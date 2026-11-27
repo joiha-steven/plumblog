@@ -18,6 +18,8 @@ use std::process::Command;
 use std::time::Duration;
 
 const NOW: i64 = 1_790_000_000_000;
+/// In every query that reads a page of the dump (crates/cli/src/dump.rs).
+const DUMP_MARK: &str = "_pb_s";
 /// Version ids the fake hands out, in order: setup's placeholder, then each upload.
 const V1: &str = "00000000-0000-4000-8000-000000000001";
 const V2: &str = "00000000-0000-4000-8000-000000000002";
@@ -386,11 +388,7 @@ fn no_pending_migration_takes_a_bookmark_but_no_export() {
     let r = deploy(&fake, &dir, &bundle);
     ok(&r);
     let reqs = fake.requests();
-    assert!(
-        !reqs
-            .iter()
-            .any(|r| r.path.ends_with("/export") || r.path.starts_with("/__signed"))
-    );
+    assert!(!reqs.iter().any(|r| r.body.contains(DUMP_MARK)));
     assert!(!dir.0.join("backups").exists());
     assert!(load(&dir).deploys[0].bookmark.is_some());
 }
@@ -398,48 +396,30 @@ fn no_pending_migration_takes_a_bookmark_but_no_export() {
 #[test]
 fn pending_migrations_export_first_into_a_private_file() {
     let (fake, dir, bundle) = set_up(&all_but_last());
-    fake.state().export_polls = 2;
     let skip = fake.requests().len();
     let r = deploy(&fake, &dir, &bundle);
     ok(&r);
     let reqs = fake.requests();
-    let c = calls(&reqs, skip);
-    let bm = c
-        .iter()
-        .position(|x| x.ends_with("/time_travel/bookmark"))
-        .unwrap();
-    let exports: Vec<usize> = (0..c.len())
-        .filter(|i| c[*i].ends_with("/export"))
+    let bm = skip
+        + reqs[skip..]
+            .iter()
+            .position(|r| r.path.ends_with("/time_travel/bookmark"))
+            .unwrap();
+    let pages: Vec<usize> = (skip..reqs.len())
+        .filter(|i| reqs[*i].path.ends_with("/query") && reqs[*i].body.contains(DUMP_MARK))
         .collect();
-    let signed = c
-        .iter()
-        .position(|x| x.starts_with("GET /__signed/"))
-        .unwrap();
-    assert_eq!(exports.len(), 3, "{c:?}");
-    assert!(bm < exports[0] && exports[2] < signed, "{c:?}");
-    // Re-polls carry the bookmark the first reply gave.
-    let posts: Vec<&Recorded> = reqs
-        .iter()
-        .filter(|r| r.path.ends_with("/export"))
-        .collect();
-    assert_eq!(body_json(posts[0]), json!({"output_format": "polling"}));
-    assert_eq!(body_json(posts[1])["current_bookmark"], "exp-bm");
-    let signed_req = reqs
-        .iter()
-        .find(|r| r.path.starts_with("/__signed/"))
-        .unwrap();
-    assert_eq!(signed_req.header("authorization"), None);
-    // The export happened before the migration ran.
+    assert!(
+        pages.len() > 10,
+        "a page per table at least: {}",
+        pages.len()
+    );
+    // The dump is read after the bookmark and before the migration runs.
     let last = migrations::bundled().pop().unwrap().name;
     let first_migration = reqs
         .iter()
         .position(|r| r.path.ends_with("/query") && r.body.contains(&last))
         .unwrap();
-    let signed_at = reqs
-        .iter()
-        .position(|r| r.path.starts_with("/__signed/"))
-        .unwrap();
-    assert!(signed_at < first_migration);
+    assert!(bm < pages[0] && pages[pages.len() - 1] < first_migration);
     // The file: backups/<utc>-<db>.sql, 0600, holding the dump.
     let rec = load(&dir).deploys[0].clone();
     assert_eq!(
@@ -448,11 +428,17 @@ fn pending_migrations_export_first_into_a_private_file() {
     );
     assert_eq!(rec.migrations, std::slice::from_ref(&last));
     let file = dir.0.join(rec.export.unwrap());
-    assert!(
-        std::fs::read_to_string(&file)
-            .unwrap()
-            .contains("-- table posts")
-    );
+    let text = std::fs::read_to_string(&file).unwrap();
+    let mark = rec.bookmark.unwrap();
+    assert!(text.contains(&format!("bookmark taken just before: {mark}\n")));
+    assert!(text.contains("\nCREATE VIRTUAL TABLE posts_fts USING fts5"));
+    assert!(text.ends_with("-- end of plumblog dump\n"));
+    assert!(!dir.0.join("backups").read_dir().unwrap().any(|e| {
+        e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".blog-part")
+    }));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

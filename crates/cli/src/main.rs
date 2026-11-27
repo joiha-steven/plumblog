@@ -484,14 +484,12 @@ fn backup(text: &Text, opts: &backup::Options) -> Result<String, (Code, String)>
         now_ms: now_ms(),
         text,
     };
-    let clock = deploy::RealClock::new();
     let mut out = std::io::stdout().lock();
     backup::run(
         &mut client,
         creds.account_id.as_deref(),
         opts,
         &cx,
-        &clock,
         &mut out,
     )
     .map_err(|f| (f.code, f.message))?;

@@ -5,7 +5,6 @@ use super::{GOOD, TempDir, client};
 use crate::fake_cf::{Failure, Fake, Object};
 use crate::setup::{ALL, ok as setup_ok, run_with as setup_with, site};
 use plumblog_cli::backup::{self, Options};
-use plumblog_cli::deploy::RealClock;
 use plumblog_cli::migrations;
 use plumblog_cli::setup::{Context, Failure as RunFailure, Options as SetupOptions};
 use plumblog_cli::state::{self, SiteState};
@@ -55,7 +54,7 @@ fn backup_later(fake: &Fake, dir: &TempDir, opts: &Options, secs: i64) -> Ran {
         text: &text,
     };
     let mut buf = Vec::new();
-    let result = backup::run(&mut c, None, opts, &cx, &RealClock::new(), &mut buf);
+    let result = backup::run(&mut c, None, opts, &cx, &mut buf);
     Ran {
         result,
         out: String::from_utf8(buf).unwrap(),
@@ -161,13 +160,14 @@ fn the_database_alone_is_exported_without_a_deploy() {
         },
     );
     ok(&r);
-    assert!(r.out.contains("answers no queries"), "{}", r.out);
+    assert!(r.out.contains("The site stays up"), "{}", r.out);
     let file = dir.0.join("backups/20260921T141320Z-plumblog.sql");
-    assert!(
-        std::fs::read_to_string(&file)
-            .unwrap()
-            .contains("-- table posts")
-    );
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("\nCREATE TABLE posts ("), "{text}");
+    assert!(text.ends_with("-- end of plumblog dump\n"));
+    // The header names the bookmark the run took first.
+    let bm = fake.state().bookmarks.last().cloned().unwrap();
+    assert!(text.contains(&format!("bookmark taken just before: {bm}\n")));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -186,7 +186,8 @@ fn the_database_alone_is_exported_without_a_deploy() {
                 && !line.contains("/assets"),
             "{line}"
         );
-        assert!(!req.body.contains("FROM media"), "{}", req.body);
+        // The dump reads the media table; the media copy's listing must not run.
+        assert!(!req.body.contains("SELECT id, r2_key"), "{}", req.body);
     }
     // The record: in the state file and in the site's own setting.
     let rec = load(&dir).last_backup.unwrap();

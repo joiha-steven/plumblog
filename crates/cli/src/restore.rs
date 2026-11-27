@@ -1,5 +1,5 @@
-//! `blog restore <file.sql>`: the database replaced by a `.sql` export (`blog backup`,
-//! `blog deploy --export`), also one older than Time Travel's 7 days. The order and the
+//! `blog restore <file.sql>`: the database replaced by a dump (`blog backup`,
+//! `blog deploy --export`, crates/cli/src/dump.rs), also one older than Time Travel's 7 days. The order and the
 //! guards are in docs/ARCHITECTURE.md (Site-specific state); nothing changes before the
 //! Time Travel bookmark is saved in `site.local.toml`.
 //!
@@ -63,6 +63,8 @@ pub enum Reason {
     NoSettingsTable,
     RowBeforeTable,
     RowUnreadable,
+    /// No row counts at the end: a cut file, or not a plumblog dump.
+    NoRowCounts,
 }
 
 impl Reason {
@@ -74,6 +76,7 @@ impl Reason {
             Self::NoSettingsTable => key!("cli.restore.reason_no_settings"),
             Self::RowBeforeTable => key!("cli.restore.reason_row_before_table"),
             Self::RowUnreadable => key!("cli.restore.reason_row_unreadable"),
+            Self::NoRowCounts => key!("cli.restore.reason_no_counts"),
         }
     }
 }
@@ -275,6 +278,8 @@ pub struct Dump {
     pub site_id: Option<String>,
     /// Names inserted into `d1_migrations`, in file order.
     pub migrations: Vec<String>,
+    /// `(table, rows)` the dump wrote, from its last lines.
+    pub counts: Vec<(String, u64)>,
 }
 
 /// Column names of a `CREATE TABLE ... (...)`, from the `(` at `i`.
@@ -293,9 +298,10 @@ fn columns(toks: &[Tok], i: usize) -> Vec<String> {
         .collect()
 }
 
-/// Reads a D1 export (SQLite `.dump` text): it must create `d1_migrations` and `settings`;
-/// their rows give the migrations and the site id. Column positions come from the column
-/// list of each `INSERT`, else from the dump's own `CREATE TABLE`.
+/// Reads a dump (SQLite text): it must create `d1_migrations` and `settings`; their rows
+/// give the migrations and the site id. Column positions come from the column list of each
+/// `INSERT`, else from the dump's own `CREATE TABLE`. It must end with the row counts
+/// [`crate::dump::write`] lists, which the restore checks after the import.
 ///
 /// # Errors
 /// The [`Reason`] it is not a backup.
@@ -384,6 +390,7 @@ pub fn parse(text: &str) -> Result<Dump, Reason> {
     if settings_cols.is_none() {
         return Err(Reason::NoSettingsTable);
     }
+    dump.counts = crate::dump::counts(text).ok_or(Reason::NoRowCounts)?;
     Ok(dump)
 }
 
@@ -681,6 +688,62 @@ fn poll(
     }
 }
 
+/// Right after the import: every table holds as many rows as the dump wrote. Anything else
+/// (a statement D1 skipped, a cut upload) stops before migrations, with the undo command.
+fn check_counts(
+    run: &mut Run,
+    db: &Database,
+    counts: &[(String, u64)],
+    undo: &str,
+) -> Result<(), Stopped> {
+    for chunk in counts.chunks(50) {
+        let cols: Vec<String> = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, (t, _))| format!("(SELECT count(*) FROM {}) AS c{i}", ident(t)))
+            .collect();
+        let row = db
+            .rows(&format!("SELECT {}", cols.join(", ")), &[])
+            .map_err(|e| uncertain(run, undo, e.to_string()))?;
+        let row = row.first().cloned().unwrap_or_default();
+        let wrong: Vec<String> = chunk
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (t, want))| {
+                let got = row.get(&format!("c{i}")).and_then(Value::as_u64);
+                (got != Some(*want)).then(|| {
+                    format!(
+                        "{t} {want} -> {}",
+                        got.map_or_else(|| "?".into(), |g| g.to_string())
+                    )
+                })
+            })
+            .collect();
+        if !wrong.is_empty() {
+            return Err(stopped(
+                "count_mismatch",
+                fail(
+                    run,
+                    Code::RestoreCountMismatch,
+                    key!("cli.error.restore_count_mismatch"),
+                    &[
+                        ("tables", printable(&wrong.join(", "))),
+                        ("undo", undo.to_string()),
+                    ],
+                ),
+            ));
+        }
+    }
+    run.line(
+        key!("cli.restore.counts_ok"),
+        &[
+            ("tables", counts.len().to_string()),
+            ("rows", counts.iter().map(|c| c.1).sum::<u64>().to_string()),
+        ],
+    );
+    Ok(())
+}
+
 /// After the import: the bundle's migrations the backup lacks, then the cache version.
 fn after_import(
     run: &mut Run,
@@ -932,6 +995,7 @@ pub fn run(
             sql.extend_from_slice(&bytes);
             import(&mut run, &site, clock, &sql, &undo)
         })
+        .and_then(|reply| check_counts(&mut run, &db, &dump.counts, &undo).map(|()| reply))
         .and_then(|reply| after_import(&mut run, &db, &reply, version_before));
     rec.outcome = Some(match &result {
         Ok(()) => "restored".into(),
@@ -979,8 +1043,16 @@ mod tests {
             ('site_id','\"ab''c\"',1);\n\
             CREATE TRIGGER t AFTER INSERT ON settings BEGIN \
               INSERT INTO settings VALUES('site_id','\"no\"',1); END;\n\
-            /* INSERT INTO settings VALUES('site_id','\"no\"',1); */";
+            /* INSERT INTO settings VALUES('site_id','\"no\"',1); */\n\
+            -- rows \"d1_migrations\" 2\n-- rows \"settings\" 2\n-- end of plumblog dump\n";
         let d = parse(text).unwrap();
+        assert_eq!(
+            d.counts,
+            [
+                ("d1_migrations".to_string(), 2),
+                ("settings".to_string(), 2)
+            ]
+        );
         assert_eq!(d.migrations, ["0001_init.sql", "0002_a;b.sql"]);
         assert_eq!(d.site_id.as_deref(), Some("\"ab'c\""));
     }
@@ -1006,6 +1078,13 @@ mod tests {
                  INSERT INTO d1_migrations VALUES(1, 2);"
             ),
             Err(Reason::RowUnreadable)
+        );
+        // A cut file: everything but the row counts at the end.
+        assert_eq!(
+            parse(
+                "CREATE TABLE d1_migrations (id, name); CREATE TABLE settings (key, value_json);"
+            ),
+            Err(Reason::NoRowCounts)
         );
     }
 

@@ -156,9 +156,6 @@ endpoints! {
     D1Restore => Post "/accounts/{account_id}/d1/database/{database_id}/time_travel/restore",
         Some(D1Edit), ApiToken, key!("cli.call.d1_restore"),
         "https://developers.cloudflare.com/api/resources/d1/subresources/database/subresources/time_travel/methods/restore/";
-    D1Export => Post "/accounts/{account_id}/d1/database/{database_id}/export", Some(D1Edit),
-        ApiToken, key!("cli.call.d1_export"),
-        "https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/export/";
     // `{action: "init" | "ingest" | "poll"}`, as wrangler 4.160.0 sends them for
     // `d1 execute --file --remote` (wrangler-dist/cli.js `executeRemotely`,
     // `uploadAndBeginIngestion`, `pollUntilComplete`, near line 240040). The file itself goes

@@ -6,6 +6,7 @@ use super::{GOOD, TempDir, client};
 use crate::deploy::{FakeClock, make_bundle, write_migrations};
 use crate::fake_cf::{Fake, Recorded};
 use crate::setup::{ALL, ok as setup_ok, run_with as setup_with, site};
+use plumblog_cli::dump;
 use plumblog_cli::migrations::{self, Migration};
 use plumblog_cli::restore::{self, Options};
 use plumblog_cli::setup::{Context, Failure as RunFailure, Options as SetupOptions};
@@ -110,8 +111,9 @@ fn literal(v: ValueRef) -> String {
     }
 }
 
-/// A dump in D1 export's shape (sqlite3 `.dump` style): tables with their rows, the virtual
-/// table's rows by column name, `sqlite_sequence`, then indexes, triggers and views.
+/// A dump in sqlite3 `.dump` style: tables with their rows, the virtual table's rows by
+/// column name, `sqlite_sequence`, then indexes, triggers and views, and the row counts
+/// `blog`'s own dump ends with (crates/cli/src/dump.rs).
 fn dump(conn: &Connection) -> String {
     let mut out = String::from("PRAGMA defer_foreign_keys=TRUE;\n");
     let mut stmt = conn
@@ -131,10 +133,17 @@ fn dump(conn: &Connection) -> String {
         .map(|(_, n, _)| n.as_str())
         .collect();
     let shadow = |n: &str| virtuals.iter().any(|v| n.starts_with(&format!("{v}_")));
+    let mut counts = String::new();
     for (ty, name, sql) in &objs {
         if ty != "table" || shadow(name) {
             continue;
         }
+        let n: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM \"{name}\""), [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        writeln!(counts, "{}\"{name}\" {n}", dump::ROWS).unwrap();
         writeln!(out, "{sql};").unwrap();
         let virt = virtuals.contains(&name.as_str());
         let cols: Vec<String> = conn
@@ -188,7 +197,7 @@ fn dump(conn: &Connection) -> String {
             writeln!(out, "{sql};").unwrap();
         }
     }
-    out
+    out + &counts + dump::END + "\n"
 }
 
 /// Writes the live database's dump to [`FILE`] and returns it.

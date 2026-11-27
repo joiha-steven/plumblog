@@ -18,7 +18,7 @@ use plumblog_syslog::{Event, EventKind};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -46,9 +46,6 @@ pub const SMOKE_BUDGET: Duration = Duration::from_secs(60);
 const SMOKE_FIRST_WAIT: Duration = Duration::from_secs(1);
 const SMOKE_MAX_WAIT: Duration = Duration::from_secs(15);
 const SMOKE_CALL_TIMEOUT: Duration = Duration::from_secs(10);
-/// A D1 export of a free-plan database (500 MB at most) finishes well inside this.
-const EXPORT_BUDGET: Duration = Duration::from_mins(15);
-const EXPORT_POLL_WAIT: Duration = Duration::from_secs(1);
 /// wrangler `versions upload` / `deploy` keep secrets with `keepSecrets: true`, sent as
 /// `keep_bindings: ["secret_text", "secret_key"]` (`createWorkerUploadForm`): secret bindings
 /// absent from the metadata are inherited from the previous version.
@@ -361,93 +358,7 @@ pub(crate) enum Purpose {
     Backup,
 }
 
-/// D1 export into `<dir>/<utc>-<db>.sql` (0600), `dir` relative to the site folder or
-/// absolute. Polling as the docs say: re-POST with `current_bookmark` until `status` is
-/// `complete` (an export nobody polls is cancelled), then download `result.signed_url`
-/// (valid 1 h), without the API token. Returns the file as shown to the owner.
-/// <https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/export/>
-pub(crate) fn export(
-    run: &mut Run,
-    site: &Site,
-    clock: &dyn Clock,
-    stamp: &str,
-    dir: &str,
-    purpose: Purpose,
-) -> Result<String, Failure> {
-    if purpose == Purpose::Deploy {
-        run.line(key!("cli.deploy.exporting"), &[]);
-    } else {
-        run.line(key!("cli.backup.exporting"), &[("dir", dir.to_string())]);
-    }
-    let text = run.cx.text;
-    let fail = |detail: String| {
-        Failure::new(
-            Code::ExportFailed,
-            text,
-            if purpose == Purpose::Deploy {
-                key!("cli.error.export_failed")
-            } else {
-                key!("cli.error.backup_export_failed")
-            },
-            &[("detail", detail)],
-        )
-    };
-    let started = clock.elapsed();
-    let mut current: Option<String> = None;
-    let url = loop {
-        let mut body = json!({"output_format": "polling"});
-        if let Some(b) = &current {
-            body["current_bookmark"] = json!(b);
-        }
-        let call = Call::new(Endpoint::D1Export)
-            .param("database_id", site.db_id.clone())
-            .json(body);
-        let r = run.client.call(&call).map_err(|e| run.api(&e))?;
-        match str_at(&r, "status") {
-            Some("complete") => {
-                break r
-                    .get("result")
-                    .and_then(|x| str_at(x, "signed_url"))
-                    .map(str::to_string)
-                    .ok_or_else(|| run.api(&malformed(Endpoint::D1Export, "no signed_url")))?;
-            }
-            Some("error") => {
-                return Err(fail(printable(str_at(&r, "error").unwrap_or("error"))));
-            }
-            _ => {}
-        }
-        current = str_at(&r, "at_bookmark").map(str::to_string).or(current);
-        if clock.elapsed().saturating_sub(started) > EXPORT_BUDGET {
-            return Err(fail(format!("{} s", EXPORT_BUDGET.as_secs())));
-        }
-        clock.sleep(EXPORT_POLL_WAIT);
-    };
-    let rel = format!("{dir}/{stamp}-{}.sql", site.db_name);
-    let path = run.cx.dir.join(&rel);
-    download(&url, &path, run.client.is_local()).map_err(|reason| {
-        Failure::new(
-            Code::BackupUnwritable,
-            text,
-            if purpose == Purpose::Deploy {
-                key!("cli.error.backup_unwritable")
-            } else {
-                key!("cli.error.backup_file_unwritable")
-            },
-            &[("path", path.display().to_string()), ("reason", reason)],
-        )
-    })?;
-    run.line(
-        if purpose == Purpose::Deploy {
-            key!("cli.deploy.exported")
-        } else {
-            key!("cli.backup.exported")
-        },
-        &[("file", rel.clone())],
-    );
-    Ok(rel)
-}
-
-/// No token, ever: these go to the site and to signed URLs.
+/// No token, ever: these go to the site and to presigned URLs.
 pub(crate) fn plain_agent(local: bool, timeout: Duration, redirects: u32) -> ureq::Agent {
     let mut config = ureq::Agent::config_builder()
         .http_status_as_error(false)
@@ -459,56 +370,6 @@ pub(crate) fn plain_agent(local: bool, timeout: Duration, redirects: u32) -> ure
         config = config.proxy(None);
     }
     config.build().into()
-}
-
-/// Downloads `url` into a new file at `path` (mode 0600, directory 0700). The URL is a
-/// bearer link, so errors never include it. Plain HTTP only to a loopback test server.
-fn download(url: &str, path: &Path, local: bool) -> Result<(), String> {
-    let loopback =
-        crate::cloudflare::client::base_override_ok(url.split(['?', '#']).next().unwrap_or(""));
-    if !(url.starts_with("https://") || local && loopback) {
-        return Err("the export link is not https".into());
-    }
-    if let Some(dir) = path.parent() {
-        let mut b = fs::DirBuilder::new();
-        b.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            b.mode(0o700);
-        }
-        b.create(dir).map_err(|e| e.to_string())?;
-    }
-    let agent = plain_agent(local, Duration::from_mins(30), 3);
-    let resp = agent.get(url).call().map_err(|e| {
-        // ureq's error text can include the URL.
-        let s = e.to_string();
-        if s.contains(url) {
-            "no reply".to_string()
-        } else {
-            s
-        }
-    })?;
-    let status = resp.status().as_u16();
-    if status != 200 {
-        return Err(format!("HTTP {status}"));
-    }
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut f = opts.open(path).map_err(|e| e.to_string())?;
-    let copied =
-        std::io::copy(&mut resp.into_body().into_reader(), &mut f).and_then(|_| f.sync_all());
-    if let Err(e) = copied {
-        drop(f);
-        let _ = fs::remove_file(path);
-        return Err(e.to_string());
-    }
-    Ok(())
 }
 
 /// Assets upload session, then only the buckets Cloudflare asks for, each as multipart of
@@ -1163,10 +1024,12 @@ fn steps(
     flow: &Flow,
 ) -> Result<(), Failure> {
     if flow.pending || flow.export {
-        rec.export = Some(export(
+        let mark = rec.bookmark.clone().unwrap_or_default();
+        rec.export = Some(crate::dump::export(
             run,
             site,
-            flow.rt.clock,
+            db,
+            &mark,
             &flow.stamp,
             BACKUP_DIR,
             Purpose::Deploy,
@@ -1654,7 +1517,7 @@ mod tests {
     /// One value, three places: the code, the dev config and the architecture doc.
     #[test]
     fn cron_and_date_match_the_dev_config_and_docs() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let dev = fs::read_to_string(root.join("tools/wrangler.dev.toml")).unwrap();
         assert!(dev.contains(&format!("compatibility_date = \"{COMPATIBILITY_DATE}\"")));
         assert!(dev.contains(&format!("crons = [\"{CRON}\"]")));

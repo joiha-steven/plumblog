@@ -170,14 +170,10 @@ pub struct State {
     pub sessions: HashMap<String, Vec<String>>,
     /// Completion JWTs handed out.
     pub completions: Vec<String>,
-    /// Polls an export answers `active` before `complete`.
-    pub export_polls: usize,
-    /// `(database id, polls so far)` of the running export.
-    pub exporting: Option<(String, usize)>,
     /// Restores done: `(database id, bookmark)`.
     pub restores: Vec<(String, String)>,
     pub site: Site,
-    /// The fake's own base URL (signed URLs point at it).
+    /// The fake's own base URL (presigned URLs point at it).
     pub base: String,
     /// Manifest path of each asset hash an upload session asked for.
     pub asset_paths: HashMap<String, String>,
@@ -201,6 +197,10 @@ pub struct State {
     pub import_polls: usize,
     /// `(database id, polls so far, final reply)` of the running import.
     pub importing: Option<(String, usize, Value)>,
+    /// Run after the next import succeeds, in the same database: a row lost on the way.
+    pub after_import: Option<String>,
+    /// `(request number, reply body bytes)` of every API reply.
+    pub reply_bytes: Vec<(usize, usize)>,
 }
 
 /// An R2 object: bytes (text, for the tests) and the `ETag` header it answers with.
@@ -327,7 +327,7 @@ fn write_reply_with(mut stream: &TcpStream, status: u16, body: &str, extra: &str
     let _ = stream.write_all(reply.as_bytes());
 }
 
-/// The public side: the site's `/healthz` and `/`, and signed export URLs. No token.
+/// The public side: the site's `/healthz` and `/`, and presigned upload URLs. No token.
 fn serve_public(st: &mut State, req: &Recorded) -> Option<(u16, String, String)> {
     let active = |st: &State| {
         st.scripts
@@ -367,26 +367,6 @@ fn serve_public(st: &mut State, req: &Recorded) -> Option<(u16, String, String)>
             Some((status, "<html></html>".into(), String::new()))
         }
         ("PUT", p) if p.starts_with("/__upload/") => Some(upload(st, req, p)),
-        ("GET", p) if p.starts_with("/__signed/") => {
-            if query(&req.query, "sig") != Some("s1g") {
-                return Some((403, "bad signature".into(), String::new()));
-            }
-            let id = p.trim_start_matches("/__signed/").trim_end_matches(".sql");
-            let conn = st.sqlite.get(id)?;
-            let tables = run_rows(
-                conn,
-                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
-                &[],
-            )
-            .unwrap_or_default();
-            let mut dump = String::from("PRAGMA defer_foreign_keys=TRUE;\n");
-            for t in tables {
-                dump.push_str("-- table ");
-                dump.push_str(t["name"].as_str().unwrap_or(""));
-                dump.push('\n');
-            }
-            Some((200, dump, String::new()))
-        }
         _ => None,
     }
 }
@@ -481,6 +461,7 @@ fn serve(stream: &TcpStream, state: &Mutex<State>) {
             }
         }
     };
+    st.reply_bytes.push((n, body.len()));
     drop(st);
     write_reply_with(stream, status, &body, &extra);
 }
@@ -619,7 +600,6 @@ fn route_d1(
             st.bookmarks.push(b.clone());
             ok(&json!({"bookmark": b}))
         }
-        ("POST", ["accounts", _, "d1", "database", id, "export"]) => d1_export(st, req, id),
         ("POST", ["accounts", _, "d1", "database", id, "import"]) => d1_import(st, req, id),
         (
             "POST",
@@ -651,33 +631,6 @@ fn route_d1(
         }
         _ => err(404, 7003, "Could not route to this path"),
     }
-}
-
-/// Export, polled: `active` for `export_polls` polls, then `complete` with a signed URL.
-fn d1_export(st: &mut State, req: &Recorded, id: &str) -> (u16, Value) {
-    let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
-    if body["output_format"] != "polling" || !st.sqlite.contains_key(id) {
-        return err(400, 7400, "bad export");
-    }
-    let polls = match (&st.exporting, body["current_bookmark"].as_str()) {
-        (None, None) => 0,
-        (Some((db, n)), Some("exp-bm")) if db.as_str() == id => n + 1,
-        _ => return err(400, 7400, "export not running or wrong bookmark"),
-    };
-    if polls < st.export_polls {
-        st.exporting = Some((id.to_string(), polls));
-        return ok(
-            &json!({"success": true, "type": "export", "status": "active",
-                          "at_bookmark": "exp-bm", "messages": ["Generating"]}),
-        );
-    }
-    st.exporting = None;
-    let url = format!("{}/__signed/{id}.sql?sig=s1g", st.base);
-    ok(
-        &json!({"success": true, "type": "export", "status": "complete",
-               "at_bookmark": "exp-bm", "messages": [],
-               "result": {"filename": format!("{id}.sql"), "signed_url": url}}),
-    )
 }
 
 fn md5_hex(bytes: &[u8]) -> String {
@@ -717,14 +670,13 @@ fn apply_import(st: &mut State, id: &str, sql: &str) -> Value {
     let conn = &st.sqlite[id];
     let applied = match st.import_error.take() {
         Some(e) => Err(e),
-        None => conn
-            .execute_batch("BEGIN")
-            .and_then(|()| conn.execute_batch(sql))
-            .and_then(|()| conn.execute_batch("COMMIT"))
-            .map_err(|e| e.to_string()),
+        None => import_sql(conn, sql),
     };
     match applied {
         Ok(()) => {
+            if let Some(lost) = st.after_import.take() {
+                conn.execute_batch(&lost).unwrap();
+            }
             let b = format!("bm-{}-{}", id, st.bookmarks.len() + 1);
             st.bookmarks.push(b.clone());
             json!({"success": true, "type": "import", "status": "complete", "at_bookmark": b,
@@ -738,6 +690,15 @@ fn apply_import(st: &mut State, id: &str, sql: &str) -> Value {
                    "error": e, "errors": [e], "messages": ["Import failed"]})
         }
     }
+}
+
+/// What the fake's import does with an uploaded file: all of it in one transaction, or
+/// nothing (the caller rolls back on error).
+pub fn import_sql(conn: &Connection, sql: &str) -> Result<(), String> {
+    conn.execute_batch("BEGIN")
+        .and_then(|()| conn.execute_batch(sql))
+        .and_then(|()| conn.execute_batch("COMMIT"))
+        .map_err(|e| e.to_string())
 }
 
 /// D1 import (wrangler 4.160.0 `executeRemotely`): `init` hands out an upload URL, `ingest`

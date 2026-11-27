@@ -5,6 +5,7 @@ pub mod bundle;
 pub mod cloudflare;
 pub mod d1;
 pub mod deploy;
+pub mod dump;
 pub mod help;
 pub mod migrations;
 pub mod release;

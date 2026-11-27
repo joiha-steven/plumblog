@@ -67,7 +67,7 @@ codes! {
     BundleMissing => "deploy.bundle_missing",
     BuildFailed => "deploy.build_failed",
     BundleInvalid => "deploy.bundle_invalid",
-    ExportFailed => "deploy.export_failed",
+    DumpRowTooLarge => "backup.row_too_large",
     BackupUnwritable => "deploy.backup_unwritable",
     SmokeFailed => "deploy.smoke_failed",
     SmokeBaseRefused => "deploy.smoke_base_refused",
@@ -123,6 +123,7 @@ codes! {
     RestoreUploadMismatch => "restore.upload_mismatch",
     RestoreImportFailed => "restore.import_failed",
     RestoreImportUncertain => "restore.import_uncertain",
+    RestoreCountMismatch => "restore.count_mismatch",
 }
 
 /// One language's `[cli]` text, English behind it.

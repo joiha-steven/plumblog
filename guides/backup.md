@@ -8,32 +8,32 @@ never backed up. Run commands in the site's folder; see `blog guide setup` for t
 ## What already exists
 
 - **Time Travel**: D1 can return to any minute of the last 7 days (free plan). Every
-  `blog deploy` records a bookmark under `deploys` in `site.local.toml`.
-- **SQL exports**: `blog deploy` writes `backups/<utc>-<database>.sql` (mode 0600, ignored by
-  git) when migrations are pending, or always with `--export`.
-- **`blog backup`**: copies the data off Cloudflare without deploying. It exports the database
-  the same way and copies every media file (originals and resized variants) from R2 to
-  `backups/media/<r2 key>`. The database answers no queries while the export runs, so do it
-  when traffic is low.
+  `blog deploy` and `blog backup` records a bookmark in `site.local.toml`.
+- **SQL dumps**: `blog` reads the database page by page and writes
+  `backups/<utc>-<database>.sql` itself (mode 0600, ignored by git); Cloudflare's own export
+  refuses a database with a search index, which every blog has. The site stays up, but every
+  row read counts against D1's daily read limit (5 million on the free plan). The copy is not
+  one instant: its first lines name the bookmark taken just before, its last lines the rows
+  per table. `blog deploy` writes one when migrations are pending, or always with `--export`.
+- **`blog backup`**: a dump without deploying, plus every media file (originals and resized
+  variants) from R2 to `backups/media/<r2 key>`. A row too large for one D1 statement
+  (100,000 bytes as SQL) stops it with `backup.row_too_large` and no file.
 
 ```sh
 blog backup
 ```
 
-`--no-media` copies only the database; `--out <dir>` chooses another folder than `backups/`.
+`--no-media` copies only the database; `--out <dir>` picks another folder than `backups/`.
+Media copying resumes: `backups/media/manifest.json` lists each file's size and SHA-256, and a
+re-run fetches only what is missing or changed. Each file is checked against the size the
+database records, and against R2's checksum when it is a plain MD5. A file that fails is not
+saved; the run goes on and ends with exit code 1 (`backup.incomplete`) and a list: run it
+again to retry. A row whose file is not in R2 is reported (`backup.object_missing`); retrying
+cannot fix it, and the backup counts as not complete. The token needs R2 permission
+(`blog guide token`).
 
-Media copying resumes: `backups/media/manifest.json` lists each file with its size and SHA-256,
-and a re-run fetches only what is missing or changed. Every file is checked against the size
-the database records, and against R2's checksum when it has a plain MD5. A file that fails a
-check is not saved, the run goes on, and it ends with exit code 1 (`backup.incomplete`) and a
-list of what failed; run it again to retry those. A database row whose file is not in R2 is
-reported (`backup.object_missing`) but cannot be fixed by retrying; it makes the backup
-"not complete", not failed. A run also needs the token's R2 permission (`blog guide token`).
-
-Each run records itself as the site's `last_backup` setting
-(`{"at": <unix seconds>, "database", "media": {"objects", "bytes", "missing", "failed"} or null,
-"complete"}`) and in `site.local.toml`. `complete` is true only when the database and every
-media file were copied. The API never writes that setting; only `blog backup` does.
+Each run records itself as the site's `last_backup` setting (`at`, `database`, `media`
+counts or null, `complete`) and in `site.local.toml`; only `blog backup` writes it.
 
 Copy `backups/` somewhere off this machine: it holds password hashes and drafts, so keep it
 private.
@@ -47,11 +47,12 @@ blog rollback --db <bookmark> --yes
 blog restore backups/<utc>-<database>.sql --yes
 ```
 
-Both overwrite the whole database and cancel running queries; ask the owner first. Both print
-the undo command; keep it. `blog restore` without `--yes` checks the file and prints its plan,
-changing nothing. It refuses a file that is not a blog backup, another site's backup
-(`--allow-other-site` overrides) and one made by newer code (`restore.backup_newer`: update
-`blog` first). It saves a bookmark first, then reruns the migrations the backup lacks.
+Both overwrite the whole database and cancel running queries; ask the owner first, and keep
+the undo command they print. Without `--yes`, `blog restore` only checks the file and prints
+its plan. It refuses a file that is not a blog backup, another site's (`--allow-other-site`),
+one from newer code (`restore.backup_newer`: update `blog` first) or a cut one (no row
+counts). It saves a bookmark, imports, checks every table's row count
+(`restore.count_mismatch` names the undo command to run), then reruns missing migrations.
 
 ## Not covered yet
 

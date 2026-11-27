@@ -1,4 +1,4 @@
-//! `blog backup`: the database (a D1 export, as `blog deploy --export` makes) and the media
+//! `blog backup`: the database (plumblog's dump, as `blog deploy --export` makes) and the media
 //! (every R2 original and variant the `media` table lists) copied into `backups/`, with no
 //! deploy. Restore is a separate command.
 //!
@@ -9,7 +9,8 @@
 
 use crate::cloudflare::{ApiError, ApiErrorKind, Call, Client, Endpoint};
 use crate::d1::{self, Database};
-use crate::deploy::{BACKUP_DIR, Clock, Lock, Purpose, Site, export, start, utc};
+use crate::deploy::{BACKUP_DIR, Lock, Purpose, Site, start, utc};
+use crate::migrations;
 use crate::setup::{Context, Failure, Run};
 use crate::state::{BackupMedia, BackupRecord};
 use crate::text::Code;
@@ -437,7 +438,6 @@ pub fn run(
     account_id: Option<&str>,
     opts: &Options,
     cx: &Context,
-    clock: &dyn Clock,
     out: &mut dyn Write,
 ) -> Result<(), Failure> {
     let _lock = Lock::take(cx)?;
@@ -464,9 +464,10 @@ pub fn run(
     );
     let (_, stamp) = utc(cx.now_ms);
     run.line(key!("cli.backup.warning"), &[]);
-    export(&mut run, &site, clock, &stamp, &dir, Purpose::Backup)?;
-
     let db = Database::new(client, site.db_id.clone());
+    let mark = migrations::bookmark(&db, client).map_err(|e| run.api(&e))?;
+    run.line(key!("cli.backup.bookmark"), &[("bookmark", mark.clone())]);
+    crate::dump::export(&mut run, &site, &db, &mark, &stamp, &dir, Purpose::Backup)?;
     let (tally, stopped) = if opts.no_media {
         run.line(key!("cli.backup.media_skipped"), &[]);
         (None, None)

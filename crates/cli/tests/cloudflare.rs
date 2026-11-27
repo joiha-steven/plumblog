@@ -2,6 +2,7 @@
 
 mod backup;
 mod deploy;
+mod dump;
 mod fake_cf;
 mod fake_release;
 mod restore;
