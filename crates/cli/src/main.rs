@@ -2,7 +2,7 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use plumblog_cli::cloudflare::{Client, Credentials, TokenError, TokenKind, endpoint, token};
 use plumblog_cli::help;
 use plumblog_cli::text::{Code, Text, pick_lang};
-use plumblog_cli::{migrations, setup};
+use plumblog_cli::{deploy, migrations, setup};
 use plumblog_i18n::{Key, key};
 use std::{fmt::Write, path::Path, process::ExitCode};
 
@@ -67,6 +67,24 @@ enum Command {
         #[arg(long)]
         clear_failed_migration: bool,
     },
+    Deploy {
+        #[arg(long)]
+        export: bool,
+        #[arg(long)]
+        bundle: Option<std::path::PathBuf>,
+        #[arg(long)]
+        allow_older: bool,
+    },
+    Rollback {
+        #[arg(long, conflicts_with = "db")]
+        to: Option<String>,
+        #[arg(long)]
+        db: Option<String>,
+        #[arg(long, requires = "db")]
+        yes: bool,
+        #[arg(long, requires = "db")]
+        clear_failed_migration: bool,
+    },
 }
 
 /// clap takes value names only as `&'static str` without its `string` feature; a few bytes,
@@ -116,6 +134,32 @@ fn command(text: &Text) -> clap::Command {
                 })
                 .mut_arg("clear_failed_migration", |a| {
                     a.help(t(key!("cli.setup.clear_failed_migration_help")))
+                })
+        })
+        .mut_subcommand("deploy", |c| {
+            c.about(t(key!("cli.deploy.about")))
+                .mut_arg("export", |a| a.help(t(key!("cli.deploy.export_help"))))
+                .mut_arg("bundle", |a| {
+                    a.help(t(key!("cli.deploy.bundle_help")))
+                        .value_name(leak(t(key!("cli.deploy.bundle_value"))))
+                })
+                .mut_arg("allow_older", |a| {
+                    a.help(t(key!("cli.deploy.allow_older_help")))
+                })
+        })
+        .mut_subcommand("rollback", |c| {
+            c.about(t(key!("cli.rollback.about")))
+                .mut_arg("to", |a| {
+                    a.help(t(key!("cli.rollback.to_help")))
+                        .value_name(leak(t(key!("cli.rollback.to_value"))))
+                })
+                .mut_arg("db", |a| {
+                    a.help(t(key!("cli.rollback.db_help")))
+                        .value_name(leak(t(key!("cli.rollback.db_value"))))
+                })
+                .mut_arg("yes", |a| a.help(t(key!("cli.rollback.yes_help"))))
+                .mut_arg("clear_failed_migration", |a| {
+                    a.help(t(key!("cli.rollback.clear_failed_help")))
                 })
         })
 }
@@ -225,6 +269,44 @@ fn setup_site(text: &Text, opts: &setup::Options) -> Result<String, (Code, Strin
     Ok(String::new())
 }
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// `blog deploy` and `blog rollback`: progress to stdout as each step finishes.
+fn deploy_or_rollback(
+    text: &Text,
+    action: Result<deploy::Options, deploy::RollbackOptions>,
+) -> Result<String, (Code, String)> {
+    let creds = Credentials::load(Path::new(".")).map_err(|e| (e.code(), e.message(text)))?;
+    let mut client = Client::from_env(creds.token).map_err(|e| (e.code(), e.message(text)))?;
+    let migrations = migrations::bundled();
+    let cx = setup::Context {
+        dir: Path::new("."),
+        migrations: &migrations,
+        now_ms: now_ms(),
+        text,
+    };
+    let clock = deploy::RealClock::new();
+    let rt = deploy::Runtime {
+        clock: &clock,
+        smoke_base: std::env::var(deploy::SMOKE_BASE_ENV)
+            .ok()
+            .filter(|v| !v.is_empty()),
+        smoke_budget: deploy::SMOKE_BUDGET,
+    };
+    let mut out = std::io::stdout().lock();
+    let account = creds.account_id.as_deref();
+    match action {
+        Ok(opts) => deploy::run(&mut client, account, &opts, &cx, &rt, &mut out),
+        Err(opts) => deploy::rollback(&mut client, account, &opts, &cx, &rt, &mut out),
+    }
+    .map_err(|f| (f.code, f.message))?;
+    Ok(String::new())
+}
+
 /// Parses `args`; a clap error becomes our own line (code + sentence + the argument).
 fn parse(text: &Text, args: &[String]) -> Result<Cli, (Code, String)> {
     command(text)
@@ -281,6 +363,32 @@ fn run(text: &Text, args: &[String]) -> Outcome {
                 change_origin,
                 clear_failed_migration,
             },
+        ),
+        Some(Command::Deploy {
+            export,
+            bundle,
+            allow_older,
+        }) => deploy_or_rollback(
+            text,
+            Ok(deploy::Options {
+                export,
+                bundle,
+                allow_older,
+            }),
+        ),
+        Some(Command::Rollback {
+            to,
+            db,
+            yes,
+            clear_failed_migration,
+        }) => deploy_or_rollback(
+            text,
+            Err(deploy::RollbackOptions {
+                to,
+                db,
+                yes,
+                clear_failed_migration,
+            }),
         ),
         None => return Outcome::Help(help::render(&cmd, &[], text)),
     };
@@ -443,9 +551,12 @@ mod tests {
                         };
                         assert!(accepted, "{}: not a valid command: {cmd}", path.display());
                         if let ["blog", "guide", topic] = argv[..] {
-                            // A `<placeholder>` stands for any topic; real names must exist.
+                            // A `<placeholder>` stands for any topic; real names must exist,
+                            // as a file or a generated reference.
                             assert!(
-                                topic.starts_with('<') || GUIDES.iter().any(|g| g.0 == topic),
+                                topic.starts_with('<')
+                                    || GUIDES.iter().any(|g| g.0 == topic)
+                                    || GENERATED.iter().any(|g| g.0 == topic),
                                 "{}: unknown guide topic in example: {cmd}",
                                 path.display()
                             );

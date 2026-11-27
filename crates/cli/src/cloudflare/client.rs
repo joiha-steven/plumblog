@@ -342,7 +342,7 @@ impl fmt::Debug for Client {
 
 /// Checks a base URL override. Only loopback over plain HTTP passes, so a stray or hostile
 /// env value can never send the token to another host.
-fn base_override_ok(base: &str) -> bool {
+pub(crate) fn base_override_ok(base: &str) -> bool {
     let Some(rest) = base
         .strip_prefix("http://127.0.0.1")
         .or_else(|| base.strip_prefix("http://[::1]"))
@@ -462,6 +462,12 @@ impl Client {
         }
         self.account_id = Some(id.to_string());
         Ok(())
+    }
+
+    /// True when talking to a loopback test server instead of Cloudflare.
+    #[must_use]
+    pub fn is_local(&self) -> bool {
+        self.base != DEFAULT_BASE
     }
 
     #[must_use]

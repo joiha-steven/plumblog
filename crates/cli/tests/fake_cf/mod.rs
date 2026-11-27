@@ -85,6 +85,36 @@ pub struct Script {
     pub secrets: HashMap<String, String>,
     pub workers_dev: bool,
     pub uploads: usize,
+    /// Version ids, oldest first.
+    pub versions: Vec<String>,
+    /// Deployments, newest first: the version id at 100%.
+    pub deployments: Vec<String>,
+    /// The last `PUT .../schedules` body.
+    pub schedules: Option<Value>,
+}
+
+/// A Worker version as uploaded: its metadata part and module part names.
+#[derive(Clone, Debug)]
+pub struct Version {
+    pub id: String,
+    pub metadata: Value,
+    pub modules: Vec<String>,
+}
+
+/// The smoke target the fake serves at `/healthz` and `/` (no auth, like a public site).
+#[derive(Clone, Debug, Default)]
+pub struct Site {
+    /// Script whose active version `/healthz` reports.
+    pub script: String,
+    /// The first n `/healthz` requests answer 404 (a route still warming up).
+    pub ready_after: usize,
+    /// Report this version instead of the active one.
+    pub version_override: Option<String>,
+    /// `/` answers this status (default 200) while the given version is active.
+    pub home_status: Option<(String, u16)>,
+    pub hits: usize,
+    /// `/healthz` answers only after this long (a slow site).
+    pub delay: std::time::Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +156,29 @@ pub struct State {
     /// `(trigger, sql)`: after the first D1 query whose body contains `trigger`, run `sql`
     /// in that database, once (another client acting between two of ours).
     pub after_query: Vec<(String, String)>,
+    pub versions: Vec<Version>,
+    /// Asset hashes Cloudflare already has.
+    pub assets: std::collections::HashSet<String>,
+    /// Upload session JWT -> hashes still missing.
+    pub sessions: HashMap<String, Vec<String>>,
+    /// Completion JWTs handed out.
+    pub completions: Vec<String>,
+    /// Polls an export answers `active` before `complete`.
+    pub export_polls: usize,
+    /// `(database id, polls so far)` of the running export.
+    pub exporting: Option<(String, usize)>,
+    /// Restores done: `(database id, bookmark)`.
+    pub restores: Vec<(String, String)>,
+    pub site: Site,
+    /// The fake's own base URL (signed URLs point at it).
+    pub base: String,
+    /// Manifest path of each asset hash an upload session asked for.
+    pub asset_paths: HashMap<String, String>,
+    /// Replaces the result of `GET .../deployments` (a malformed reply).
+    pub deployments_override: Option<Value>,
+    /// `Some(n)`: after a `POST .../deployments` beyond the first n requests, every
+    /// `GET .../deployments` gets no reply.
+    pub blind_after_switch: Option<usize>,
 }
 
 pub struct Fake {
@@ -137,12 +190,17 @@ impl Fake {
     pub fn start(state: State) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
+        let mut state = state;
+        state.base.clone_from(&base);
         let state = Arc::new(Mutex::new(state));
         let shared = Arc::clone(&state);
         // Never joined: the thread ends with the test process.
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                serve(&stream, &shared);
+                // One thread per connection, so a slow reply (`Site::delay`) never holds up
+                // the next request; the state lock keeps requests in arrival order.
+                let shared = Arc::clone(&shared);
+                thread::spawn(move || serve(&stream, &shared));
             }
         });
         Self { base, state }
@@ -218,13 +276,68 @@ fn read_request(stream: &TcpStream) -> Option<Recorded> {
     })
 }
 
-fn write_reply(mut stream: &TcpStream, status: u16, body: &str) {
+fn write_reply(stream: &TcpStream, status: u16, body: &str) {
+    write_reply_with(stream, status, body, "");
+}
+
+/// `extra`: more header lines, each ending in `\r\n`.
+fn write_reply_with(mut stream: &TcpStream, status: u16, body: &str, extra: &str) {
     let reply = format!(
         "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
-         Connection: close\r\n\r\n{body}",
+         {extra}Connection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = stream.write_all(reply.as_bytes());
+}
+
+/// The public side: the site's `/healthz` and `/`, and signed export URLs. No token.
+fn serve_public(st: &mut State, req: &Recorded) -> Option<(u16, String, String)> {
+    let active = |st: &State| {
+        st.scripts
+            .get(&st.site.script)
+            .and_then(|s| s.deployments.first().cloned())
+    };
+    match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/healthz") => {
+            st.site.hits += 1;
+            if st.site.hits <= st.site.ready_after {
+                return Some((404, "not yet".into(), String::new()));
+            }
+            let v = st.site.version_override.clone().or_else(|| active(st));
+            let header = v
+                .map(|v| format!("x-plumblog-version: {v}\r\n"))
+                .unwrap_or_default();
+            Some((200, "ok".into(), header))
+        }
+        ("GET", "/") => {
+            let status = match (&st.site.home_status, active(st)) {
+                (Some((v, s)), Some(a)) if *v == a => *s,
+                _ => 200,
+            };
+            Some((status, "<html></html>".into(), String::new()))
+        }
+        ("GET", p) if p.starts_with("/__signed/") => {
+            if query(&req.query, "sig") != Some("s1g") {
+                return Some((403, "bad signature".into(), String::new()));
+            }
+            let id = p.trim_start_matches("/__signed/").trim_end_matches(".sql");
+            let conn = st.sqlite.get(id)?;
+            let tables = run_rows(
+                conn,
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+                &[],
+            )
+            .unwrap_or_default();
+            let mut dump = String::from("PRAGMA defer_foreign_keys=TRUE;\n");
+            for t in tables {
+                dump.push_str("-- table ");
+                dump.push_str(t["name"].as_str().unwrap_or(""));
+                dump.push('\n');
+            }
+            Some((200, dump, String::new()))
+        }
+        _ => None,
+    }
 }
 
 fn serve(stream: &TcpStream, state: &Mutex<State>) {
@@ -234,7 +347,25 @@ fn serve(stream: &TcpStream, state: &Mutex<State>) {
     let mut st = state.lock().unwrap();
     st.requests.push(req.clone());
     let n = st.requests.len();
+    if let Some((status, body, extra)) = serve_public(&mut st, &req) {
+        let delay = if req.path == "/healthz" {
+            st.site.delay
+        } else {
+            std::time::Duration::ZERO
+        };
+        drop(st);
+        thread::sleep(delay);
+        write_reply_with(stream, status, &body, &extra);
+        return;
+    }
     let mut failure = st.failures.iter().find(|(i, _)| *i == n).map(|(_, f)| *f);
+    let from = st.blind_after_switch.unwrap_or(n - 1).min(n - 1);
+    let switched = st.requests[from..n - 1]
+        .iter()
+        .any(|r| r.method == "POST" && r.path.ends_with("/deployments"));
+    if switched && req.method == "GET" && req.path.ends_with("/deployments") {
+        failure = Some(Failure::Drop);
+    }
     let line = format!("{} {}", req.method, req.path);
     if failure.is_none()
         && let Some(i) = st
@@ -308,6 +439,9 @@ fn visible(st: &State, token: &Token) -> Vec<(String, String)> {
 }
 
 fn route(st: &mut State, req: &Recorded) -> (u16, Value) {
+    if req.method == "POST" && req.path.ends_with("/workers/assets/upload") {
+        return assets_upload(st, req);
+    }
     let Some(token) = req
         .header("authorization")
         .and_then(|a| a.strip_prefix("Bearer "))
@@ -412,6 +546,19 @@ fn route_d1(
             st.bookmarks.push(b.clone());
             ok(&json!({"bookmark": b}))
         }
+        ("POST", ["accounts", _, "d1", "database", id, "export"]) => d1_export(st, req, id),
+        (
+            "POST",
+            [
+                "accounts",
+                _,
+                "d1",
+                "database",
+                id,
+                "time_travel",
+                "restore",
+            ],
+        ) => d1_restore(st, req, id),
         ("POST", ["accounts", _, "d1", "database", id, "query"]) => {
             let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
             let Some(conn) = st.sqlite.get(*id) else {
@@ -430,6 +577,47 @@ fn route_d1(
         }
         _ => err(404, 7003, "Could not route to this path"),
     }
+}
+
+/// Export, polled: `active` for `export_polls` polls, then `complete` with a signed URL.
+fn d1_export(st: &mut State, req: &Recorded, id: &str) -> (u16, Value) {
+    let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
+    if body["output_format"] != "polling" || !st.sqlite.contains_key(id) {
+        return err(400, 7400, "bad export");
+    }
+    let polls = match (&st.exporting, body["current_bookmark"].as_str()) {
+        (None, None) => 0,
+        (Some((db, n)), Some("exp-bm")) if db.as_str() == id => n + 1,
+        _ => return err(400, 7400, "export not running or wrong bookmark"),
+    };
+    if polls < st.export_polls {
+        st.exporting = Some((id.to_string(), polls));
+        return ok(
+            &json!({"success": true, "type": "export", "status": "active",
+                          "at_bookmark": "exp-bm", "messages": ["Generating"]}),
+        );
+    }
+    st.exporting = None;
+    let url = format!("{}/__signed/{id}.sql?sig=s1g", st.base);
+    ok(
+        &json!({"success": true, "type": "export", "status": "complete",
+               "at_bookmark": "exp-bm", "messages": [],
+               "result": {"filename": format!("{id}.sql"), "signed_url": url}}),
+    )
+}
+
+/// Time Travel restore; the bookmark must be one the fake handed out.
+fn d1_restore(st: &mut State, req: &Recorded, id: &str) -> (u16, Value) {
+    let Some(b) = query(&req.query, "bookmark") else {
+        return err(400, 7400, "bookmark query parameter is required");
+    };
+    if !st.bookmarks.iter().any(|x| x == b) {
+        return err(400, 7400, "unknown bookmark");
+    }
+    st.restores.push((id.to_string(), b.to_string()));
+    let prev = format!("bm-{}-before-restore-{}", id, st.restores.len());
+    ok(&json!({"bookmark": b, "previous_bookmark": prev,
+               "message": "Restored"}))
 }
 
 /// R2 buckets, listed by cursor as R2 does.
@@ -484,6 +672,14 @@ fn route_r2(
     }
 }
 
+/// Script paths [`route_versions`] answers.
+const SCRIPT_OPS: &[&str] = &[
+    "assets-upload-session",
+    "versions",
+    "deployments",
+    "schedules",
+];
+
 /// Worker scripts, secrets, workers.dev and custom domains.
 fn route_workers(
     st: &mut State,
@@ -519,8 +715,7 @@ fn route_workers(
             if !shaped {
                 return err(400, 10021, "bad multipart upload");
             }
-            let script = st.scripts.entry((*name).to_string()).or_default();
-            script.uploads += 1;
+            placeholder(st, name);
             ok(&json!({"id": name}))
         }
         (_, ["accounts", _, "workers", "scripts", name, ..]) if !st.scripts.contains_key(*name) => {
@@ -548,6 +743,9 @@ fn route_workers(
             let script = st.scripts.get_mut(*name).unwrap();
             script.secrets.insert(n.to_string(), t.to_string());
             ok(&json!({"name": n, "type": "secret_text"}))
+        }
+        (_, ["accounts", _, "workers", "scripts", _, op]) if SCRIPT_OPS.contains(op) => {
+            route_versions(st, req, segs)
         }
         ("GET", ["accounts", _, "workers", "scripts", name, "subdomain"]) => {
             let on = st.scripts[*name].workers_dev;
@@ -580,6 +778,163 @@ fn route_workers(
                        "service": svc, "zone_id": zone, "environment": body["environment"]});
             st.domains.push(d.clone());
             ok(&d)
+        }
+        _ => err(404, 7003, "Could not route to this path"),
+    }
+}
+
+/// A script upload makes a version and deploys it, as Cloudflare does.
+fn placeholder(st: &mut State, name: &str) {
+    let id = format!("00000000-0000-4000-8000-{:012}", st.versions.len() + 1);
+    st.versions.push(Version {
+        id: id.clone(),
+        metadata: json!({"main_module": "worker.js"}),
+        modules: vec!["worker.js".into()],
+    });
+    let script = st.scripts.entry(name.to_string()).or_default();
+    script.uploads += 1;
+    script.versions.push(id.clone());
+    script.deployments.insert(0, id);
+}
+
+/// `POST .../versions`: multipart with `metadata` and module parts.
+fn new_version(st: &mut State, req: &Recorded, name: &str) -> (u16, Value) {
+    let Some(parts) = multipart(req) else {
+        return err(400, 10021, "expected multipart/form-data");
+    };
+    let Some((_, meta)) = parts.iter().find(|(h, _)| h.contains("name=\"metadata\"")) else {
+        return err(400, 10021, "no metadata part");
+    };
+    let meta: Value = serde_json::from_str(meta).unwrap_or_default();
+    let modules: Vec<String> = parts
+        .iter()
+        .filter_map(|(h, _)| {
+            let n = h.split("filename=\"").nth(1)?.split('"').next()?;
+            Some(n.to_string())
+        })
+        .collect();
+    let main = meta["main_module"].as_str().unwrap_or("");
+    if !modules.iter().any(|m| m == main) {
+        return err(400, 10021, "main_module has no part");
+    }
+    // Strict inheritance: every `inherit` binding must exist on the script.
+    if query(&req.query, "bindings_inherit") != Some("strict") {
+        return err(400, 10021, "expected bindings_inherit=strict");
+    }
+    for b in meta["bindings"].as_array().into_iter().flatten() {
+        let n = b["name"].as_str().unwrap_or("");
+        if b["type"] == "inherit" && !st.scripts[name].secrets.contains_key(n) {
+            return err(400, 10021, &format!("binding {n} could not be inherited"));
+        }
+    }
+    let jwt = meta["assets"]["jwt"].as_str().unwrap_or("");
+    if !st.completions.iter().any(|c| c == jwt) {
+        return err(400, 10021, "assets jwt is not a completion token");
+    }
+    let id = format!("00000000-0000-4000-8000-{:012}", st.versions.len() + 1);
+    st.versions.push(Version {
+        id: id.clone(),
+        metadata: meta.clone(),
+        modules,
+    });
+    let script = st.scripts.get_mut(name).unwrap();
+    script.versions.push(id.clone());
+    // Without keep_bindings for secrets, a new version has none (as Cloudflare drops
+    // bindings the metadata does not list).
+    let keep = meta["keep_bindings"]
+        .as_array()
+        .is_some_and(|k| k.iter().any(|x| x == "secret_text"));
+    if !keep {
+        script.secrets.clear();
+    }
+    ok(&json!({"id": id, "number": script.versions.len()}))
+}
+
+/// Assets upload sessions, versions, deployments and cron schedules of a script.
+fn route_versions(st: &mut State, req: &Recorded, segs: &[&str]) -> (u16, Value) {
+    match (req.method.as_str(), segs) {
+        (
+            "POST",
+            [
+                "accounts",
+                _,
+                "workers",
+                "scripts",
+                _,
+                "assets-upload-session",
+            ],
+        ) => {
+            let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
+            let Some(manifest) = body["manifest"].as_object() else {
+                return err(400, 10021, "manifest is required");
+            };
+            let mut missing = Vec::new();
+            for (path, entry) in manifest {
+                let hash = entry["hash"].as_str().unwrap_or("");
+                let hex32 = hash.len() == 32 && hash.bytes().all(|b| b.is_ascii_hexdigit());
+                if !path.starts_with('/') || !hex32 || entry["size"].as_u64().is_none() {
+                    return err(400, 10021, "bad manifest entry");
+                }
+                st.asset_paths.insert(hash.to_string(), path.clone());
+                if !st.assets.contains(hash) && !missing.contains(&hash.to_string()) {
+                    missing.push(hash.to_string());
+                }
+            }
+            let jwt = format!("sessionJWT{}", st.sessions.len() + 1);
+            // Two files per bucket, so tests see several uploads.
+            let buckets: Vec<Vec<String>> = missing.chunks(2).map(<[String]>::to_vec).collect();
+            st.sessions.insert(jwt.clone(), missing.clone());
+            if missing.is_empty() {
+                st.completions.push(jwt.clone());
+            }
+            ok(&json!({"jwt": jwt, "buckets": buckets}))
+        }
+        ("POST", ["accounts", _, "workers", "scripts", name, "versions"]) => {
+            new_version(st, req, name)
+        }
+        ("GET", ["accounts", _, "workers", "scripts", name, "versions"]) => {
+            let items: Vec<Value> = st.scripts[*name]
+                .versions
+                .iter()
+                .rev()
+                .map(|v| json!({"id": v}))
+                .collect();
+            ok(&json!({"items": items}))
+        }
+        ("GET", ["accounts", _, "workers", "scripts", name, "deployments"]) => {
+            if let Some(v) = &st.deployments_override {
+                return ok(v);
+            }
+            let list: Vec<Value> = st.scripts[*name]
+                .deployments
+                .iter()
+                .map(|v| {
+                    json!({"id": format!("dep-{v}"), "strategy": "percentage",
+                                "versions": [{"version_id": v, "percentage": 100.0}]})
+                })
+                .collect();
+            ok(&json!({"deployments": list}))
+        }
+        ("POST", ["accounts", _, "workers", "scripts", name, "deployments"]) => {
+            let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
+            let v = body["versions"][0]["version_id"].as_str().unwrap_or("");
+            let script = st.scripts.get_mut(*name).unwrap();
+            if body["strategy"] != "percentage"
+                || body["versions"][0]["percentage"] != 100
+                || !script.versions.iter().any(|x| x == v)
+            {
+                return err(400, 10021, "bad deployment");
+            }
+            script.deployments.insert(0, v.to_string());
+            ok(&json!({"id": format!("dep-{v}")}))
+        }
+        ("PUT", ["accounts", _, "workers", "scripts", name, "schedules"]) => {
+            let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
+            if !body.is_array() {
+                return err(400, 10021, "schedules must be an array");
+            }
+            st.scripts.get_mut(*name).unwrap().schedules = Some(body.clone());
+            ok(&json!({"schedules": body}))
         }
         _ => err(404, 7003, "Could not route to this path"),
     }
@@ -672,6 +1027,90 @@ fn route_turnstile(
         }
         _ => err(404, 7003, "Could not route to this path"),
     }
+}
+
+/// `(part headers, part content)` of a multipart request body.
+fn multipart(req: &Recorded) -> Option<Vec<(String, String)>> {
+    let ctype = req.header("content-type")?;
+    let boundary = ctype.strip_prefix("multipart/form-data; boundary=")?;
+    let body = req.body.strip_suffix(&format!("--{boundary}--\r\n"))?;
+    let mut out = Vec::new();
+    for chunk in body.split(&format!("--{boundary}\r\n")).skip(1) {
+        let chunk = chunk.strip_suffix("\r\n")?;
+        let (head, content) = chunk.split_once("\r\n\r\n")?;
+        out.push((head.to_string(), content.to_string()));
+    }
+    Some(out)
+}
+
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::new();
+    let mut acc = 0u32;
+    let mut bits = 0;
+    for c in s.bytes().filter(|c| *c != b'=') {
+        let v = u32::try_from(A.iter().position(|a| *a == c)?).ok()?;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(u8::try_from((acc >> bits) & 0xff).ok()?);
+        }
+    }
+    Some(out)
+}
+
+/// Assets upload: authorized by the session JWT only; each part is base64 of a file whose
+/// hash the session asked for. The last bucket gets the completion JWT.
+fn assets_upload(st: &mut State, req: &Recorded) -> (u16, Value) {
+    let jwt = req
+        .header("authorization")
+        .and_then(|a| a.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if !st.sessions.contains_key(jwt) {
+        return err(401, 10000, "upload needs the session JWT");
+    }
+    if query(&req.query, "base64") != Some("true") {
+        return err(400, 10021, "base64=true is required");
+    }
+    let Some(parts) = multipart(req) else {
+        return err(400, 10021, "expected multipart/form-data");
+    };
+    for (head, content) in &parts {
+        let Some(hash) = head
+            .split("name=\"")
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+        else {
+            return err(400, 10021, "part without a name");
+        };
+        if b64_decode(content).is_none() {
+            return err(400, 10021, "part is not base64");
+        }
+        // Content as sent (base64) plus the manifest path's extension.
+        let ext = st
+            .asset_paths
+            .get(hash)
+            .and_then(|p| p.rsplit_once('.'))
+            .map_or("", |(_, e)| e);
+        let mut h = plumblog_auth::base64url::hex(&plumblog_auth::sha256::sha256(
+            format!("{content}{ext}").as_bytes(),
+        ));
+        h.truncate(32);
+        if h != hash || !head.contains(&format!("filename=\"{hash}\"")) {
+            return err(400, 10021, "hash does not match the content");
+        }
+        st.assets.insert(hash.to_string());
+        st.sessions.get_mut(jwt).unwrap().retain(|m| m != hash);
+    }
+    if st.sessions[jwt].is_empty() {
+        let done = format!("completionJWT{}", st.completions.len() + 1);
+        st.completions.push(done.clone());
+        let (_, mut v) = ok(&json!({"jwt": done}));
+        v["success"] = json!(true);
+        return (201, v);
+    }
+    ok(&json!({}))
 }
 
 fn to_json(v: ValueRef) -> Value {

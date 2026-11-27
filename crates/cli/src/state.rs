@@ -48,6 +48,53 @@ pub struct MigrationsState {
     pub failed: Option<FailedMigration>,
 }
 
+/// One `blog deploy` run, written before anything changes and updated after each step, so
+/// a run that stops halfway still says what it did.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeployRecord {
+    /// UTC, `2026-11-28T10:15:00Z`.
+    pub at: String,
+    /// `started`, `migration_failed`, `failed` (nothing switched), `deployed`,
+    /// `deployed_cron_failed` (serving, cron not set), `deploy_uncertain` (switch sent, the
+    /// active version unreadable) or `rolled_back`.
+    pub outcome: String,
+    /// The Time Travel bookmark taken before anything changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bookmark: Option<String>,
+    /// The SQL export, relative to the site folder (`backups/...`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub migrations: Vec<String>,
+    /// The uploaded Worker version id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// The version that served the site before this deploy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<String>,
+    /// `passed`, or what the smoke check saw when it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smoke: Option<String>,
+}
+
+/// One `blog rollback`: code (`kind = "version"`) or database (`kind = "database"`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RollbackRecord {
+    pub at: String,
+    pub kind: String,
+    /// The version id or bookmark restored.
+    pub to: String,
+    /// What it replaced: the version that was serving, or Time Travel's `previous_bookmark`
+    /// (restoring that undoes the restore).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smoke: Option<String>,
+}
+
+/// Records kept per list; older ones are dropped.
+pub const MAX_RECORDS: usize = 20;
+
 /// The file's content. Plain values first, tables last (TOML requires it).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SiteState {
@@ -65,12 +112,29 @@ pub struct SiteState {
     /// Public Turnstile site key (the secret is a Worker secret only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turnstile_site_key: Option<String>,
+    /// The version `blog setup` uploaded (503, no body): never a rollback target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub d1: Option<D1State>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub r2: Option<R2State>,
     #[serde(default)]
     pub migrations: MigrationsState,
+    /// Newest last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deploys: Vec<DeployRecord>,
+    /// Newest last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rollbacks: Vec<RollbackRecord>,
+}
+
+/// Appends `item`, keeping the newest [`MAX_RECORDS`].
+pub fn push_capped<T>(list: &mut Vec<T>, item: T) {
+    list.push(item);
+    if list.len() > MAX_RECORDS {
+        list.drain(..list.len() - MAX_RECORDS);
+    }
 }
 
 /// Why the file could not be read or written: `(path, reason)`.

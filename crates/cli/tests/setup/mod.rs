@@ -11,7 +11,7 @@ use plumblog_store::setup_hash_json;
 use serde_json::{Value, json};
 use std::process::Command;
 
-const ALL: &[&str] = &[
+pub(crate) const ALL: &[&str] = &[
     "Account | D1 | Edit",
     "Account | Workers Scripts | Edit",
     "Account | Workers R2 Storage | Edit",
@@ -21,7 +21,7 @@ const ALL: &[&str] = &[
 const NOW: i64 = 1_790_000_000_000;
 const ORIGIN: &str = "https://plumblog.steven.workers.dev";
 
-fn site(perms: &[&'static str]) -> State {
+pub(crate) fn site(perms: &[&'static str]) -> State {
     let mut st = State::default();
     st.accounts.push(("acc1".into(), "Steven's blog".into()));
     st.tokens.insert(GOOD.into(), Token::user(perms));
@@ -31,12 +31,18 @@ fn site(perms: &[&'static str]) -> State {
     st
 }
 
-struct Ran {
-    result: Result<(), SetupFailure>,
-    out: String,
+pub(crate) struct Ran {
+    pub(crate) result: Result<(), SetupFailure>,
+    pub(crate) out: String,
 }
 
-fn run_with(fake: &Fake, dir: &TempDir, opts: &Options, migs: &[Migration], text: &Text) -> Ran {
+pub(crate) fn run_with(
+    fake: &Fake,
+    dir: &TempDir,
+    opts: &Options,
+    migs: &[Migration],
+    text: &Text,
+) -> Ran {
     let mut c = client(fake, GOOD);
     let cx = Context {
         dir: &dir.0,
@@ -56,7 +62,7 @@ fn run(fake: &Fake, dir: &TempDir, opts: &Options) -> Ran {
     run_with(fake, dir, opts, &migrations::bundled(), &en())
 }
 
-fn ok(r: &Ran) {
+pub(crate) fn ok(r: &Ran) {
     if let Err(e) = &r.result {
         panic!("{:?}: {}\n{}", e.code, e.message, r.out);
     }
@@ -102,7 +108,7 @@ fn setting(fake: &Fake, key: &str) -> Option<String> {
     .and_then(|r| r["value_json"].as_str().map(str::to_string))
 }
 
-fn secret(fake: &Fake, name: &str) -> Option<String> {
+pub(crate) fn secret(fake: &Fake, name: &str) -> Option<String> {
     fake.state()
         .scripts
         .get("plumblog")?

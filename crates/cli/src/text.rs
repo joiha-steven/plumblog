@@ -63,6 +63,22 @@ codes! {
     MigrationRestorePending => "setup.migration_restore_pending",
     DatabaseForeign => "setup.database_foreign",
     TurnstileAmbiguous => "setup.turnstile_ambiguous",
+    NotSetUp => "deploy.not_set_up",
+    BundleMissing => "deploy.bundle_missing",
+    BuildFailed => "deploy.build_failed",
+    BundleInvalid => "deploy.bundle_invalid",
+    ExportFailed => "deploy.export_failed",
+    BackupUnwritable => "deploy.backup_unwritable",
+    SmokeFailed => "deploy.smoke_failed",
+    SmokeBaseRefused => "deploy.smoke_base_refused",
+    RollbackNoRecord => "rollback.no_record",
+    RollbackVersionUnknown => "rollback.version_unknown",
+    RollbackDbUnconfirmed => "rollback.db_unconfirmed",
+    DeployLocked => "deploy.locked",
+    BundleSymlink => "deploy.bundle_symlink",
+    BundleOlder => "deploy.bundle_older",
+    CronFailed => "deploy.cron_failed",
+    RollbackPlaceholder => "rollback.placeholder",
 }
 
 /// One language's `[cli]` text, English behind it.

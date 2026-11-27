@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Worker name when neither `--name` nor `site.local.toml` gives one.
 pub const DEFAULT_NAME: &str = "plumblog";
-/// The restore command `blog rollback` (part c of issue #7) will provide.
+/// How to restore the database to a bookmark (`blog rollback --db`).
 pub const ROLLBACK_COMMAND: &str = "blog rollback --db {bookmark} --yes";
 /// Longest worker name: `<name>-media` must stay a valid R2 bucket name (63).
 const MAX_NAME: usize = 50;
@@ -39,8 +39,6 @@ const CODE_GROUP_LEN: usize = 5;
 /// Placeholder Worker until `blog deploy`: 503, no body, so secrets can attach to a script.
 const PLACEHOLDER_JS: &str =
     "export default { fetch() { return new Response(null, { status: 503 }); } };\n";
-/// Same date as tools/wrangler.dev.toml.
-const COMPATIBILITY_DATE: &str = "2026-11-01";
 
 /// Turnstile, as asked on the command line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -94,21 +92,21 @@ pub struct Failure {
 }
 
 impl Failure {
-    fn api(e: &ApiError, text: &Text) -> Self {
+    pub(crate) fn api(e: &ApiError, text: &Text) -> Self {
         Self {
             code: e.code(),
             message: e.message(text),
         }
     }
 
-    fn token(e: &TokenError, text: &Text) -> Self {
+    pub(crate) fn token(e: &TokenError, text: &Text) -> Self {
         Self {
             code: e.code(),
             message: e.message(text),
         }
     }
 
-    fn new(code: Code, text: &Text, key: Key, args: &[(&str, String)]) -> Self {
+    pub(crate) fn new(code: Code, text: &Text, key: Key, args: &[(&str, String)]) -> Self {
         Self {
             code,
             message: text.t(key, args),
@@ -117,7 +115,7 @@ impl Failure {
 }
 
 /// Text from Cloudflare, safe on a terminal.
-fn printable(s: &str) -> String {
+pub(crate) fn printable(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_control() { '?' } else { c })
         .collect()
@@ -154,7 +152,7 @@ pub fn normalize_domain(input: &str) -> Option<String> {
 }
 
 /// Standard base64 with padding, the form `WEBHOOK_KEY` is read in (plumblog-webhook b64).
-fn base64_std(bytes: &[u8]) -> String {
+pub(crate) fn base64_std(bytes: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
@@ -267,21 +265,21 @@ struct WorkerDomain {
 }
 
 /// One run: the API, the owner's language, the output and the state file.
-struct Run<'a> {
-    client: &'a Client,
-    cx: &'a Context<'a>,
-    out: &'a mut dyn Write,
-    state: SiteState,
+pub(crate) struct Run<'a> {
+    pub(crate) client: &'a Client,
+    pub(crate) cx: &'a Context<'a>,
+    pub(crate) out: &'a mut dyn Write,
+    pub(crate) state: SiteState,
     /// Secrets of this run, kept out of the state file.
-    secrets: Vec<ApiToken>,
+    pub(crate) secrets: Vec<ApiToken>,
 }
 
 impl Run<'_> {
-    fn t(&self, key: Key, args: &[(&str, String)]) -> String {
+    pub(crate) fn t(&self, key: Key, args: &[(&str, String)]) -> String {
         self.cx.text.t(key, args)
     }
 
-    fn line(&mut self, key: Key, args: &[(&str, String)]) {
+    pub(crate) fn line(&mut self, key: Key, args: &[(&str, String)]) {
         let l = self.t(key, args);
         // A closed stdout must not stop setup halfway; the state file still records it all.
         let _ = writeln!(self.out, "{l}");
@@ -298,11 +296,11 @@ impl Run<'_> {
         )
     }
 
-    fn api(&self, e: &ApiError) -> Failure {
+    pub(crate) fn api(&self, e: &ApiError) -> Failure {
         Failure::api(e, self.cx.text)
     }
 
-    fn save(&self) -> Result<(), Failure> {
+    pub(crate) fn save(&self) -> Result<(), Failure> {
         let secrets: Vec<&ApiToken> = self.secrets.iter().collect();
         state::save(self.cx.dir, &self.state, &secrets).map_err(|e| state_failure(&e, self.cx.text))
     }
@@ -338,7 +336,7 @@ impl Run<'_> {
     }
 }
 
-fn state_failure(e: &StateError, text: &Text) -> Failure {
+pub(crate) fn state_failure(e: &StateError, text: &Text) -> Failure {
     match e {
         StateError::Unreadable(path, reason) => Failure::new(
             Code::StateUnreadable,
@@ -392,7 +390,7 @@ pub fn check_options(opts: &Options, text: &Text) -> Result<(), Failure> {
 }
 
 /// A value given on the command line must match the one saved for this folder.
-fn same_or_mismatch(
+pub(crate) fn same_or_mismatch(
     saved: Option<&String>,
     given: Option<&String>,
     flag: &str,
@@ -603,7 +601,7 @@ fn check_existing(run: &Run, db: &Database, origin: &str, may_change: bool) -> R
 }
 
 /// A refusal from the migrations module that is not a failed migration.
-fn migration_error(run: &Run, e: migrations::Error) -> Failure {
+pub(crate) fn migration_error(run: &Run, e: migrations::Error) -> Failure {
     match e {
         migrations::Error::Foreign(tables) => Failure::new(
             Code::DatabaseForeign,
@@ -665,6 +663,10 @@ fn worker(
         list
     } else {
         upload_placeholder(client, name).map_err(|e| run.api(&e))?;
+        // `blog rollback` must never land on the placeholder.
+        let placeholder = crate::deploy::active_version(client, name).map_err(|e| run.api(&e))?;
+        run.state.placeholder_version = Some(placeholder);
+        run.save()?;
         run.line(
             key!("cli.setup.worker_created"),
             &[("name", name.to_string())],
@@ -770,7 +772,7 @@ fn upload_placeholder(client: &Client, name: &str) -> Result<(), ApiError> {
     let boundary = format!("plumblog{}", plumblog_auth::base64url::hex(&rnd));
     let metadata = json!({
         "main_module": "worker.js",
-        "compatibility_date": COMPATIBILITY_DATE,
+        "compatibility_date": crate::deploy::COMPATIBILITY_DATE,
         "bindings": [],
     });
     let mut body = String::new();
@@ -848,7 +850,11 @@ fn put_secret(run: &mut Run, script: &str, name: &str, value: &str) -> Result<()
     run.client.call(&call).map(drop).map_err(|e| run.api(&e))
 }
 
-fn apply_migrations(run: &mut Run, db: &Database, clear_failed: bool) -> Result<(), Failure> {
+pub(crate) fn apply_migrations(
+    run: &mut Run,
+    db: &Database,
+    clear_failed: bool,
+) -> Result<(), Failure> {
     // A recorded failure means the database may be half migrated: a new bookmark now would
     // capture that state and replace the clean one, so nothing runs until it is restored.
     if let Some(f) = run.state.migrations.failed.clone() {
