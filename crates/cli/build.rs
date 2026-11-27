@@ -1,8 +1,10 @@
 //! Embeds guides/*.md, locales/*.toml and migrations/*.sql into the binary so `blog` works offline, with no
-//! extra crate.
+//! extra crate. Also bakes the release trust root (docs/ARCHITECTURE.md, Release): the bundle hash
+//! from `PLUMBLOG_BUNDLE_SHA256` and the build target.
 use std::{env, fmt::Write, fs, path::PathBuf};
 
 fn main() {
+    release_env();
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../guides");
     println!("cargo:rerun-if-changed={}", root.display());
 
@@ -108,4 +110,28 @@ fn main() {
         out,
     )
     .unwrap();
+}
+
+/// `PLUMBLOG_BUNDLE_SHA256` (64 hex) becomes `PLUMBLOG_BAKED_BUNDLE_SHA256`, lowercase; unset or
+/// empty bakes "" (a dev build). Anything else fails the build: a release must never ship with
+/// a hash `blog deploy` would silently ignore.
+fn release_env() {
+    println!("cargo:rerun-if-env-changed=PLUMBLOG_BUNDLE_SHA256");
+    let hash = env::var("PLUMBLOG_BUNDLE_SHA256").unwrap_or_default();
+    let hash = hash.trim();
+    assert!(
+        hash.is_empty() || (hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())),
+        "PLUMBLOG_BUNDLE_SHA256 must be 64 hex characters (the bundle's SHA-256), got {hash:?}"
+    );
+    println!(
+        "cargo:rustc-env=PLUMBLOG_BAKED_BUNDLE_SHA256={}",
+        hash.to_ascii_lowercase()
+    );
+    println!(
+        "cargo:rustc-env=PLUMBLOG_TARGET={}",
+        env::var("TARGET").unwrap()
+    );
+    // include_str! tracks the file itself; this also reruns when it is created.
+    let key = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../release");
+    println!("cargo:rerun-if-changed={}", key.display());
 }

@@ -1,6 +1,8 @@
 //! `blog deploy` and `blog rollback` against the fake API: real migrations in SQLite, a fake
 //! site answering `/healthz` with the active version, and a virtual clock (no real waits).
 
+mod release;
+
 use super::{GOOD, TempDir, client};
 use crate::fake_cf::{Failure, Fake, Recorded};
 use crate::setup::{ALL, Ran as SetupRan, ok as setup_ok, run_with as setup_with, secret, site};
@@ -1071,8 +1073,20 @@ fn the_binary_refuses_a_db_restore_without_yes_before_any_call() {
         err.contains("[rollback.db_unconfirmed]") && err.contains("--yes"),
         "{err}"
     );
+    // A dev build (tests never bake a bundle hash) deploys only with --build or --bundle.
     let out = Command::new(env!("CARGO_BIN_EXE_blog"))
         .args(["--lang", "en", "deploy"])
+        .current_dir(&dir.0)
+        .env("PLUMBLOG_CF_API_BASE", "http://127.0.0.1:9")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("[release.dev_build]") && err.contains("--build"),
+        "{err}"
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_blog"))
+        .args(["--lang", "en", "deploy", "--build"])
         .current_dir(&dir.0)
         .env("PLUMBLOG_CF_API_BASE", "http://127.0.0.1:9")
         .output()

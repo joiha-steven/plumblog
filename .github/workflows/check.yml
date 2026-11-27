@@ -12,18 +12,18 @@ jobs:
     # A normal run takes ~5 min; a hung Worker test must fail fast, not hold the PR for hours.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install pinned toolchain (reads rust-toolchain.toml)
         run: |
           rustup toolchain install
           rustup target list --installed | grep -qx wasm32-unknown-unknown
       # Node runs the local Worker tests (scripts/worker-test); npm cache keyed on the pinned lockfile.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: tools/package-lock.json
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           # target/ also holds the pinned worker-build binary (target/tools);
           # ~/.cache/worker-build holds the wasm-bindgen and esbuild it downloads.
