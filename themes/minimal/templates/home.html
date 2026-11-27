@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block main %}
+{%- if site.description %}
+<p class="intro">{{ site.description }}</p>
+{%- endif %}
+<ul class="posts">
+  {%- for post in posts %}
+  <li>
+    <a class="entry" href="{{ post.url }}"{% if post.lang != page.lang %} hreflang="{{ post.lang }}"{% endif %}>
+      <span class="entry-title"{% if post.lang != page.lang %} lang="{{ post.lang }}"{% endif %}>
+        {%- if post.pinned %}<span class="pin">{{ t.pinned }}</span>{% endif %}{{ post.title }}</span>
+      <time datetime="{{ post.date_iso }}">{{ post.date_display }}</time>
+      {%- if post.thumb %}
+      <img src="{{ post.thumb.src }}" width="{{ post.thumb.width }}" height="{{ post.thumb.height }}" alt="" loading="{{ 'eager' if loop.index <= 6 else 'lazy' }}" decoding="async">
+      {%- endif %}
+    </a>
+  </li>
+  {%- endfor %}
+</ul>
+{%- if older_url or newer_url %}
+<nav class="older" aria-label="Pages">
+  {%- if newer_url %}<a href="{{ newer_url }}" rel="prev">{{ t.newer_posts }}</a>{% endif %}
+  {%- if older_url %}<a href="{{ older_url }}" rel="next">{{ t.older_posts }}</a>{% endif %}
+</nav>
+{%- endif %}
+{% endblock %}

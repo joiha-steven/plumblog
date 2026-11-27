@@ -1,3 +1,17 @@
 # UI strings, Vietnamese.
 [site]
 title_fallback = "Trang chưa đặt tên"
+
+[reader]
+skip_to_content = "Bỏ qua, tới nội dung"
+toggle_theme = "Đổi sáng hoặc tối"
+pinned = "Ghim"
+older_posts = "Bài cũ hơn"
+newer_posts = "Bài mới hơn"
+previous_post = "Bài trước"
+next_post = "Bài sau"
+minutes_read = "{n} phút đọc"
+footnotes = "Chú thích"
+back_to_text = "Quay lại đoạn văn"
+show_note = "Xem chú thích {n}"
+feed = "RSS"

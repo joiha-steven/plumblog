@@ -1,0 +1,216 @@
+/* minimal theme. Colors come only from --c-* tokens (theme.toml); everything else is here. */
+
+/* Typography tokens. The admin editor reuses these for its writing column. */
+:root {
+  --font: Inter, Inter-fallback, system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  /* 17px on phones -> 19px on desktop, in rem so a user's larger default text still scales. */
+  --fs: clamp(1.0625rem, 0.95rem + 0.45vw, 1.1875rem);
+  --lh: 1.7;           /* room for stacked Vietnamese diacritics (e.g. the capital E-circumflex-hook) */
+  --lh-tight: 1.25;
+  --measure: calc(32 * var(--fs)); /* ~66 characters of Inter per line; not em, so it means the same inside smaller text */
+  --track: -0.011em;   /* Inter text cut at 17-19px reads slightly loose; tighten a touch */
+  --w-body: 400;
+  --w-strong: 600;
+  --w-head: 650;
+  --space: 1.1em;      /* paragraph gap */
+  --gutter: clamp(1rem, 4vw, 2rem);
+  --radius: 6px;
+  --ease: cubic-bezier(.2, .7, .2, 1);
+  --dur: 180ms;
+  --features: "cv05", "cv08"; /* l with tail, I with serifs: tells I, l and 1 apart */
+  color-scheme: light dark;
+}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--c-bg);
+  color: var(--c-text);
+  font: var(--w-body) var(--fs)/var(--lh) var(--font);
+  letter-spacing: var(--track);
+  font-feature-settings: var(--features);
+  font-kerning: normal;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overflow-wrap: break-word;
+}
+::selection { background: color-mix(in srgb, var(--c-accent) 22%, transparent); }
+:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 3px; border-radius: 2px; }
+
+/* Layout: one centered column. */
+.wrap { max-width: calc(var(--measure) + 2 * var(--gutter)); margin-inline: auto; padding-inline: var(--gutter); }
+.skip { position: absolute; left: var(--gutter); top: -4em; padding: .5em 1em; background: var(--c-bg); color: var(--c-text); z-index: 2; }
+.skip:focus { top: .5em; }
+
+/* Site header */
+.site-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 1rem; padding-block: 1.5rem 0; font-size: .9375em; }
+.site-name { display: inline-flex; align-items: center; min-height: 44px; white-space: nowrap; font-weight: var(--w-head); color: var(--c-text); text-decoration: none; letter-spacing: -0.015em; }
+.site-nav { display: flex; align-items: center; margin-left: auto; }
+.site-nav a, .toggle { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; padding-inline: .5rem; color: var(--c-text-2); white-space: nowrap; text-decoration: none; }
+.site-nav a:hover, .toggle:hover { color: var(--c-text); }
+.site-nav a[aria-current="page"] { color: var(--c-text); }
+.toggle { display: none; border: 0; background: none; font: inherit; cursor: pointer; padding: 0; }
+.js .toggle { display: inline-flex; justify-content: flex-end; } /* icon lines up with the text column edge */
+.toggle svg { width: 1.15em; height: 1.15em; }
+.toggle .moon, [data-theme="dark"] .toggle .sun { display: none; }
+[data-theme="dark"] .toggle .moon { display: block; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .toggle .sun { display: none; }
+  :root:not([data-theme="light"]) .toggle .moon { display: block; }
+}
+
+main { padding-block: clamp(2.5rem, 6vw, 4.5rem) 3rem; }
+
+/* Text. Headings balance their lines; paragraphs avoid a lone last word. */
+h1, h2, h3, h4 { font-weight: var(--w-head); line-height: var(--lh-tight); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(1.875rem, 1.35rem + 2.2vw, 2.625rem); letter-spacing: -0.022em; line-height: 1.15; }
+.prose h2 { font-size: 1.4em; letter-spacing: -0.018em; margin: 2.2em 0 .55em; }
+.prose h3 { font-size: 1.15em; letter-spacing: -0.014em; margin: 1.9em 0 .45em; }
+.prose h4 { font-size: 1em; margin: 1.6em 0 .3em; }
+.prose h2 + h3 { margin-top: 1em; }
+p, ul, ol, blockquote, pre, figure, table, .table, hr, dl { margin: 0 0 var(--space); }
+p, li, dd, blockquote, figcaption { text-wrap: pretty; }
+strong, b { font-weight: var(--w-strong); }
+small { font-size: .85em; }
+sub, sup { line-height: 0; }
+abbr[title] { text-decoration: underline dotted; text-underline-offset: .2em; }
+
+/* Underline sits below Vietnamese dot-below marks and descenders, and skips ink. */
+a { color: inherit; text-decoration-line: underline; text-decoration-color: color-mix(in srgb, var(--c-accent) 55%, transparent); text-decoration-thickness: .075em; text-underline-offset: .3em; text-decoration-skip-ink: auto; transition: color var(--dur) var(--ease), text-decoration-color var(--dur) var(--ease); }
+a:hover { color: var(--c-accent); text-decoration-color: var(--c-accent); }
+
+.prose ul, .prose ol { padding-left: 1.35em; }
+.prose li { margin-block: .3em; padding-left: .2em; }
+.prose li > ul, .prose li > ol { margin-block: .3em 0; }
+.prose ::marker { color: var(--c-text-2); }
+.prose ol > li::marker { font-feature-settings: "tnum"; }
+.prose li:has(> label > input[type="checkbox"]) { list-style: none; margin-left: -1.35em; }
+.prose input[type="checkbox"] { margin: 0 .5em 0 0; accent-color: var(--c-accent); }
+
+blockquote { padding-left: 1.1em; border-left: 2px solid var(--c-accent); color: var(--c-text-2); }
+blockquote > :last-child { margin-bottom: 0; }
+
+hr { border: 0; height: 1.7em; text-align: center; margin-block: 2em; }
+hr::before { content: "* * *"; color: var(--c-text-2); letter-spacing: .6em; }
+
+code, kbd, samp, pre { font-family: var(--mono); font-size: .86em; letter-spacing: 0; font-feature-settings: normal; }
+:not(pre) > code { padding: .12em .32em; border-radius: 4px; background: var(--c-surface); overflow-wrap: anywhere; }
+pre { padding: 1em 1.15em; border-radius: var(--radius); background: var(--c-surface); color: var(--c-code); line-height: 1.6; overflow-x: auto; tab-size: 4; -webkit-overflow-scrolling: touch; }
+pre code { font-size: 1em; }
+kbd { padding: .05em .35em; border: 1px solid var(--c-rule); border-bottom-width: 2px; border-radius: 4px; }
+
+/* Media: full column width; on phones images go edge to edge for size. */
+img, video, svg { max-width: 100%; height: auto; }
+figure { margin-inline: 0; }
+figure img { display: block; width: 100%; border-radius: var(--radius); background: var(--c-surface); }
+figcaption { margin-top: .6em; font-size: .85em; line-height: 1.5; color: var(--c-text-2); }
+@media (max-width: 40rem) {
+  .prose figure.wide { margin-inline: calc(-1 * var(--gutter)); }
+  .prose figure.wide img { border-radius: 0; }
+  .prose figure.wide figcaption { padding-inline: var(--gutter); }
+}
+
+/* Tables scroll inside their box instead of widening the page. */
+.table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { border-collapse: collapse; width: 100%; font-size: .9em; line-height: 1.5; font-feature-settings: var(--features), "tnum"; }
+.table table { margin: 0; }
+th, td { padding: .55em .9em .55em 0; border-bottom: 1px solid var(--c-rule); text-align: left; vertical-align: top; }
+th { font-weight: var(--w-strong); border-bottom-color: var(--c-text-2); white-space: nowrap; }
+td:last-child, th:last-child { padding-right: 0; }
+td[align="right"], th[align="right"] { text-align: right; }
+
+/* Post */
+.post-head { margin-bottom: 2.5em; }
+.meta { margin-top: .9em; font-size: .875em; color: var(--c-text-2); font-feature-settings: var(--features), "tnum"; }
+.meta a { color: inherit; }
+.cover { margin: 2em 0 0; }
+.post-foot { margin-top: 3.5em; padding-top: 1.5em; border-top: 1px solid var(--c-rule); font-size: .9em; }
+.tags { display: flex; flex-wrap: wrap; gap: .35em 1em; padding: 0; margin: 0 0 1.5em; list-style: none; }
+.tags a { color: var(--c-text-2); }
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5em; }
+.pager a { display: block; text-decoration: none; line-height: 1.45; }
+.pager span { display: block; font-size: .85em; color: var(--c-text-2); margin-bottom: .2em; }
+.pager .next { grid-column: 2; text-align: right; }
+
+/* Footnotes: classic list at the bottom (no JS, print). */
+.fnref { font-size: .72em; font-feature-settings: "tnum"; vertical-align: super; line-height: 0; }
+.fnref a { text-decoration: none; color: var(--c-accent); padding: 0 .15em; }
+.footnotes { margin-top: 3em; padding-top: 1em; border-top: 1px solid var(--c-rule); font-size: .875em; line-height: 1.6; color: var(--c-text-2); }
+.footnotes ol { padding-left: 1.4em; }
+.footnotes li { margin-block: .5em; }
+.footnotes p { margin: 0; }
+.fnback { text-decoration: none; margin-left: .3em; }
+
+/* Sidenotes (JS): inline toggle under the sentence on narrow screens... */
+.has-sidenotes .footnotes { display: none; }
+.fnref button { position: relative; font: inherit; color: var(--c-accent); background: none; border: 0; padding: 0 .1em; cursor: pointer; line-height: 0; }
+/* The number is tiny; an invisible box around it makes a finger-sized target without moving text. */
+.fnref button::after { content: ""; position: absolute; inset: -16px -14px; }
+.fnref button[aria-expanded="true"] { color: var(--c-text); }
+.sidenote { display: none; font-size: .84rem; line-height: 1.55; color: var(--c-text-2); letter-spacing: 0; }
+.sidenote-n { font-feature-settings: "tnum"; color: var(--c-accent); margin-right: .4em; }
+.sidenote.open { display: block; margin: .6em 0 .9em; padding: .55em 0 .55em .9em; border-left: 2px solid var(--c-rule); animation: sn-in var(--dur) var(--ease); }
+@keyframes sn-in { from { opacity: 0; transform: translateY(-4px); } }
+/* ...and in the right margin beside the line where wide screens have room. */
+@media (min-width: 76rem) {
+  .has-sidenotes { --sn-w: min(15rem, calc((100vw - var(--measure) - 2 * var(--gutter)) / 2 - 3.5rem)); }
+  .has-sidenotes .fnref button { pointer-events: none; color: var(--c-accent); }
+  .sidenote, .sidenote.open { display: block; float: right; clear: right; width: var(--sn-w); margin: .3em calc(-1 * (var(--sn-w) + 2.75rem)) .8em 0; padding: 0; border: 0; animation: none; font-size: calc(var(--fs) * .78); }
+}
+
+/* Home: list of posts. Title left, date right; date drops under the title on phones. */
+.intro { margin: 0 0 2.5em; color: var(--c-text-2); max-width: 30em; }
+.posts { list-style: none; padding: 0; margin: 0; }
+.posts li { border-top: 1px solid var(--c-rule); }
+.posts li:last-child { border-bottom: 1px solid var(--c-rule); }
+.entry { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "title thumb" "date thumb"; align-items: center; column-gap: 1rem; padding-block: 1.05em; text-decoration: none; }
+.entry-title { grid-area: title; font-weight: 500; line-height: 1.4; text-wrap: pretty; transition: color var(--dur) var(--ease); }
+.entry:hover .entry-title { color: var(--c-accent); }
+.entry time { grid-area: date; font-size: .85em; color: var(--c-text-2); font-feature-settings: var(--features), "tnum"; white-space: nowrap; margin-top: .15em; }
+.entry img { grid-area: thumb; width: 3.5rem; height: 3.5rem; object-fit: cover; border-radius: 4px; background: var(--c-surface); }
+.pin { display: inline-block; margin-right: .5em; font-size: .72em; font-weight: var(--w-strong); letter-spacing: .06em; text-transform: uppercase; color: var(--c-accent); vertical-align: .12em; font-feature-settings: var(--features), "case"; }
+@media (min-width: 40rem) {
+  .entry { grid-template-columns: 1fr auto auto; grid-template-areas: "title date thumb"; column-gap: 1.5rem; }
+  .entry time { margin: 0; }
+}
+.older { display: flex; justify-content: space-between; gap: 1em; margin-top: 1.5em; font-size: .9em; }
+.older a { display: inline-flex; align-items: center; min-height: 44px; }
+.older a[rel="next"] { margin-left: auto; }
+
+/* Footer */
+.site-foot { padding-block: 2rem 3rem; font-size: .85em; color: var(--c-text-2); }
+.site-foot a { color: inherit; }
+
+/* Phones: hyphenate so a narrow ragged edge stays even (English; Vietnamese has no dictionary). */
+@media (max-width: 30rem) {
+  .prose p, .prose li { hyphens: auto; -webkit-hyphens: auto; hyphenate-limit-chars: 7 3 3; }
+}
+
+/* Instant navigation: a short cross-fade between pages. */
+@view-transition { navigation: auto; }
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: var(--dur); animation-timing-function: var(--ease); }
+@media (prefers-reduced-motion: reduce) {
+  @view-transition { navigation: none; }
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+@media print {
+  :root { --fs: 11pt; --lh: 1.55; --gutter: 0; }
+  /* Dark tokens are emitted under @media screen only, so print always uses the light ones. */
+  body { background: none; }
+  .site-head, .site-foot, .skip, .pager, .toggle, .sidenote { display: none !important; }
+  .has-sidenotes .footnotes { display: block; }
+  .fnref button { pointer-events: none; }
+  a { text-decoration: none; }
+  .prose a[href^="http"]::after { content: " (" attr(href) ")"; font-size: .85em; overflow-wrap: anywhere; }
+  pre, figure, table, blockquote { break-inside: avoid; }
+  pre { white-space: pre-wrap; }
+  h2, h3 { break-after: avoid; }
+  main { padding: 0; }
+}

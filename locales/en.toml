@@ -1,3 +1,17 @@
 # UI strings, English (default).
 [site]
 title_fallback = "Untitled site"
+
+[reader]
+skip_to_content = "Skip to content"
+toggle_theme = "Switch light or dark"
+pinned = "Pinned"
+older_posts = "Older posts"
+newer_posts = "Newer posts"
+previous_post = "Previous"
+next_post = "Next"
+minutes_read = "{n} min read"
+footnotes = "Notes"
+back_to_text = "Back to text"
+show_note = "Show note {n}"
+feed = "RSS"
