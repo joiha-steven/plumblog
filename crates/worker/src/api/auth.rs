@@ -309,11 +309,11 @@ pub async fn logout(ctx: &Ctx, p: &Principal) -> Result<Reply> {
 }
 
 /// Checks the signed-in user's current password, rate limited like sign-in (a stolen session
-/// must not become a password oracle).
+/// must not become a password oracle), but outside the site-wide cap.
 pub(super) async fn check_current(ctx: &Ctx, user: &User, f: &Fields) -> Result<()> {
     let current = password::parse_stretched(f.req("current_password")?)?;
     let keys = Keys::new(ctx, &user.login).await?;
-    let attempt = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
+    let attempt = limit::check_signed_in(ctx, &keys, f.opt("turnstile_token")?).await?;
     if password_matches(ctx, Some(user), &current).await? {
         limit::succeeded(ctx, &keys).await
     } else {

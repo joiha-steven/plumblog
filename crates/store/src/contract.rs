@@ -61,6 +61,7 @@ cases! {
     signin::login_failures_count_and_restart,
     signin::login_failures_multi_key_read,
     signin::login_failures_stop_at_the_cap,
+    signin::login_failures_count_capped,
     signin::login_failures_sweep_is_bounded,
     signin::challenges_are_single_use,
     signin::challenges_expire,
