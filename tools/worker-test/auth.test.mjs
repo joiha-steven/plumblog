@@ -427,6 +427,25 @@ describe("seeded site", () => {
     assert.equal((await bobLogin({ ip, extra: { turnstile_token: "pass" } })).status, 200);
   });
 
+  test("30 concurrent wrong passwords for one login: at most 5 reach the password check", async () => {
+    const failedBefore = seeded.query("SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.sign_in_failed' AND detail = 'password'")[0].n;
+    const answers = await Promise.all(
+      Array.from({ length: 30 }, (_, i) =>
+        api(seeded, "POST", "/api/auth/login", { body: { login: "racer", password: wrong() }, ip: `192.0.2.${100 + i}` }),
+      ),
+    );
+    const checked = answers.filter((r) => r.status === 401).length;
+    // The rest are refused unchecked: Turnstile after 5, locked from 20.
+    for (const r of answers.filter((x) => x.status !== 401)) {
+      assert.ok(["auth.turnstile_required", "auth.locked"].includes(r.json.error), r.text);
+    }
+    assert.ok(checked >= 1 && checked <= 5, `${checked} attempts reached the password check`);
+    const failedAfter = seeded.query("SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.sign_in_failed' AND detail = 'password'")[0].n;
+    assert.equal(failedAfter - failedBefore, checked);
+    const row = seeded.query(`SELECT count FROM login_failures WHERE key_hash = ${sq(sha256hex("login:racer"))}`);
+    assert.ok(row[0].count >= 30, `counted ${row[0]?.count}`);
+  });
+
   test("20 failures lock even with a valid Turnstile token", async () => {
     const ip = "192.0.2.20";
     for (let i = 0; i < 20; i++) {

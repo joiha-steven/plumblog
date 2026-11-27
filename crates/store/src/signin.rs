@@ -80,6 +80,10 @@ pub trait LoginLimitStore {
     ) -> Result<Vec<(i64, i64)>>;
     /// Forgets `key_hash` (after a successful sign-in). Absent is Ok.
     async fn clear_failures(&self, key_hash: &str) -> Result<()>;
+    /// Takes one back from `key_hash`'s count in one atomic write: an attempt counted up front
+    /// that then succeeded. A count of 1 removes the row (rows hold at least one); absent is Ok;
+    /// otherwise the window is left as it is.
+    async fn forgive_failure(&self, key_hash: &str) -> Result<()>;
 }
 
 #[allow(async_fn_in_trait)]

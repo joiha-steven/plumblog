@@ -54,6 +54,19 @@ impl LoginLimitStore for MemoryStore {
         }))
     }
 
+    async fn forgive_failure(&self, key_hash: &str) -> Result<()> {
+        self.write(|s| {
+            match s.login_failures.get_mut(key_hash) {
+                Some((n, _)) if *n > 1 => *n -= 1,
+                Some(_) => {
+                    s.login_failures.remove(key_hash);
+                }
+                None => {}
+            }
+            Ok(())
+        })
+    }
+
     async fn clear_failures(&self, key_hash: &str) -> Result<()> {
         self.write(|s| {
             s.login_failures.remove(key_hash);

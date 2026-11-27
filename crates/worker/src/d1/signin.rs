@@ -77,6 +77,24 @@ impl LoginLimitStore for D1Store {
             .collect())
     }
 
+    async fn forgive_failure(&self, key_hash: &str) -> Result<()> {
+        // Rows hold at least one (CHECK): the last one goes with its row. Delete first, so a
+        // count the update just lowered to 1 is not deleted too.
+        let stmts = vec![
+            self.stmt(
+                "forgive_failure_last",
+                "DELETE FROM login_failures WHERE key_hash = ? AND count <= 1",
+                &[text(key_hash)],
+            )?,
+            self.stmt(
+                "forgive_failure",
+                "UPDATE login_failures SET count = count - 1 WHERE key_hash = ? AND count > 1",
+                &[text(key_hash)],
+            )?,
+        ];
+        self.batch("forgive_failure", stmts).await.map(drop)
+    }
+
     async fn clear_failures(&self, key_hash: &str) -> Result<()> {
         let s = self.stmt(
             "clear_failures",

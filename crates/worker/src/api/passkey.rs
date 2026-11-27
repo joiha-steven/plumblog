@@ -228,6 +228,8 @@ pub async fn register_verify(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Re
 pub async fn login_options(ctx: &Ctx, body: &[u8]) -> Result<Reply> {
     no_fields(body)?;
     let site = site::site(ctx).await?;
+    // Anonymous and each call writes a row: counted per address before the write.
+    limit::options(ctx).await?;
     let challenge = new_challenge(ctx, ChallengePurpose::Login, None).await?;
     let public_key = object(&[
         ("challenge", Out::Str(challenge)),
@@ -362,15 +364,15 @@ pub async fn verify(ctx: &Ctx, f: &Fields, want_user: Option<UserId>, how: &str)
     // First: without a configured origin nothing is counted or consumed.
     let site = site::site(ctx).await?;
     let keys = Keys::passkey(ctx, credential_id).await?;
-    let rows = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
+    let attempt = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
     match check_assertion(ctx, f, credential_id, want_user, &site).await {
         Ok(user) => {
-            limit::succeeded(ctx, &keys, &rows).await?;
+            limit::succeeded(ctx, &keys).await?;
             Ok(user)
         }
         Err(Err(e)) => Err(e),
         Err(Ok(r)) => {
-            limit::failed(ctx, &keys, r.actor, how).await?;
+            limit::failed(ctx, &attempt, r.actor, how).await?;
             ctx.syslog(
                 EventKind::SignInFailed,
                 r.actor,

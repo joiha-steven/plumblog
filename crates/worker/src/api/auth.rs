@@ -172,8 +172,8 @@ const NEW_ACCOUNT_FIELDS: &[&str] = &[
 
 /// One-time codes are guessable only by trying: wrong codes count per address like failed
 /// sign-ins (same thresholds, Turnstile, lock), and are logged.
-async fn code_failed(ctx: &Ctx, keys: &Keys, how: &str) -> Result<()> {
-    limit::failed(ctx, keys, None, how).await?;
+async fn code_failed(ctx: &Ctx, attempt: &limit::Attempt, how: &str) -> Result<()> {
+    limit::failed(ctx, attempt, None, how).await?;
     ctx.syslog(EventKind::SignInFailed, None, how).await;
     Ok(())
 }
@@ -185,13 +185,13 @@ pub async fn setup(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
     let hash = code_hash(ctx, f.req("code")?).await?;
     let user = new_user(&f, ctx.now, String::new())?;
     let keys = Keys::address(ctx).await?;
-    limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
+    let attempt = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
     // The store compares with SQL `=`; compare in constant time here first, as its docs ask.
     let stored = ctx.store.get_setting(SETUP_CODE_HASH_KEY).await?;
     let matches =
         stored.is_some_and(|s| constant_time_eq(s.as_bytes(), setup_hash_json(&hash).as_bytes()));
     if !matches {
-        code_failed(ctx, &keys, "setup code").await?;
+        code_failed(ctx, &attempt, "setup code").await?;
         return Err(Error::new(
             ErrorCode::SetupInvalid,
             "setup code does not match, or none is pending",
@@ -204,11 +204,13 @@ pub async fn setup(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
     // Expired, or another setup won the race: the store refuses with SetupInvalid too.
     let id = match ctx.store.create_first_owner(&hash, user, ctx.now).await {
         Err(e) if e.code == ErrorCode::SetupInvalid => {
-            code_failed(ctx, &keys, "setup code").await?;
+            code_failed(ctx, &attempt, "setup code").await?;
             return Err(e);
         }
         other => other?,
     };
+    // The code was right: this attempt was not a guess.
+    limit::succeeded(ctx, &keys).await?;
     // The page normally created the id already (params); make sure it exists.
     site_id(ctx).await?;
     ctx.syslog(EventKind::UserCreated, Some(id), "setup: first owner")
@@ -224,15 +226,17 @@ pub async fn accept_invite(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Repl
     let hash = code_hash(ctx, f.req("code")?).await?;
     new_user(&f, ctx.now, String::new())?;
     let keys = Keys::address(ctx).await?;
-    limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
+    let attempt = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
     let user = new_user(&f, ctx.now, hash_password(&ctx.crypto, &stretched).await?)?;
     let id = match ctx.store.accept_invite(&hash, user, ctx.now).await {
         Err(e) if e.code == ErrorCode::InviteInvalid => {
-            code_failed(ctx, &keys, "invite code").await?;
+            code_failed(ctx, &attempt, "invite code").await?;
             return Err(e);
         }
         other => other?,
     };
+    // The code was right: this attempt was not a guess.
+    limit::succeeded(ctx, &keys).await?;
     ctx.syslog(EventKind::UserCreated, Some(id), "invite accepted")
         .await;
     let user = ctx.store.get_user(id).await?;
@@ -245,14 +249,14 @@ pub async fn login(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
     let login = f.req("login")?;
     let stretched = password::parse_stretched(f.req("password")?)?;
     let keys = Keys::new(ctx, login).await?;
-    let rows = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
+    let attempt = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
     let user = ctx.store.find_user_by_login(login).await?;
     let matched = password_matches(ctx, user.as_ref(), &stretched).await?;
     let user = match user {
         Some(u) if matched && u.disabled_at.is_none() => u,
         other => {
             let actor = other.as_ref().map(|u| u.id);
-            limit::failed(ctx, &keys, actor, "password").await?;
+            limit::failed(ctx, &attempt, actor, "password").await?;
             ctx.syslog(EventKind::SignInFailed, actor, "password").await;
             // One answer for unknown login, wrong password and disabled account.
             return Err(wrong_credentials(match other {
@@ -262,7 +266,7 @@ pub async fn login(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
             }));
         }
     };
-    limit::succeeded(ctx, &keys, &rows).await?;
+    limit::succeeded(ctx, &keys).await?;
     sign_in(ctx, p, &user, 200, "password").await
 }
 
@@ -284,11 +288,11 @@ pub async fn logout(ctx: &Ctx, p: &Principal) -> Result<Reply> {
 async fn check_current(ctx: &Ctx, user: &User, f: &Fields) -> Result<()> {
     let current = password::parse_stretched(f.req("current_password")?)?;
     let keys = Keys::new(ctx, &user.login).await?;
-    let rows = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
+    let attempt = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
     if password_matches(ctx, Some(user), &current).await? {
-        limit::succeeded(ctx, &keys, &rows).await
+        limit::succeeded(ctx, &keys).await
     } else {
-        limit::failed(ctx, &keys, Some(user.id), "current password").await?;
+        limit::failed(ctx, &attempt, Some(user.id), "current password").await?;
         ctx.syslog(EventKind::SignInFailed, Some(user.id), "current password")
             .await;
         Err(wrong_credentials("current password does not match"))

@@ -81,10 +81,6 @@ impl Keys {
             subject: subject.is_some(),
         })
     }
-
-    fn refs(&self) -> Vec<&str> {
-        self.keys.iter().map(String::as_str).collect()
-    }
 }
 
 /// The Turnstile secret when Turnstile is set up: a site key in settings and the
@@ -206,31 +202,41 @@ async fn turnstile_ok(ctx: &Ctx, secret: &str, token: &str) -> Result<bool> {
     }
 }
 
-/// Gate before checking a password: refuses locked keys, and asks for Turnstile once enough
-/// failures piled up. Reads one row per key; writes nothing.
+/// One counted attempt: the count of each key including this attempt (same order as the keys).
+pub struct Attempt {
+    counts: Vec<i64>,
+}
+
+/// Gate before checking a secret (password, passkey, one-time code). Counts the attempt first,
+/// on every key, in one atomic upsert each, so concurrent attempts cannot all read a count
+/// under the threshold: each gets its own count. Then decides from the failures before it
+/// (count - 1): refuses locked keys, and asks for Turnstile once enough piled up. A refused
+/// attempt stays counted; that never extends a lock, which ends with its window (the upsert
+/// moves `window_start` only when the window is over).
 ///
 /// # Errors
 ///
-/// `Locked`, `TurnstileRequired` (missing or rejected token), storage or fetch errors.
-pub async fn check(ctx: &Ctx, keys: &Keys, turnstile_token: Option<&str>) -> Result<Vec<Failures>> {
-    let rows: Vec<Failures> = ctx
-        .store
-        .failures(&keys.refs(), ctx.now, WINDOW_MS)
-        .await?
-        .into_iter()
-        .map(|(count, window_start)| Failures {
-            count,
+/// `Locked`, `TurnstileRequired` (missing or rejected token), `OriginMissing` (Turnstile on
+/// without a site origin), storage or fetch errors.
+pub async fn check(ctx: &Ctx, keys: &Keys, turnstile_token: Option<&str>) -> Result<Attempt> {
+    let mut counts = Vec::with_capacity(keys.keys.len());
+    let mut before = Vec::with_capacity(keys.keys.len());
+    for key in &keys.keys {
+        let (count, window_start) = ctx.store.record_failure(key, ctx.now, WINDOW_MS).await?;
+        counts.push(count);
+        before.push(Failures {
+            count: count - 1,
             window_start,
-        })
-        .collect();
+        });
+    }
     // Turnstile settings matter only once a key reached its threshold: skip the read before.
-    let secret = if rows.iter().any(|r| r.count >= TURNSTILE_AFTER) {
+    let secret = if before.iter().any(|r| r.count >= TURNSTILE_AFTER) {
         turnstile_secret(ctx).await?
     } else {
         None
     };
-    match ratelimit::decide(&rows, ctx.now, secret.is_some()) {
-        Decision::Allow => Ok(rows),
+    match ratelimit::decide(&before, ctx.now, secret.is_some()) {
+        Decision::Allow => Ok(Attempt { counts }),
         d @ Decision::Locked { .. } => Err(d
             .error()
             .unwrap_or_else(|| Error::new(ErrorCode::Locked, "locked"))),
@@ -248,7 +254,7 @@ pub async fn check(ctx: &Ctx, keys: &Keys, turnstile_token: Option<&str>) -> Res
                 return Err(refuse());
             };
             if turnstile_ok(ctx, &secret, token).await? {
-                Ok(rows)
+                Ok(Attempt { counts })
             } else {
                 let mut e = refuse();
                 e.detail.push_str("; token rejected");
@@ -258,25 +264,16 @@ pub async fn check(ctx: &Ctx, keys: &Keys, turnstile_token: Option<&str>) -> Res
     }
 }
 
-/// Counts a failed attempt on every key (one upsert each) and logs a lock once, when a key
-/// crosses its threshold.
+/// After a failed check of the secret: the attempt is already counted; logs a lock once, from
+/// the attempt whose failure made a key reach its threshold.
 ///
 /// # Errors
 ///
 /// Storage errors pass through.
-pub async fn failed(ctx: &Ctx, keys: &Keys, actor: Option<UserId>, how: &str) -> Result<()> {
-    let mut locked = false;
-    let mut turnstile_on: Option<bool> = None;
-    for key in &keys.keys {
-        let (count, _) = ctx.store.record_failure(key, ctx.now, WINDOW_MS).await?;
-        if count == LOCK_AFTER {
-            locked = true;
-        } else if count == TURNSTILE_AFTER {
-            if turnstile_on.is_none() {
-                turnstile_on = Some(turnstile_secret(ctx).await?.is_some());
-            }
-            locked |= turnstile_on == Some(false);
-        }
+pub async fn failed(ctx: &Ctx, attempt: &Attempt, actor: Option<UserId>, how: &str) -> Result<()> {
+    let mut locked = attempt.counts.contains(&LOCK_AFTER);
+    if !locked && attempt.counts.contains(&TURNSTILE_AFTER) {
+        locked = turnstile_secret(ctx).await?.is_none();
     }
     if locked {
         ctx.syslog(EventKind::SignInLocked, actor, how).await;
@@ -284,20 +281,60 @@ pub async fn failed(ctx: &Ctx, keys: &Keys, actor: Option<UserId>, how: &str) ->
     Ok(())
 }
 
-/// After a success: forget the subject's failures (the address keeps its count). Writes only
-/// when there was something to forget.
+/// After a success: forget the subject's count (login or credential), and take this attempt
+/// back from the address's (its earlier failures stay), one write per key. Without this, a
+/// person signing in a few times from one address would lock themselves out.
 ///
 /// # Errors
 ///
 /// Storage errors pass through.
-pub async fn succeeded(ctx: &Ctx, keys: &Keys, rows: &[Failures]) -> Result<()> {
-    if !keys.subject {
-        return Ok(());
+pub async fn succeeded(ctx: &Ctx, keys: &Keys) -> Result<()> {
+    for (i, key) in keys.keys.iter().enumerate() {
+        if i == 0 && keys.subject {
+            ctx.store.clear_failures(key).await?;
+        } else {
+            ctx.store.forgive_failure(key).await?;
+        }
     }
-    if let (Some(key), Some(row)) = (keys.keys.first(), rows.first())
-        && row.count > 0
-    {
-        ctx.store.clear_failures(key).await?;
+    Ok(())
+}
+
+/// Most anonymous passkey sign-in options per address in a window: each writes a challenge
+/// row, so the count bounds the table; far above what a person needs.
+pub const OPTIONS_PER_WINDOW: i64 = 60;
+
+/// Counts one anonymous options request for this address, before anything is written for it.
+///
+/// # Errors
+///
+/// `Locked` above [`OPTIONS_PER_WINDOW`] in the window; storage and crypto errors pass through.
+pub async fn options(ctx: &Ctx) -> Result<()> {
+    let Some(ip) = ctx.ip.as_deref() else {
+        worker::console_error!(
+            "[{}] passkey options not limited: no CF-Connecting-IP",
+            ctx.request_id.as_str()
+        );
+        return Ok(());
+    };
+    let ip = match ratelimit::ip_key(ip) {
+        Ok(k) => k,
+        Err(e) => {
+            worker::console_error!(
+                "[{}] passkey options not limited: {e}",
+                ctx.request_id.as_str()
+            );
+            return Ok(());
+        }
+    };
+    let key = hash_key(ctx, &format!("options:{ip}")).await?;
+    let (count, window_start) = ctx.store.record_failure(&key, ctx.now, WINDOW_MS).await?;
+    if count > OPTIONS_PER_WINDOW {
+        return Err(Error::new(
+            ErrorCode::Locked,
+            format!(
+                "passkey options: {count} from this address since {window_start}, limit {OPTIONS_PER_WINDOW}"
+            ),
+        ));
     }
     Ok(())
 }

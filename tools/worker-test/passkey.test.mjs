@@ -245,6 +245,16 @@ describe("passkeys, no configured origin", () => {
     assert.ok(!JSON.stringify(rows).includes(pk.challenge));
   });
 
+  test("anonymous sign-in options: 60 per address per window, then locked before any write", async () => {
+    const ip = "192.0.2.150";
+    const ok = await Promise.all(Array.from({ length: 60 }, () => api(plain, "POST", LOGIN_OPT, { ip })));
+    assert.deepEqual([...new Set(ok.map((r) => r.status))], [200]);
+    const rows = count(plain, "SELECT COUNT(*) AS n FROM auth_challenges");
+    assertError(await api(plain, "POST", LOGIN_OPT, { ip }), 429, "auth.locked");
+    assert.equal(count(plain, "SELECT COUNT(*) AS n FROM auth_challenges"), rows);
+    assert.equal((await api(plain, "POST", LOGIN_OPT)).status, 200, "another address is not affected");
+  });
+
   test("register options: rp, user handle, algorithms, UV required, existing keys excluded", async () => {
     const r = await api(plain, "POST", REG_OPT, { cookie: S.olga, body: "{}" });
     assert.equal(r.status, 200, r.text);

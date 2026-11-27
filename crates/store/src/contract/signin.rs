@@ -47,6 +47,26 @@ pub async fn login_failures_count_and_restart<S: Store>(db: &S) -> Check {
         )?,
         (2, T0 + WINDOW),
     )?;
+    ok("forgive_failure", db.forgive_failure("k").await)?;
+    eq!(
+        "forgiven: one less, same window",
+        ok(
+            "failures",
+            db.failures(&["k"], T0 + WINDOW + 1, WINDOW).await
+        )?,
+        vec![(1, T0 + WINDOW)],
+    )?;
+    ok("forgive_failure", db.forgive_failure("k").await)?;
+    ok("forgive_failure when gone", db.forgive_failure("k").await)?;
+    eq!(
+        "forgiving the last one removes the row",
+        ok(
+            "failures",
+            db.failures(&["k"], T0 + WINDOW + 1, WINDOW).await
+        )?,
+        vec![(0, 0)],
+    )?;
+    ok("forgive_failure absent", db.forgive_failure("zz").await)?;
     ok("clear_failures", db.clear_failures("k").await)?;
     ok("clear_failures absent", db.clear_failures("k").await)?;
     eq!(
