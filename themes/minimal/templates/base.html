@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="{{ page.lang }}" dir="{{ page.dir | default('ltr') }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{% block title %}{{ site.title }}{% endblock %}</title>
+<meta name="description" content="{{ page.description }}">
+<link rel="canonical" href="{{ page.canonical }}">
+<link rel="icon" href="{{ site.icon_url }}">
+{%- for alt in page.alternates %}
+<link rel="alternate" hreflang="{{ alt.lang }}" href="{{ alt.url }}">
+{%- endfor %}
+<link rel="alternate" type="application/atom+xml" title="{{ site.title }}" href="{{ site.feed_url }}">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="{{ theme.colors.light.bg }}">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="{{ theme.colors.dark.bg }}">
+{%- for href in theme.preload %}
+<link rel="preload" href="{{ href }}" as="font" type="font/woff2" crossorigin>
+{%- endfor %}
+{#- Runs before first paint so a saved light/dark choice never flashes the other theme. #}
+<script>try{var t=localStorage.getItem("theme");if(t)document.documentElement.dataset.theme=t}catch(e){}document.documentElement.classList.add("js")</script>
+{#- theme.css is built by the renderer from theme files, never from user input. #}
+<style>{{ theme.css | safe }}</style>
+{%- for src in theme.js %}
+<script src="{{ src }}" defer></script>
+{%- endfor %}
+<script type="speculationrules">{"prerender":[{"where":{"and":[{"href_matches":"/*"},{"not":{"href_matches":"/admin/*"}}]},"eagerness":"moderate"}]}</script>
+{% block head %}{% endblock %}
+</head>
+<body>
+<a class="skip" href="#main">{{ t.skip_to_content }}</a>
+<header class="wrap site-head">
+  <a class="site-name" href="{{ site.home_url }}">{{ site.title }}</a>
+  <nav class="site-nav" aria-label="Site">
+    {%- for item in site.nav %}
+    <a href="{{ item.url }}"{% if item.current %} aria-current="page"{% endif %}>{{ item.label }}</a>
+    {%- endfor %}
+    <button class="toggle" type="button" aria-label="{{ t.toggle_theme }}" title="{{ t.toggle_theme }}">
+      <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>
+      <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z"/></svg>
+    </button>
+  </nav>
+</header>
+<main id="main" class="wrap">
+{% block main %}{% endblock %}
+</main>
+<footer class="wrap site-foot">
+  <p>{{ site.footer }} &middot; <a href="{{ site.feed_url }}">{{ t.feed }}</a></p>
+</footer>
+</body>
+</html>

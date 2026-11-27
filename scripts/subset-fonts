@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Build the minimal theme's Inter subsets. Dev-time only; output is committed.
+
+Downloads Inter from its official GitHub release (pinned by sha256) into a cache outside the
+repo, trims the variable axes to what the theme uses, splits it into unicode-range subsets and
+writes woff2 files plus the generated @font-face CSS (with a metric-matched fallback so the
+font swap moves nothing).
+
+Needs: python3, fonttools, brotli (pip install fonttools brotli).
+Run:   scripts/subset-fonts            (from the repo root)
+"""
+
+import hashlib
+import io
+import os
+import sys
+import urllib.request
+import zipfile
+from pathlib import Path
+
+from fontTools import subset
+from fontTools.ttLib import TTFont
+from fontTools.varLib import instancer
+
+VERSION = "4.1"
+URL = f"https://github.com/rsms/inter/releases/download/v{VERSION}/Inter-{VERSION}.zip"
+SHA256 = "9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e"
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "themes/minimal/assets/fonts"
+CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "plumblog" / f"inter-{VERSION}"
+
+# Weights the theme's CSS uses: 400 body, 600 strong, 650-700 headings. Starting at the default (400)
+# instead of 350 saves ~20% per file; dark mode softens text with color instead of weight.
+WGHT = (400, 700)  # keep in sync with --w-* tokens in themes/minimal/style.css
+# Optical size: text cut only. Display cut for headings would roughly double every file.
+OPSZ = 14
+
+# Layout features kept. cv05 (l with tail) and cv08 (I with serifs) disambiguate I/l/1;
+# tnum aligns dates; case raises punctuation in all-caps labels.
+FEATURES = ["kern", "calt", "ccmp", "locl", "mark", "mkmk", "case", "tnum", "cv05", "cv08"]
+
+# Order matters: a code point goes to the first subset that claims it, so subsets never overlap
+# and a Vietnamese page fetches latin + vietnamese only, never latin-ext as well.
+SUBSETS = [
+    ("latin", "0000-00FF 0131 0152-0153 02BB-02BC 02C6 02DA 02DC 2000-206F 20AC 2122 2191 2193 2212 2215 FEFF FFFD"),
+    ("vietnamese", "0102-0103 0110-0111 0128-0129 0168-0169 01A0-01A1 01AF-01B0 0300-0301 0303-0304 0308-0309 0323 0329 1EA0-1EF9 20AB"),
+    ("latin-ext", "0100-02BA 02BD-02C5 02C7-02CC 02CE-02D7 02DD-02FF 0304 0308 0329 1D00-1DBF 1E00-1E9F 1EF2-1EFF 2020 20A0-20AB 20AD-20C0 2113 2C60-2C7F A720-A7FF"),
+    ("cyrillic", "0301 0400-045F 0460-052F 0490-0491 04B0-04B1 1C80-1C8A 20B4 2116 2DE0-2DFF A640-A69F FE2E-FE2F"),
+    ("greek", "0370-0377 037A-037F 0384-038A 038C 038E-03A1 03A3-03FF 1F00-1FFF"),
+]
+STYLES = [("InterVariable.ttf", "normal", "inter"), ("InterVariable-Italic.ttf", "italic", "inter-italic")]
+
+# Letter frequencies used to weigh average glyph width for the fallback size-adjust (English-ish
+# prose; close enough for Vietnamese, which is mostly the same Latin letters).
+SAMPLE = "the quick brown fox jumps over the lazy dog etaoin shrdlu cmfwyp vbgkjqxz THE QUICK BROWN FOX "
+FALLBACKS = [  # (local() names, file to measure on this machine)
+    (["Arial", "ArialMT"], "/System/Library/Fonts/Supplemental/Arial.ttf"),
+]
+
+
+def die(msg):
+    print(f"subset-fonts: FAIL: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def parse_ranges(spec):
+    cps = []
+    for part in spec.split():
+        lo, _, hi = part.partition("-")
+        cps.extend(range(int(lo, 16), int(hi or lo, 16) + 1))
+    return cps
+
+
+def to_ranges(cps):
+    cps = sorted(cps)
+    out, start, prev = [], cps[0], cps[0]
+    for c in cps[1:] + [None]:
+        if c is not None and c == prev + 1:
+            prev = c
+            continue
+        out.append(f"U+{start:04X}" if start == prev else f"U+{start:04X}-{prev:04X}")
+        if c is not None:
+            start = prev = c
+    return ", ".join(out)
+
+
+def fetch():
+    CACHE.mkdir(parents=True, exist_ok=True)
+    zpath = CACHE / f"Inter-{VERSION}.zip"
+    if not zpath.exists():
+        print(f"subset-fonts: downloading {URL}")
+        with urllib.request.urlopen(URL) as r:
+            data = r.read()
+        zpath.write_bytes(data)
+    digest = hashlib.sha256(zpath.read_bytes()).hexdigest()
+    if digest != SHA256:
+        die(f"{zpath} sha256 {digest} != pinned {SHA256}; delete it and rerun")
+    return zipfile.ZipFile(zpath)
+
+
+def avg_width(font):
+    cmap, hmtx = font.getBestCmap(), font["hmtx"]
+    widths = [hmtx[cmap[ord(c)]][0] for c in SAMPLE if ord(c) in cmap]
+    return sum(widths) / len(widths) / font["head"].unitsPerEm
+
+
+def main():
+    zf = fetch()
+    OUT.mkdir(parents=True, exist_ok=True)
+    for old in OUT.glob("inter-*.woff2"):
+        old.unlink()
+    (OUT / "license-inter.txt").write_bytes(zf.read("LICENSE.txt"))
+
+    faces = []
+    for fname, style, stem in STYLES:
+        base = TTFont(io.BytesIO(zf.read(fname)))
+        inst = instancer.instantiateVariableFont(base, {"opsz": OPSZ, "wght": WGHT})
+        available = set(inst.getBestCmap())
+        claimed = set()
+        for name, spec in SUBSETS:
+            cps = [c for c in parse_ranges(spec) if c not in claimed and c in available]
+            claimed.update(cps)
+            font = TTFont(io.BytesIO(_save(inst)))
+            opts = subset.Options()
+            opts.flavor = "woff2"
+            opts.layout_features = FEATURES
+            opts.name_IDs = [0, 1, 2, 3, 4, 5, 6]  # keep copyright/license-relevant names
+            opts.notdef_outline = True
+            opts.hinting = False  # variable Inter ships unhinted outlines anyway
+            sub = subset.Subsetter(opts)
+            sub.populate(unicodes=cps)
+            sub.subset(font)
+            out = OUT / f"{stem}-{name}.woff2"
+            font.flavor = "woff2"
+            font.save(out)
+            print(f"subset-fonts: {out.relative_to(ROOT)} {out.stat().st_size} bytes, {len(cps)} code points")
+            faces.append((style, out.name, to_ranges(cps)))
+        if style == "normal":
+            inter_metrics = inst
+
+    write_css(faces, inter_metrics)
+
+
+def _save(font):
+    buf = io.BytesIO()
+    font.save(buf)
+    return buf.getvalue()
+
+
+def write_css(faces, inter):
+    upm = inter["head"].unitsPerEm
+    hhea = inter["hhea"]
+    lines = [
+        "/* GENERATED by scripts/subset-fonts. Do not edit; change the script and rerun. */",
+        f"/* Inter {VERSION}, SIL Open Font License 1.1 (see license-inter.txt). */",
+    ]
+    for style, file, ranges in faces:
+        lines.append(
+            "@font-face{font-family:Inter;font-style:%s;font-weight:%d %d;font-display:swap;"
+            'src:url("{{fonts}}/%s") format("woff2");unicode-range:%s}' % (style, WGHT[0], WGHT[1], file, ranges)
+        )
+    for names, path in FALLBACKS:
+        if not Path(path).exists():
+            die(f"fallback font {path} not found; it is measured to compute size-adjust")
+        fb = TTFont(path)
+        size_adjust = avg_width(inter) / avg_width(fb)
+        asc = hhea.ascent / upm / size_adjust
+        desc = -hhea.descent / upm / size_adjust
+        gap = hhea.lineGap / upm / size_adjust
+        src = ",".join(f'local("{n}")' for n in names)
+        lines.append(
+            "@font-face{font-family:Inter-fallback;src:%s;size-adjust:%.2f%%;"
+            "ascent-override:%.2f%%;descent-override:%.2f%%;line-gap-override:%.2f%%}"
+            % (src, size_adjust * 100, asc * 100, desc * 100, gap * 100)
+        )
+    css = OUT / "faces.css"
+    css.write_text("\n".join(lines) + "\n")
+    print(f"subset-fonts: {css.relative_to(ROOT)} written")
+
+
+if __name__ == "__main__":
+    main()

@@ -19,7 +19,7 @@ agent a Cloudflare API token, and the agent sets up, writes, translates, themes 
 0. **Reading and writing come first.** Every screen is judged first by how well it reads (or how good it feels to write in), then by UI/UX polish. Typography is tuned per font, book-like, never default browser values. Phones, tablets, desktops and foldables (folded and unfolded) are all first-class.
 1. **Lightest and simplest that works.** Fixed budgets, see Budgets. New dependency needs a `# why` line in the workspace `Cargo.toml`.
 2. **Fast and smooth.** PageSpeed 100 on mobile and desktop for every default theme. No layout shift. Animations use only `transform`/`opacity`, 150-250 ms, and stop under `prefers-reduced-motion`.
-3. **English everywhere** in the repo: code, comments, paths, file names, guides. Only `locales/` holds other languages. Comments say why, not what.
+3. **English everywhere** in the repo: code, comments, paths, file names, guides. Only `locales/` and each theme's `locales/` hold other languages. Comments say why, not what.
 4. **Built for AI operators.** If an AI agent can do a job by following a guide, plumblog ships a guide, not a feature.
 5. **No drifting docs.** Fixed list of Markdown files (see Documentation). Anything a machine can generate from code is generated.
 6. **Heavy work happens off the Worker.** The browser (admin) or the user's machine (CLI) does expensive work; the Worker validates, stores and serves.
@@ -127,7 +127,12 @@ Not built: PWA/offline, newsletter (later), reactions.
   - Split into `unicode-range` subsets (latin, latin-ext, vietnamese, cyrillic, greek) so a page downloads only the scripts it uses. Variable weight axis only, trimmed to the weights used.
   - Preload only the body latin subset. `font-display: swap` with a metric-matched fallback (`size-adjust`, `ascent-override`...) so the swap causes zero layout shift.
   - CJK, Arabic, Thai and other scripts use system fonts.
-- minimal uses **Inter** (v4, OFL): high x-height, screen-first, wide language coverage. Body ~17px phone to ~19px desktop, line-height ~1.7 (Vietnamese stacked diacritics), measure ~66ch, near-black on white, slightly lighter weight in dark mode, disambiguation features for I/l/1, balanced headings, no orphan words.
+- minimal uses **Inter** (v4, OFL): high x-height, screen-first, wide language coverage. Body 17px phone to 19px desktop (rem, so user font size still scales), line-height 1.7 (Vietnamese stacked diacritics), measure 32 x font size (~66 characters), near-black on white, off-white on near-black in dark mode, `cv05`/`cv08` to tell I/l/1 apart, balanced headings, no orphan words. Accent: plum.
+  - Preload the body latin subset plus the page language's subset (`preload_by_lang`), so its letters never swap in late and move the layout.
+  - `scripts/subset-fonts` builds the woff2 files and `faces.css` from the pinned official release. Weight axis 400-700 (starting at the default saves ~20% per file, so dark mode softens text by color, not weight); optical size pinned to the text cut. Subsets never overlap, so a Vietnamese page fetches latin + vietnamese only. Fallback face is Arial with metrics matched to Inter.
+  - Typography values are CSS custom properties at the top of `style.css`; the editor's writing column reuses them.
+  - Renderer contract: dark tokens are emitted inside `@media screen` (print is always light); footnotes as `<sup class="fnref"><a href="#fn-N">` plus `<section class="footnotes">` with `<li id="fn-N">` and `a.fnback`; wide tables wrapped in `<div class="table">`; task-list items as `<li><label><input type="checkbox" disabled> text</label></li>`; a `wide` class on a figure lets it bleed to the screen edges on phones.
+  - Sidenotes move into the margin from 76rem (~1216px) wide; narrower screens, folded or unfolded foldables included, get the inline toggle.
 - Footnotes are sidenotes: in the margin beside the sentence on wide screens, an inline toggle under the sentence on narrow screens, classic bottom footnotes when JS is off. About 1 KB JS.
 - AI workflow: `blog theme new | dev | check | push | rollback`. `check` reports template errors, missing dark tokens, contrast failures and size, each with file:line and a fix. Last 5 versions kept for rollback.
 - The template variable reference is generated from Rust types, never written by hand.
@@ -196,3 +201,4 @@ Each phase is one or more sessions; each ends with `scripts/check` green and evi
 - 2026-11-27 Reading and writing first; book-like typography tuned per font; foldables first-class.
 - 2026-11-27 minimal theme first, font Inter with unicode-range subsets; footnotes as sidenotes.
 - 2026-11-27 No hard-coded text (all languages incl. English in locale files); no hard-coded layout (themes define page structure); small core, features via themes and plugins.
+- 2026-11-27 minimal: Inter weight axis 400-700 and text optical size only; dark mode softens text by color instead of a lighter weight; plum accent.
