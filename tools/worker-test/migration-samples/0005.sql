@@ -76,6 +76,11 @@ INSERT INTO plugins (id, enabled, disabled_reason, updated_at) VALUES
 INSERT INTO webhooks (id, url, events, secret, enabled, created_at) VALUES
   (1, 'https://hooks.example.com/plumblog', 'post.published,post.updated', 'whsec_sample', 1, 1700004000000);
 
+-- 0003 (merged from main while 0005 was in review): one pending and one finished delivery.
+INSERT INTO webhook_deliveries (id, webhook_id, msg_id, event, payload, attempts, next_at_ms, last_status, last_error, created_at_ms) VALUES
+  (1, 1, 'msg_sample_1', 'post.published', '{"type":"post.published","data":{"id":1}}', 0, 1700004100000, NULL, NULL, 1700004100000),
+  (2, 1, 'msg_sample_2', 'post.updated', '{"type":"post.updated","data":{"id":1}}', 1, NULL, 200, NULL, 1700004200000);
+
 INSERT INTO system_log (id, at_ms, request_id, kind, actor_id, error_code, detail) VALUES
   (1, 1700000300000, '8a1b2c3d4e5f6a7b-SIN', 'auth.sign_in', 1, NULL, 'owner'),
   (2, 1700002000000, '8a1b2c3d4e5f6a7c-SIN', 'content.changed', 1, NULL, '/vi/da-lat-mua-mua'),
