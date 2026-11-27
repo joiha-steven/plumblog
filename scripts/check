@@ -160,7 +160,8 @@ bad=""
 for f in "${files[@]}"; do
   # Themes ship their own UI text (themes/<name>/locales/), so a theme zip is self-contained.
   # Renderer fixtures must hold real Vietnamese, Russian and Chinese text to test it.
-  case "$f" in locales/*|guides/*|themes/*/locales/*|crates/markdown/tests/fixtures/*|LICENSE) continue ;; esac
+  # The admin mock's posts must hold real Vietnamese to show how writing in it looks.
+  case "$f" in locales/*|guides/*|themes/*/locales/*|crates/markdown/tests/fixtures/*|web/admin/fixtures/*|LICENSE) continue ;; esac
   rc=0
   # -I skips binary files; the class allows printable ASCII plus whitespace.
   hits=$(LC_ALL=C grep -nI '[^ -~[:space:]]' "$f") || rc=$?

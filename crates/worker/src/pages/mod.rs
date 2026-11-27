@@ -277,6 +277,88 @@ pub async fn render(
     Ok(out)
 }
 
+/// Store reads for pages, over D1, for routes outside this module (`crate::contract`).
+#[cfg_attr(not(feature = "contract-tests"), allow(dead_code))]
+pub(crate) fn db_source(store: &D1Store) -> Db<'_, D1Store> {
+    Db(store)
+}
+
+/// The page a draft would publish as, rendered with the site's theme and options: the admin
+/// preview. The real route lives with the posts API (#10); test builds serve it as
+/// `/__preview` (`crate::contract`) so the admin is built against the real renderer.
+///
+/// # Errors
+/// A storage or template failure, as a detail for the log.
+#[cfg_attr(not(feature = "contract-tests"), allow(dead_code))]
+pub async fn preview(
+    src: &impl ReaderSource,
+    ext: &impl ExtSource,
+    title: &str,
+    markdown: &str,
+    lang: &str,
+) -> std::result::Result<String, String> {
+    let (theme, _) = configured(ext).await?;
+    let settings = src.settings().await.map_err(err)?;
+    let origin = public_origin(&settings);
+    let p = Pages {
+        src,
+        theme,
+        site: site(&settings, &settings.lang),
+        info: PageInfo {
+            lang: settings.lang.clone(),
+            canonical: format!("{origin}/"),
+            origin: origin.to_owned(),
+        },
+        per: settings.per_page.max(1),
+        settings: &settings,
+        complete: Cell::new(true),
+    };
+    let post = Post {
+        url: "/".to_owned(),
+        title: title.to_owned(),
+        lang: if lang.is_empty() {
+            settings.lang.clone()
+        } else {
+            lang.to_owned()
+        },
+        published_at: settings.updated_at,
+        pinned: false,
+        excerpt: None,
+        body: plumblog_markdown::render(markdown, plumblog_markdown::Options::default()),
+        tags: Vec::new(),
+        cover: None,
+        thumb: None,
+        translations: Vec::new(),
+    };
+    // A draft has no comments yet; the preview shows the page as it publishes.
+    p.render(&Body::Post {
+        post: &post,
+        prev: None,
+        next: None,
+        comments: None,
+    })
+    .map(|html| without_scripts(&html))
+}
+
+/// The page with its `<script>` elements removed. The preview frame runs no scripts (it shares
+/// the admin's origin so theme fonts load), so they would only fill the console with blocked
+/// script errors; the page is complete without them.
+#[cfg_attr(not(feature = "contract-tests"), allow(dead_code))]
+fn without_scripts(html: &str) -> String {
+    // ASCII lowercasing keeps byte offsets, so indexes found in `lower` apply to `html`.
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut at = 0;
+    while let Some(i) = lower[at..].find("<script").map(|i| at + i) {
+        out.push_str(&html[at..i]);
+        at = lower[i..]
+            .find("</script>")
+            .map_or(html.len(), |j| i + j + "</script>".len());
+    }
+    out.push_str(&html[at..]);
+    out
+}
+
 async fn route(
     src: &impl ReaderSource,
     theme: Theme,

@@ -2,7 +2,7 @@ import type { Boot, Text } from "./boot";
 
 export type Args = Record<string, string | number>;
 
-let boot: Boot = { lang: "en", langs: ["en"], site: "" };
+let boot: Boot = { lang: "en", langs: ["en"], site: "", nonce: "" };
 let strings: Text = { messages: {}, fallback: {} };
 let rules = new Intl.PluralRules("en");
 const english = new Intl.PluralRules("en");

@@ -120,3 +120,45 @@ fn a_failed_option_read_serves_defaults_that_nothing_caches() {
     assert!(super::cache_policy(200, true).0);
     assert!(!super::cache_policy(404, true).0, "404s are never stored");
 }
+
+#[test]
+fn a_preview_is_the_post_page_with_the_site_theme_and_options() {
+    let db = MemoryStore::default();
+    put(
+        &db,
+        "accent",
+        "{\"light\":\"#123456\",\"dark\":\"#abcdef\"}",
+    );
+    let md = "## Ch\u{1b0}\u{1a1}ng m\u{1ed9}t\n\nC\u{f3} $x^2$ v\u{e0} <b>raw</b>.\n\n```rust\nfn main() {}\n```\n";
+    let html = run(super::preview(
+        SampleSource::get(),
+        &Db(&db),
+        "B\u{e0}i <th\u{1ed1}ng>",
+        md,
+        "vi",
+    ))
+    .unwrap();
+    assert!(html.contains("<html lang=\"vi\""), "the draft's language");
+    assert!(
+        html.contains("B\u{e0}i &lt;th\u{1ed1}ng&gt;"),
+        "the title is escaped"
+    );
+    assert!(html.contains("<math"), "math is MathML, as when published");
+    assert!(
+        html.contains("data-lang=\"rust\""),
+        "code keeps its language for the highlighter"
+    );
+    assert!(!html.contains("<b>"), "raw HTML in Markdown is dropped");
+    assert!(
+        html.contains("light-dark(#123456,#abcdef)"),
+        "stored theme options apply"
+    );
+    assert!(
+        !html.to_ascii_lowercase().contains("<script"),
+        "the preview frame runs no theme code"
+    );
+    assert!(
+        html.contains("</html>"),
+        "nothing after the last script is lost"
+    );
+}

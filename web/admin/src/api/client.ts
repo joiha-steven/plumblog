@@ -29,8 +29,39 @@ export interface Me {
   role: Role;
 }
 
+/**
+ * A post as the editor and lists use it. The posts API (#10) defines the real shape; until
+ * then only the mock serves posts.
+ */
+export interface PostDraft {
+  id: number;
+  title: string;
+  body: string;
+  lang: string;
+  status: "draft" | "scheduled" | "published";
+  /** Unix milliseconds of the last server save. */
+  updated_at: number;
+}
+
+export interface PostSummary {
+  id: number;
+  title: string;
+  excerpt: string;
+  lang: string;
+  status: PostDraft["status"];
+  updated_at: number;
+}
+
 export interface Api {
   me(): Promise<Result<Me>>;
+  posts(): Promise<Result<PostSummary[]>>;
+  post(id: number): Promise<Result<PostDraft>>;
+  /**
+   * Where the editor posts `title`, `body` and `lang` as a form to get the page the draft
+   * would publish as, rendered by the Worker with the site's theme; undefined while the Worker
+   * has no preview route for this build.
+   */
+  previewUrl: string | undefined;
 }
 
 export const fail = <T>(code: ApiError["code"], status: number): Result<T> => ({
@@ -70,5 +101,9 @@ export function httpApi(): Api {
       const r = await getJson<{ user: Me }>("/api/auth/me");
       return r.ok ? { ok: true, value: r.value.user } : r;
     },
+    // The posts API is issue #10; these answer as the Worker does today.
+    posts: () => getJson<PostSummary[]>("/api/posts"),
+    post: (id) => getJson<PostDraft>(`/api/posts/${id}`),
+    previewUrl: undefined,
   };
 }
