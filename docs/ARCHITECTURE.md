@@ -16,6 +16,7 @@ agent a Cloudflare API token, and the agent sets up, writes, translates, themes 
 
 ## Principles (each one is enforced by `scripts/check` where a machine can check it)
 
+0. **Reading and writing come first.** Every screen is judged first by how well it reads (or how good it feels to write in), then by UI/UX polish. Typography is tuned per font, book-like, never default browser values. Phones, tablets, desktops and foldables (folded and unfolded) are all first-class.
 1. **Lightest and simplest that works.** Fixed budgets, see Budgets. New dependency needs a `# why` line in the workspace `Cargo.toml`.
 2. **Fast and smooth.** PageSpeed 100 on mobile and desktop for every default theme. No layout shift. Animations use only `transform`/`opacity`, 150-250 ms, and stop under `prefers-reduced-motion`.
 3. **English everywhere** in the repo: code, comments, paths, file names, guides. Only `locales/` holds other languages. Comments say why, not what.
@@ -117,7 +118,14 @@ Not built: PWA/offline, newsletter (later), reactions.
   assets/        images, fonts, JS
   ```
 - Themes may contain JS. Installing a theme not made locally shows a warning.
-- Fonts must support Vietnamese. Candidates: Be Vietnam Pro (sans), Literata (serif); self-hosted, subset, `font-display: swap`.
+- **minimal** is built first; literary and technical follow once it is approved.
+- Fonts: pick the most readable font for the theme's role that covers Latin (incl. Vietnamese), Cyrillic and Greek; modify (subset) it if needed, within its license. Loading rules:
+  - Self-hosted on the blog's own domain, never a font CDN.
+  - Split into `unicode-range` subsets (latin, latin-ext, vietnamese, cyrillic, greek) so a page downloads only the scripts it uses. Variable weight axis only, trimmed to the weights used.
+  - Preload only the body latin subset. `font-display: swap` with a metric-matched fallback (`size-adjust`, `ascent-override`...) so the swap causes zero layout shift.
+  - CJK, Arabic, Thai and other scripts use system fonts.
+- minimal uses **Inter** (v4, OFL): high x-height, screen-first, wide language coverage. Body ~17px phone to ~19px desktop, line-height ~1.7 (Vietnamese stacked diacritics), measure ~66ch, near-black on white, slightly lighter weight in dark mode, disambiguation features for I/l/1, balanced headings, no orphan words.
+- Footnotes are sidenotes: in the margin beside the sentence on wide screens, an inline toggle under the sentence on narrow screens, classic bottom footnotes when JS is off. About 1 KB JS.
 - AI workflow: `blog theme new | dev | check | push | rollback`. `check` reports template errors, missing dark tokens, contrast failures and size, each with file:line and a fix. Last 5 versions kept for rollback.
 - The template variable reference is generated from Rust types, never written by hand.
 - Owner-only admin page for colors, fonts, logo.
@@ -182,3 +190,5 @@ Each phase is one or more sessions; each ends with `scripts/check` green and evi
 - 2026-11-27 Comments built, off by default. Email/newsletter deferred.
 - 2026-11-27 Raw HTML in Markdown forbidden for now.
 - 2026-11-27 Docs: guides and AGENTS.md short with no repetition (line caps in check); README in plain, honest human voice.
+- 2026-11-27 Reading and writing first; book-like typography tuned per font; foldables first-class.
+- 2026-11-27 minimal theme first, font Inter with unicode-range subsets; footnotes as sidenotes.
