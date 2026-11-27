@@ -4,31 +4,29 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-WORKER_BUILD_VERSION=0.9.0 # keep in step with the `worker` crate version in Cargo.toml
-NODE_MAJOR_MIN=22
-
 fail() { echo "worker-test: FAIL: $1" >&2; exit 1; }
 
-command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 \
-  || fail "Node.js $NODE_MAJOR_MIN+ with npm is required for Worker tests (contributors only). Install it from https://nodejs.org or with your package manager, then rerun."
-major=$(node -p 'process.versions.node.split(".")[0]')
-[ "$major" -ge "$NODE_MAJOR_MIN" ] || fail "Node.js $NODE_MAJOR_MIN+ is required, found $(node -v). Upgrade Node, then rerun."
+# --serve: build like the tests, then keep the Worker running for a person to click through
+# (scripts/admin-dev). --admin-prebuilt: use target/admin as scripts/check just built it.
+# Tests and --serve build into separate dirs, so a test run never swaps files under a
+# running scripts/admin-dev: target/worker-test for tests, target/worker-dev (what
+# tools/wrangler.dev.toml names) for --serve.
+serve=false
+admin_prebuilt=false
+for a in "$@"; do
+  case "$a" in
+    --serve) serve=true ;;
+    --admin-prebuilt) admin_prebuilt=true ;;
+    *) fail "unknown argument $a" ;;
+  esac
+done
+if $serve; then out=target/worker-dev; else out=target/worker-test; fi
 
-# Pinned wrangler from tools/package-lock.json; reinstall only when the lockfile changed.
-stamp=tools/node_modules/.lock-stamp
-if ! cmp -s tools/package-lock.json "$stamp" 2>/dev/null; then
-  echo "worker-test: npm ci in tools/ (first run or lockfile change only)"
-  npm ci --prefix tools --no-audit --no-fund --loglevel=error || fail "npm ci in tools/ failed"
-  cp tools/package-lock.json "$stamp"
-fi
+# Pinned Node tools (wrangler, esbuild...) from tools/package-lock.json.
+scripts/tools-install || fail "contributor tools (above)"
 
-# Pinned worker-build, installed into target/ so it is cached with the cargo build.
-wb=target/tools/bin/worker-build
-if [ "$("$wb" --version 2>/dev/null || true)" != "$WORKER_BUILD_VERSION" ]; then
-  echo "worker-test: installing worker-build $WORKER_BUILD_VERSION (first run only, about 30 s)"
-  cargo install -q "worker-build@$WORKER_BUILD_VERSION" --locked --root target/tools \
-    || fail "cargo install worker-build failed"
-fi
+# Pinned worker-build (scripts/worker-build installs it on first use).
+wb=$(scripts/worker-build) || fail "worker-build unavailable"
 
 # Build once here: node --test runs each file in its own process, in parallel.
 # --no-opt: wasm-opt is for deploy size; tests want the fastest correct build.
@@ -36,21 +34,44 @@ fi
 # empties the database to run the store contract suite on D1. Its own target dir keeps that
 # wasm away from target/wasm32-unknown-unknown/release, the deploy and size-budget build.
 contract_target="$PWD/target/contract-tests"
-(cd crates/worker && "../../$wb" --release --no-opt --out-dir ../../target/worker-dev \
+(cd crates/worker && "$wb" --release --no-opt --out-dir "../../$out" \
   -- --features contract-tests --target-dir "$contract_target") \
   || fail "worker-build failed"
 
 # Static assets the Worker's pages link to (crates/worker/src/pages THEME_ASSETS_URL).
-rm -rf target/worker-dev/assets
-mkdir -p target/worker-dev/assets/theme
-cp -R themes/minimal/assets target/worker-dev/assets/theme/minimal
+rm -rf "$out/assets"
+mkdir -p "$out/assets/theme"
+cp -R themes/minimal/assets "$out/assets/theme/minimal"
 # Bundled plugins' assets at PLUGIN_ASSETS_URL (/plugin/<name>/).
 for dir in plugins/*/; do
   [ -d "$dir/assets" ] || continue
   name=$(basename "$dir")
-  mkdir -p target/worker-dev/assets/plugin
-  cp -R "$dir/assets" "target/worker-dev/assets/plugin/$name"
+  mkdir -p "$out/assets/plugin"
+  cp -R "$dir/assets" "$out/assets/plugin/$name"
 done
+
+# The admin (scripts/admin-build) under /admin/. Served with the mock API when a person
+# clicks through, since the posts and media APIs do not exist yet.
+if $serve; then
+  scripts/admin-build --dev || fail "admin build (above)"
+  cp -R target/admin-dev "$out/assets/admin"
+else
+  $admin_prebuilt || scripts/admin-build || fail "admin build (above)"
+  cp -R target/admin "$out/assets/admin"
+fi
+# Cache rules for the admin's static files, written by admin-build; Workers static assets read
+# `_headers` at the root of the assets directory.
+mv "$out/assets/admin/_headers" "$out/assets/_headers"
+
+if $serve; then
+  port="${PORT:-8790}"
+  state=target/worker-dev/state
+  wr=tools/node_modules/.bin/wrangler
+  "$wr" d1 migrations apply DB --local --config tools/wrangler.dev.toml --persist-to "$state" >/dev/null \
+    || fail "applying migrations to the local D1"
+  echo "worker-test: serving http://localhost:$port/admin/ (Ctrl-C stops)"
+  exec "$wr" dev --config tools/wrangler.dev.toml --persist-to "$state" --ip 127.0.0.1 --port "$port"
+fi
 
 # The harness cleans up after itself, even on Ctrl-C. This trap is the second line of
 # defence: kill any wrangler process group it recorded and remove its temp state.
@@ -67,5 +88,5 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-WORKER_TEST_RUN_DIR="$run_dir" node --test "tools/worker-test/*.test.mjs" \
+WORKER_TEST_RUN_DIR="$run_dir" WORKER_TEST_OUT="$PWD/$out" node --test "tools/worker-test/*.test.mjs" \
   || fail "Worker integration tests failed"

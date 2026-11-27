@@ -14,6 +14,9 @@ const WRANGLER = join(ROOT, "tools/node_modules/.bin/wrangler");
 // scripts/worker-test removes this dir and kills the process groups recorded in it,
 // as a second line of defence if this process dies without running its own cleanup.
 const RUN_DIR = process.env.WORKER_TEST_RUN_DIR ?? tmpdir();
+// The test build (scripts/worker-test), apart from target/worker-dev that the config names
+// for scripts/admin-dev, so tests never replace files under a running dev server.
+const OUT = process.env.WORKER_TEST_OUT ?? join(ROOT, "target/worker-test");
 const READY_TIMEOUT_MS = 60_000;
 
 // Keep wrangler quiet and non-interactive; never phone home from tests.
@@ -106,7 +109,7 @@ export async function startWorker({ seedSql = null, vars = {} } = {}) {
   // detached: wrangler starts workerd children; killing the group stops them all.
   const child = spawn(
     WRANGLER,
-    ["dev", ...common, "--ip", "127.0.0.1", "--port", String(port), "--inspector-port", String(inspector),
+    ["dev", join(OUT, "worker/shim.mjs"), "--assets", join(OUT, "assets"), ...common, "--ip", "127.0.0.1", "--port", String(port), "--inspector-port", String(inspector),
       "--show-interactive-dev-session=false", "--log-level", "log",
       // Serves /__scheduled so tests can fire the cron trigger.
       "--test-scheduled",

@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Builds the admin (web/admin): tsc type-checks, esbuild bundles, then the size budgets
+# (docs/ARCHITECTURE.md, Budgets) are enforced. The output is never committed; releases ship
+# it like the Worker wasm (issue #21).
+#   scripts/admin-build         the real client, talking to the Worker's API, in target/admin
+#   scripts/admin-build --dev   the mock client (web/admin/src/api/mock.ts), in target/admin-dev
+#                               (its own dir, so scripts/check never rebuilds under admin-dev)
+# Besides the files the output has `_headers` (cache rules for Workers static assets, moved to
+# the assets root when served) and the service worker knows this build's files by name.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# Budgets, gzip -9 bytes. Shell: what every admin page loads. Chunks: each lazily loaded part
+# (the editor lands as one). CSS: the whole admin stylesheet.
+SHELL_JS_BUDGET=$((35 * 1024))
+CHUNK_JS_BUDGET=$((110 * 1024))
+CSS_BUDGET=$((20 * 1024))
+
+fail() { echo "admin-build: FAIL: $1" >&2; exit 1; }
+mock=false
+[ "${1:-}" = "--dev" ] && mock=true
+
+scripts/tools-install
+bin=tools/node_modules/.bin
+"$bin/tsc" -p web/admin/tsconfig.json || fail "type errors in web/admin/src (above)"
+"$bin/tsc" -p web/admin/tsconfig.sw.json || fail "type errors in web/admin/src/sw.ts (above)"
+
+if $mock; then out=target/admin-dev; else out=target/admin; fi
+meta="$out.meta.json" # beside the output, not in it: it is not served
+rm -rf "$out" "$meta"
+mkdir -p "$out"
+common=(--bundle --minify --target=es2022 --legal-comments=none --log-level=warning --charset=utf8)
+"$bin/esbuild" web/admin/src/main.ts "${common[@]}" --format=esm --splitting \
+  --outdir="$out" --entry-names=app --chunk-names='chunks/[name]-[hash]' --define:MOCK="$mock" \
+  --metafile="$meta" || fail "esbuild: admin script"
+"$bin/esbuild" web/admin/src/app.css "${common[@]}" --outfile="$out/app.css" \
+  || fail "esbuild: admin stylesheet"
+# UI text, one module per language from locales/*.toml (crates/i18n `admin`): part of the
+# admin, not the Worker, so it never counts against the wasm budget.
+cargo run -q -p plumblog-i18n --example admin_locales -- locales "$out/i18n" \
+  || fail "UI text modules (locales/*.toml, above)"
+
+# The service worker precaches exactly this build's files, in a cache named after their hash:
+# a new deploy gets a new cache and the old one (with its old chunks) is deleted.
+files=$(cd "$out" && find . -type f \( -name '*.js' -o -name '*.css' \) | sed 's#^\./#/admin/#' | sort)
+build=$(cd "$out" && find . -type f -print0 | sort -z | xargs -0 cat | shasum -a 256 | cut -c1-12)
+list=$(printf '%s\n' $files | sed 's/.*/"&"/' | paste -sd, -)
+"$bin/esbuild" web/admin/src/sw.ts "${common[@]}" --format=iife --outfile="$out/sw.js" \
+  --define:BUILD="\"$build\"" --define:ASSETS="[$list]" || fail "esbuild: service worker"
+
+# Hashed chunks never change: cache them for a year. Everything else revalidates, so a deploy
+# is seen on the next load.
+cat > "$out/_headers" <<'HEADERS'
+/admin/chunks/*
+  Cache-Control: public, max-age=31536000, immutable
+/admin/app.js
+  Cache-Control: no-cache
+/admin/app.css
+  Cache-Control: no-cache
+/admin/sw.js
+  Cache-Control: no-cache
+/admin/i18n/*
+  Cache-Control: no-cache
+HEADERS
+
+gz() { gzip -9 -c "$1" | wc -c | tr -d ' '; }
+over=""
+check_size() { # file budget label
+  local size; size=$(gz "$1")
+  echo "admin-build: $3 $(basename "$1") gzip = $size bytes (budget $2)"
+  [ "$size" -le "$2" ] || over+="$3 $(basename "$1") $size > $2; "
+}
+# The shell is app.js plus every chunk it imports statically (code splitting moves shared code
+# into chunks that load with it); lazy chunks are what only a dynamic import() reaches.
+shell_files=$(node -e '
+  const m = require(process.argv[1]).outputs, seen = new Set(), todo = [process.argv[2]];
+  while (todo.length) {
+    const f = todo.pop();
+    if (seen.has(f)) continue;
+    seen.add(f);
+    for (const i of m[f].imports) if (i.kind === "import-statement") todo.push(i.path);
+  }
+  console.log([...seen].join("\n"));
+' "$PWD/$meta" "$out/app.js") || fail "reading $meta"
+shell_size=0
+for f in $shell_files; do shell_size=$((shell_size + $(gz "$f"))); done
+# Plus one language's text, which every page loads too: the largest.
+text_size=0
+for f in "$out"/i18n/*.js; do s=$(gz "$f"); [ "$s" -le "$text_size" ] || text_size=$s; done
+shell_size=$((shell_size + text_size))
+echo "admin-build: shell ($(echo $shell_files | wc -w | tr -d ' ') files + text $text_size) gzip = $shell_size bytes (budget $SHELL_JS_BUDGET)"
+[ "$shell_size" -le "$SHELL_JS_BUDGET" ] || over+="shell $shell_size > $SHELL_JS_BUDGET; "
+for f in "$out"/chunks/*.js; do
+  [ -e "$f" ] || continue
+  case " $(echo $shell_files) " in *" $f "*) continue ;; esac
+  check_size "$f" "$CHUNK_JS_BUDGET" "chunk"
+done
+check_size "$out/app.css" "$CSS_BUDGET" "css"
+[ -z "$over" ] || fail "over budget: $over"

@@ -4,7 +4,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 WASM_GZIP_BUDGET_BYTES=$((1024 * 1024)) # Workers free plan allows 3 MiB gzipped; keep headroom.
-WASM_FILE="${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/plumblog_worker.wasm"
 
 fail() { echo "check: FAIL: $1" >&2; exit 1; }
 step() { echo "check: $1"; }
@@ -44,11 +43,19 @@ step "markdown render CPU budget (release)"
 cargo test -q --release -p plumblog-markdown --test perf || fail "markdown render over its CPU budget"
 # --- end markdown CPU budget ---
 
-step "worker wasm build + size budget"
-cargo build -q -p plumblog-worker --target wasm32-unknown-unknown --release \
-  || fail "worker wasm build failed"
+step "worker wasm build + size budget (what a deploy ships)"
+# The budget applies to the deployed wasm: the same pinned worker-build a deploy runs, so
+# wasm-bindgen and wasm-opt included. It fails, and so does this check, if wasm-opt cannot
+# run. Its own target dir keeps it apart from the test builds.
+wb=$(scripts/worker-build) || fail "worker-build unavailable"
+release_target="$PWD/target/worker-release-build"
+(cd crates/worker && "$wb" --release --out-dir ../../target/worker-release \
+  -- --target-dir "$release_target" > ../../target/worker-release.log 2>&1) \
+  || { tail -20 target/worker-release.log >&2; fail "worker-build --release failed (see target/worker-release.log)"; }
+WASM_FILE=target/worker-release/index_bg.wasm
+[ -s "$WASM_FILE" ] || fail "worker-build produced no $WASM_FILE"
 size=$(gzip -9 -c "$WASM_FILE" | wc -c | tr -d ' ')
-echo "check: worker.wasm gzip = $size bytes (budget $WASM_GZIP_BUDGET_BYTES)"
+echo "check: worker.wasm gzip = $size bytes (budget $WASM_GZIP_BUDGET_BYTES; deployed form, after wasm-opt)"
 [ "$size" -le "$WASM_GZIP_BUDGET_BYTES" ] || fail "worker wasm gzip $size > budget $WASM_GZIP_BUDGET_BYTES"
 
 # --- crate dependency graph (issue #1) ---
@@ -96,9 +103,12 @@ graph_errors=$(jq -r --arg order "$order" --arg allow "$external_allowlist" '
 if [ -n "$graph_errors" ]; then echo "$graph_errors"; fail "crate dependency graph (see docs/ARCHITECTURE.md, Code layout)"; fi
 # --- end crate dependency graph ---
 
+step "admin build (tsc, esbuild, size budgets)"
+scripts/admin-build || fail "admin build (run scripts/admin-build for details)"
+
 # Own block: the real Worker over HTTP under local wrangler (about 5 s warm). Needs Node.
 step "worker integration (wrangler dev, local D1/R2)"
-scripts/worker-test || fail "worker integration tests (run scripts/worker-test for details)"
+scripts/worker-test --admin-prebuilt || fail "worker integration tests (run scripts/worker-test for details)"
 step "theme script tests (node)"
 node --test "tools/theme-test/*.test.mjs" || fail "theme script tests (run: node --test 'tools/theme-test/*.test.mjs')"
 
@@ -161,7 +171,7 @@ step "no uppercase styling in web/ and themes/"
 # All-caps and small-caps are hard to read, worst for Vietnamese diacritics; write words in normal case.
 bad=""
 for f in "${files[@]}"; do
-  case "$f" in web/*.css|web/*.html|themes/*.css|themes/*.html) ;; *) continue ;; esac
+  case "$f" in web/*.css|web/*.html|web/*.ts|themes/*.css|themes/*.html) ;; *) continue ;; esac
   rc=0
   hits=$(grep -nEi 'text-transform[[:space:]]*:[[:space:]]*(uppercase|capitalize)|font-variant(-caps)?[[:space:]]*:[^;}]*small-caps' "$f") || rc=$?
   [ "$rc" -le 1 ] || fail "grep error while scanning $f"
