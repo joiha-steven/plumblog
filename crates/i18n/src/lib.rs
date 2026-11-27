@@ -2,10 +2,15 @@
 
 use std::collections::HashMap;
 
-/// CLDR plural categories that the shipped languages use.
+/// All six CLDR plural categories, so adding a language (Russian, Arabic...) never changes
+/// this API; each language's rules pick the subset it needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plural {
+    Zero,
     One,
+    Two,
+    Few,
+    Many,
     Other,
 }
 

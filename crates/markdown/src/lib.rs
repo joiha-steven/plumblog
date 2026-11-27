@@ -16,12 +16,15 @@ pub struct TocEntry {
     pub text: String,
 }
 
+use unicode_normalization::UnicodeNormalization;
+
 /// Anchor id for a heading. Letters of any script are kept (HTML ids allow them), so
-/// Vietnamese headings stay readable in links instead of collapsing to dashes.
+/// Vietnamese headings stay readable in links instead of collapsing to dashes. Input is
+/// NFC-normalised first: otherwise decomposed text (macOS input) loses its combining marks.
 #[must_use]
 pub fn heading_id(text: &str) -> String {
     let mut id = String::with_capacity(text.len());
-    for c in text.chars().flat_map(char::to_lowercase) {
+    for c in text.nfc().flat_map(char::to_lowercase) {
         if c.is_alphanumeric() {
             id.push(c);
         } else if !id.is_empty() && !id.ends_with('-') {
@@ -48,6 +51,11 @@ mod tests {
         assert_eq!(
             heading_id("Ti\u{1ebf}ng Vi\u{1ec7}t"),
             "ti\u{1ebf}ng-vi\u{1ec7}t"
+        );
+        // NFD "Ti\u{1ebf}ng": e + circumflex + acute as separate code points.
+        assert_eq!(
+            heading_id("Tie\u{302}\u{301}ng"),
+            heading_id("Ti\u{1ebf}ng")
         );
         assert_eq!(heading_id("!!!"), "section");
     }

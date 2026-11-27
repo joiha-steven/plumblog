@@ -1,57 +1,24 @@
 //! System log: what the system did, for the owner's timeline (docs/ARCHITECTURE.md, System
 //! log). Only the event shape and the interface live here; storage is a `store` concern.
 
-use plumblog_model::{ErrorCode, RequestId, Result, UserId};
+use plumblog_model::{ErrorCode, RequestId, Result, UserId, stable_codes};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum EventKind {
-    SignIn,
-    SignInFailed,
-    ContentChanged,
-    SettingsChanged,
-    ThemeChanged,
-    PluginChanged,
-    PluginDisabled,
-    Deploy,
-    Migration,
-    ScheduledJob,
-    WebhookDelivery,
-    Error,
-}
-
-impl EventKind {
-    pub const ALL: &[EventKind] = &[
-        Self::SignIn,
-        Self::SignInFailed,
-        Self::ContentChanged,
-        Self::SettingsChanged,
-        Self::ThemeChanged,
-        Self::PluginChanged,
-        Self::PluginDisabled,
-        Self::Deploy,
-        Self::Migration,
-        Self::ScheduledJob,
-        Self::WebhookDelivery,
-        Self::Error,
-    ];
-
-    /// Stored in D1 and used by the admin filter, so never renamed once shipped.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::SignIn => "auth.sign_in",
-            Self::SignInFailed => "auth.sign_in_failed",
-            Self::ContentChanged => "content.changed",
-            Self::SettingsChanged => "settings.changed",
-            Self::ThemeChanged => "theme.changed",
-            Self::PluginChanged => "plugin.changed",
-            Self::PluginDisabled => "plugin.disabled",
-            Self::Deploy => "system.deploy",
-            Self::Migration => "system.migration",
-            Self::ScheduledJob => "job.run",
-            Self::WebhookDelivery => "webhook.delivery",
-            Self::Error => "error",
-        }
+stable_codes! {
+    /// Kinds of timeline entries. Codes are stored in D1 and used by the admin filter, so a
+    /// code is never renamed once shipped.
+    pub enum EventKind {
+        SignIn => "auth.sign_in",
+        SignInFailed => "auth.sign_in_failed",
+        ContentChanged => "content.changed",
+        SettingsChanged => "settings.changed",
+        ThemeChanged => "theme.changed",
+        PluginChanged => "plugin.changed",
+        PluginDisabled => "plugin.disabled",
+        Deploy => "system.deploy",
+        Migration => "system.migration",
+        ScheduledJob => "job.run",
+        WebhookDelivery => "webhook.delivery",
+        Error => "error",
     }
 }
 
@@ -78,11 +45,27 @@ pub trait Logger {
 #[cfg(test)]
 mod tests {
     use super::EventKind;
-    use std::collections::HashSet;
 
+    /// Pins every stored code: renaming one orphans existing D1 rows.
     #[test]
-    fn event_kind_codes_are_unique() {
-        let codes: HashSet<_> = EventKind::ALL.iter().map(|k| k.as_str()).collect();
-        assert_eq!(codes.len(), EventKind::ALL.len());
+    fn event_kind_codes_are_pinned() {
+        let table: Vec<_> = EventKind::ALL.iter().map(|k| (*k, k.as_str())).collect();
+        assert_eq!(
+            table,
+            [
+                (EventKind::SignIn, "auth.sign_in"),
+                (EventKind::SignInFailed, "auth.sign_in_failed"),
+                (EventKind::ContentChanged, "content.changed"),
+                (EventKind::SettingsChanged, "settings.changed"),
+                (EventKind::ThemeChanged, "theme.changed"),
+                (EventKind::PluginChanged, "plugin.changed"),
+                (EventKind::PluginDisabled, "plugin.disabled"),
+                (EventKind::Deploy, "system.deploy"),
+                (EventKind::Migration, "system.migration"),
+                (EventKind::ScheduledJob, "job.run"),
+                (EventKind::WebhookDelivery, "webhook.delivery"),
+                (EventKind::Error, "error"),
+            ]
+        );
     }
 }

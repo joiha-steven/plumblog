@@ -32,7 +32,6 @@ pub mod memory {
     use plumblog_syslog::Logger;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
-    use std::future::ready;
 
     /// In-memory store for tests. `RefCell` because traits take `&self` like the D1 impl.
     #[derive(Debug, Default)]
@@ -41,35 +40,45 @@ pub mod memory {
         log: RefCell<Vec<Event>>,
     }
 
-    // Nothing here awaits, so ready futures stand in for `async fn` without an executor hop.
+    // `async fn` so nothing is read or written until the future is polled, as with D1.
+    // The bodies never await, which pedantic clippy flags; that is the point of an in-memory
+    // stand-in, so the lint is expected here and only here.
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "in-memory stand-in for async D1 storage"
+    )]
     impl PostStore for MemoryStore {
-        fn get_post(&self, id: PostId) -> impl Future<Output = Result<PostRecord>> {
-            ready(self.posts.borrow().get(&id).cloned().ok_or_else(|| {
+        async fn get_post(&self, id: PostId) -> Result<PostRecord> {
+            self.posts.borrow().get(&id).cloned().ok_or_else(|| {
                 Error::new(ErrorCode::PostNotFound, format!("post {} not found", id.0))
-            }))
+            })
         }
 
-        fn put_post(&self, post: PostRecord) -> impl Future<Output = Result<()>> {
+        async fn put_post(&self, post: PostRecord) -> Result<()> {
             self.posts.borrow_mut().insert(post.id, post);
-            ready(Ok(()))
+            Ok(())
         }
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "in-memory stand-in for async D1 storage"
+    )]
     impl LogStore for MemoryStore {
-        fn append(&self, event: Event) -> impl Future<Output = Result<()>> {
+        async fn append(&self, event: Event) -> Result<()> {
             self.log.borrow_mut().push(event);
-            ready(Ok(()))
+            Ok(())
         }
 
-        fn recent(&self, limit: usize) -> impl Future<Output = Result<Vec<Event>>> {
-            ready(Ok(self
+        async fn recent(&self, limit: usize) -> Result<Vec<Event>> {
+            Ok(self
                 .log
                 .borrow()
                 .iter()
                 .rev()
                 .take(limit)
                 .cloned()
-                .collect()))
+                .collect())
         }
     }
 
@@ -107,6 +116,9 @@ mod tests {
             slug: "hello".into(),
             title: "Hello".into(),
         };
+        // Like D1, an un-awaited write does nothing.
+        drop(s.put_post(post.clone()));
+        assert!(run(s.get_post(PostId(1))).is_err());
         run(s.put_post(post.clone())).unwrap();
         assert_eq!(run(s.get_post(PostId(1))).unwrap(), post);
     }

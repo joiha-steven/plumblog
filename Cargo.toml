@@ -24,6 +24,9 @@ publish = false
 worker = "0.9.0"
 # Argument parsing for the `blog` CLI; derive keeps commands declarative.
 clap = { version = "4.6.7", features = ["derive"] }
+# NFC before slugging so the same heading typed on macOS (NFD) and elsewhere (NFC) gets one id;
+# composition tables are too large to hand-write correctly.
+unicode-normalization = "0.1.26"
 # Internal module crates; allowed edges between them are enforced by scripts/check.
 plumblog-model = { path = "crates/model" }
 plumblog-markdown = { path = "crates/markdown" }

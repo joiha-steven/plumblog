@@ -5,41 +5,40 @@ use std::fmt;
 /// Engine version, taken from the workspace so it never drifts.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Stable error codes. The string form is a public contract: it appears in API responses,
-/// the system log and locale keys (`error.<code>`), so a code is never renamed once shipped.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ErrorCode {
-    PostNotFound,
-    UserNotFound,
-    Forbidden,
-    Unauthenticated,
-    InvalidInput,
-    Storage,
-    Internal,
+/// Declares an enum whose variants each carry a stable string code. The enum, `ALL` and
+/// `as_str` come from one list, so adding a variant cannot leave `ALL` or a code behind.
+#[macro_export]
+macro_rules! stable_codes {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident { $($variant:ident => $code:literal),+ $(,)? }
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        $vis enum $name { $($variant),+ }
+
+        impl $name {
+            pub const ALL: &[$name] = &[$($name::$variant),+];
+
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self { $($name::$variant => $code),+ }
+            }
+        }
+    };
 }
 
-impl ErrorCode {
-    pub const ALL: &[ErrorCode] = &[
-        Self::PostNotFound,
-        Self::UserNotFound,
-        Self::Forbidden,
-        Self::Unauthenticated,
-        Self::InvalidInput,
-        Self::Storage,
-        Self::Internal,
-    ];
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::PostNotFound => "post.not_found",
-            Self::UserNotFound => "user.not_found",
-            Self::Forbidden => "auth.forbidden",
-            Self::Unauthenticated => "auth.unauthenticated",
-            Self::InvalidInput => "input.invalid",
-            Self::Storage => "store.failed",
-            Self::Internal => "internal",
-        }
+stable_codes! {
+    /// Stable error codes. The string form is a public contract: it appears in API responses,
+    /// the system log and locale keys (`error.<code>`), so a code is never renamed once shipped.
+    pub enum ErrorCode {
+        PostNotFound => "post.not_found",
+        UserNotFound => "user.not_found",
+        Forbidden => "auth.forbidden",
+        Unauthenticated => "auth.unauthenticated",
+        InvalidInput => "input.invalid",
+        Storage => "store.failed",
+        Internal => "internal",
     }
 }
 
@@ -102,81 +101,97 @@ pub enum Role {
     Writer,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Permission {
-    WritePost,
-    PublishPost,
-    EditAnyPost,
-    DeleteAnyPost,
-    UploadMedia,
-    CreateOwnToken,
-    ManageSettings,
-    ManageThemes,
-    ManagePlugins,
-    ManageUsers,
-    ModerateComments,
-    ViewSystemLog,
+stable_codes! {
+    /// What a role may do. Codes double as API token scope names.
+    pub enum Permission {
+        WritePost => "post.write",
+        PublishPost => "post.publish",
+        EditAnyPost => "post.edit_any",
+        DeleteAnyPost => "post.delete_any",
+        UploadMedia => "media.upload",
+        CreateOwnToken => "token.create_own",
+        ManageSettings => "settings.manage",
+        ManageThemes => "theme.manage",
+        ManagePlugins => "plugin.manage",
+        ManageUsers => "user.manage",
+        ModerateComments => "comment.moderate",
+        ViewSystemLog => "syslog.view",
+    }
 }
 
-/// The whole role model as data (docs/ARCHITECTURE.md, Users and auth). Every permission is
-/// listed exactly once, so a missing row is a test failure, not a silent deny.
-pub const PERMISSIONS: &[(Permission, &[Role])] = &[
-    (Permission::WritePost, &[Role::Owner, Role::Writer]),
-    (Permission::PublishPost, &[Role::Owner, Role::Writer]),
-    (Permission::EditAnyPost, &[Role::Owner, Role::Writer]),
-    (Permission::DeleteAnyPost, &[Role::Owner, Role::Writer]),
-    (Permission::UploadMedia, &[Role::Owner, Role::Writer]),
-    (Permission::CreateOwnToken, &[Role::Owner, Role::Writer]),
-    (Permission::ManageSettings, &[Role::Owner]),
-    (Permission::ManageThemes, &[Role::Owner]),
-    (Permission::ManagePlugins, &[Role::Owner]),
-    (Permission::ManageUsers, &[Role::Owner]),
-    (Permission::ModerateComments, &[Role::Owner]),
-    (Permission::ViewSystemLog, &[Role::Owner]),
-];
+impl Permission {
+    /// The whole role model (docs/ARCHITECTURE.md, Users and auth). An exhaustive match, so a
+    /// new permission does not compile until someone decides who holds it.
+    #[must_use]
+    pub const fn roles(self) -> &'static [Role] {
+        const BOTH: &[Role] = &[Role::Owner, Role::Writer];
+        const OWNER: &[Role] = &[Role::Owner];
+        match self {
+            Self::WritePost
+            | Self::PublishPost
+            | Self::EditAnyPost
+            | Self::DeleteAnyPost
+            | Self::UploadMedia
+            | Self::CreateOwnToken => BOTH,
+            Self::ManageSettings
+            | Self::ManageThemes
+            | Self::ManagePlugins
+            | Self::ManageUsers
+            | Self::ModerateComments
+            | Self::ViewSystemLog => OWNER,
+        }
+    }
+}
 
 impl Role {
     #[must_use]
     pub fn can(self, permission: Permission) -> bool {
-        PERMISSIONS
-            .iter()
-            .any(|(p, roles)| *p == permission && roles.contains(&self))
+        permission.roles().contains(&self)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorCode, PERMISSIONS, Permission, RequestId, Role};
-    use std::collections::HashSet;
+    use super::{ErrorCode, Permission, RequestId, Role};
 
+    /// Pins every shipped code: renaming one breaks API clients and stored log rows.
     #[test]
-    fn error_codes_are_unique_and_dotted_lowercase() {
-        let codes: HashSet<_> = ErrorCode::ALL.iter().map(|c| c.as_str()).collect();
-        assert_eq!(codes.len(), ErrorCode::ALL.len());
-        for c in codes {
-            assert!(
-                c.bytes()
-                    .all(|b| b.is_ascii_lowercase() || b == b'.' || b == b'_')
-            );
-        }
-        assert_eq!(ErrorCode::PostNotFound.as_str(), "post.not_found");
+    fn error_codes_are_pinned() {
+        let table: Vec<_> = ErrorCode::ALL.iter().map(|c| (*c, c.as_str())).collect();
+        assert_eq!(
+            table,
+            [
+                (ErrorCode::PostNotFound, "post.not_found"),
+                (ErrorCode::UserNotFound, "user.not_found"),
+                (ErrorCode::Forbidden, "auth.forbidden"),
+                (ErrorCode::Unauthenticated, "auth.unauthenticated"),
+                (ErrorCode::InvalidInput, "input.invalid"),
+                (ErrorCode::Storage, "store.failed"),
+                (ErrorCode::Internal, "internal"),
+            ]
+        );
     }
 
+    /// The full owner/writer table, so any change to who holds what is a visible test edit.
     #[test]
-    fn owner_can_everything_writer_cannot_touch_site_settings() {
-        let perms: HashSet<_> = PERMISSIONS.iter().map(|(p, _)| *p).collect();
-        assert_eq!(perms.len(), PERMISSIONS.len(), "permission listed twice");
-        assert!(PERMISSIONS.iter().all(|(p, _)| Role::Owner.can(*p)));
-        assert!(Role::Writer.can(Permission::PublishPost));
-        for p in [
+    fn permission_table_is_pinned() {
+        let writer_only_lacks = [
             Permission::ManageSettings,
             Permission::ManageThemes,
+            Permission::ManagePlugins,
             Permission::ManageUsers,
             Permission::ModerateComments,
             Permission::ViewSystemLog,
-        ] {
-            assert!(!Role::Writer.can(p), "writer must not have {p:?}");
+        ];
+        for p in Permission::ALL {
+            assert!(Role::Owner.can(*p), "owner must have {p:?}");
+            assert_eq!(
+                Role::Writer.can(*p),
+                !writer_only_lacks.contains(p),
+                "writer and {p:?}"
+            );
         }
+        assert_eq!(Permission::ALL.len(), 12);
     }
 
     #[test]
