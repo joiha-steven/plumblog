@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Prints the path of the pinned worker-build, installing it into target/tools on first use.
+# Shared by scripts/check (the shipped-size budget) and scripts/worker-test, so both build
+# with the same tool as a deploy: wasm-bindgen plus wasm-opt at the binaryen version
+# worker-build pins (it downloads both into ~/.cache/worker-build and fails if it cannot).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+WORKER_BUILD_VERSION=0.9.0 # keep in step with the `worker` crate version in Cargo.toml
+
+wb=target/tools/bin/worker-build
+if [ "$("$wb" --version 2>/dev/null || true)" != "$WORKER_BUILD_VERSION" ]; then
+  echo "worker-build: installing $WORKER_BUILD_VERSION (first run only, about 30 s)" >&2
+  cargo install -q "worker-build@$WORKER_BUILD_VERSION" --locked --root target/tools >&2 \
+    || { echo "worker-build: FAIL: cargo install worker-build@$WORKER_BUILD_VERSION failed" >&2; exit 1; }
+fi
+echo "$PWD/$wb"
