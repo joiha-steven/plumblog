@@ -51,11 +51,6 @@ impl EventKind {
             Self::Error => Severity::Error,
         }
     }
-
-    #[must_use]
-    pub fn from_code(code: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|k| k.as_str() == code)
-    }
 }
 
 /// Longest stored subject or field value, in characters: keeps one row small and stops a
@@ -126,6 +121,45 @@ impl Event {
         self
     }
 
+    /// Subject and fields as one text column (D1 `system_log.detail`): the subject on the
+    /// first line, then one `key<TAB>value` line per field, with `\\`, newline and tab escaped
+    /// so any text round-trips.
+    #[must_use]
+    pub fn detail(&self) -> String {
+        let mut out = escape(&self.subject);
+        for (k, v) in &self.fields {
+            out.push('\n');
+            out.push_str(&escape(k));
+            out.push('\t');
+            out.push_str(&escape(v));
+        }
+        out
+    }
+
+    /// Rebuilds a stored event from its columns. `detail` goes through the same redacting
+    /// setters as a new event, so a row written by an older or buggy build cannot surface a
+    /// secret in the admin.
+    #[must_use]
+    pub fn restore(
+        at_ms: u64,
+        request_id: RequestId,
+        kind: EventKind,
+        actor: Option<UserId>,
+        error: Option<ErrorCode>,
+        detail: &str,
+    ) -> Self {
+        let mut lines = detail.split('\n');
+        let mut event = Self::new(kind, request_id, at_ms)
+            .actor(actor)
+            .subject(&unescape(lines.next().unwrap_or_default()));
+        event.error = error;
+        for line in lines {
+            let (k, v) = line.split_once('\t').unwrap_or((line, ""));
+            event = event.field(&unescape(k), &unescape(v));
+        }
+        event
+    }
+
     #[must_use]
     pub fn at_ms(&self) -> u64 {
         self.at_ms
@@ -172,6 +206,30 @@ impl Event {
     }
 }
 
+fn escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
+}
+
+fn unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Event, EventKind, MAX_FIELDS, Severity};
@@ -203,9 +261,9 @@ mod tests {
             ]
         );
         for k in EventKind::ALL {
-            assert_eq!(EventKind::from_code(k.as_str()), Some(*k));
+            assert_eq!(EventKind::parse(k.as_str()), Some(*k));
         }
-        assert_eq!(EventKind::from_code("page.view"), None);
+        assert_eq!(EventKind::parse("page.view"), None);
     }
 
     #[test]
@@ -238,5 +296,39 @@ mod tests {
             e = e.field(&format!("k{i}"), "v");
         }
         assert_eq!(e.fields().len(), MAX_FIELDS);
+    }
+
+    #[test]
+    fn detail_round_trips_any_text() {
+        let e = Event::new(EventKind::SettingsChanged, rid(), 9)
+            .actor(Some(UserId(3)))
+            .error(ErrorCode::Storage)
+            .subject("a\\b\nc\td")
+            .field("from", "line1\nline2")
+            .field("to", "tab\there \\n literal")
+            .field("empty", "");
+        let back = Event::restore(
+            9,
+            rid(),
+            EventKind::SettingsChanged,
+            Some(UserId(3)),
+            Some(ErrorCode::Storage),
+            &e.detail(),
+        );
+        assert_eq!(back, e);
+        let bare = Event::new(EventKind::Deploy, rid(), 1);
+        assert_eq!(bare.detail(), "");
+        assert_eq!(
+            Event::restore(1, rid(), EventKind::Deploy, None, None, ""),
+            bare
+        );
+    }
+
+    #[test]
+    fn restore_redacts_again() {
+        let raw = "x\npassword\thunter2\nnote\tmail me at a@b.co\ncolor\tblue";
+        let e = Event::restore(1, rid(), EventKind::SettingsChanged, None, None, raw);
+        let values: Vec<_> = e.fields().iter().map(|(_, v)| v.as_str()).collect();
+        assert_eq!(values, ["[redacted]", "[redacted]", "blue"]);
     }
 }

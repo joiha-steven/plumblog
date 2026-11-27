@@ -11,16 +11,13 @@ fn read_entry(r: &mut Row) -> Result<LogEntry> {
     let raw_request = r.text()?;
     let request_id = RequestId::parse(&raw_request)
         .ok_or_else(|| storage("query_log", &format!("bad request id {raw_request:?}")))?;
+    let kind = r.code("event kind", EventKind::parse)?;
+    let actor = r.opt_int()?.map(UserId);
+    let error = r.opt_code("error", ErrorCode::parse)?;
+    let detail = r.text()?;
     Ok(LogEntry {
         id,
-        event: Event {
-            at_ms,
-            request_id,
-            kind: r.code("event kind", EventKind::parse)?,
-            actor: r.opt_int()?.map(UserId),
-            error: r.opt_code("error", ErrorCode::parse)?,
-            detail: r.text()?,
-        },
+        event: Event::restore(at_ms, request_id, kind, actor, error, &detail),
     })
 }
 
@@ -32,12 +29,12 @@ impl LogStore for D1Store {
             "INSERT INTO system_log (at_ms, request_id, kind, actor_id, error_code, detail) \
              VALUES (?, ?, ?, ?, ?, ?)",
             &[
-                uint(e.at_ms)?,
-                text(e.request_id.as_str()),
-                text(e.kind.as_str()),
-                opt_int(e.actor.map(|a| a.0))?,
-                opt_text(e.error.map(ErrorCode::as_str)),
-                text(&e.detail),
+                uint(e.at_ms())?,
+                text(e.request_id().as_str()),
+                text(e.kind().as_str()),
+                opt_int(e.actor_id().map(|a| a.0))?,
+                opt_text(e.error_code().map(ErrorCode::as_str)),
+                text(&e.detail()),
             ],
         )?;
         let r = self.exec(s).await?;

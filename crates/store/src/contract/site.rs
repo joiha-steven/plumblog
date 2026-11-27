@@ -498,7 +498,7 @@ pub async fn log_query_and_cursor<S: Store>(db: &S) -> Check {
     ] {
         let mut e = event(t, kind, actor)?;
         if kind == EventKind::Deploy {
-            e.error = Some(ErrorCode::Storage);
+            e = e.error(ErrorCode::Storage);
         }
         let id = ok("append", db.append(e.clone()).await)?;
         rows.push(((t, id), e));
@@ -520,8 +520,12 @@ pub async fn log_query_and_cursor<S: Store>(db: &S) -> Check {
         pick(&|_| true),
     )?;
 
-    let kind_of = |id: i64| rows.iter().find(|r| r.0.1 == id).map(|r| r.1.kind);
-    let actor_of = |id: i64| rows.iter().find(|r| r.0.1 == id).and_then(|r| r.1.actor);
+    let kind_of = |id: i64| rows.iter().find(|r| r.0.1 == id).map(|r| r.1.kind());
+    let actor_of = |id: i64| {
+        rows.iter()
+            .find(|r| r.0.1 == id)
+            .and_then(|r| r.1.actor_id())
+    };
     let mut q = log_query();
     q.kind = Some(EventKind::SignIn);
     eq!(
@@ -551,7 +555,7 @@ pub async fn log_query_and_cursor<S: Store>(db: &S) -> Check {
     for _ in 0..10 {
         let page = ok("query_log", db.query_log(q).await)?;
         let Some(last) = page.last() else { break };
-        q.before = Some((last.event.at_ms, last.id));
+        q.before = Some((last.event.at_ms(), last.id));
         paged.extend(page.iter().map(|e| e.id));
     }
     eq!("cursor pages", paged, pick(&|_| true))?;
@@ -596,6 +600,88 @@ pub async fn log_prune<S: Store>(db: &S) -> Check {
         "keep 0 empties",
         ok("prune_log", db.prune_log(0, 0).await)?,
         2,
+    )
+}
+
+/// Subject and fields survive storage byte for byte (newlines, tabs, backslashes), and what
+/// redaction removed before the write is still gone after the read.
+pub async fn log_detail_redacted<S: Store>(db: &S) -> Check {
+    let e = event(1, EventKind::SettingsChanged, None)?
+        .subject("line1\nline2\ttab \\n")
+        .field("from", "a\\b")
+        .field("api_token", "sk-live-0123456789abcdef")
+        .field("note", "reach me at reader@example.com")
+        .field("to", "");
+    let id = ok("append", db.append(e.clone()).await)?;
+    let got = ok("query_log", db.query_log(log_query()).await)?;
+    let stored = got.iter().find(|x| x.id == id).ok_or("entry missing")?;
+    eq!("detail round trip", &stored.event, &e)?;
+    let values: Vec<&str> = stored.event.fields().iter().map(|f| f.1.as_str()).collect();
+    eq!(
+        "secrets stay redacted",
+        values,
+        vec![
+            "a\\b",
+            plumblog_syslog::REDACTED,
+            plumblog_syslog::REDACTED,
+            ""
+        ],
+    )
+}
+
+/// The daily job applies both caps and leaves one `job.run` entry saying what it did.
+pub async fn log_retention_job<S: Store>(db: &S) -> Check {
+    const DAY: u64 = 24 * 60 * 60 * 1000;
+    let now = 100 * DAY;
+    // Two rows older than 30 days, four within; the cap of 3 then drops the oldest recent one.
+    let mut recent = Vec::new();
+    for t in [10 * DAY, 60 * DAY, 80 * DAY, 90 * DAY, 95 * DAY, 99 * DAY] {
+        let id = ok(
+            "append",
+            db.append(event(t, EventKind::Deploy, None)?).await,
+        )?;
+        if t >= 90 * DAY {
+            recent.push((t, id));
+        }
+    }
+    let retention = plumblog_syslog::Retention {
+        max_age_days: 30,
+        max_rows: 3,
+    };
+    let scope = plumblog_syslog::Scope::new(
+        plumblog_model::RequestId::parse("job-1").ok_or("request id rejected")?,
+        None,
+    );
+    eq!(
+        "deleted by age and by count",
+        ok(
+            "retention_job",
+            crate::retention_job(db, &scope, retention, now).await,
+        )?,
+        3,
+    )?;
+    let log = ok("query_log", db.query_log(log_query()).await)?;
+    let job = log.first().ok_or("job event missing")?;
+    eq!("job event kind", job.event.kind(), EventKind::ScheduledJob)?;
+    eq!(
+        "job event subject",
+        job.event.subject_text(),
+        crate::RETENTION_JOB
+    )?;
+    eq!(
+        "job event request id",
+        job.event.request_id().as_str(),
+        "job-1"
+    )?;
+    eq!(
+        "job event fields",
+        job.event.fields(),
+        &[("deleted".to_owned(), "3".to_owned())][..],
+    )?;
+    eq!(
+        "rows kept: the newest 3, then the job event",
+        log.iter().skip(1).map(|e| e.id).collect::<Vec<_>>(),
+        desc(&recent).iter().map(|x| x.1).collect::<Vec<_>>(),
     )
 }
 

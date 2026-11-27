@@ -30,7 +30,7 @@ pub use auth::{
     PasskeyStore, Session, SessionStore, TokenStore,
 };
 pub use comments::{Comment, CommentStatus, CommentStore, NewComment};
-pub use log::{LogEntry, LogQuery, LogStore};
+pub use log::{LogEntry, LogQuery, LogStore, RETENTION_JOB, retention_job};
 pub use media::{Media, MediaQuery, MediaStore, NewMedia};
 pub use posts::{
     NewRevision, Post, PostCursor, PostKind, PostOrder, PostQuery, PostStatus, PostStore,

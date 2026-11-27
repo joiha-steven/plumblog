@@ -237,7 +237,7 @@ Models: Bear and iA Writer for focus; Braun and Dieter Rams (Bauhaus) for the co
 - Never recorded: page views, passwords, tokens, personal data beyond the acting user.
 - Stored in D1 with a retention cap (age and row count) so it stays inside free-plan write limits; one write per event, never per view.
 - Worker logs carry the same request id, so an AI can go from an admin entry to the full trace.
-- Each request has one id (`cf-ray`, else generated); every event and Worker log line from that request carries it. Events are built through methods that redact: secret-named fields (password, token, session...), credential-looking values, emails and IPs are stored as `[redacted]`; subjects and values are capped at 200 characters, 8 fields per event. Severity comes from the kind, raised to warning when an error code is attached. Retention defaults to 90 days and 10,000 rows, pruned by a daily scheduled job, never per event.
+- Each request has one id (`cf-ray`, else generated); every event and Worker log line from that request carries it. Events are built through methods that redact: secret-named fields (password, token, session...), credential-looking values, emails and IPs are stored as `[redacted]`; subjects and values are capped at 200 characters, 8 fields per event. Severity comes from the kind, raised to warning when an error code is attached. Retention defaults to 90 days and 10,000 rows, pruned by a daily scheduled job (the Worker's cron trigger; the generated `wrangler.toml` must declare it), never per event; each run leaves one `job.run` entry saying how many rows went. Subject and fields share one `detail` column (subject line, then `key<TAB>value` lines, escaped), re-redacted when read.
 
 ## Testing
 
