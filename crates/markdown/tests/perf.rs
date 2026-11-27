@@ -10,7 +10,8 @@
 //! counting allocator, and the renderer has no hook. The real budget is printed as `perf ...` lines
 //! (`scripts/perf` shows them) and enforced when `PLUMBLOG_PERF_STRICT` is set, on a machine
 //! that is not shared.
-//! Release builds only (`scripts/check` runs this test with `--release`); debug builds are
+//! The ratio is enforced in the release run only (`scripts/check` runs this test with
+//! `--release`); the debug workspace run keeps the scaling checks; debug builds are
 //! 10-30x slower and would only measure the compiler.
 
 use plumblog_markdown::{Options, render, render_comment};
@@ -70,6 +71,12 @@ fn report(what: &str, (best, calibration): (Duration, Duration), budget: Duratio
     );
     if std::env::var_os("PLUMBLOG_PERF_STRICT").is_some() {
         assert!(best <= budget, "{what}: {best:?} over budget {budget:?}");
+    }
+    // The debug workspace run (`cargo test --workspace`) also runs this file; there the
+    // optimizer is off and the renderer slows more than the hash (ratio 3-5), so the ratio
+    // only means something in the release run that `scripts/check` makes for this test.
+    if cfg!(debug_assertions) {
+        return;
     }
     assert!(
         best < K * calibration,

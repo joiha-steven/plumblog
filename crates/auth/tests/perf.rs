@@ -11,8 +11,9 @@
 //! allocator, and the parser has no hook. The real budget is printed as `perf ...` lines
 //! (`scripts/perf` shows them) and enforced when `PLUMBLOG_PERF_STRICT` is set, on a machine
 //! that is not shared.
-//! Release builds only (`scripts/check` runs this test with `--release`); debug builds are
-//! 10-30x slower and would only measure the compiler.
+//! The ratio is enforced in the release run only (`scripts/check` runs this test with
+//! `--release`); the debug workspace run keeps the scaling checks, since a debug build is
+//! 10-30x slower and its ratio would only measure the compiler.
 
 use plumblog_auth::json::{MAX_DEPTH, MAX_ITEMS, MAX_KEY, MAX_VALUES, parse_document};
 use plumblog_model::ErrorCode;
@@ -158,6 +159,12 @@ fn report(what: &str, bytes: usize, (d, calibration): (Duration, Duration)) {
     );
     if std::env::var_os("PLUMBLOG_PERF_STRICT").is_some() {
         assert!(d <= BUDGET, "{what}: parse took {d:?}, budget {BUDGET:?}");
+    }
+    // The debug workspace run (`cargo test --workspace`) also runs this file; there the
+    // optimizer is off and the parser slows far more than the hash (ratio 5-7), so the ratio
+    // only means something in the release run that `scripts/check` makes for this test.
+    if cfg!(debug_assertions) {
+        return;
     }
     assert!(
         d < K * calibration,

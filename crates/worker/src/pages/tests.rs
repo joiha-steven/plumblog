@@ -275,8 +275,8 @@ fn every_page_renders_without_a_blowup() {
     // Wall time on a shared CI runner is a poor clock, and a debug build on the host says
     // little about wasm, so this gates only on a ratio to a reference workload (a serial hash
     // of a fixed buffer, same build profile) timed in the same loop, so a slow machine slows
-    // both. Measured normal ratio: see the `ratio` in the `perf` line (1.0-1.3 per page, debug
-    // build, laptop); K = 8 is about 6x that, so a uniform 10x slowdown fails. It catches a slowdown, not the budget. The real
+    // both. Measured normal ratio: see the `ratio` in the `perf` line (1.0-1.9 per page, debug
+    // build, laptop); K = 8 is about 4x that, so a uniform 10x slowdown fails. It catches a slowdown, not the budget. The real
     // per-page time is the `perf` line (`scripts/perf` shows it; PLUMBLOG_PERF_STRICT holds it
     // to 2 ms natively) and the Worker's Server-Timing.
     const K: f64 = 8.0;
