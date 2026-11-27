@@ -76,12 +76,22 @@ async fn challenge_hash(ctx: &Ctx, raw: &[u8]) -> Result<String> {
     Ok(base64url::hex(&ctx.crypto.sha256(raw).await?))
 }
 
+/// Prefix of a gated challenge's hashed input: a sign-in challenge whose options request
+/// passed the site-wide cap with a Turnstile token is stored under this hash instead, so the
+/// row itself records it (no schema change) and nothing else can hash to it.
+const GATED: &[u8] = b"plumblog gated sign-in challenge\0";
+
+async fn gated_hash(ctx: &Ctx, raw: &[u8]) -> Result<String> {
+    challenge_hash(ctx, &[GATED, raw].concat()).await
+}
+
 /// A fresh random challenge, stored hashed, single use, 5 minutes. Expired ones are swept
-/// first (lazy cleanup, no cron).
+/// first (lazy cleanup, no cron). `gated` (sign-in only): stored under [`gated_hash`].
 async fn new_challenge(
     ctx: &Ctx,
     purpose: ChallengePurpose,
     user: Option<UserId>,
+    gated: bool,
 ) -> Result<String> {
     if let Err(e) = ctx.store.delete_expired_challenges(ctx.now).await {
         // Leftovers are harmless (expired ones never validate); the next call retries.
@@ -92,14 +102,20 @@ async fn new_challenge(
     }
     let mut raw = [0u8; CHALLENGE_BYTES];
     ctx.crypto.random_bytes(&mut raw)?;
-    let hash = challenge_hash(ctx, &raw).await?;
+    let hash = if gated {
+        gated_hash(ctx, &raw).await?
+    } else {
+        challenge_hash(ctx, &raw).await?
+    };
     ctx.store
         .put_challenge(&hash, purpose, user, ctx.now + CHALLENGE_TTL_MS)
         .await?;
     Ok(base64url::encode(&raw))
 }
 
-/// Consumes the challenge `client_data_json` names. `Some(user)` is who it was issued to.
+/// Consumes the challenge `client_data_json` names. `Some(user)` is who it was issued to. A
+/// sign-in challenge may be stored gated; a row exists under one hash only, and each take is
+/// atomic, so it is still single use. Registration never looks at the gated form.
 async fn take_challenge(
     ctx: &Ctx,
     client_data_json: &[u8],
@@ -107,7 +123,12 @@ async fn take_challenge(
 ) -> Result<(Vec<u8>, Option<UserId>)> {
     let raw = client_data::challenge(client_data_json)?;
     let hash = challenge_hash(ctx, &raw).await?;
-    match ctx.store.take_challenge(&hash, purpose, ctx.now).await? {
+    let mut taken = ctx.store.take_challenge(&hash, purpose, ctx.now).await?;
+    if taken.is_none() && matches!(purpose, ChallengePurpose::Login) {
+        let hash = gated_hash(ctx, &raw).await?;
+        taken = ctx.store.take_challenge(&hash, purpose, ctx.now).await?;
+    }
+    match taken {
         Some(user) => Ok((raw, user)),
         None => Err(invalid(format!(
             "{} challenge unknown, used, expired or of another purpose",
@@ -138,7 +159,7 @@ pub async fn register_options(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<R
     no_fields(body)?;
     let site = site::site(ctx).await?;
     let existing = ctx.store.list_passkeys(user.id).await?;
-    let challenge = new_challenge(ctx, ChallengePurpose::Register, Some(user.id)).await?;
+    let challenge = new_challenge(ctx, ChallengePurpose::Register, Some(user.id), false).await?;
     let algs: Vec<String> = [cose::ALG_ES256, cose::ALG_EDDSA, cose::ALG_RS256]
         .iter()
         .map(|a| format!(r#"{{"type":"public-key","alg":{a}}}"#))
@@ -282,9 +303,9 @@ pub async fn login_options(ctx: &Ctx, body: &[u8]) -> Result<Reply> {
     };
     let site = site::site(ctx).await?;
     // Anonymous and each call writes a row: counted site-wide and per address before the
-    // write.
-    limit::options(ctx, token.as_deref()).await?;
-    let challenge = new_challenge(ctx, ChallengePurpose::Login, None).await?;
+    // write. Past the cap with a token, the challenge carries that proof to the sign-in.
+    let gated = limit::options(ctx, token.as_deref()).await?;
+    let challenge = new_challenge(ctx, ChallengePurpose::Login, None, gated).await?;
     let public_key = object(&[
         ("challenge", Out::Str(challenge)),
         ("rpId", Out::Str(site.host)),
@@ -316,6 +337,7 @@ fn refused(actor: Option<UserId>, reason: &'static str, detail: impl Into<String
 
 /// The checks of one assertion, in order. `Err(Ok(refused))` is the client's failure (counted);
 /// `Err(Err(e))` is ours (storage, crypto, a corrupt stored key) and is not counted.
+/// `challenge_taken`: the limiter already consumed the challenge as its site-wide gate proof.
 async fn check_assertion(
     ctx: &Ctx,
     f: &Fields,
@@ -323,6 +345,7 @@ async fn check_assertion(
     credential_id: &str,
     want_user: Option<UserId>,
     site: &site::Site,
+    challenge_taken: bool,
 ) -> std::result::Result<User, std::result::Result<Refused, Error>> {
     let ours = |e: Error| {
         if e.code == ErrorCode::PasskeyInvalid {
@@ -334,9 +357,14 @@ async fn check_assertion(
     let client_data_json = b64(f, prefix, "client_data_json").map_err(ours)?;
     let authenticator_data = b64(f, prefix, "authenticator_data").map_err(ours)?;
     let signature = b64(f, prefix, "signature").map_err(ours)?;
-    let (challenge, _) = take_challenge(ctx, &client_data_json, ChallengePurpose::Login)
-        .await
-        .map_err(ours)?;
+    let challenge = if challenge_taken {
+        client_data::challenge(&client_data_json).map_err(ours)?
+    } else {
+        take_challenge(ctx, &client_data_json, ChallengePurpose::Login)
+            .await
+            .map_err(ours)?
+            .0
+    };
     let Some(key) = ctx.store.find_passkey(credential_id).await.map_err(Err)? else {
         return Err(Ok(refused(
             want_user,
@@ -428,12 +456,31 @@ pub async fn verify(
     let keys = Keys::passkey(ctx, credential_id).await?;
     // Re-auth (`want_user`) comes from a signed-in user: outside the site-wide cap.
     let token = f.opt("turnstile_token")?;
-    let attempt = if want_user.is_some() {
-        limit::check_signed_in(ctx, &keys, token).await?
+    let (attempt, challenge_taken) = if want_user.is_some() {
+        (limit::check_signed_in(ctx, &keys, token).await?, false)
     } else {
-        limit::check(ctx, &keys, token).await?
+        // The challenge's gated hash, if the body names one: at the cap it may stand for a
+        // Turnstile token. A malformed one is refused, and counted, by check_assertion.
+        let raw = b64(f, prefix, "client_data_json")
+            .ok()
+            .and_then(|cd| client_data::challenge(&cd).ok());
+        let gated = match raw {
+            Some(raw) => Some(gated_hash(ctx, &raw).await?),
+            None => None,
+        };
+        limit::check_passkey(ctx, &keys, token, gated.as_deref()).await?
     };
-    match check_assertion(ctx, f, prefix, credential_id, want_user, &site).await {
+    match check_assertion(
+        ctx,
+        f,
+        prefix,
+        credential_id,
+        want_user,
+        &site,
+        challenge_taken,
+    )
+    .await
+    {
         Ok(user) => {
             limit::succeeded(ctx, &keys).await?;
             Ok(user)
