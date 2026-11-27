@@ -191,8 +191,8 @@ impl UserStore for MemoryStore {
             for r in s.revisions.values_mut().filter(|r| r.author_id == Some(id)) {
                 r.author_id = None;
             }
-            for e in s.log.values_mut().filter(|e| e.actor == Some(id)) {
-                e.actor = None;
+            for e in s.log.values_mut().filter(|e| e.actor_id() == Some(id)) {
+                *e = e.clone().actor(None);
             }
             Ok(())
         })

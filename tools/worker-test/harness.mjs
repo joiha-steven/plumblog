@@ -95,7 +95,9 @@ export async function startWorker() {
   const child = spawn(
     WRANGLER,
     ["dev", ...common, "--ip", "127.0.0.1", "--port", String(port), "--inspector-port", String(inspector),
-      "--show-interactive-dev-session=false", "--log-level", "warn"],
+      "--show-interactive-dev-session=false", "--log-level", "log",
+      // Serves /__scheduled so tests can fire the cron trigger.
+      "--test-scheduled"],
     { cwd: ROOT, env: ENV, detached: true, stdio: ["ignore", "pipe", "pipe"] },
   );
   entry.pgid = child.pid;
@@ -134,7 +136,8 @@ export async function startWorker() {
     }
     try {
       await fetch(`${url}/healthz`);
-      return { url, stop };
+      // state: the --persist-to dir, for reading the local D1 with `wrangler d1 execute`.
+      return { url, stop, state: entry.state, log: () => log };
     } catch {
       await new Promise((r) => setTimeout(r, 200));
     }

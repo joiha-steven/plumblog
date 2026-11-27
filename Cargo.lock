@@ -538,6 +538,7 @@ dependencies = [
 name = "plumblog-syslog"
 version = "0.1.0"
 dependencies = [
+ "plumblog-i18n",
  "plumblog-model",
 ]
 

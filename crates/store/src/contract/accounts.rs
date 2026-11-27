@@ -255,7 +255,7 @@ pub async fn user_delete_effects<S: Store>(db: &S) -> Check {
         .iter()
         .find(|e| e.id == log_id)
         .ok_or("log entry must stay")?;
-    eq!("system_log.actor_id set NULL", entry.event.actor, None)
+    eq!("system_log.actor_id set NULL", entry.event.actor_id(), None)
 }
 
 /// The deleted user and every sign-in row of theirs (ON DELETE CASCADE).
