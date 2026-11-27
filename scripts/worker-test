@@ -38,30 +38,16 @@ contract_target="$PWD/target/contract-tests"
   -- --features contract-tests --target-dir "$contract_target") \
   || fail "worker-build failed"
 
-# Static assets the Worker's pages link to (crates/worker/src/pages THEME_ASSETS_URL).
-rm -rf "$out/assets"
-mkdir -p "$out/assets/theme"
-cp -R themes/minimal/assets "$out/assets/theme/minimal"
-# Bundled plugins' assets at PLUGIN_ASSETS_URL (/plugin/<name>/).
-for dir in plugins/*/; do
-  [ -d "$dir/assets" ] || continue
-  name=$(basename "$dir")
-  mkdir -p "$out/assets/plugin"
-  cp -R "$dir/assets" "$out/assets/plugin/$name"
-done
-
-# The admin (scripts/admin-build) under /admin/. Served with the mock API when a person
-# clicks through, since the posts and media APIs do not exist yet.
+# The admin (scripts/admin-build), served with the mock API when a person clicks through,
+# since the posts and media APIs do not exist yet. Assets laid out as a deploy ships them.
 if $serve; then
   scripts/admin-build --dev || fail "admin build (above)"
-  cp -R target/admin-dev "$out/assets/admin"
+  admin_dir=target/admin-dev
 else
   $admin_prebuilt || scripts/admin-build || fail "admin build (above)"
-  cp -R target/admin "$out/assets/admin"
+  admin_dir=target/admin
 fi
-# Cache rules for the admin's static files, written by admin-build; Workers static assets read
-# `_headers` at the root of the assets directory.
-mv "$out/assets/admin/_headers" "$out/assets/_headers"
+scripts/assemble-assets "$out/assets" "$admin_dir" || fail "assembling assets (above)"
 
 if $serve; then
   port="${PORT:-8790}"
@@ -88,5 +74,5 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-WORKER_TEST_RUN_DIR="$run_dir" WORKER_TEST_OUT="$PWD/$out" node --test "tools/worker-test/*.test.mjs" \
+WORKER_TEST_RUN_DIR="$run_dir" WORKER_TEST_OUT="$PWD/$out" node tools/worker-test/run.mjs \
   || fail "Worker integration tests failed"

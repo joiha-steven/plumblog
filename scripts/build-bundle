@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Builds a release bundle for `blog deploy` (layout: docs/ARCHITECTURE.md, Release bundle):
+#   <out>/worker/  worker-build --release output (wasm-bindgen + wasm-opt), as a deploy ships
+#   <out>/assets/  static assets, laid out by scripts/assemble-assets
+#   <out>/migrations/  the D1 migrations this Worker expects
+#   scripts/build-bundle <out-dir>
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+fail() { echo "build-bundle: FAIL: $1" >&2; exit 1; }
+[ $# -eq 1 ] || fail "usage: scripts/build-bundle <out-dir>"
+out=$1
+case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+
+wb=$(scripts/worker-build) || fail "worker-build unavailable"
+rm -rf "$out"
+mkdir -p "$out"
+# Same build as scripts/check's size budget: the release profile, with wasm-opt.
+(cd crates/worker && "$wb" --release --out-dir "$out/worker") >&2 || fail "worker-build failed"
+scripts/admin-build >&2 || fail "admin build (above)"
+scripts/assemble-assets "$out/assets" target/admin || fail "assembling assets (above)"
+cp -R migrations "$out/migrations"

@@ -212,3 +212,23 @@ test("ago: minutes, hours, days, then the date", () => {
   assert.equal(lists.ago(now - 2 * 86400000, now), "2 days ago");
   assert.match(lists.ago(now - 90 * 86400000, now), /2026/);
 });
+
+test("a boot prefetch serves the list's first request once, and only when it asked the same", async () => {
+  const api = fakeApi((q) => page([post(q.status === "draft" ? 7 : 1, q.status ?? "published")]));
+  lists.prefetch(api, "post", "?status=draft");
+  assert.equal(api.queries.length, 1, "the prefetch asks at once");
+  const el = mount(api, { url: "/admin/?status=draft" });
+  await wait();
+  assert.equal(api.queries.length, 1, "the list used the prefetched page");
+  assert.deepEqual(titles(el), ["Post 7"]);
+  // Used once: the next load asks again.
+  button(el, "admin.status.draft").click();
+  await wait();
+  assert.equal(api.queries.length, 2);
+  // A prefetch for another filter is not used for this one.
+  lists.prefetch(api, "post", "");
+  mount(api, { url: "/admin/?status=draft" });
+  await wait();
+  assert.equal(api.queries.length, 4);
+  assert.equal(api.queries[3].status, "draft");
+});

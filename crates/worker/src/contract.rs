@@ -1,5 +1,6 @@
 //! Test builds only (feature `contract-tests`): runs the store contract suite against the
 //! real D1 binding, so `D1Store` is held to the same cases as the in-memory store.
+//! `GET /__instance` echoes the harness's per-start token.
 //! `GET /__contract` lists case names; `POST /__contract/<name>` empties the database and
 //! runs one case. Cases share one database, so the caller runs them one at a time.
 //! D1-only cases (`d1::selftest`) are listed and run the same way. `POST /__seed` empties the
@@ -21,6 +22,10 @@ const SEED: &str = "/__seed";
 const OPTION: &str = "/__option";
 const MODERATE: &str = "/__moderate";
 const PREVIEW: &str = "/__preview";
+const INSTANCE: &str = "/__instance";
+/// Per-start token the test harness passes with `--var`, so it can tell its own Worker from
+/// another test file's that answers on the same port (tools/worker-test/harness.mjs).
+const INSTANCE_VAR: &str = "PLUMBLOG_TEST_INSTANCE";
 /// The preview page runs no script even if opened outside the editor's frame, and only the
 /// admin may frame it. `allow-same-origin` keeps the site's origin so the theme's fonts pass
 /// their CORS check; scripts stay off (`sandbox` without `allow-scripts`, and `script-src`).
@@ -35,6 +40,18 @@ const ENABLE_VAR: &str = "PLUMBLOG_CONTRACT_TESTS";
 /// Whether this Worker may serve test routes (`/__contract`, `/__webhooks/...`).
 pub fn enabled(env: &Env) -> bool {
     env.var(ENABLE_VAR).map(|v| v.to_string()).ok().as_deref() == Some("wipe-db")
+}
+
+/// `GET /__instance`: the harness's per-start token, so it can tell its own Worker.
+pub fn instance(req: &Request, env: &Env) -> Option<Result<Response>> {
+    if !enabled(env) || req.path() != INSTANCE || req.method().as_ref() != "GET" {
+        return None;
+    }
+    let token = env
+        .var(INSTANCE_VAR)
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    Some(Response::ok(token))
 }
 
 pub async fn handle(req: &Request, env: &Env) -> Result<Option<Response>> {
