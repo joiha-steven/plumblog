@@ -78,7 +78,9 @@ async fn challenge_hash(ctx: &Ctx, raw: &[u8]) -> Result<String> {
 
 /// Prefix of a gated challenge's hashed input: a sign-in challenge whose options request
 /// passed the site-wide cap with a Turnstile token is stored under this hash instead, so the
-/// row itself records it (no schema change) and nothing else can hash to it.
+/// row itself records it (no schema change). A plain challenge cannot be taken as gated
+/// (that needs a SHA-256 preimage); a client sending `GATED || raw` could take a gated row
+/// as plain, which gains nothing: the row stays login-only and single use.
 const GATED: &[u8] = b"plumblog gated sign-in challenge\0";
 
 async fn gated_hash(ctx: &Ctx, raw: &[u8]) -> Result<String> {
