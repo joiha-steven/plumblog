@@ -10,6 +10,7 @@ mod kit;
 mod library;
 mod listing;
 mod posts;
+mod reader;
 mod signin;
 mod site;
 mod user_writes;
@@ -99,6 +100,12 @@ cases! {
     listing::post_paging_series_asc,
     listing::post_filters,
     listing::limits_cap_at_max_page,
+    reader::reader_posts_published_only,
+    reader::reader_posts_offset_and_count,
+    reader::reader_tags_and_tag_filter,
+    reader::reader_years_at_the_edges,
+    reader::reader_translations_published_only,
+    reader::reader_neighbours_by_date,
     find::search_vietnamese,
     find::search_scope_and_order,
     find::search_hostile_input,

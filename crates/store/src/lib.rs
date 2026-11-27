@@ -18,6 +18,7 @@ mod log;
 mod media;
 pub mod memory;
 mod posts;
+mod reader;
 mod redirects;
 pub mod search;
 mod settings;
@@ -43,6 +44,10 @@ pub use media::{Media, MediaQuery, MediaStore, NewMedia};
 pub use posts::{
     NewRevision, Post, PostCursor, PostKind, PostOrder, PostQuery, PostStatus, PostStore,
     PostSummary, Revision, SavePost,
+};
+pub use reader::{
+    READER_MAX_OFFSET, ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage, ReaderPost,
+    ReaderRow, ReaderStore, ReaderTag, year_bounds, year_of,
 };
 pub use redirects::{Redirect, RedirectStore};
 pub use settings::{OptionOwner, PluginState, SettingsStore};
@@ -74,6 +79,7 @@ pub trait Store:
     + MediaStore
     + TaxonomyStore
     + PostStore
+    + ReaderStore
     + RedirectStore
     + CommentStore
     + SettingsStore
@@ -97,6 +103,7 @@ impl<T> Store for T where
         + MediaStore
         + TaxonomyStore
         + PostStore
+        + ReaderStore
         + RedirectStore
         + CommentStore
         + SettingsStore

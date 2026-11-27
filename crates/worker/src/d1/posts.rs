@@ -20,7 +20,7 @@ pub(super) const POST_COLS: &str = "p.id, p.kind, p.translation_group, p.lang, p
      (SELECT group_concat(tag_id) FROM post_tags WHERE post_id = p.id)";
 
 /// [`POST_COLS`] without the bodies: list pages never load them.
-const SUMMARY_COLS: &str = "p.id, p.kind, p.translation_group, p.lang, p.slug, p.status, \
+pub(super) const SUMMARY_COLS: &str = "p.id, p.kind, p.translation_group, p.lang, p.slug, p.status, \
      p.trashed_from, p.published_at, p.author_id, p.title, \
      p.excerpt, p.word_count, p.reading_minutes, p.pinned, p.comments_enabled, \
      p.cover_media_id, p.series_id, p.series_position, p.created_at, p.updated_at, p.version, \
@@ -79,7 +79,7 @@ pub(super) fn read_post(r: &mut Row) -> Result<Post> {
     })
 }
 
-fn read_summary(r: &mut Row) -> Result<PostSummary> {
+pub(super) fn read_summary(r: &mut Row) -> Result<PostSummary> {
     Ok(PostSummary {
         id: PostId(r.int()?),
         kind: r.code("post kind", PostKind::parse)?,
