@@ -2,24 +2,28 @@
 //! kept in the Cache API under a key that includes the site content version.
 
 mod cache;
+mod db;
 mod docs;
 mod routes;
 mod search;
 pub mod source;
 
+use crate::d1::D1Store;
 use crate::keys;
+use db::{Db, ExtSource};
 use plumblog_i18n::{Catalog, Key};
 use plumblog_model::VERSION;
-use plumblog_render::{Body, Link, PageInfo, Post, Site, Theme, ThemeError};
+use plumblog_render::{Body, Link, PageInfo, Plugin, Post, Site, Theme, ThemeError};
 use routes::Route;
-use search::{EnvSearch, SearchSource};
+use search::SearchSource;
 use source::{Filter, ReaderSource, SampleSource, Settings, StoredPost};
-use std::collections::BTreeMap;
 use std::sync::OnceLock;
-use worker::{Context, Env, Headers, Request, Response, Result, console_error, console_warn};
+use worker::{Context, Env, Headers, Request, Response, Result, console_error};
 
 /// Where the default theme's `assets/` folder is served (Workers static assets).
 pub const THEME_ASSETS_URL: &str = "/theme/minimal";
+/// Where bundled plugins' `assets/` folders are served: `/plugin/<name>/...`.
+pub const PLUGIN_ASSETS_URL: &str = "/plugin";
 
 /// Posts suggested on the 404 page.
 const NOT_FOUND_SUGGESTIONS: usize = 5;
@@ -35,20 +39,52 @@ pub enum Outcome {
     Redirect(String),
 }
 
-/// Theme loaded once per isolate: parsing theme.toml, locales and templates costs more than
-/// rendering a page, so it must not happen per request.
+/// Theme and bundled plugins loaded once per isolate: parsing manifests, locales and
+/// templates costs more than rendering a page, so it must not happen per request. A plugin
+/// that fails to load is left out and logged; the site keeps working.
 fn theme() -> std::result::Result<&'static Theme, &'static ThemeError> {
     static THEME: OnceLock<std::result::Result<Theme, ThemeError>> = OnceLock::new();
     THEME
         .get_or_init(|| {
-            Theme::load(
-                &source::THEME_FILES,
-                None,
-                &BTreeMap::new(),
-                THEME_ASSETS_URL,
-            )
+            let plugins = source::PLUGIN_FILES
+                .iter()
+                .filter_map(|(name, files)| {
+                    let url = format!("{PLUGIN_ASSETS_URL}/{name}");
+                    Plugin::load(name, files, &url)
+                        .map_err(|e| warn(&format!("plugin.broken name={name} detail={e}")))
+                        .ok()
+                })
+                .collect();
+            Theme::load(&source::THEME_FILES, None, plugins, THEME_ASSETS_URL)
         })
         .as_ref()
+}
+
+/// The theme with this site's stored options and enabled plugins. Reading them may fail
+/// (D1 hiccup): the page then uses defaults rather than failing, and the log says why.
+async fn configured(ext: &impl ExtSource) -> std::result::Result<Theme, String> {
+    let base = theme().map_err(|e| format!("theme: {e}"))?;
+    let stored = ext.theme_options(base.name()).await.unwrap_or_else(|e| {
+        warn(&format!(
+            "option.read_failed owner=theme:{} detail={e}",
+            base.name()
+        ));
+        Vec::new()
+    });
+    // No bundled plugin: no query.
+    let plugins = if base.plugin_names().is_empty() {
+        Vec::new()
+    } else {
+        ext.enabled_plugins().await.unwrap_or_else(|e| {
+            warn(&format!("plugin.read_failed detail={e}"));
+            Vec::new()
+        })
+    };
+    let (theme, problems) = base.with_options(&stored, &plugins);
+    for p in problems {
+        warn(&p);
+    }
+    Ok(theme)
 }
 
 /// Serves a reader page, from cache when possible.
@@ -57,6 +93,11 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
     let path = url.path().to_owned();
     let origin = url.origin().ascii_serialization();
     let src = SampleSource::get();
+    let d1 = match env.d1("DB") {
+        Ok(d) => D1Store::new(d),
+        Err(e) => return Ok(failure(&format!("D1 binding DB: {e}"))),
+    };
+    let db = Db(&d1);
     // Search results depend on the query string and on the store, neither of which is in
     // the cache key or the ETag, so they skip both.
     if path == routes::SEARCH {
@@ -65,10 +106,11 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
             .find(|(k, _)| k == "q")
             .map(|(_, v)| v.into_owned())
             .unwrap_or_default();
-        return live(src, &EnvSearch(env), &path, &query).await;
+        return live(src, &db, &path, &query).await;
     }
 
-    let version = match src.content_version().await {
+    // From the store: option and plugin changes bump it too, so they reach cached pages.
+    let version = match db.content_version().await {
         Ok(v) => v,
         Err(e) => return Ok(failure(&format!("content version: {e}"))),
     };
@@ -87,7 +129,7 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
     }
 
     let started = worker::Date::now().as_millis();
-    let outcome = match render(src, &NoSearch, &path, "").await {
+    let outcome = match render(src, &db, &db, &path, "").await {
         Ok(o) => o,
         Err(detail) => return Ok(failure(&detail)),
     };
@@ -135,13 +177,13 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
 }
 
 /// A page rendered for this request only: no `ETag`, no Cache API, never stored by browsers.
-async fn live(
+async fn live<S: ExtSource + SearchSource>(
     src: &impl ReaderSource,
-    search: &impl SearchSource,
+    db: &S,
     path: &str,
     query: &str,
 ) -> Result<Response> {
-    let outcome = match render(src, search, path, query).await {
+    let outcome = match render(src, db, db, path, query).await {
         Ok(o) => o,
         Err(detail) => return Ok(failure(&detail)),
     };
@@ -158,20 +200,6 @@ async fn live(
     h.set("cache-control", "no-store")?;
     h.set("x-plumblog-cache", cache::Lookup::Bypass.label())?;
     Ok(Response::ok(body)?.with_status(status).with_headers(h))
-}
-
-/// For cached pages, which never search.
-struct NoSearch;
-
-impl SearchSource for NoSearch {
-    fn search(
-        &self,
-        _: &str,
-        _: &str,
-        _: u32,
-    ) -> impl Future<Output = std::result::Result<Vec<plumblog_store::PostSummary>, String>> {
-        std::future::ready(Err("search outside the search route".to_owned()))
-    }
 }
 
 /// Plain-text 500 from the core locale, for when the theme or the data cannot produce a page.
@@ -201,14 +229,16 @@ fn core_text(lang: &str, key: Key) -> String {
 /// Takes no request origin on purpose: the Host header is the client's to choose, so it must
 /// never reach a public URL (canonical, feed and entry ids, sitemap).
 ///
-/// `query` is the `q` parameter, read only by the search route; `search` serves it.
+/// `ext` gives the theme its stored options; `query` is the `q` parameter, read only by the
+/// search route, which `search` serves.
 pub async fn render(
     src: &impl ReaderSource,
+    ext: &impl ExtSource,
     search: &impl SearchSource,
     path: &str,
     query: &str,
 ) -> std::result::Result<Outcome, String> {
-    let theme = theme().map_err(|e| format!("theme: {e}"))?;
+    let theme = configured(ext).await?;
     let settings = src.settings().await.map_err(err)?;
     let origin = public_origin(&settings);
     let p = Pages {
@@ -279,7 +309,7 @@ fn public_origin(settings: &Settings) -> &str {
 /// A Worker log warning. `console_warn!` only exists in wasm, so host tests print to stderr.
 fn warn(line: &str) {
     #[cfg(target_arch = "wasm32")]
-    console_warn!("{line}");
+    worker::console_warn!("{line}");
     #[cfg(not(target_arch = "wasm32"))]
     eprintln!("{line}");
 }
@@ -291,7 +321,7 @@ fn err(e: impl std::fmt::Display) -> String {
 /// One request's rendering context. Each page method returns `None` for "no such page".
 struct Pages<'a, S> {
     src: &'a S,
-    theme: &'a Theme,
+    theme: Theme,
     /// Site and page facts in the default language; a post in another language swaps both.
     site: Site,
     info: PageInfo,
@@ -323,11 +353,14 @@ impl<S: ReaderSource> Pages<'_, S> {
         let (site, info) = other
             .as_ref()
             .map_or((&self.site, &self.info), |(s, i)| (s, i));
-        let (html, missing) = self.theme.render_reporting(site, info, body).map_err(err)?;
-        for (lang, key) in missing {
-            console_warn!("i18n.missing_key lang={lang} key={key}");
+        let report = self.theme.render_reporting(site, info, body).map_err(err)?;
+        for (lang, key) in report.missing {
+            warn(&format!("i18n.missing_key lang={lang} key={key}"));
         }
-        Ok(html)
+        for p in report.problems {
+            warn(&p);
+        }
+        Ok(report.html)
     }
 
     async fn home(&self, n: usize) -> PageResult {
@@ -494,6 +527,8 @@ fn to_render(p: &StoredPost) -> Post {
 
 #[cfg(test)]
 mod docs_tests;
+#[cfg(test)]
+mod options_tests;
 #[cfg(test)]
 mod search_tests;
 #[cfg(any(test, feature = "contract-tests"))]

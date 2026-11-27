@@ -2,14 +2,17 @@
 
 use crate::data::{Body, EntryData, LinkData, PageInfo, Post, PostData, Site, civil, cut_words};
 use crate::keys;
+use crate::options::{self, FieldType, Group, OptionDecl, Owner, Schema};
+use crate::plugin::Plugin;
 use crate::{PageKind, SLOTS, css, seo};
 use minijinja::value::{Kwargs, Serde, Value};
 use minijinja::{Environment, State};
 use plumblog_i18n::{Catalog, Key, MissingKeys};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use serde_json::Value as Json;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{self, Write as _};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Read-only access to one theme folder (paths relative to it, `/`-separated).
 pub trait ThemeFiles {
@@ -36,7 +39,7 @@ pub struct ThemeError {
 }
 
 impl ThemeError {
-    fn new(detail: impl Into<String>) -> Self {
+    pub(crate) fn new(detail: impl Into<String>) -> Self {
         Self {
             detail: detail.into(),
         }
@@ -65,6 +68,12 @@ struct Manifest {
     fonts: Fonts,
     #[serde(default)]
     js: Js,
+    /// Plugin slots this theme's templates fill with `slot()`; a plugin partial for any
+    /// other slot is not shown.
+    #[serde(default)]
+    slots: Vec<String>,
+    #[serde(default)]
+    groups: BTreeMap<String, Group>,
     #[serde(default)]
     options: BTreeMap<String, OptionDecl>,
     colors: Colors,
@@ -85,56 +94,69 @@ struct Js {
     files: Vec<String>,
 }
 
-/// The admin's fixed field types (docs/ARCHITECTURE.md, Plugins and options). Parsing them here
-/// means a theme with an unknown type fails to load instead of rendering half its options.
-#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "snake_case")]
-enum FieldType {
-    ShortText,
-    LongText,
-    Number,
-    Toggle,
-    Choice,
-    Color,
-    Image,
-    List,
-}
-
-#[derive(Deserialize)]
-struct OptionDecl {
-    #[serde(rename = "type")]
-    kind: FieldType,
-    default: toml::Value,
-    /// For `color`: the token it overrides.
-    token: Option<String>,
-    #[serde(default)]
-    choices: Vec<Choice>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    value: String,
-    css: Option<String>,
-}
-
 #[derive(Deserialize, Serialize, Clone)]
 struct Colors {
     light: BTreeMap<String, String>,
     dark: BTreeMap<String, String>,
 }
 
-/// A loaded theme. Built once per Worker isolate and reused, so per-request work is only the
-/// template render.
-pub struct Theme {
+/// Everything loaded once per Worker isolate: parsing and compiling cost far more than a
+/// render, so per-request work is [`Theme::with_options`] (cheap) and the template render.
+struct Shared {
     name: String,
     env: Environment<'static>,
-    css: String,
+    schema: Schema,
+    slots: Vec<String>,
     colors: Colors,
-    options: BTreeMap<String, toml::Value>,
+    /// Minified `faces.css` (font URLs filled in) and `style.css`.
+    faces_css: String,
+    style_css: String,
+    /// Minified stylesheet of each style choice, by path.
+    styles: BTreeMap<String, String>,
     preload: Vec<String>,
     preload_by_lang: BTreeMap<String, Vec<String>>,
     js: Vec<String>,
     catalogs: Arc<Catalogs>,
+    plugins: Vec<PluginInfo>,
+}
+
+/// What rendering needs of a loaded plugin (its templates and locales live in `env` and the
+/// `t` function).
+struct PluginInfo {
+    name: String,
+    schema: Schema,
+    slots: Vec<String>,
+    css: String,
+    js: Vec<String>,
+}
+
+/// One site's option values applied to the theme.
+#[derive(Clone)]
+struct Look {
+    css: String,
+    colors: Colors,
+    /// What templates read as `theme.options` (see `options::template_values`).
+    options: BTreeMap<String, Json>,
+    /// Option values as stored or defaulted, for Rust lookups.
+    values: BTreeMap<String, Json>,
+    js: Vec<String>,
+    plugins: Vec<ActivePlugin>,
+}
+
+/// An enabled plugin as its partials see it (`plugin.name`, `plugin.options`).
+#[derive(Clone, Serialize)]
+struct ActivePlugin {
+    name: String,
+    options: BTreeMap<String, Json>,
+    slots: Vec<String>,
+}
+
+/// A loaded theme with one set of option values. [`Theme::load`] applies the defaults;
+/// [`Theme::with_options`] gives a copy with a site's stored values.
+#[derive(Clone)]
+pub struct Theme {
+    shared: Arc<Shared>,
+    look: Look,
 }
 
 /// Keys one render asked for that exist nowhere, passed to the template `t` function through
@@ -147,7 +169,28 @@ impl minijinja::value::Object for RenderMissing {}
 /// Context variable holding the render's [`RenderMissing`].
 const MISSING_VAR: &str = "__i18n_missing";
 
-struct Catalogs {
+/// Plugin partials that failed during one render; the page is served without them.
+#[derive(Debug, Default)]
+struct RenderProblems(Mutex<Vec<String>>);
+
+impl minijinja::value::Object for RenderProblems {}
+
+impl RenderProblems {
+    fn push(&self, p: String) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(p);
+    }
+}
+
+const PROBLEMS_VAR: &str = "__render_problems";
+/// The enabled plugins, for `slot()`.
+const PLUGINS_VAR: &str = "__plugins";
+/// Set while a plugin partial renders, so `t()` reads that plugin's locales.
+const PLUGIN_VAR: &str = "__plugin";
+
+pub(crate) struct Catalogs {
     by_lang: HashMap<String, Catalog>,
     english: Catalog,
 }
@@ -162,16 +205,18 @@ const FALLBACK_LANG: &str = "en";
 
 impl Theme {
     /// Loads `theme`, taking any template or locale key it lacks from `default` (the default
-    /// theme; `None` when loading the default theme itself). `chosen` holds the owner's option
-    /// values; anything missing uses the declared default. `assets_url` is where the theme's
-    /// `assets/` folder is served from, without a trailing slash.
+    /// theme; `None` when loading the default theme itself), with every option at its
+    /// default. `plugins` are the bundled plugins that loaded; none is enabled until
+    /// [`Theme::with_options`] says so. `assets_url` is where the theme's `assets/` folder
+    /// is served from, without a trailing slash.
     ///
     /// # Errors
-    /// A missing or invalid `theme.toml`, locale file, stylesheet or template.
+    /// A missing or invalid `theme.toml`, option declaration, locale file, stylesheet or
+    /// template.
     pub fn load(
         theme: &dyn ThemeFiles,
         default: Option<&dyn ThemeFiles>,
-        chosen: &BTreeMap<String, toml::Value>,
+        plugins: Vec<Plugin>,
         assets_url: &str,
     ) -> Result<Self, ThemeError> {
         let manifest_src = theme
@@ -184,15 +229,32 @@ impl Theme {
                 "theme.toml: [colors.light] and [colors.dark] must define the same keys",
             ));
         }
-        let options = resolve_options(&manifest, chosen)?;
-        let mut colors = manifest.colors.clone();
-        apply_color_options(&manifest, &options, &mut colors)?;
+        for slot in &manifest.slots {
+            if !SLOTS.contains(&slot.as_str()) {
+                return Err(ThemeError::new(format!(
+                    "theme.toml: unknown slot {slot:?}; known: {}",
+                    SLOTS.join(", ")
+                )));
+            }
+        }
+        let strings = locale_strings(theme, default)?;
+        let english = strings.get(FALLBACK_LANG).cloned().unwrap_or_default();
+        let tokens: BTreeSet<String> = manifest.colors.light.keys().cloned().collect();
+        let schema = Schema::check(
+            "theme.toml",
+            manifest.options,
+            &manifest.groups,
+            &english,
+            Owner::Theme(&tokens),
+        )
+        .map_err(ThemeError::new)?;
 
         let asset = |path: &str| -> String {
             path.strip_prefix("assets/")
                 .map_or_else(|| path.to_owned(), |p| format!("{assets_url}/{p}"))
         };
-        let css = build_css(theme, &manifest, &options, &colors, &asset)?;
+        let (faces_css, style_css, styles) =
+            load_css(theme, manifest.fonts.faces.as_deref(), &schema, &asset)?;
 
         let mut env = Environment::new();
         env.set_formatter(html_formatter);
@@ -200,61 +262,40 @@ impl Theme {
             add_templates(&mut env, fallback, |p| theme.read(p).is_none())?;
         }
         add_templates(&mut env, theme, |_| true)?;
-
-        let catalogs = Arc::new(load_catalogs(theme, default)?);
-        let for_t = Arc::clone(&catalogs);
-        env.add_function(
-            "t",
-            move |state: &State, key: &str, kwargs: Kwargs| -> Result<String, minijinja::Error> {
-                let lang = page_lang(state);
-                let args = kwargs_strings(&kwargs)?;
-                let args: Vec<(&str, String)> =
-                    args.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-                let fallback = MissingKeys::default();
-                let missing = state.lookup(MISSING_VAR);
-                let missing = missing
-                    .as_ref()
-                    .and_then(|v| v.downcast_object_ref::<RenderMissing>())
-                    .map_or(&fallback, |m| &m.0);
-                Ok(for_t.get(&lang).t_template(key, &args, missing))
-            },
-        );
-        // Templates link theme files that only some pages need (the code highlighter) by name.
-        let assets_base = assets_url.to_owned();
-        env.add_function(
-            "asset",
-            move |path: &str| -> Result<String, minijinja::Error> {
-                if path.is_empty()
-                    || path.starts_with('/')
-                    || path.contains("..")
-                    || path.contains("//")
-                {
-                    return Err(minijinja::Error::new(
-                        minijinja::ErrorKind::InvalidOperation,
-                        format!("asset({path:?}): give a path inside the theme's assets/ folder"),
-                    ));
-                }
-                Ok(format!("{assets_base}/{path}"))
-            },
-        );
-        env.add_function("slot", |name: &str| -> Result<Value, minijinja::Error> {
-            if SLOTS.contains(&name) {
-                // Plugins land with issue #15; until then every slot is empty.
-                Ok(Value::from_safe_string(String::new()))
-            } else {
-                Err(minijinja::Error::new(
-                    minijinja::ErrorKind::InvalidOperation,
-                    format!("unknown slot {name:?}; known: {}", SLOTS.join(", ")),
-                ))
+        let mut plugin_catalogs = HashMap::new();
+        let mut infos = Vec::new();
+        for p in plugins {
+            for (slot, src) in &p.partials {
+                env.add_template_owned(p.template_name(slot), src.clone())?;
             }
-        });
+            infos.push(PluginInfo {
+                slots: p.partials.iter().map(|(s, _)| s.clone()).collect(),
+                name: p.name.clone(),
+                schema: p.schema,
+                css: p.css,
+                js: p.js,
+            });
+            plugin_catalogs.insert(p.name, p.catalogs);
+        }
 
-        Ok(Self {
+        let catalogs = Arc::new(catalogs(strings));
+        add_functions(
+            &mut env,
+            Arc::clone(&catalogs),
+            Arc::new(plugin_catalogs),
+            assets_url,
+            manifest.slots.clone(),
+        );
+
+        let shared = Arc::new(Shared {
             name: manifest.name,
             env,
-            css,
-            colors,
-            options,
+            schema,
+            slots: manifest.slots,
+            colors: manifest.colors,
+            faces_css,
+            style_css,
+            styles,
             preload: manifest.fonts.preload.iter().map(|p| asset(p)).collect(),
             preload_by_lang: manifest
                 .fonts
@@ -264,25 +305,58 @@ impl Theme {
                 .collect(),
             js: manifest.js.files.iter().map(|p| asset(p)).collect(),
             catalogs,
-        })
+            plugins: infos,
+        });
+        let (look, _) = look(&shared, &[], &[]);
+        Ok(Self { shared, look })
+    }
+
+    /// This theme with a site's stored option values (`(key, value_json)`, as the store
+    /// keeps them) and enabled plugins (`(name, stored values)`). Never fails: a value that
+    /// does not fit, an unknown plugin or a slot this theme lacks is left out and reported,
+    /// one line each, for the Worker log.
+    #[must_use]
+    pub fn with_options(
+        &self,
+        stored: &[(String, String)],
+        plugins: &[(String, Vec<(String, String)>)],
+    ) -> (Self, Vec<String>) {
+        let (look, problems) = look(&self.shared, stored, plugins);
+        (
+            Self {
+                shared: Arc::clone(&self.shared),
+                look,
+            },
+            problems,
+        )
+    }
+
+    /// Names of the bundled plugins that loaded, for listing and enabling.
+    #[must_use]
+    pub fn plugin_names(&self) -> Vec<&str> {
+        self.shared
+            .plugins
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect()
     }
 
     #[must_use]
     pub fn name(&self) -> &str {
-        &self.name
+        &self.shared.name
     }
 
     /// The inlined stylesheet, for the size budget.
     #[must_use]
     pub fn css(&self) -> &str {
-        &self.css
+        &self.look.css
     }
 
     /// Text for `key` in `lang` (theme locale, then English, then the key itself). Rust keys
     /// are checked against the default theme, which every theme's catalog includes.
     #[must_use]
     pub fn text(&self, lang: &str, key: Key, args: &[(&str, String)]) -> String {
-        self.catalogs.get(lang).t(key, args)
+        self.shared.catalogs.get(lang).t(key, args)
     }
 
     /// Renders one reader page.
@@ -295,12 +369,11 @@ impl Theme {
         page: &PageInfo,
         body: &Body<'_>,
     ) -> Result<String, ThemeError> {
-        self.render_reporting(site, page, body)
-            .map(|(html, _)| html)
+        self.render_reporting(site, page, body).map(|r| r.html)
     }
 
-    /// Like [`Theme::render`], also returning the `(lang, key)` pairs this render asked for
-    /// that exist in no locale, each once, for the Worker to log as `i18n.missing_key`.
+    /// Like [`Theme::render`], also reporting what the Worker should log: locale keys that
+    /// exist nowhere and plugin partials that failed (the page is served without them).
     ///
     /// # Errors
     /// A template error, with template name and line.
@@ -309,11 +382,11 @@ impl Theme {
         site: &Site,
         page: &PageInfo,
         body: &Body<'_>,
-    ) -> Result<(String, Vec<(String, String)>), ThemeError> {
+    ) -> Result<Report, ThemeError> {
         let lang = page.lang.as_str();
         let (kind, description, data) = self.body_data(site, body);
-        let mut preload: Vec<&str> = self.preload.iter().map(String::as_str).collect();
-        if let Some(extra) = self.preload_by_lang.get(lang) {
+        let mut preload: Vec<&str> = self.shared.preload.iter().map(String::as_str).collect();
+        if let Some(extra) = self.shared.preload_by_lang.get(lang) {
             preload.extend(extra.iter().map(String::as_str));
         }
         let list_title = self.list_title(lang, body);
@@ -329,11 +402,11 @@ impl Theme {
                 seo,
             },
             theme: ThemeData {
-                css: &self.css,
-                js: &self.js,
+                css: &self.look.css,
+                js: &self.look.js,
                 preload,
-                colors: &self.colors,
-                options: &self.options,
+                colors: &self.look.colors,
+                options: &self.look.options,
             },
         };
         self.run(kind, ser(&ctx), data)
@@ -423,20 +496,30 @@ impl Theme {
     }
 
     /// Renders `kind`'s template with a fresh missing-key collector for this render only.
-    fn run(
-        &self,
-        kind: PageKind,
-        ctx: Value,
-        data: Value,
-    ) -> Result<(String, Vec<(String, String)>), ThemeError> {
+    fn run(&self, kind: PageKind, ctx: Value, data: Value) -> Result<Report, ThemeError> {
         let missing = Arc::new(RenderMissing::default());
+        let problems = Arc::new(RenderProblems::default());
         let ctx = minijinja::context! {
-            ..minijinja::context! { __i18n_missing => Value::from_dyn_object(Arc::clone(&missing)) },
+            ..minijinja::context! {
+                __i18n_missing => Value::from_dyn_object(Arc::clone(&missing)),
+                __render_problems => Value::from_dyn_object(Arc::clone(&problems)),
+                __plugins => ser(&self.look.plugins),
+            },
             ..ctx,
             ..data
         };
-        let html = self.env.get_template(kind.template())?.render(ctx)?;
-        Ok((html, missing.0.take()))
+        let html = self.shared.env.get_template(kind.template())?.render(ctx)?;
+        let problems = std::mem::take(
+            &mut *problems
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        Ok(Report {
+            html,
+            missing: missing.0.take(),
+            problems,
+        })
     }
 
     /// The visible title of a tag or archive page, for its social and JSON-LD name.
@@ -459,9 +542,10 @@ impl Theme {
     fn entry<'a>(&self, post: &'a Post) -> EntryData<'a> {
         let (year, month, day) = civil(post.published_at);
         let excerpt_words = self
-            .options
+            .look
+            .values
             .get("excerpt_words")
-            .and_then(toml::Value::as_integer)
+            .and_then(Json::as_u64)
             .map_or(55, |n| usize::try_from(n).unwrap_or(0));
         let excerpt = match &post.excerpt {
             Some(e) if !e.trim().is_empty() => e.trim().to_owned(),
@@ -521,7 +605,17 @@ struct ThemeData<'a> {
     js: &'a [String],
     preload: Vec<&'a str>,
     colors: &'a Colors,
-    options: &'a BTreeMap<String, toml::Value>,
+    options: &'a BTreeMap<String, Json>,
+}
+
+/// One render and what the Worker should log about it.
+#[derive(Debug)]
+pub struct Report {
+    pub html: String,
+    /// `(lang, key)` asked for and found in no locale, each once (`i18n.missing_key`).
+    pub missing: Vec<(String, String)>,
+    /// Plugin partials left out of this page, one line each (`plugin.broken ...`).
+    pub problems: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -653,14 +747,51 @@ fn add_templates(
     Ok(())
 }
 
-fn load_catalogs(
+/// Minified `faces.css` (font URLs filled in), `style.css` and each offered style's sheet.
+fn load_css(
     theme: &dyn ThemeFiles,
+    faces: Option<&str>,
+    schema: &Schema,
+    asset: &dyn Fn(&str) -> String,
+) -> Result<(String, String, BTreeMap<String, String>), ThemeError> {
+    let read = |path: &str| {
+        theme
+            .read(path)
+            .ok_or_else(|| ThemeError::new(format!("{path} is missing")))
+    };
+    let faces_css = match faces {
+        Some(faces) => {
+            let dir = faces.rsplit_once('/').map_or("", |(d, _)| d);
+            css::minify(&read(faces)?.replace("{{fonts}}", &asset(dir)))
+        }
+        None => String::new(),
+    };
+    let style_css = css::minify(read("style.css")?);
+    let mut styles = BTreeMap::new();
+    for decl in schema.decls.values() {
+        // Drafts are never chosen (a stored draft falls back), so their files may not
+        // exist yet.
+        for path in decl
+            .choices
+            .iter()
+            .filter(|c| !c.draft)
+            .filter_map(|c| c.css.as_deref())
+        {
+            styles.insert(path.to_owned(), css::minify(read(path)?));
+        }
+    }
+
+    Ok((faces_css, style_css, styles))
+}
+
+/// Every `locales/<lang>.toml` of `files`, flattened, on top of `default`'s (templates that
+/// fall back to the default theme still find their keys).
+pub(crate) fn locale_strings(
+    files: &dyn ThemeFiles,
     default: Option<&dyn ThemeFiles>,
-) -> Result<Catalogs, ThemeError> {
-    // Default theme strings first, the theme's own on top: templates that fall back to the
-    // default theme still find their keys.
+) -> Result<BTreeMap<String, HashMap<String, String>>, ThemeError> {
     let mut merged: BTreeMap<String, HashMap<String, String>> = BTreeMap::new();
-    for files in default.into_iter().chain([theme]) {
+    for files in default.into_iter().chain([files]) {
         for path in files.paths() {
             let Some(lang) = path
                 .strip_prefix("locales/")
@@ -673,6 +804,11 @@ fn load_catalogs(
             merged.entry(lang.to_owned()).or_default().extend(strings);
         }
     }
+    Ok(merged)
+}
+
+/// Catalogs per language, each falling back to English.
+pub(crate) fn catalogs(merged: BTreeMap<String, HashMap<String, String>>) -> Catalogs {
     let english_strings = merged.get(FALLBACK_LANG).cloned().unwrap_or_default();
     let by_lang = merged
         .into_iter()
@@ -682,111 +818,226 @@ fn load_catalogs(
             (lang, catalog)
         })
         .collect();
-    Ok(Catalogs {
+    Catalogs {
         by_lang,
         english: Catalog::new(english_strings, HashMap::new()),
-    })
-}
-
-fn resolve_options(
-    manifest: &Manifest,
-    chosen: &BTreeMap<String, toml::Value>,
-) -> Result<BTreeMap<String, toml::Value>, ThemeError> {
-    let mut out = BTreeMap::new();
-    for (key, decl) in &manifest.options {
-        if decl.kind == FieldType::Choice && decl.choices.is_empty() {
-            return Err(ThemeError::new(format!(
-                "theme.toml: options.{key} is a choice without choices"
-            )));
-        }
-        // A stored value that no longer fits the declaration (type changed, choice removed in a
-        // theme update) falls back to the default instead of breaking the site.
-        let value = chosen
-            .get(key)
-            .filter(|v| v.same_type(&decl.default))
-            .filter(|v| {
-                decl.kind != FieldType::Choice
-                    || decl
-                        .choices
-                        .iter()
-                        .any(|c| v.as_str() == Some(c.value.as_str()))
-            })
-            .unwrap_or(&decl.default);
-        out.insert(key.clone(), value.clone());
     }
-    Ok(out)
 }
 
-fn apply_color_options(
-    manifest: &Manifest,
-    options: &BTreeMap<String, toml::Value>,
-    colors: &mut Colors,
-) -> Result<(), ThemeError> {
-    for (key, decl) in &manifest.options {
-        if decl.kind != FieldType::Color {
+/// `t`, `asset` and `slot`, the functions every template may call.
+fn add_functions(
+    env: &mut Environment<'static>,
+    theme_catalogs: Arc<Catalogs>,
+    plugin_catalogs: Arc<HashMap<String, Catalogs>>,
+    assets_url: &str,
+    slots: Vec<String>,
+) {
+    env.add_function(
+        "t",
+        move |state: &State, key: &str, kwargs: Kwargs| -> Result<String, minijinja::Error> {
+            let lang = page_lang(state);
+            let args = kwargs_strings(&kwargs)?;
+            let args: Vec<(&str, String)> =
+                args.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+            let fallback = MissingKeys::default();
+            let missing = state.lookup(MISSING_VAR);
+            let missing = missing
+                .as_ref()
+                .and_then(|v| v.downcast_object_ref::<RenderMissing>())
+                .map_or(&fallback, |m| &m.0);
+            // Inside a plugin partial, text comes from that plugin's own locales.
+            let plugin = state.lookup(PLUGIN_VAR);
+            let catalogs = plugin
+                .as_ref()
+                .and_then(Value::as_str)
+                .and_then(|name| plugin_catalogs.get(name))
+                .unwrap_or(&theme_catalogs);
+            Ok(catalogs.get(&lang).t_template(key, &args, missing))
+        },
+    );
+    // Templates link theme files that only some pages need (the code highlighter) by name.
+    let assets_base = assets_url.to_owned();
+    env.add_function(
+        "asset",
+        move |path: &str| -> Result<String, minijinja::Error> {
+            if path.is_empty()
+                || path.starts_with('/')
+                || path.contains("..")
+                || path.contains("//")
+            {
+                return Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    format!("asset({path:?}): give a path inside the theme's assets/ folder"),
+                ));
+            }
+            Ok(format!("{assets_base}/{path}"))
+        },
+    );
+    env.add_function(
+        "slot",
+        move |state: &State, name: &str| -> Result<Value, minijinja::Error> {
+            if !slots.iter().any(|s| s == name) {
+                let known = if SLOTS.contains(&name) {
+                    "add it to `slots` in theme.toml"
+                } else {
+                    "unknown slot"
+                };
+                return Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    format!("slot({name:?}): {known}; declared: {}", slots.join(", ")),
+                ));
+            }
+            Ok(Value::from_safe_string(fill_slot(state, name)))
+        },
+    );
+}
+
+/// Every enabled plugin's partial for `slot`, in plugin-name order. A partial that fails is
+/// left out and reported; the page still renders.
+fn fill_slot(state: &State, slot: &str) -> String {
+    let mut out = String::new();
+    let Some(plugins) = state.lookup(PLUGINS_VAR) else {
+        return out;
+    };
+    let problems = state.lookup(PROBLEMS_VAR);
+    let report = |p: String| {
+        if let Some(r) = problems
+            .as_ref()
+            .and_then(|v| v.downcast_object_ref::<RenderProblems>())
+        {
+            r.push(p);
+        }
+    };
+    let Ok(iter) = plugins.try_iter() else {
+        return out;
+    };
+    for plugin in iter {
+        let name = plugin
+            .get_attr("name")
+            .ok()
+            .and_then(|n| n.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let has_slot = plugin
+            .get_attr("slots")
+            .ok()
+            .and_then(|s| s.try_iter().ok())
+            .is_some_and(|mut s| s.any(|v| v.as_str() == Some(slot)));
+        if !has_slot {
             continue;
         }
-        let token = decl.token.as_deref().unwrap_or(key);
-        let value = &options[key];
-        for (mode, map) in [("light", &mut colors.light), ("dark", &mut colors.dark)] {
-            let Some(c) = value.get(mode).and_then(toml::Value::as_str) else {
-                return Err(ThemeError::new(format!(
-                    "theme.toml: options.{key} needs a {mode} color"
-                )));
-            };
-            if !map.contains_key(token) {
-                return Err(ThemeError::new(format!(
-                    "theme.toml: options.{key} overrides unknown color token {token:?}"
-                )));
-            }
-            map.insert(token.to_owned(), c.to_owned());
+        let template = format!("@plugin/{name}/{slot}.html");
+        let rendered = state.env().get_template(&template).and_then(|t| {
+            t.render(minijinja::context! {
+                site => state.lookup("site"),
+                page => state.lookup("page"),
+                plugin => plugin.clone(),
+                __plugin => name.clone(),
+                __i18n_missing => state.lookup(MISSING_VAR),
+            })
+        });
+        match rendered {
+            Ok(html) => out.push_str(&html),
+            Err(e) => report(format!(
+                "plugin.broken name={name} slot={slot} detail={e:#}"
+            )),
         }
     }
-    Ok(())
+    out
 }
 
-fn build_css(
-    files: &dyn ThemeFiles,
-    manifest: &Manifest,
-    options: &BTreeMap<String, toml::Value>,
-    colors: &Colors,
-    asset: &dyn Fn(&str) -> String,
-) -> Result<String, ThemeError> {
-    let read = |path: &str| {
-        files
-            .read(path)
-            .ok_or_else(|| ThemeError::new(format!("{path} is missing")))
-    };
-    let mut out = String::new();
-    if let Some(faces) = &manifest.fonts.faces {
-        let dir = faces.rsplit_once('/').map_or("", |(d, _)| d);
-        out.push_str(&read(faces)?.replace("{{fonts}}", &asset(dir)));
-        out.push('\n');
+/// Applies stored values: options, color tokens, the chosen style, enabled plugins.
+fn look(
+    shared: &Shared,
+    stored: &[(String, String)],
+    plugins: &[(String, Vec<(String, String)>)],
+) -> (Look, Vec<String>) {
+    let owner = format!("theme:{}", shared.name);
+    let (values, mut problems) = shared.schema.resolve(&owner, stored);
+
+    let mut colors = shared.colors.clone();
+    let mut styles = Vec::new();
+    for (key, decl) in &shared.schema.decls {
+        match decl.kind {
+            FieldType::Color => {
+                let token = decl.token.as_deref().unwrap_or(key);
+                for (mode, map) in [("light", &mut colors.light), ("dark", &mut colors.dark)] {
+                    if let Some(c) = values[key].get(mode).and_then(Json::as_str) {
+                        map.insert(token.to_owned(), c.to_owned());
+                    }
+                }
+            }
+            FieldType::Choice => {
+                let picked = values[key].as_str().unwrap_or_default();
+                if let Some(path) = decl
+                    .choices
+                    .iter()
+                    .find(|c| c.value == picked)
+                    .and_then(|c| c.css.as_deref())
+                {
+                    styles.push(path);
+                }
+            }
+            _ => {}
+        }
     }
-    // One block of tokens; `light-dark()` lets `color-scheme` switch the palette
-    // (docs/ARCHITECTURE.md, renderer contract).
-    out.push_str(":root{");
+
+    let mut active = Vec::new();
+    let mut plugin_css = String::new();
+    let mut js = shared.js.clone();
+    for (name, stored) in plugins {
+        let Some(p) = shared.plugins.iter().find(|p| &p.name == name) else {
+            problems.push(format!(
+                "plugin.unknown name={name}: enabled but not bundled"
+            ));
+            continue;
+        };
+        for slot in &p.slots {
+            if !shared.slots.contains(slot) {
+                problems.push(format!(
+                    "plugin.slot_missing name={name} slot={slot}: theme {} has no such slot",
+                    shared.name
+                ));
+            }
+        }
+        let (values, more) = p.schema.resolve(&format!("plugin:{name}"), stored);
+        problems.extend(more);
+        active.push(ActivePlugin {
+            name: name.clone(),
+            options: options::template_values(&p.schema, &values),
+            slots: p.slots.clone(),
+        });
+        plugin_css.push_str(&p.css);
+        js.extend(p.js.iter().cloned());
+    }
+    // Plugin-name order, whatever order the store listed them in.
+    active.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // Same order as ever: fonts, one block of tokens (`light-dark()` lets `color-scheme`
+    // switch the palette; docs/ARCHITECTURE.md, renderer contract), the theme, its style,
+    // then plugins.
+    let mut css = shared.faces_css.clone();
+    css.push_str(":root{");
     for (k, light) in &colors.light {
         let dark = &colors.dark[k];
         // Writing to a String cannot fail.
-        let _ = write!(out, "--c-{k}:light-dark({light},{dark});");
+        let _ = write!(css, "--c-{k}:light-dark({light},{dark});");
     }
-    out.push_str("}\n");
-    out.push_str(read("style.css")?);
-    for (key, decl) in &manifest.options {
-        if decl.kind != FieldType::Choice {
-            continue;
-        }
-        let picked = options[key].as_str().unwrap_or_default();
-        if let Some(path) = decl
-            .choices
-            .iter()
-            .find(|c| c.value == picked)
-            .and_then(|c| c.css.as_deref())
-        {
-            out.push('\n');
-            out.push_str(read(path)?);
-        }
+    css.push('}');
+    css.push_str(&shared.style_css);
+    for path in styles {
+        css.push_str(&shared.styles[path]);
     }
-    Ok(css::minify(&out))
+    css.push_str(&plugin_css);
+
+    (
+        Look {
+            css,
+            colors,
+            options: options::template_values(&shared.schema, &values),
+            values,
+            js,
+            plugins: active,
+        },
+        problems,
+    )
 }
