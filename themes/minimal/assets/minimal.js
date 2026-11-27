@@ -188,11 +188,13 @@
     }
     const { note, buttons } = entry;
     const again = buttons.length > 0;
-    const sync = () => buttons.forEach((b) => b.setAttribute("aria-expanded", note.classList.contains("open")));
+    // Only the first citation's button toggles the note; repeats just reveal it, so they carry
+    // no aria-expanded.
+    const sync = () => buttons[0].setAttribute("aria-expanded", note.classList.contains("open"));
     const btn = d.createElement("button");
     btn.type = "button";
     btn.textContent = n;
-    btn.setAttribute("aria-expanded", "false");
+    if (!again) btn.setAttribute("aria-expanded", "false");
     btn.setAttribute("aria-controls", note.id);
     btn.setAttribute("aria-label", label.replace("{n}", n));
     if (again) btn.className = "again";
