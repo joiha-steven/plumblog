@@ -171,8 +171,11 @@ impl State {
                 self.put_redirect(&old_path, &new_path, now)?;
             }
         }
-        // The path is live again, so a redirect away from it would hide the post.
-        self.redirects.remove(&new_path);
+        // A live path must not redirect away, but a draft must not turn a working old URL
+        // into a 404 either: only a published save takes the path over.
+        if post.status == PostStatus::Published {
+            self.redirects.remove(&new_path);
+        }
         if was_published || post.status == PostStatus::Published {
             self.bump();
         }

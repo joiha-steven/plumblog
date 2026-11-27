@@ -2,6 +2,7 @@ use std::cmp::Reverse;
 
 use plumblog_model::{PostId, Result, RevisionId};
 
+use super::post_save::post_path;
 use super::{MemoryStore, invalid, not_found, post_not_found};
 use crate::{Post, PostQuery, PostStatus, PostStore, PostSummary, Revision, SavePost};
 
@@ -72,6 +73,9 @@ impl PostStore for MemoryStore {
             p.trashed_from = None;
             p.updated_at = now;
             if to == PostStatus::Published {
+                // Live again: its path wins over a redirect away from it (see save_post).
+                let path = post_path(&p.lang, &p.slug);
+                s.redirects.remove(&path);
                 s.bump();
             }
             Ok(())
@@ -104,6 +108,13 @@ impl PostStore for MemoryStore {
             }) {
                 p.status = PostStatus::Published;
                 ids.push(p.id);
+            }
+            // Each newly live path takes over from any redirect away from it (see save_post).
+            for id in &ids {
+                if let Some(p) = s.posts.get(id) {
+                    let path = post_path(&p.lang, &p.slug);
+                    s.redirects.remove(&path);
+                }
             }
             if !ids.is_empty() {
                 s.bump();

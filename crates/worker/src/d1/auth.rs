@@ -1,0 +1,337 @@
+use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
+use plumblog_store::{
+    ApiToken, Invite, InviteStore, NewInvite, NewPasskey, NewSession, NewToken, NewUser, Passkey,
+    PasskeyStore, Session, SessionStore, TokenStore,
+};
+
+use super::{D1Store, Row, bound, int, not_found, opt_int, opt_text, text};
+
+const SESSION_COLS: &str = "id, token_hash, user_id, created_at, expires_at";
+const PASSKEY_COLS: &str =
+    "id, user_id, credential_id, public_key, sign_count, name, created_at, last_used_at";
+const TOKEN_COLS: &str = "id, user_id, name, token_hash, scope, created_at, expires_at, revoked_at";
+const INVITE_COLS: &str =
+    "id, code_hash, role, created_by, created_at, expires_at, used_at, used_by";
+
+fn read_session(r: &mut Row) -> Result<Session> {
+    Ok(Session {
+        id: r.int()?,
+        token_hash: r.text()?,
+        user_id: UserId(r.int()?),
+        created_at: r.int()?,
+        expires_at: r.int()?,
+    })
+}
+
+fn read_passkey(r: &mut Row) -> Result<Passkey> {
+    Ok(Passkey {
+        id: r.int()?,
+        user_id: UserId(r.int()?),
+        credential_id: r.text()?,
+        public_key: r.text()?,
+        sign_count: r.int()?,
+        name: r.text()?,
+        created_at: r.int()?,
+        last_used_at: r.opt_int()?,
+    })
+}
+
+fn read_token(r: &mut Row) -> Result<ApiToken> {
+    Ok(ApiToken {
+        id: r.int()?,
+        user_id: UserId(r.int()?),
+        name: r.text()?,
+        token_hash: r.text()?,
+        scope: r.code("scope", Role::parse)?,
+        created_at: r.int()?,
+        expires_at: r.opt_int()?,
+        revoked_at: r.opt_int()?,
+    })
+}
+
+fn read_invite(r: &mut Row) -> Result<Invite> {
+    Ok(Invite {
+        id: r.int()?,
+        code_hash: r.text()?,
+        role: r.code("role", Role::parse)?,
+        created_by: UserId(r.int()?),
+        created_at: r.int()?,
+        expires_at: r.int()?,
+        used_at: r.opt_int()?,
+        used_by: r.opt_int()?.map(UserId),
+    })
+}
+
+impl SessionStore for D1Store {
+    async fn create_session(&self, session: NewSession) -> Result<i64> {
+        let s = self.stmt(
+            "create_session",
+            "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            &[
+                text(&session.token_hash),
+                int(session.user_id.0)?,
+                int(session.created_at)?,
+                int(session.expires_at)?,
+            ],
+        )?;
+        let r = self.exec(s).await?;
+        Self::last_row_id("create_session", &r)
+    }
+
+    // 1 query (every authenticated request).
+    async fn find_session(&self, token_hash: &str, now: i64) -> Result<Option<Session>> {
+        let s = self.stmt(
+            "find_session",
+            &format!("SELECT {SESSION_COLS} FROM sessions WHERE token_hash = ? AND expires_at > ?"),
+            &[text(token_hash), bound(now)],
+        )?;
+        self.row(s)
+            .await?
+            .map(|mut r| read_session(&mut r))
+            .transpose()
+    }
+
+    async fn delete_session(&self, token_hash: &str) -> Result<()> {
+        let s = self.stmt(
+            "delete_session",
+            "DELETE FROM sessions WHERE token_hash = ?",
+            &[text(token_hash)],
+        )?;
+        self.exec(s).await.map(drop)
+    }
+
+    async fn delete_user_sessions(&self, user: UserId) -> Result<u64> {
+        let s = self.stmt(
+            "delete_user_sessions",
+            "DELETE FROM sessions WHERE user_id = ?",
+            &[bound(user.0)],
+        )?;
+        let r = self.exec(s).await?;
+        Self::changes("delete_user_sessions", &r)
+    }
+
+    async fn delete_expired_sessions(&self, now: i64) -> Result<u64> {
+        let s = self.stmt(
+            "delete_expired_sessions",
+            "DELETE FROM sessions WHERE expires_at <= ?",
+            &[bound(now)],
+        )?;
+        let r = self.exec(s).await?;
+        Self::changes("delete_expired_sessions", &r)
+    }
+}
+
+impl PasskeyStore for D1Store {
+    async fn add_passkey(&self, passkey: NewPasskey) -> Result<i64> {
+        let s = self.stmt(
+            "add_passkey",
+            "INSERT INTO passkeys (user_id, credential_id, public_key, sign_count, name, \
+             created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, NULL)",
+            &[
+                int(passkey.user_id.0)?,
+                text(&passkey.credential_id),
+                text(&passkey.public_key),
+                int(passkey.sign_count)?,
+                text(&passkey.name),
+                int(passkey.created_at)?,
+            ],
+        )?;
+        let r = self.exec(s).await?;
+        Self::last_row_id("add_passkey", &r)
+    }
+
+    // 1 query.
+    async fn find_passkey(&self, credential_id: &str) -> Result<Option<Passkey>> {
+        let s = self.stmt(
+            "find_passkey",
+            &format!("SELECT {PASSKEY_COLS} FROM passkeys WHERE credential_id = ?"),
+            &[text(credential_id)],
+        )?;
+        self.row(s)
+            .await?
+            .map(|mut r| read_passkey(&mut r))
+            .transpose()
+    }
+
+    // 1 query.
+    async fn list_passkeys(&self, user: UserId) -> Result<Vec<Passkey>> {
+        let s = self.stmt(
+            "list_passkeys",
+            &format!("SELECT {PASSKEY_COLS} FROM passkeys WHERE user_id = ? ORDER BY id"),
+            &[bound(user.0)],
+        )?;
+        self.rows(s).await?.iter_mut().map(read_passkey).collect()
+    }
+
+    async fn touch_passkey(&self, id: i64, sign_count: i64, at: i64) -> Result<()> {
+        let s = self.stmt(
+            "touch_passkey",
+            "UPDATE passkeys SET sign_count = ?, last_used_at = ? WHERE id = ?",
+            &[int(sign_count)?, int(at)?, bound(id)],
+        )?;
+        let r = self.exec(s).await?;
+        if Self::changes("touch_passkey", &r)? == 0 {
+            return Err(not_found("passkey", id));
+        }
+        Ok(())
+    }
+
+    async fn delete_passkey(&self, id: i64) -> Result<()> {
+        let s = self.stmt(
+            "delete_passkey",
+            "DELETE FROM passkeys WHERE id = ?",
+            &[bound(id)],
+        )?;
+        let r = self.exec(s).await?;
+        if Self::changes("delete_passkey", &r)? == 0 {
+            return Err(not_found("passkey", id));
+        }
+        Ok(())
+    }
+}
+
+impl TokenStore for D1Store {
+    async fn create_token(&self, token: NewToken) -> Result<i64> {
+        let s = self.stmt(
+            "create_token",
+            "INSERT INTO api_tokens (user_id, name, token_hash, scope, created_at, expires_at, \
+             revoked_at) VALUES (?, ?, ?, ?, ?, ?, NULL)",
+            &[
+                int(token.user_id.0)?,
+                text(&token.name),
+                text(&token.token_hash),
+                text(token.scope.as_str()),
+                int(token.created_at)?,
+                opt_int(token.expires_at)?,
+            ],
+        )?;
+        let r = self.exec(s).await?;
+        Self::last_row_id("create_token", &r)
+    }
+
+    // 1 query (every API call).
+    async fn find_token(&self, token_hash: &str, now: i64) -> Result<Option<ApiToken>> {
+        let s = self.stmt(
+            "find_token",
+            &format!(
+                "SELECT {TOKEN_COLS} FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL \
+                 AND (expires_at IS NULL OR expires_at > ?)"
+            ),
+            &[text(token_hash), bound(now)],
+        )?;
+        self.row(s)
+            .await?
+            .map(|mut r| read_token(&mut r))
+            .transpose()
+    }
+
+    // 1 query.
+    async fn list_tokens(&self, user: UserId) -> Result<Vec<ApiToken>> {
+        let s = self.stmt(
+            "list_tokens",
+            &format!("SELECT {TOKEN_COLS} FROM api_tokens WHERE user_id = ? ORDER BY id"),
+            &[bound(user.0)],
+        )?;
+        self.rows(s).await?.iter_mut().map(read_token).collect()
+    }
+
+    async fn revoke_token(&self, id: i64, at: i64) -> Result<()> {
+        // COALESCE keeps the first revocation time.
+        let s = self.stmt(
+            "revoke_token",
+            "UPDATE api_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ?",
+            &[int(at)?, bound(id)],
+        )?;
+        let r = self.exec(s).await?;
+        if Self::changes("revoke_token", &r)? == 0 {
+            return Err(not_found("api token", id));
+        }
+        Ok(())
+    }
+}
+
+impl InviteStore for D1Store {
+    async fn create_invite(&self, invite: NewInvite) -> Result<i64> {
+        let s = self.stmt(
+            "create_invite",
+            "INSERT INTO invites (code_hash, role, created_by, created_at, expires_at, used_at, \
+             used_by) VALUES (?, ?, ?, ?, ?, NULL, NULL)",
+            &[
+                text(&invite.code_hash),
+                text(invite.role.as_str()),
+                int(invite.created_by.0)?,
+                int(invite.created_at)?,
+                int(invite.expires_at)?,
+            ],
+        )?;
+        let r = self.exec(s).await?;
+        Self::last_row_id("create_invite", &r)
+    }
+
+    // 1 query.
+    async fn list_invites(&self) -> Result<Vec<Invite>> {
+        let s = self.stmt(
+            "list_invites",
+            &format!("SELECT {INVITE_COLS} FROM invites ORDER BY created_at DESC, id DESC"),
+            &[],
+        )?;
+        self.rows(s).await?.iter_mut().map(read_invite).collect()
+    }
+
+    async fn delete_invite(&self, id: i64) -> Result<()> {
+        let s = self.stmt(
+            "delete_invite",
+            "DELETE FROM invites WHERE id = ?",
+            &[bound(id)],
+        )?;
+        let r = self.exec(s).await?;
+        if Self::changes("delete_invite", &r)? == 0 {
+            return Err(not_found("invite", id));
+        }
+        Ok(())
+    }
+
+    async fn accept_invite(&self, code_hash: &str, user: NewUser, now: i64) -> Result<UserId> {
+        // One batch. The insert copies the role from the invite and only happens if the
+        // invite is usable at that moment; the update repeats the same condition (the insert
+        // does not change it), so both happen or neither does. Two requests racing for one
+        // invite are serialised by D1: the second finds it used and inserts nothing. A login
+        // or slug conflict fails the insert and rolls back the whole batch.
+        let usable = "code_hash = ? AND used_at IS NULL AND expires_at > ?";
+        let insert = self.stmt(
+            "accept_invite_user",
+            &format!(
+                "INSERT INTO users (login, slug, display_name, bio, role, password_hash, \
+                 disabled_at, created_at, updated_at) \
+                 SELECT ?, ?, ?, ?, role, ?, NULL, ?, ? FROM invites WHERE {usable}"
+            ),
+            &[
+                text(&user.login),
+                text(&user.slug),
+                text(&user.display_name),
+                text(&user.bio),
+                opt_text(user.password_hash.as_deref()),
+                int(user.created_at)?,
+                int(user.created_at)?,
+                text(code_hash),
+                bound(now),
+            ],
+        )?;
+        let mark = self.stmt(
+            "accept_invite_mark",
+            &format!(
+                "UPDATE invites SET used_at = ?, \
+                 used_by = (SELECT seq FROM sqlite_sequence WHERE name = 'users') WHERE {usable}"
+            ),
+            &[int(now)?, text(code_hash), bound(now)],
+        )?;
+        let results = self.batch("accept_invite", vec![insert, mark]).await?;
+        if Self::changes("accept_invite_user", &results[0])? != 1 {
+            return Err(Error::new(
+                ErrorCode::InviteInvalid,
+                "invite is unknown, used or expired",
+            ));
+        }
+        Self::last_row_id("accept_invite_user", &results[0]).map(UserId)
+    }
+}

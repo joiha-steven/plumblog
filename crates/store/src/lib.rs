@@ -12,6 +12,8 @@
 
 mod auth;
 mod comments;
+#[cfg(any(test, feature = "contract"))]
+pub mod contract;
 mod log;
 mod media;
 pub mod memory;

@@ -241,9 +241,10 @@ pub trait PostStore {
     /// missing author, cover, series, tag or revision author. `Conflict`: `(lang, slug)` or
     /// `(group, lang)` taken by another post.
     /// Also: replaces tags and the search row; adds the revision if asked; if the old row
-    /// was published and its `/<lang>/<slug>` changed, `put_redirect(old, new)`; deletes a
-    /// redirect from the new path; bumps the content version if the old or new status is
-    /// published.
+    /// was published and its `/<lang>/<slug>` changed, `put_redirect(old, new)`; if the new
+    /// status is published, deletes the redirect from the new path (a draft or scheduled
+    /// save keeps it, so the old URL works until the post is live); bumps the content
+    /// version if the old or new status is published.
     async fn save_post(&self, post: SavePost) -> Result<PostId>;
     /// `PostNotFound`.
     async fn get_post(&self, id: PostId) -> Result<Post>;
@@ -256,13 +257,16 @@ pub trait PostStore {
     /// `trashed_from`; `updated_at = now`; bumps if it was published.
     async fn trash_post(&self, id: PostId, now: i64) -> Result<()>;
     /// `PostNotFound`; `InvalidInput` if not trashed. Back to `trashed_from`;
-    /// `updated_at = now`; bumps if that is published.
+    /// `updated_at = now`; if that is published, deletes the redirect from its path (it is
+    /// live again) and bumps.
     async fn restore_post(&self, id: PostId, now: i64) -> Result<()>;
     /// Permanent. `PostNotFound`; `InvalidInput` unless trashed. Deletes its tags,
-    /// revisions, comments and search row; translations are untouched.
+    /// revisions, comments and search row; translations are untouched. Never bumps the
+    /// content version: a trashed post and its comments are not visible to readers.
     async fn delete_post(&self, id: PostId) -> Result<()>;
     /// Every scheduled post with `published_at <= now` becomes published, in one write;
-    /// returns their ids ascending; bumps once if any. `updated_at` is unchanged.
+    /// returns their ids ascending; deletes the redirect from each one's path (it is live
+    /// now); bumps once if any. `updated_at` is unchanged.
     async fn publish_due(&self, now: i64) -> Result<Vec<PostId>>;
     /// Newest first (`created_at` DESC, id DESC); empty for an unknown post.
     async fn list_revisions(&self, post: PostId) -> Result<Vec<Revision>>;

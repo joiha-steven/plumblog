@@ -1,0 +1,459 @@
+//! Media, tags and series.
+
+use plumblog_model::{ErrorCode, MediaId, SeriesId, TagId};
+
+use super::kit::{
+    Check, T0, asc, eq, fails, media, ok, post, save, that, update, user, version, version_is,
+};
+use crate::{MediaQuery, NewSeries, PostOrder, PostQuery, PostStatus, Series, Store, Tag};
+
+fn page(before: Option<(i64, MediaId)>, missing_alt_only: bool, limit: u32) -> MediaQuery {
+    MediaQuery {
+        before,
+        missing_alt_only,
+        limit,
+    }
+}
+
+pub async fn media_round_trip<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let mut m = media("a.png", T0);
+    m.uploaded_by = Some(u);
+    m.alt = "A cat".into();
+    let id = ok("create_media", db.create_media(m.clone()).await)?;
+    let got = ok("get_media", db.get_media(id).await)?;
+    eq!(
+        "media fields",
+        (
+            got.r2_key.as_str(),
+            got.mime.as_str(),
+            got.bytes,
+            got.width,
+            got.height,
+            got.alt.as_str(),
+            got.variants_json.as_str(),
+            got.uploaded_by,
+            got.created_at,
+        ),
+        ("a.png", "image/png", 10, 4, 3, "A cat", "{}", Some(u), T0),
+    )?;
+    ok("set_media_alt", db.set_media_alt(id, "A dog").await)?;
+    eq!(
+        "alt after set",
+        ok("get_media", db.get_media(id).await)?.alt,
+        "A dog".to_owned(),
+    )?;
+    let missing = MediaId(id.0 + 1000);
+    fails(
+        "get_media missing",
+        db.get_media(missing).await,
+        ErrorCode::NotFound,
+    )?;
+    fails(
+        "set_media_alt missing",
+        db.set_media_alt(missing, "x").await,
+        ErrorCode::NotFound,
+    )?;
+    fails(
+        "delete_media missing",
+        db.delete_media(missing).await,
+        ErrorCode::NotFound,
+    )?;
+    fails(
+        "create_media duplicate r2_key",
+        db.create_media(media("a.png", T0)).await,
+        ErrorCode::Conflict,
+    )?;
+    let mut bad = media("b.png", T0);
+    bad.bytes = -1;
+    fails(
+        "negative bytes",
+        db.create_media(bad).await,
+        ErrorCode::InvalidInput,
+    )?;
+    let mut bad = media("c.png", T0);
+    bad.width = 0;
+    fails(
+        "zero width",
+        db.create_media(bad).await,
+        ErrorCode::InvalidInput,
+    )?;
+    let mut bad = media("d.png", T0);
+    bad.height = 0;
+    fails(
+        "zero height",
+        db.create_media(bad).await,
+        ErrorCode::InvalidInput,
+    )?;
+    let mut bad = media("e.png", T0);
+    bad.uploaded_by = Some(plumblog_model::UserId(u.0 + 1000));
+    fails(
+        "missing uploader",
+        db.create_media(bad).await,
+        ErrorCode::InvalidInput,
+    )?;
+    let mut zero = media("f.png", T0);
+    zero.bytes = 0;
+    ok("zero bytes is allowed", db.create_media(zero).await)?;
+    ok("delete_media", db.delete_media(id).await)?;
+    fails(
+        "get deleted media",
+        db.get_media(id).await,
+        ErrorCode::NotFound,
+    )
+}
+
+/// Newest first with equal `created_at`; the cursor starts strictly after the last row.
+pub async fn media_paging<S: Store>(db: &S) -> Check {
+    let mut ids = Vec::new();
+    for (i, at) in [100, 200, 200, 200, 300].into_iter().enumerate() {
+        let mut m = media(&format!("m{i}.png"), at);
+        if i % 2 == 0 {
+            m.alt = "described".into();
+        }
+        ids.push((at, ok("create_media", db.create_media(m).await)?));
+    }
+    let mut want = ids.clone();
+    want.sort_unstable_by(|a, b| b.cmp(a));
+    let mut seen = Vec::new();
+    let mut before = None;
+    for _ in 0..5 {
+        let rows = ok("list_media", db.list_media(page(before, false, 2)).await)?;
+        that("page size <= 2", rows.len() <= 2)?;
+        let Some(last) = rows.last() else { break };
+        before = Some((last.created_at, last.id));
+        seen.extend(rows.iter().map(|m| (m.created_at, m.id)));
+    }
+    eq!("media pages, newest first", seen, want.clone())?;
+    let missing: Vec<MediaId> = ok("list_media", db.list_media(page(None, true, 10)).await)?
+        .iter()
+        .map(|m| m.id)
+        .collect();
+    let want_missing: Vec<MediaId> = want
+        .iter()
+        .filter(|(_, id)| {
+            ids.iter()
+                .position(|x| x.1 == *id)
+                .is_some_and(|i| i % 2 == 1)
+        })
+        .map(|x| x.1)
+        .collect();
+    eq!("missing_alt_only", missing, want_missing)?;
+    eq!(
+        "limit 0",
+        ok("list_media", db.list_media(page(None, false, 0)).await)?.len(),
+        0,
+    )
+}
+
+/// `delete_media` clears covers; bumps only when a published post used it.
+pub async fn media_delete_clears_cover<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let m1 = ok("create_media", db.create_media(media("1.png", T0)).await)?;
+    let m2 = ok("create_media", db.create_media(media("2.png", T0)).await)?;
+    let mut d = post(u, "vi", "draft", PostStatus::Draft);
+    d.cover_media_id = Some(m1);
+    let d = save(db, d).await?;
+    let mut p = post(u, "vi", "live", PostStatus::Published);
+    p.cover_media_id = Some(m2);
+    let p = save(db, p).await?;
+    let v = version(db).await?;
+    ok("delete_media (draft cover)", db.delete_media(m1).await)?;
+    version_is(db, "delete_media used by a draft", v).await?;
+    eq!(
+        "draft cover cleared",
+        ok("get_post", db.get_post(d).await)?.cover_media_id,
+        None,
+    )?;
+    ok("delete_media (published cover)", db.delete_media(m2).await)?;
+    version_is(db, "delete_media used by a published post", v + 1).await?;
+    eq!(
+        "published cover cleared",
+        ok("get_post", db.get_post(p).await)?.cover_media_id,
+        None,
+    )
+}
+
+pub async fn tags_round_trip<S: Store>(db: &S) -> Check {
+    let a = ok("ensure_tag", db.ensure_tag("rust", "Rust").await)?;
+    let again = ok("ensure_tag existing", db.ensure_tag("rust", "Other").await)?;
+    eq!("ensure_tag returns the existing id", again, a)?;
+    let found = ok("find_tag", db.find_tag("rust").await)?;
+    eq!(
+        "existing tag keeps its name",
+        found,
+        Some(Tag {
+            id: a,
+            slug: "rust".into(),
+            name: "Rust".into(),
+        }),
+    )?;
+    eq!(
+        "find_tag unknown",
+        ok("find_tag", db.find_tag("go").await)?,
+        None,
+    )?;
+    let b = ok("ensure_tag", db.ensure_tag("b", "Same").await)?;
+    let c = ok("ensure_tag", db.ensure_tag("c", "Same").await)?;
+    let z = ok("ensure_tag", db.ensure_tag("z", "Alpha").await)?;
+    let order: Vec<TagId> = ok("list_tags", db.list_tags().await)?
+        .iter()
+        .map(|t| t.id)
+        .collect();
+    let mut want = vec![z, a];
+    want.extend(asc(&[b, c]));
+    eq!("list_tags by name, then id", order, want)?;
+    ok(
+        "update_tag",
+        db.update_tag(&Tag {
+            id: a,
+            slug: "rust-lang".into(),
+            name: "Rust lang".into(),
+        })
+        .await,
+    )?;
+    eq!(
+        "renamed",
+        ok("find_tag", db.find_tag("rust-lang").await)?.map(|t| t.name),
+        Some("Rust lang".into()),
+    )?;
+    eq!(
+        "old slug gone",
+        ok("find_tag", db.find_tag("rust").await)?,
+        None,
+    )?;
+    fails(
+        "update_tag to taken slug",
+        db.update_tag(&Tag {
+            id: a,
+            slug: "b".into(),
+            name: "x".into(),
+        })
+        .await,
+        ErrorCode::Conflict,
+    )?;
+    let missing = TagId(a.0.max(z.0) + 1000);
+    fails(
+        "update_tag missing",
+        db.update_tag(&Tag {
+            id: missing,
+            slug: "q".into(),
+            name: "q".into(),
+        })
+        .await,
+        ErrorCode::NotFound,
+    )?;
+    fails(
+        "delete_tag missing",
+        db.delete_tag(missing).await,
+        ErrorCode::NotFound,
+    )?;
+    ok("delete_tag", db.delete_tag(z).await)?;
+    eq!("deleted tag", ok("find_tag", db.find_tag("z").await)?, None)
+}
+
+/// Tag updates and deletes bump only when a published post has the tag; delete unlinks.
+pub async fn tag_links_and_versions<S: Store>(db: &S) -> Check {
+    let author = user(db, "alice").await?;
+    let t_draft = ok("ensure_tag", db.ensure_tag("d", "D").await)?;
+    let t_live = ok("ensure_tag", db.ensure_tag("l", "L").await)?;
+    let mut d = post(author, "vi", "draft", PostStatus::Draft);
+    d.tag_ids = vec![t_live, t_draft, t_draft];
+    let d = save(db, d).await?;
+    let mut p = post(author, "vi", "live", PostStatus::Published);
+    p.tag_ids = vec![t_live];
+    let p = save(db, p).await?;
+    eq!(
+        "tag_ids ascending, deduplicated",
+        ok("get_post", db.get_post(d).await)?.tag_ids,
+        asc(&[t_draft, t_live]),
+    )?;
+    let v = version(db).await?;
+    let rename = |id, slug: &str| Tag {
+        id,
+        slug: slug.into(),
+        name: slug.to_uppercase(),
+    };
+    ok(
+        "update_tag (draft only)",
+        db.update_tag(&rename(t_draft, "dd")).await,
+    )?;
+    version_is(db, "update_tag on a draft-only tag", v).await?;
+    ok(
+        "update_tag (published)",
+        db.update_tag(&rename(t_live, "ll")).await,
+    )?;
+    version_is(db, "update_tag on a published post'db tag", v + 1).await?;
+    ok("delete_tag (draft only)", db.delete_tag(t_draft).await)?;
+    version_is(db, "delete_tag on a draft-only tag", v + 1).await?;
+    eq!(
+        "deleted tag unlinked",
+        ok("get_post", db.get_post(d).await)?.tag_ids,
+        vec![t_live],
+    )?;
+    ok("delete_tag (published)", db.delete_tag(t_live).await)?;
+    version_is(db, "delete_tag on a published post'db tag", v + 2).await?;
+    eq!(
+        "published post unlinked",
+        ok("get_post", db.get_post(p).await)?.tag_ids,
+        Vec::new(),
+    )?;
+    let mut q = PostQuery::new(PostOrder::UpdatedDesc, 10);
+    q.tag = Some(t_live);
+    eq!(
+        "no post lists under a deleted tag",
+        ok("list_posts", db.list_posts(&q).await)?.len(),
+        0,
+    )
+}
+
+fn series(slug: &str, title: &str) -> NewSeries {
+    NewSeries {
+        slug: slug.into(),
+        title: title.into(),
+        description: format!("about {slug}"),
+    }
+}
+
+pub async fn series_round_trip<S: Store>(db: &S) -> Check {
+    let a = ok("create_series", db.create_series(series("a", "Same")).await)?;
+    let b = ok("create_series", db.create_series(series("b", "Same")).await)?;
+    let c = ok(
+        "create_series",
+        db.create_series(series("c", "Alpha")).await,
+    )?;
+    fails(
+        "create_series duplicate slug",
+        db.create_series(series("a", "x")).await,
+        ErrorCode::Conflict,
+    )?;
+    let order: Vec<SeriesId> = ok("list_series", db.list_series().await)?
+        .iter()
+        .map(|x| x.id)
+        .collect();
+    let mut want = vec![c];
+    want.extend(asc(&[a, b]));
+    eq!("list_series by title, then id", order, want)?;
+    let found = ok("find_series", db.find_series("a").await)?;
+    eq!(
+        "find_series",
+        found,
+        Some(Series {
+            id: a,
+            slug: "a".into(),
+            title: "Same".into(),
+            description: "about a".into(),
+        }),
+    )?;
+    eq!(
+        "find_series unknown",
+        ok("find_series", db.find_series("q").await)?,
+        None,
+    )?;
+    let changed = Series {
+        id: a,
+        slug: "a2".into(),
+        title: "New".into(),
+        description: "d".into(),
+    };
+    ok("update_series", db.update_series(&changed).await)?;
+    eq!(
+        "updated series",
+        ok("find_series", db.find_series("a2").await)?,
+        Some(changed),
+    )?;
+    fails(
+        "update_series to taken slug",
+        db.update_series(&Series {
+            id: a,
+            slug: "b".into(),
+            title: "t".into(),
+            description: String::new(),
+        })
+        .await,
+        ErrorCode::Conflict,
+    )?;
+    let missing = SeriesId(a.0.max(b.0).max(c.0) + 1000);
+    fails(
+        "update_series missing",
+        db.update_series(&Series {
+            id: missing,
+            slug: "zz".into(),
+            title: "t".into(),
+            description: String::new(),
+        })
+        .await,
+        ErrorCode::NotFound,
+    )?;
+    fails(
+        "delete_series missing",
+        db.delete_series(missing).await,
+        ErrorCode::NotFound,
+    )?;
+    ok("delete_series", db.delete_series(c).await)?;
+    eq!(
+        "deleted series",
+        ok("find_series", db.find_series("c").await)?,
+        None,
+    )
+}
+
+/// Series updates and deletes bump only when a published post is in it; delete clears
+/// `series_id` and `series_position`.
+pub async fn series_links_and_versions<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let sd = ok("create_series", db.create_series(series("d", "D")).await)?;
+    let sl = ok("create_series", db.create_series(series("l", "L")).await)?;
+    let mut d = post(u, "vi", "draft", PostStatus::Draft);
+    d.series_id = Some(sd);
+    d.series_position = Some(1);
+    let d = save(db, d).await?;
+    let mut p = post(u, "vi", "live", PostStatus::Published);
+    p.series_id = Some(sl);
+    p.series_position = Some(2);
+    let p = save(db, p.clone()).await?;
+    let v = version(db).await?;
+    let edit = |id, slug: &str| Series {
+        id,
+        slug: slug.into(),
+        title: slug.into(),
+        description: String::new(),
+    };
+    ok(
+        "update_series (draft only)",
+        db.update_series(&edit(sd, "d2")).await,
+    )?;
+    version_is(db, "update_series with only drafts", v).await?;
+    ok(
+        "update_series (published)",
+        db.update_series(&edit(sl, "l2")).await,
+    )?;
+    version_is(db, "update_series with a published post", v + 1).await?;
+    ok("delete_series (draft only)", db.delete_series(sd).await)?;
+    version_is(db, "delete_series with only drafts", v + 1).await?;
+    let got = ok("get_post", db.get_post(d).await)?;
+    eq!(
+        "draft leaves the series",
+        (got.series_id, got.series_position),
+        (None, None),
+    )?;
+    ok("delete_series (published)", db.delete_series(sl).await)?;
+    version_is(db, "delete_series with a published post", v + 2).await?;
+    let got = ok("get_post", db.get_post(p).await)?;
+    eq!(
+        "published post leaves the series",
+        (got.series_id, got.series_position),
+        (None, None),
+    )?;
+    let empty = ok("list_series", db.list_series().await)?;
+    eq!("no series left", empty.len(), 0)?;
+    // Saving with a deleted series is a missing reference.
+    let mut again = post(u, "vi", "live", PostStatus::Published);
+    again.series_id = Some(sl);
+    fails(
+        "save_post with deleted series",
+        db.save_post(update(p, again)).await,
+        ErrorCode::InvalidInput,
+    )?;
+    Ok(())
+}

@@ -15,3 +15,7 @@ migrations_dir = "../migrations"
 [[r2_buckets]]
 binding = "MEDIA"
 bucket_name = "plumblog-dev"
+
+# Lets a test build (feature contract-tests) serve /__contract, which empties the database.
+[vars]
+PLUMBLOG_CONTRACT_TESTS = "wipe-db"
