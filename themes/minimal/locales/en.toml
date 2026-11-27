@@ -1,6 +1,7 @@
 # Text of the minimal theme, English. Templates call t("section.key", name=value);
 # {name} placeholders are filled from those arguments.
 [nav]
+search = "Search"
 skip_to_content = "Skip to content"
 site = "Site"
 toggle_theme = "Switch light or dark"
@@ -23,6 +24,27 @@ copy_code = "Copy"
 copied = "Copied"
 # {n} is filled in by the sidenote script, per note.
 show_note = "Show note {n}"
+
+[search]
+title = "Search"
+submit = "Search"
+hint = "Search titles and text of every post."
+count_one = "1 post for “{query}”"
+count_other = "{count} posts for “{query}”"
+none = "Nothing found for “{query}”. Try fewer or different words."
+
+[comments]
+title = "Comments"
+owner = "Author"
+empty = "No comments yet."
+closed = "Comments are closed."
+name = "Name"
+body = "Comment"
+submit = "Send comment"
+moderated = "Comments appear after the author approves them."
+notice_pending = "Thanks. Your comment will appear once it is approved."
+notice_error = "Your comment was not sent. Check your connection and try again; your text is still here."
+check_failed = "The spam check could not load, so the comment cannot be sent yet. Reload the page and try again."
 
 # Labels for the owner's theme options (theme.toml [options]).
 [options]

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{%- from "entry.html" import entry %}
+{%- block title %}{{ t("post.page_title", title=t("search.title"), site=site.title) }}{% endblock %}
+{%- block head %}
+<meta name="robots" content="noindex">
+{%- endblock %}
+{% block main %}
+{#- A plain GET form: search works without JS and every result page has its own URL. #}
+<form class="search" role="search" action="{{ site.search_url }}" method="get">
+  <h1 class="search-title"><label for="q">{{ t("search.title") }}</label></h1>
+  <div class="search-row">
+    <input class="field" id="q" name="q" type="search" value="{{ query }}" enterkeyhint="search" autocomplete="off" spellcheck="false"{% if not query %} autofocus{% endif %}>
+    <button class="btn" type="submit">{{ t("search.submit") }}</button>
+  </div>
+</form>
+{%- if query %}
+<p class="search-count" role="status">
+  {%- if results %}{{ t("search.count_one" if results | length == 1 else "search.count_other", count=results | length, query=query) }}
+  {%- else %}{{ t("search.none", query=query) }}{% endif %}</p>
+{%- if results %}
+<ol class="posts">
+  {%- for post in results %}{{ entry(post, loop.index <= 4, theme.options.list_images) }}{% endfor %}
+</ol>
+{%- endif %}
+{%- else %}
+<p class="search-count">{{ t("search.hint") }}</p>
+{%- endif %}
+{% endblock %}

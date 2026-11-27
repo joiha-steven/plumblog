@@ -1,4 +1,4 @@
-// minimal theme: light/dark toggle, copy-code buttons and sidenotes. Every page works fully without this file.
+// minimal theme: light/dark toggle, comment form helpers, copy-code buttons and sidenotes. Every page works fully without this file.
 (() => {
   const d = document, root = d.documentElement;
 
@@ -10,6 +10,39 @@
     root.dataset.theme = next;
     try { localStorage.setItem("theme", next); } catch (e) { /* private mode: choice lasts this page only */ }
   });
+
+  // Comments: Turnstile loads only when the reader starts writing, so reading costs no third-party
+  // bytes. The draft is kept in sessionStorage so a failed send never loses the text.
+  const form = d.querySelector(".comment-form");
+  if (form) {
+    const body = form.querySelector("textarea"), key = "draft:" + form.action;
+    const store = (fn) => { try { return fn(sessionStorage); } catch (e) { return null; } };
+    if (d.querySelector(".notice.is-pending")) store((s) => s.removeItem(key));
+    else if (body && !body.value) body.value = store((s) => s.getItem(key)) || "";
+    if (body) body.addEventListener("input", () => store((s) => s.setItem(key, body.value)));
+    const sitekey = form.dataset.turnstile;
+    let started = false;
+    if (sitekey) form.addEventListener("focusin", () => {
+      if (started) return;
+      started = true;
+      const fail = (err) => {
+        console.error("comments: Turnstile failed to load", err);
+        const p = d.createElement("p");
+        p.className = "notice is-error";
+        p.setAttribute("role", "alert");
+        p.textContent = form.dataset.checkFailed || "";
+        form.prepend(p);
+      };
+      window.plumTurnstile = () => {
+        try { window.turnstile.render(form.querySelector(".turnstile"), { sitekey, size: "flexible" }); } catch (e) { fail(e); }
+      };
+      const s = d.createElement("script");
+      s.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=plumTurnstile";
+      s.async = true;
+      s.onerror = fail;
+      d.head.append(s);
+    });
+  }
 
   const prose = d.querySelector(".prose");
   if (!prose) return;

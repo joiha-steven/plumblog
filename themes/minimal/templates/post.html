@@ -33,13 +33,54 @@
       {%- endfor %}
     </ul>
     {%- endif %}
-    {%- if post.prev or post.next %}
+  </footer>
+</article>
+{{ slot("after_post") }}
+{#- Comments are a site setting (off by default); core passes `comments` only when they are on. #}
+{%- if comments %}
+<section class="comments" id="comments" aria-labelledby="comments-title">
+  <h2 id="comments-title">{{ t("comments.title") }}{% if comments.items %} <span class="count">{{ comments.items | length }}</span>{% endif %}</h2>
+  {%- if comments.items %}
+  <ol class="comment-list">
+    {%- for c in comments.items %}
+    <li class="comment{% if c.owner %} is-owner{% endif %}" id="c{{ c.id }}">
+      <p class="meta"><b>{{ c.author }}</b>{% if c.owner %}<span class="badge">{{ t("comments.owner") }}</span>{% endif %}<time datetime="{{ c.date_iso }}">{{ c.date_display }}</time></p>
+      {#- Comment HTML is rendered from plain Markdown and sanitized by core. #}
+      <div class="comment-body">{{ c.html | safe }}</div>
+    </li>
+    {%- endfor %}
+  </ol>
+  {%- else %}
+  <p class="comments-empty">{{ t("comments.empty") }}</p>
+  {%- endif %}
+  {%- if comments.notice %}
+  <p class="notice is-{{ comments.notice }}" role="status">{{ t("comments.notice_" ~ comments.notice) }}</p>
+  {%- endif %}
+  {%- if comments.open %}
+  <form class="comment-form" action="{{ comments.action_url }}" method="post" data-turnstile="{{ comments.turnstile_key }}" data-check-failed="{{ t("comments.check_failed") }}">
+    <p class="form-row">
+      <label for="c-name">{{ t("comments.name") }}</label>
+      <input class="field" id="c-name" name="name" required maxlength="60" autocomplete="name">
+    </p>
+    <p class="form-row">
+      <label for="c-body">{{ t("comments.body") }}</label>
+      <textarea class="field" id="c-body" name="body" required rows="5" maxlength="{{ comments.max_length }}"></textarea>
+    </p>
+    <div class="turnstile"></div>
+    <p class="form-foot">
+      <button class="btn" type="submit">{{ t("comments.submit") }}</button>
+      <span class="hint">{{ t("comments.moderated") }}</span>
+    </p>
+  </form>
+  {%- else %}
+  <p class="comments-empty">{{ t("comments.closed") }}</p>
+  {%- endif %}
+</section>
+{%- endif %}
+{%- if post.prev or post.next %}
     <nav class="pager" aria-label="{{ t("post.posts") }}">
       {%- if post.prev %}<a class="prev" href="{{ post.prev.url }}" rel="prev"><span>{{ t("post.previous") }}</span>{{ post.prev.title }}</a>{% endif %}
       {%- if post.next %}<a class="next" href="{{ post.next.url }}" rel="next"><span>{{ t("post.next") }}</span>{{ post.next.title }}</a>{% endif %}
     </nav>
     {%- endif %}
-  </footer>
-</article>
-{{ slot("after_post") }}
 {% endblock %}

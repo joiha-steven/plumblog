@@ -1,22 +1,5 @@
 {% extends "base.html" %}
-{#- One markup for every post row; each style (theme option "style") lays it out its own way. #}
-{%- macro entry(post, eager) %}
-<li>
-  <a class="entry{% if post.pinned %} is-pinned{% endif %}" href="{{ post.url }}"{% if post.lang != page.lang %} hreflang="{{ post.lang }}" lang="{{ post.lang }}"{% endif %}>
-    <h3 class="entry-title">{{ post.title }}</h3>
-    {%- if post.excerpt %}
-    <p class="excerpt">{{ post.excerpt }}</p>
-    {%- endif %}
-    <p class="meta"><time datetime="{{ post.date_iso }}">{{ post.date_display }}</time>
-      {%- if post.pinned %}<span class="pin">{{ t("home.pinned") }}</span>{% endif %}
-      <span class="read">{{ t("post.reading_time", minutes=post.reading_minutes) }}</span></p>
-    {%- set img = (post.cover if post.pinned and post.cover else post.thumb) if theme.options.list_images else none %}
-    {%- if img %}
-    <span class="thumb"><img src="{{ img.src }}" width="{{ img.width }}" height="{{ img.height }}" alt="" loading="{{ 'eager' if eager else 'lazy' }}" decoding="async"></span>
-    {%- endif %}
-  </a>
-</li>
-{%- endmacro %}
+{%- from "entry.html" import entry %}
 {% block main %}
 {%- if site.description %}
 <p class="intro">{{ site.description }}</p>
@@ -24,7 +7,7 @@
 {%- set pinned = posts | selectattr("pinned") | list %}
 {%- if pinned %}
 <ol class="posts pinned">
-  {%- for post in pinned %}{{ entry(post, true) }}{% endfor %}
+  {%- for post in pinned %}{{ entry(post, true, theme.options.list_images) }}{% endfor %}
 </ol>
 {%- endif %}
 {#- The rest are grouped by year; a style may show or hide the year heading. #}
@@ -38,7 +21,7 @@
 <h2 class="year-label" id="y{{ post.year }}">{{ post.year }}</h2>
 <ol class="posts">
 {%- endif %}
-{{ entry(post, loop.index <= 4) }}
+{{ entry(post, loop.index <= 4, theme.options.list_images) }}
 {%- if loop.last %}
 </ol>
 </section>

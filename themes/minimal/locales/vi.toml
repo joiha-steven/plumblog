@@ -1,5 +1,6 @@
 # Text of the minimal theme, Vietnamese.
 [nav]
+search = "Tìm kiếm"
 skip_to_content = "Bỏ qua, tới nội dung"
 site = "Trang"
 toggle_theme = "Đổi sáng hoặc tối"
@@ -21,6 +22,27 @@ next = "Bài sau"
 copy_code = "Chép"
 copied = "Đã chép"
 show_note = "Xem chú thích {n}"
+
+[search]
+title = "Tìm kiếm"
+submit = "Tìm"
+hint = "Tìm trong tiêu đề và nội dung mọi bài viết."
+count_one = "1 bài cho “{query}”"
+count_other = "{count} bài cho “{query}”"
+none = "Không tìm thấy bài nào cho “{query}”. Thử ít từ hơn hoặc từ khác."
+
+[comments]
+title = "Bình luận"
+owner = "Tác giả"
+empty = "Chưa có bình luận nào."
+closed = "Bài này đã đóng bình luận."
+name = "Tên"
+body = "Bình luận"
+submit = "Gửi bình luận"
+moderated = "Bình luận hiện ra sau khi tác giả duyệt."
+notice_pending = "Cảm ơn bạn. Bình luận sẽ hiện sau khi được duyệt."
+notice_error = "Chưa gửi được bình luận. Kiểm tra mạng rồi thử lại; chữ bạn viết vẫn còn đây."
+check_failed = "Không tải được bước chống spam nên chưa gửi được. Tải lại trang rồi thử lại."
 
 # Nhãn cho các tuỳ chọn của theme (theme.toml [options]).
 [options]

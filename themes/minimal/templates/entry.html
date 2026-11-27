@@ -1,0 +1,19 @@
+{#- One markup for every post row (home, search, archives); each style lays it out its own way.
+    Imported without context, so the caller passes `images` (theme option list_images). #}
+{%- macro entry(post, eager, images) %}
+<li>
+  <a class="entry{% if post.pinned %} is-pinned{% endif %}" href="{{ post.url }}"{% if post.lang != page.lang %} hreflang="{{ post.lang }}" lang="{{ post.lang }}"{% endif %}>
+    <h3 class="entry-title">{{ post.title }}</h3>
+    {%- if post.excerpt %}
+    <p class="excerpt">{{ post.excerpt }}</p>
+    {%- endif %}
+    <p class="meta"><time datetime="{{ post.date_iso }}">{{ post.date_display }}</time>
+      {%- if post.pinned %}<span class="pin">{{ t("home.pinned") }}</span>{% endif %}
+      <span class="read">{{ t("post.reading_time", minutes=post.reading_minutes) }}</span></p>
+    {%- set img = (post.cover if post.pinned and post.cover else post.thumb) if images else none %}
+    {%- if img %}
+    <span class="thumb"><img src="{{ img.src }}" width="{{ img.width }}" height="{{ img.height }}" alt="" loading="{{ 'eager' if eager else 'lazy' }}" decoding="async"></span>
+    {%- endif %}
+  </a>
+</li>
+{%- endmacro %}
