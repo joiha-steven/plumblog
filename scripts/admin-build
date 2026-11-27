@@ -37,6 +37,13 @@ common=(--bundle --minify --target=es2022 --legal-comments=none --log-level=warn
   --metafile="$meta" || fail "esbuild: admin script"
 "$bin/esbuild" web/admin/src/app.css "${common[@]}" --outfile="$out/app.css" \
   || fail "esbuild: admin stylesheet"
+# The writing column's fonts: the default theme's Inter, Inter Display and JetBrains Mono
+# subsets (scripts/subset-fonts), copied rather than linked, so the admin never loads theme
+# files. Browsers fetch a subset only when its characters are on screen.
+fonts=themes/minimal/assets/fonts
+mkdir -p "$out/fonts"
+cp "$fonts"/*.woff2 "$fonts"/license-*.txt "$out/fonts/" || fail "copying $fonts"
+sed 's#{{fonts}}#fonts#g' "$fonts/faces.css" >> "$out/app.css" || fail "reading $fonts/faces.css"
 # UI text, one module per language from locales/*.toml (crates/i18n `admin`): part of the
 # admin, not the Worker, so it never counts against the wasm budget.
 cargo run -q -p plumblog-i18n --example admin_locales -- locales "$out/i18n" \
@@ -66,6 +73,8 @@ cat > "$out/_headers" <<'HEADERS'
   Cache-Control: no-cache
 /admin/i18n/*
   Cache-Control: no-cache
+/admin/fonts/*
+  Cache-Control: public, max-age=604800
 HEADERS
 
 gz() { gzip -9 -c "$1" | wc -c | tr -d ' '; }

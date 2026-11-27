@@ -118,10 +118,11 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   titleIn.value = title;
   const cmHost = h("div", { lang });
   const toolbar = h("div", { class: "tools", role: "toolbar", "aria-label": t("admin.editor.toolbar") });
+  const toolsWrap = h("div", { class: "tools-wrap" }, toolbar);
   const write = h(
     "div",
     { class: "pane ed-write" },
-    h("div", { class: "tools-wrap" }, toolbar),
+    toolsWrap,
     h(
       "div",
       { class: "col" },
@@ -265,7 +266,9 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   };
   const showBubble = () => {
     const r = view.state.selection.main;
-    if (r.empty || !view.hasFocus) return hideBubble();
+    // On touch screens the system's own menu sits on a selection and the bottom bar already
+    // acts on it: a floating bubble would only fight them.
+    if (r.empty || !view.hasFocus || matchMedia("(pointer: coarse)").matches) return hideBubble();
     const a = view.coordsAtPos(r.from);
     const b = view.coordsAtPos(r.to);
     if (!a || !b) return hideBubble();
@@ -292,9 +295,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     const vw = document.documentElement.clientWidth;
     const w = bubble.offsetWidth;
     const x = Math.max(16, Math.min((a.left + b.right) / 2 - w / 2, vw - w - 16));
-    // On touch screens the system's own menu sits above a selection, so the bubble goes below.
-    const touch = matchMedia("(pointer: coarse)").matches;
-    const y = touch ? b.bottom + 12 : a.top - bubble.offsetHeight - 10;
+    const y = a.top - bubble.offsetHeight - 10;
     bubble.style.left = `${x}px`;
     bubble.style.top = `${Math.max(8, y)}px`;
   };
@@ -382,6 +383,8 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
 
   /* ---------- the editor ---------- */
   const view: EditorView = createEditor(cmHost, body, {
+    // The toolbar floats at the top of the column, or at the bottom on phones.
+    margins: () => (phone() ? { bottom: toolsWrap.offsetHeight } : { top: toolsWrap.offsetHeight }),
     lang,
     nonce: o.nonce,
     label: t("admin.editor.body_label"),

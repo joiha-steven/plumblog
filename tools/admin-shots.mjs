@@ -94,6 +94,8 @@ const STATES = [
       await page.waitForSelector(".bubble");
       await settle(page, ".bubble");
     },
+    // Touch screens have no bubble: the bottom bar acts on the selection.
+    (w) => w >= 768,
   ],
   [
     "slash",

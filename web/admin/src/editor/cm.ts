@@ -75,9 +75,12 @@ function paragraph(state: EditorState): [number, number] {
 
 function decorate(state: EditorState, missingAlt: string): DecorationSet {
   const [curFrom, curTo] = paragraph(state);
+  const caretLine = state.doc.lineAt(state.selection.main.head).number;
   const tree = ensureSyntaxTree(state, state.doc.length, 50) ?? syntaxTree(state);
   const lines = new Map<number, string[]>();
-  const widgets: [number, Decoration][] = [];
+  // [from, to, decoration]: a point for a widget under a line, a range for a collapsed line.
+  const widgets: [number, number, Decoration][] = [];
+  const collapsed = new Set<number>();
   const add = (n: number, c: string) => lines.set(n, [...(lines.get(n) ?? []), c]);
   tree.iterate({
     enter(node) {
@@ -98,8 +101,16 @@ function decorate(state: EditorState, missingAlt: string): DecorationSet {
         const line = state.doc.lineAt(node.to);
         if (m && line.text.trim() === text) {
           const cur = line.number >= curFrom && line.number <= curTo;
-          widgets.push([line.to, Decoration.widget({ widget: new Picture(m[2] ?? "", m[1] ?? "", cur, missingAlt), block: true, side: 1 })]);
-          add(line.number, "cm-imgsrc");
+          const pic = new Picture(m[2] ?? "", m[1] ?? "", cur, missingAlt);
+          if (line.number === caretLine) {
+            // The caret is on it: the source to edit, the picture under it.
+            widgets.push([line.to, line.to, Decoration.widget({ widget: pic, block: true, side: 1 })]);
+            add(line.number, "cm-imgsrc");
+          } else {
+            // Elsewhere only the picture and its caption show, as in the published post.
+            widgets.push([line.from, line.to, Decoration.replace({ widget: pic, block: true })]);
+            collapsed.add(line.number);
+          }
         }
       }
       return undefined;
@@ -115,12 +126,15 @@ function decorate(state: EditorState, missingAlt: string): DecorationSet {
     if (/^\[\^[^\]]+\]:/.test(text)) add(i, "cm-fn");
     if (i >= curFrom && i <= curTo) add(i, "cm-cur");
   }
-  const all: [number, Decoration, number][] = [];
-  for (const [n, c] of lines) all.push([state.doc.line(n).from, Decoration.line({ class: c.join(" ") }), 0]);
-  for (const [p, d] of widgets) all.push([p, d, 1]);
-  all.sort((a, b) => a[0] - b[0] || a[2] - b[2]);
+  const all: [number, number, Decoration, number][] = [];
+  for (const [n, c] of lines) {
+    const l = state.doc.line(n);
+    if (!collapsed.has(n)) all.push([l.from, l.from, Decoration.line({ class: c.join(" ") }), 0]);
+  }
+  for (const [from, to, d] of widgets) all.push([from, to, d, 1]);
+  all.sort((a, b) => a[0] - b[0] || a[3] - b[3]);
   const b = new RangeSetBuilder<Decoration>();
-  for (const [p, d] of all) b.add(p, p, d);
+  for (const [from, to, d] of all) b.add(from, to, d);
   return b.finish();
 }
 
@@ -169,6 +183,8 @@ export interface Hooks {
   link: (v: EditorView) => void;
   update: (u: ViewUpdate) => void;
   events: Parameters<typeof EditorView.domEventHandlers>[0];
+  /** Room the floating toolbar takes at the top or bottom, kept clear when scrolling to the caret. */
+  margins: () => { top?: number; bottom?: number };
 }
 
 export function createEditor(parent: HTMLElement, doc: string, hooks: Hooks): EditorView {
@@ -206,6 +222,7 @@ export function createEditor(parent: HTMLElement, doc: string, hooks: Hooks): Ed
         ...historyKeymap,
         indentWithTab,
       ]),
+      EditorView.scrollMargins.of(() => hooks.margins()),
       EditorView.updateListener.of(hooks.update),
       EditorView.domEventHandlers(hooks.events),
     ],

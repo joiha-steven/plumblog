@@ -13,12 +13,12 @@
   /* Type: 11 / 12 / 13 / 14 / 16 / 20 px, weights 400 / 500 / 600 (650 for writing titles). */
   --ui: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --read: "Inter", "Inter Fallback", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --read: "Inter", Inter-fallback, -apple-system, "Segoe UI", system-ui, sans-serif;
   --fs-11: 11px; --fs-12: 12px; --fs-13: 13px; --fs-14: 14px; --fs-16: 16px; --fs-20: 20px;
   --fw-regular: 400; --fw-medium: 500; --fw-semibold: 600; --fw-title: 650;
   --lh-1: 1; --lh-tight: 1.2; --lh-snug: 1.35; --lh-ui: 1.45; --lh-body: 1.55;
   --ls-title: -.01em;
-  --ls-display: -.018em; --ls-write-title: -.016em; --lh-read: 1.65;
+  --ls-display: -.018em; --ls-write-title: -.016em; --lh-read: 1.7;
   --type-story: var(--read-weight) 17px/var(--lh-read) var(--read);
   --type-story-title: var(--fw-title) 1.6em/var(--lh-tight) var(--read);
   --type-write-title: var(--fw-title) 1.5em/1.25 var(--read);
@@ -56,7 +56,7 @@
   --ctl-rail: 40px;                     /* icon rail items on tablets */
   --area: 72px;                         /* textarea minimum */
   --icon: 16px; --icon-sm: 12px; --icon-md: 14px; --icon-lg: 18px; --icon-xl: 20px;
-  --mark: 24px; --mark-lg: 36px;
+  --mark-size: 24px; --mark-size-lg: 36px;
   --lamp: 6px;
   --head-h: 60px;                       /* page header; its middle is level with the logo */
   --side-w: 224px; --rail-w: 60px; --insp-w: 340px; --subnav-w: 224px; --drawer-w: 340px;
@@ -78,7 +78,8 @@
   --w-h1: 1.4em; --w-h2: 1.2em; --w-h3: 1.05em; --w-ls-h1: -.014em; --w-ls-h2: -.01em;
   --w-space-h1: .8em; --w-space-h2: 1em; --w-indent: 1em; --w-block-pad: .5em;
   --w-code: .84em; --w-small: .88em; --w-source: .78em; --w-url: .9em; --w-caption: .8em;
-  --w-chip: .1em .3em; --w-pic-space: .5em 0 1em; --w-pic-h: clamp(12rem, 45vw, 20rem); --lh-code: 1.6;
+  --w-chip: .1em .3em; --w-track: -.011em;
+  --w-display: "Inter Display", var(--read); --w-mono: "JetBrains Mono", var(--mono); --w-pic-space: .5em 0 1em; --w-pic-ratio: 3 / 2; --lh-code: 1.6;
 
   /* Radius: pills and circles for controls; 10 fields, 12 rows, 16 cards and popovers. */
   --r-4: 4px; --r-6: 6px; --r-10: 10px; --r-12: 12px; --r-16: 16px; --r-22: 22px; --r-pill: 999px; --r-round: 50%;
@@ -114,7 +115,7 @@
   --bg: #f3f2ef; --surface: #ffffff; --field: #f7f6f3; --line: #e7e5e0; --line-strong: #d6d3cd; --line-ctl: #ccc8c1;
   --text: #1f1e1c; --muted: #55524c; --faint: #6b6761;
   --ink: #252421; --ink-fg: #fbfaf8; --ink-press: #0f0e0d; --tint: 37 36 33; --tint-inv: 251 250 248;
-  --key: #fdfcfa; --well: #f0eee9; --signal: #c4561f; --signal-edge: #a94816; --accent: #c4561f; --ring: rgb(196 86 31 / .45);
+  --key: #fdfcfa; --float: #ffffff; --well: #f0eee9; --signal: #c4561f; --signal-edge: #a94816; --accent: #c4561f; --ring: rgb(196 86 31 / .45);
   --st-draft: #6b6862; --st-draft-bg: #edebe7; --st-sched: #7d5f17; --st-sched-bg: #f3ead3; --st-pub: #46664c; --st-pub-bg: #e3ebe2; --st-err: #9a3a2c; --st-err-bg: #f5e1dc;
   --paper: #ffffff; --ink-text: #1d1c1a; --ink-soft: #57544e; --mark: #76726c; --code-bg: #f3f2ef; --sel: rgb(196 86 31 / .16);
   --glass: rgb(251 250 248 / .7); --glass-sel: rgb(0 0 0 / .06);
@@ -137,7 +138,7 @@
   --bg: #1a1918; --surface: #222120; --field: #1d1c1b; --line: #312f2d; --line-strong: #3e3c39; --line-ctl: #4a4743;
   --text: #ebe9e5; --muted: #bdb9b2; --faint: #9e9a93;
   --ink: #ebe9e5; --ink-fg: #1a1918; --ink-press: #cfccc6; --tint: 235 233 229; --tint-inv: 26 25 24;
-  --key: #353330; --well: #1b1a19; --signal: #e0804b; --signal-edge: #c8693a; --accent: #e0804b; --ring: rgb(224 128 75 / .5);
+  --key: #353330; --float: #2d2b29; --well: #1b1a19; --signal: #e0804b; --signal-edge: #c8693a; --accent: #e0804b; --ring: rgb(224 128 75 / .5);
   --st-draft: #b0aba3; --st-draft-bg: #2e2c2a; --st-sched: #d4b26a; --st-sched-bg: #383020; --st-pub: #9bbb9e; --st-pub-bg: #25302a; --st-err: #e39a8c; --st-err-bg: #3c2522;
   --paper: #222120; --ink-text: #e7e4df; --ink-soft: #b0aba3; --mark: #8f8b84; --code-bg: #2a2927; --sel: rgb(224 128 75 / .24);
   --glass: rgb(40 38 36 / .72); --glass-sel: rgb(255 255 255 / .1);
@@ -160,7 +161,7 @@
   --bg: #1a1918; --surface: #222120; --field: #1d1c1b; --line: #312f2d; --line-strong: #3e3c39; --line-ctl: #4a4743;
   --text: #ebe9e5; --muted: #bdb9b2; --faint: #9e9a93;
   --ink: #ebe9e5; --ink-fg: #1a1918; --ink-press: #cfccc6; --tint: 235 233 229; --tint-inv: 26 25 24;
-  --key: #353330; --well: #1b1a19; --signal: #e0804b; --signal-edge: #c8693a; --accent: #e0804b; --ring: rgb(224 128 75 / .5);
+  --key: #353330; --float: #2d2b29; --well: #1b1a19; --signal: #e0804b; --signal-edge: #c8693a; --accent: #e0804b; --ring: rgb(224 128 75 / .5);
   --st-draft: #b0aba3; --st-draft-bg: #2e2c2a; --st-sched: #d4b26a; --st-sched-bg: #383020; --st-pub: #9bbb9e; --st-pub-bg: #25302a; --st-err: #e39a8c; --st-err-bg: #3c2522;
   --paper: #222120; --ink-text: #e7e4df; --ink-soft: #b0aba3; --mark: #8f8b84; --code-bg: #2a2927; --sel: rgb(224 128 75 / .24);
   --glass: rgb(40 38 36 / .72); --glass-sel: rgb(255 255 255 / .1);
