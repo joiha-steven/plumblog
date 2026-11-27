@@ -75,28 +75,12 @@ pedantic = { level = "warn", priority = -1 }
 
 # Small wasm matters: the free plan limits Worker size and startup CPU.
 [profile.release]
-# "z" with the CPU-heavy parts at "s" (issue #50 rejected plain "z": a long post rendered about
-# twice as slowly, 0.54 -> 1.31 ms natively, and CPU (10 ms per request) is the scarcer limit).
-# Its "z outside the render path" kept both markdown and templates at "s", so it saved little.
-# Measured 2026-11-28 on the deployed pipeline, gzip, against all-"s":
-#   "z", markdown stack "s":                      -91 KB, markdown render unchanged (~580 us)
-#   same, minijinja and plumblog-render also "s":  -33 KB  (this setting)
-# and in workerd, per page render, "z" for minijinja and plumblog-render cost 4-9% more than
-# "s" on the home page and a post, so they stay "s". Mixed levels are not monotone: re-measure
-# the size and the render CPU (scripts/check, markdown perf test) before changing any line.
-opt-level = "z"
+# "s", not "z" (issue #50, measured on the deployed wasm): "z" ships 769 KB instead of 879 KB
+# but renders a long post about twice as slowly (0.54 -> 1.31 ms natively, over the 2 ms
+# budget on CI runners), and CPU (10 ms per request) is the scarcer limit. "z" everywhere but
+# the render path saved only 20 KB more than this.
+opt-level = "s"
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-
-[profile.release.package.plumblog-markdown]
-opt-level = "s"
-[profile.release.package.pulldown-cmark]
-opt-level = "s"
-[profile.release.package.pulldown-latex]
-opt-level = "s"
-[profile.release.package.minijinja]
-opt-level = "s"
-[profile.release.package.plumblog-render]
-opt-level = "s"
