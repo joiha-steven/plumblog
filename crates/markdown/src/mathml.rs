@@ -119,10 +119,7 @@ pub fn neutralize(tex: &str) -> String {
                 if raw {
                     raw_argument(&mut chars, &mut out);
                 } else if TEXT_COMMANDS.contains(&name) {
-                    while chars.peek().is_some_and(|&(_, n)| n == ' ') {
-                        out.push(' ');
-                        chars.next();
-                    }
+                    skip_space(&mut chars);
                     if chars.peek().is_some_and(|&(_, n)| n == '{') {
                         copy_group(&mut chars, &mut out, raw);
                     }
@@ -134,6 +131,14 @@ pub fn neutralize(tex: &str) -> String {
     out
 }
 
+/// TeX skips all whitespace between a command and its argument, so a tab or newline is
+/// never taken as the argument or left between the command and its group.
+fn skip_space(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) {
+    while chars.peek().is_some_and(|&(_, n)| n.is_ascii_whitespace()) {
+        chars.next();
+    }
+}
+
 /// The argument of a raw-text command, always written as a braced group. pulldown-latex
 /// handles only `\\operatorname{...}`: the star form and a brace-less argument make it
 /// copy the rest of the formula as raw text and parse it again. So the `*` (limits placement,
@@ -142,11 +147,6 @@ pub fn neutralize(tex: &str) -> String {
 /// Whitespace is skipped before the `*` and before the argument, as TeX does, so a tab or
 /// newline is never taken as the argument.
 fn raw_argument(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>, out: &mut String) {
-    let skip_space = |chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>| {
-        while chars.peek().is_some_and(|&(_, n)| n.is_ascii_whitespace()) {
-            chars.next();
-        }
-    };
     skip_space(chars);
     if chars.peek().is_some_and(|&(_, n)| n == '*') {
         chars.next();
@@ -390,7 +390,7 @@ mod tests {
     fn author_angle_brackets_never_reach_the_parser_outside_text() {
         assert_eq!(neutralize("a<b>c"), "a\\lt b\\gt c");
         assert_eq!(neutralize("\\text{a<b}<c"), "\\text{a<b}\\lt c");
-        assert_eq!(neutralize("\\text {x{<}y}>"), "\\text {x{<}y}\\gt ");
+        assert_eq!(neutralize("\\text {x{<}y}>"), "\\text{x{<}y}\\gt ");
         assert_eq!(
             neutralize("\\operatorname{<mtext style=x>}"),
             "\\operatorname{&lt;mtext style=x&gt;}"
@@ -402,6 +402,15 @@ mod tests {
         // Brace-less `<` and `>` arguments.
         assert_eq!(neutralize("\\mathop>x"), "\\mathop{&gt;}x");
         assert_eq!(neutralize("\\mathop<x"), "\\mathop{&lt;}x");
+    }
+
+    /// Text-mode arguments skip every kind of whitespace too (#44): a tab or newline before
+    /// the group must not leave its `<` outside text mode, where it would show as `\lt`.
+    #[test]
+    fn text_argument_skips_tex_whitespace() {
+        assert_eq!(neutralize("\\text\t{<img src=x>}"), "\\text{<img src=x>}");
+        assert_eq!(neutralize("\\text\n{a<b}<c"), "\\text{a<b}\\lt c");
+        assert_eq!(neutralize("\\text \r\n {a<b}"), "\\text{a<b}");
     }
 
     /// TeX skips every kind of whitespace before `*` and before the argument (#38).
