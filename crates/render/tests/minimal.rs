@@ -285,6 +285,29 @@ fn partial_theme_falls_back_and_bad_slots_fail() {
 }
 
 #[test]
+fn highlighter_loads_only_on_posts_with_code() {
+    let files = theme_files();
+    let theme = load(&files, &BTreeMap::new());
+    let mut p = post("x", "X", 0, false);
+    let render = |p: &Post| {
+        theme
+            .render(
+                &site(),
+                &page("en"),
+                &Body::Post {
+                    post: p,
+                    prev: None,
+                    next: None,
+                },
+            )
+            .unwrap()
+    };
+    assert!(!render(&p).contains("highlight.js"));
+    p.body.has_code = true;
+    assert!(render(&p).contains("<script src=\"/theme/assets/highlight.js\" defer></script>"));
+}
+
+#[test]
 fn post_flags_reach_templates() {
     let files = theme_files();
     let default: Vec<(&str, &str)> = files

@@ -116,6 +116,16 @@ test("theme fonts and script are served as static assets", async () => {
   }
 });
 
+test("the code highlighter loads only on posts with code", async () => {
+  const code = await (await get("/code-in-many-languages")).text();
+  const src = code.match(/<script src="([^"]*highlight\.js)" defer>/)?.[1];
+  assert.ok(src, "post with code links the highlighter");
+  const res = await get(src);
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /tok-/);
+  assert.doesNotMatch(await (await get("/slow-mornings")).text(), /highlight\.js/);
+});
+
 test("writes are refused", async () => {
   assert.equal((await get("/", { method: "POST" })).status, 405);
 });

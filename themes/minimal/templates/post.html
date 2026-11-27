@@ -1,6 +1,10 @@
 {% extends "base.html" %}
 {% block title %}{{ t("post.page_title", title=post.title, site=site.title) }}{% endblock %}
 {%- block head %}
+{%- if post.has_code %}
+{#- Only posts with code pay for the highlighter; without it code is plain, readable text. #}
+<script src="{{ asset("highlight.js") }}" defer></script>
+{%- endif %}
 {%- if post.cover %}
 {#- The cover is the largest thing on screen; fetch it alongside the fonts, not after layout. #}
 <link rel="preload" as="image" href="{{ post.cover.src }}"{% if post.cover.srcset %} imagesrcset="{{ post.cover.srcset }}" imagesizes="(min-width: 52rem) 52rem, 100vw"{% endif %} fetchpriority="high">
