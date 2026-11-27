@@ -31,8 +31,8 @@ function serverHash(stretched) {
 let ipSeq = 0;
 const nextIp = () => `2001:db8:${(++ipSeq).toString(16)}::1`;
 
-async function api(w, method, path, { body, cookie } = {}) {
-  const h = { "cf-connecting-ip": nextIp(), origin: w.url };
+async function api(w, method, path, { body, cookie, ip } = {}) {
+  const h = { "cf-connecting-ip": ip ?? nextIp(), origin: w.url };
   if (cookie) h.cookie = `${COOKIE}=${cookie}`;
   if (body !== undefined) h["content-type"] = "application/json";
   const res = await fetch(w.url + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -51,6 +51,7 @@ const snapshot = (w) => ({
   challenges: w.query("SELECT COUNT(*) AS n FROM auth_challenges")[0].n,
   log: w.query("SELECT COUNT(*) AS n FROM system_log")[0].n,
 });
+const globalCount = (w) => w.query("SELECT count FROM login_failures WHERE key_hash = 'global'")[0].count;
 const capLogs = (w) => w.query("SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.global_cap'")[0].n;
 
 let off, on, stub, bobPw;
@@ -96,6 +97,23 @@ after(async () => {
 const login = (w, password, extra = {}) =>
   api(w, "POST", "/api/auth/login", { body: { login: "bob", password, ...extra } });
 
+/** Re-authentication by a signed-in user: current password, or a passkey assertion. */
+const changePassword = (w, current, ip) =>
+  api(w, "POST", "/api/auth/password", { cookie: SESSION, ip, body: { current_password: current, new_password: wrong() } });
+// Reaches the challenge only once re-authentication passed; this one is never valid.
+const addPasskey = (w, reauth, ip) =>
+  api(w, "POST", "/api/auth/passkey/register/verify", {
+    cookie: SESSION,
+    ip,
+    body: { name: "k", client_data_json: b64u("{}"), attestation_object: b64u("x"), ...reauth },
+  });
+const unknownKey = {
+  reauth_credential_id: "AAAA",
+  reauth_client_data_json: b64u("{}"),
+  reauth_authenticator_data: b64u("x"),
+  reauth_signature: b64u("x"),
+};
+
 /** One of every limited attempt, each from a new address. */
 const flood = (w, extra = {}) =>
   Promise.all([
@@ -125,6 +143,23 @@ describe("Turnstile off", () => {
   test("a signed-in session still works", async () => {
     const r = await api(off, "GET", "/api/auth/me", { cookie: SESSION });
     assert.equal(r.status, 200, r.text);
+  });
+
+  test("signed-in re-auth skips the cap and keeps its own per-address and per-login limits", async () => {
+    const ip = "2001:db8:ffff::1";
+    // The right password passes re-auth and fails later, at the (absent) challenge.
+    assertError(await addPasskey(off, { current_password: bobPw }, ip), 400, "auth.passkey_invalid");
+    assertError(await changePassword(off, wrong(), ip), 401, "auth.invalid_credentials");
+    assertError(await addPasskey(off, unknownKey, ip), 400, "auth.passkey_invalid");
+    for (let i = 0; i < 3; i++) assertError(await changePassword(off, wrong(), ip), 401, "auth.invalid_credentials");
+    // 5 failures from this address: locked, as without the cap.
+    assertError(await changePassword(off, wrong(), ip), 429, "auth.locked");
+    assertError(await addPasskey(off, unknownKey, ip), 429, "auth.locked");
+    // A 5th wrong current password, from another address, locks his login too.
+    assertError(await changePassword(off, wrong()), 401, "auth.invalid_credentials");
+    assertError(await changePassword(off, bobPw), 429, "auth.locked");
+    assert.equal(globalCount(off), CAP, "signed-in attempts moved the site-wide count");
+    assert.equal(capLogs(off), 1);
   });
 });
 
@@ -156,5 +191,13 @@ describe("Turnstile on", () => {
   test("a signed-in session still works", async () => {
     const r = await api(on, "GET", "/api/auth/me", { cookie: SESSION });
     assert.equal(r.status, 200, r.text);
+  });
+
+  test("signed-in re-auth needs no token at the cap", async () => {
+    const before = globalCount(on);
+    assertError(await addPasskey(on, { current_password: bobPw }), 400, "auth.passkey_invalid");
+    assertError(await changePassword(on, wrong()), 401, "auth.invalid_credentials");
+    assertError(await addPasskey(on, unknownKey), 400, "auth.passkey_invalid");
+    assert.equal(globalCount(on), before);
   });
 });

@@ -426,7 +426,13 @@ pub async fn verify(
     // First: without a configured origin nothing is counted or consumed.
     let site = site::site(ctx).await?;
     let keys = Keys::passkey(ctx, credential_id).await?;
-    let attempt = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
+    // Re-auth (`want_user`) comes from a signed-in user: outside the site-wide cap.
+    let token = f.opt("turnstile_token")?;
+    let attempt = if want_user.is_some() {
+        limit::check_signed_in(ctx, &keys, token).await?
+    } else {
+        limit::check(ctx, &keys, token).await?
+    };
     match check_assertion(ctx, f, prefix, credential_id, want_user, &site).await {
         Ok(user) => {
             limit::succeeded(ctx, &keys).await?;

@@ -285,13 +285,13 @@ describe("fresh site", () => {
     assert.equal(fresh.query("SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.sign_in_locked' AND detail = 'password'")[0].n, 1);
   });
 
-  test("a locked address writes nothing for its keys: no rows for new logins, its own count stays", async () => {
+  test("a locked address writes nothing: no rows for new logins, its own count stays, the site-wide count stays", async () => {
     const ip = "198.51.100.90";
     for (let i = 0; i < 5; i++) {
       const r = await api(fresh, "POST", "/api/auth/login", { body: { login: `random${i}`, password: wrong() }, ip });
       assertError(r, 401, "auth.invalid_credentials");
     }
-    // Below the site-wide cap each attempt still costs its one site-wide count; nothing else.
+    // Refused from a read of its own row: one address cannot fill the site-wide cap.
     const snap = () => fresh.query("SELECT key_hash, count, window_start FROM login_failures WHERE key_hash <> 'global' ORDER BY key_hash");
     const global = () => fresh.query("SELECT count FROM login_failures WHERE key_hash = 'global'")[0].count;
     const before = snap();
@@ -301,7 +301,7 @@ describe("fresh site", () => {
       assertError(r, 429, "auth.locked");
     }
     assert.deepEqual(snap(), before);
-    assert.equal(global(), globalBefore + 10);
+    assert.equal(global(), globalBefore, "a locked address moved the site-wide count");
   });
 
   test("bodies: over 8 KiB by Content-Length is 413 before reading; no Content-Length (chunked) is 411", async () => {

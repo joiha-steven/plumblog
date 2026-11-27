@@ -324,7 +324,33 @@ async fn global(ctx: &Ctx, gate: &mut Gate, token: Option<&str>) -> Result<bool>
     Ok(false)
 }
 
-/// Gate before checking a secret (password, passkey, one-time code). First the site-wide
+/// Refuses an address already locked in this window, from one read and no write. Runs before
+/// the site-wide count, so a locked address never adds to it: one address adds at most its own
+/// threshold per window, and cannot keep sign-in locked site-wide on its own.
+async fn refuse_locked_address(ctx: &Ctx, gate: &mut Gate, ip: &str) -> Result<()> {
+    let (count, window_start) = ctx
+        .store
+        .failures(&[ip], ctx.now, WINDOW_MS)
+        .await?
+        .first()
+        .copied()
+        .unwrap_or((0, 0));
+    // Between the thresholds the lock depends on Turnstile; read its setting only then.
+    if (TURNSTILE_AFTER..LOCK_AFTER).contains(&count) {
+        gate.secret(ctx).await?;
+    }
+    let row = Failures {
+        count,
+        window_start,
+    };
+    match ratelimit::decide(&[row], ctx.now, gate.on()) {
+        d @ Decision::Locked { .. } => Err(locked(d)),
+        Decision::Allow | Decision::NeedTurnstile => Ok(()),
+    }
+}
+
+/// Gate before checking a secret (password, passkey, one-time code) for a caller without a
+/// session. An address already locked is refused first, with no write. Then the site-wide
 /// count ([`global`]): at its cap the attempt writes nothing unless it carries a valid Turnstile
 /// token. Then counts the attempt per key, in one atomic upsert per key, so concurrent attempts
 /// cannot all read a count under the threshold: each gets its own count. The address goes
@@ -343,7 +369,36 @@ async fn global(ctx: &Ctx, gate: &mut Gate, token: Option<&str>) -> Result<bool>
 /// without a site origin), storage or fetch errors.
 pub async fn check(ctx: &Ctx, keys: &Keys, turnstile_token: Option<&str>) -> Result<Attempt> {
     let mut gate = Gate::default();
-    let mut new_window = global(ctx, &mut gate, turnstile_token).await?;
+    if let Some(ip) = &keys.ip {
+        refuse_locked_address(ctx, &mut gate, ip).await?;
+    }
+    let new_window = global(ctx, &mut gate, turnstile_token).await?;
+    count_keys(ctx, keys, turnstile_token, gate, new_window).await
+}
+
+/// As [`check`], for re-authentication by a caller who already holds a session (current
+/// password, passkey re-auth): only the per-address and per-key limits, never the site-wide
+/// cap, so a flood of anonymous attempts cannot stop a signed-in user from changing a password
+/// or a passkey. A stolen session stays limited per login and per address.
+///
+/// # Errors
+///
+/// As [`check`].
+pub async fn check_signed_in(
+    ctx: &Ctx,
+    keys: &Keys,
+    turnstile_token: Option<&str>,
+) -> Result<Attempt> {
+    count_keys(ctx, keys, turnstile_token, Gate::default(), false).await
+}
+
+async fn count_keys(
+    ctx: &Ctx,
+    keys: &Keys,
+    turnstile_token: Option<&str>,
+    mut gate: Gate,
+    mut new_window: bool,
+) -> Result<Attempt> {
     let mut before = Vec::with_capacity(2);
     let mut locks = false;
     for (i, key) in [&keys.ip, &keys.subject].into_iter().flatten().enumerate() {
@@ -440,29 +495,68 @@ pub async fn succeeded(ctx: &Ctx, keys: &Keys) -> Result<()> {
 }
 
 /// Most anonymous passkey sign-in options per address in a window: each writes a challenge
-/// row, so the count bounds the table; far above what a person needs.
-pub const OPTIONS_PER_WINDOW: i64 = 60;
+/// row, so the count bounds the table; far above what a person needs (one per sign-in). Kept
+/// below `GLOBAL_CAP` so one address alone cannot fill the site-wide window.
+pub const OPTIONS_PER_WINDOW: i64 = 20;
 
-/// Counts one anonymous options request, site-wide first (as [`check`]: at the cap it needs a
-/// valid Turnstile token or is refused, writing nothing), then for this address, before
-/// anything is written for it.
+/// Counts one anonymous options request. An address at [`OPTIONS_PER_WINDOW`] is refused from
+/// one read, before the site-wide count (as in [`check`], so it never adds to it). Then the
+/// site-wide count (at the cap it needs a valid Turnstile token or is refused, writing nothing),
+/// then this address's, before anything is written for it.
 ///
 /// # Errors
 ///
 /// `Locked` above [`OPTIONS_PER_WINDOW`] in the window or at the site-wide cap without
 /// Turnstile; `TurnstileRequired`; storage, fetch and crypto errors pass through.
 pub async fn options(ctx: &Ctx, turnstile_token: Option<&str>) -> Result<()> {
+    let key = options_key(ctx).await?;
+    if let Some(key) = &key {
+        let (count, window_start) = ctx
+            .store
+            .failures(&[key], ctx.now, WINDOW_MS)
+            .await?
+            .first()
+            .copied()
+            .unwrap_or((0, 0));
+        if count >= OPTIONS_PER_WINDOW {
+            return Err(options_locked(count, window_start));
+        }
+    }
     let mut gate = Gate::default();
     let new_window = global(ctx, &mut gate, turnstile_token).await?;
     if new_window {
         sweep(ctx).await;
     }
+    let Some(key) = key else {
+        return Ok(());
+    };
+    let r = ctx
+        .store
+        .record_failure(&key, ctx.now, WINDOW_MS, OPTIONS_PER_WINDOW)
+        .await?;
+    if !r.counted {
+        return Err(options_locked(r.count, r.window_start));
+    }
+    Ok(())
+}
+
+fn options_locked(count: i64, window_start: i64) -> Error {
+    Error::new(
+        ErrorCode::Locked,
+        format!(
+            "passkey options: {count} from this address since {window_start}, limit {OPTIONS_PER_WINDOW}"
+        ),
+    )
+}
+
+/// The per-address options key, or `None` (logged) when the address is missing or unusable.
+async fn options_key(ctx: &Ctx) -> Result<Option<String>> {
     let Some(ip) = ctx.ip.as_deref() else {
         worker::console_error!(
             "[{}] passkey options not limited per address: no CF-Connecting-IP",
             ctx.request_id.as_str()
         );
-        return Ok(());
+        return Ok(None);
     };
     let ip = match ratelimit::ip_key(ip) {
         Ok(k) => k,
@@ -471,24 +565,10 @@ pub async fn options(ctx: &Ctx, turnstile_token: Option<&str>) -> Result<()> {
                 "[{}] passkey options not limited per address: {e}",
                 ctx.request_id.as_str()
             );
-            return Ok(());
+            return Ok(None);
         }
     };
-    let key = hash_key(ctx, &format!("options:{ip}")).await?;
-    let r = ctx
-        .store
-        .record_failure(&key, ctx.now, WINDOW_MS, OPTIONS_PER_WINDOW)
-        .await?;
-    if !r.counted {
-        return Err(Error::new(
-            ErrorCode::Locked,
-            format!(
-                "passkey options: {} from this address since {}, limit {OPTIONS_PER_WINDOW}",
-                r.count, r.window_start
-            ),
-        ));
-    }
-    Ok(())
+    Ok(Some(hash_key(ctx, &format!("options:{ip}")).await?))
 }
 
 #[cfg(test)]
