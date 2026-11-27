@@ -3,20 +3,48 @@
 {%- if site.description %}
 <p class="intro">{{ site.description }}</p>
 {%- endif %}
-<ul class="posts">
-  {%- for post in posts %}
-  <li>
-    <a class="entry" href="{{ post.url }}"{% if post.lang != page.lang %} hreflang="{{ post.lang }}"{% endif %}>
-      <span class="entry-title"{% if post.lang != page.lang %} lang="{{ post.lang }}"{% endif %}>
-        {%- if post.pinned %}<span class="pin">{{ t("home.pinned") }}</span>{% endif %}{{ post.title }}</span>
-      <time datetime="{{ post.date_iso }}">{{ post.date_display }}</time>
-      {%- if post.thumb %}
-      <img src="{{ post.thumb.src }}" width="{{ post.thumb.width }}" height="{{ post.thumb.height }}" alt="" loading="{{ 'eager' if loop.index <= 6 else 'lazy' }}" decoding="async">
-      {%- endif %}
-    </a>
-  </li>
-  {%- endfor %}
-</ul>
+{#- Pinned posts lead as a feature; the rest are grouped by year. #}
+{%- for post in posts if post.pinned %}
+<article class="feature">
+  <a href="{{ post.url }}"{% if post.lang != page.lang %} hreflang="{{ post.lang }}" lang="{{ post.lang }}"{% endif %}>
+    {%- if post.cover %}
+    <img src="{{ post.cover.src }}"{% if post.cover.srcset %} srcset="{{ post.cover.srcset }}" sizes="(min-width: 40rem) 40rem, 100vw"{% endif %} width="{{ post.cover.width }}" height="{{ post.cover.height }}" alt="" fetchpriority="high" decoding="async">
+    {%- endif %}
+    <p class="kicker"><span class="pin">{{ t("home.pinned") }}</span><time datetime="{{ post.date_iso }}">{{ post.date_display }}</time></p>
+    <h2 class="feature-title">{{ post.title }}</h2>
+    {%- if post.excerpt %}
+    <p class="excerpt">{{ post.excerpt }}</p>
+    {%- endif %}
+  </a>
+</article>
+{%- endfor %}
+{%- for post in posts if not post.pinned %}
+{%- if loop.first or post.year != loop.previtem.year %}
+{%- if not loop.first %}
+  </ol>
+</section>
+{%- endif %}
+<section class="year" aria-labelledby="y{{ post.year }}">
+  <h2 class="year-label" id="y{{ post.year }}">{{ post.year }}</h2>
+  <ol class="posts">
+{%- endif %}
+    <li>
+      <a class="entry" href="{{ post.url }}"{% if post.lang != page.lang %} hreflang="{{ post.lang }}" lang="{{ post.lang }}"{% endif %}>
+        <h3 class="entry-title">{{ post.title }}</h3>
+        {%- if post.excerpt %}
+        <p class="excerpt">{{ post.excerpt }}</p>
+        {%- endif %}
+        <p class="kicker"><time datetime="{{ post.date_iso }}">{{ post.date_display }}</time><span>{{ t("post.reading_time", minutes=post.reading_minutes) }}</span></p>
+        {%- if post.thumb %}
+        <div class="thumb"><img src="{{ post.thumb.src }}" width="{{ post.thumb.width }}" height="{{ post.thumb.height }}" alt="" loading="{{ 'eager' if loop.index <= 4 else 'lazy' }}" decoding="async"></div>
+        {%- endif %}
+      </a>
+    </li>
+{%- if loop.last %}
+  </ol>
+</section>
+{%- endif %}
+{%- endfor %}
 {%- if older_url or newer_url %}
 <nav class="older" aria-label="{{ t("home.pages") }}">
   {%- if newer_url %}<a href="{{ newer_url }}" rel="prev">{{ t("home.newer_posts") }}</a>{% endif %}

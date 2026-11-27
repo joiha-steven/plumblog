@@ -1,21 +1,27 @@
 {% extends "base.html" %}
 {% block title %}{{ t("post.page_title", title=post.title, site=site.title) }}{% endblock %}
+{%- block head %}
+{%- if post.cover %}
+{#- The cover is the largest thing on screen; fetch it alongside the fonts, not after layout. #}
+<link rel="preload" as="image" href="{{ post.cover.src }}"{% if post.cover.srcset %} imagesrcset="{{ post.cover.srcset }}" imagesizes="(min-width: 52rem) 52rem, 100vw"{% endif %} fetchpriority="high">
+{%- endif %}
+{%- endblock %}
 {% block main %}
 <article>
   <header class="post-head">
+    <p class="kicker"><time datetime="{{ post.date_iso }}">{{ post.date_display }}</time><span>{{ t("post.reading_time", minutes=post.reading_minutes) }}</span></p>
     <h1>{{ post.title }}</h1>
-    <p class="meta">
-      <time datetime="{{ post.date_iso }}">{{ post.date_display }}</time>
-      &middot; {{ t("post.reading_time", minutes=post.reading_minutes) }}
-    </p>
+    {%- if post.excerpt %}
+    <p class="standfirst">{{ post.excerpt }}</p>
+    {%- endif %}
     {%- if post.cover %}
     <figure class="cover">
-      <img src="{{ post.cover.src }}"{% if post.cover.srcset %} srcset="{{ post.cover.srcset }}" sizes="(min-width: 40rem) 40rem, 100vw"{% endif %} width="{{ post.cover.width }}" height="{{ post.cover.height }}" alt="{{ post.cover.alt }}" fetchpriority="high" decoding="async">
+      <img src="{{ post.cover.src }}"{% if post.cover.srcset %} srcset="{{ post.cover.srcset }}" sizes="(min-width: 52rem) 52rem, 100vw"{% endif %} width="{{ post.cover.width }}" height="{{ post.cover.height }}" alt="{{ post.cover.alt }}" fetchpriority="high" decoding="async">
     </figure>
     {%- endif %}
   </header>
   {#- post.html is rendered from Markdown on save and sanitized by core; it is trusted here. #}
-  <div class="prose" data-note-label="{{ t("post.show_note") }}">
+  <div class="prose" data-note-label="{{ t("post.show_note") }}" data-copy="{{ t("post.copy_code") }}" data-copied="{{ t("post.copied") }}">
 {{ post.html | safe }}
   </div>
   <footer class="post-foot">

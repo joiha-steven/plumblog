@@ -19,5 +19,7 @@ tag = "#{name}"
 posts = "Posts"
 previous = "Previous"
 next = "Next"
+copy_code = "Copy"
+copied = "Copied"
 # {n} is filled in by the sidenote script, per note.
 show_note = "Show note {n}"

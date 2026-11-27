@@ -80,7 +80,7 @@ Users do not need Rust: releases ship the built Worker and `blog` binaries for m
 ## Content
 
 - Posts and pages; drafts, scheduled, revisions (author recorded), trash with restore.
-- Tags and series; pinned posts; cover image; excerpt; auto table of contents; reading time.
+- Tags and series; pinned posts; cover image; excerpt (written by the author, else cut from the text at a word boundary; the length is a site setting, default 160 characters); auto table of contents; reading time.
 - Translations: one row per language, linked by a translation group. URLs `/<lang>/<slug>`. Missing translation shows the original with a notice. Translation itself is done by the user's AI.
 - Changing a slug creates a permanent redirect automatically.
 - Author pages.
@@ -132,7 +132,9 @@ Not built: PWA/offline, newsletter (later), reactions.
   - Preload the body latin subset plus the page language's subset (`preload_by_lang`), so its letters never swap in late and move the layout.
   - `scripts/subset-fonts` builds the woff2 files and `faces.css` from the pinned official release. Weight axis 400-700 (starting at the default saves ~20% per file, so dark mode softens text by color, not weight); optical size pinned to the text cut. Subsets never overlap, so a Vietnamese page fetches latin + vietnamese only. Fallback face is Arial with metrics matched to Inter.
   - Typography values are CSS custom properties at the top of `style.css`; the editor's writing column reuses them.
-  - Renderer contract: dark tokens are emitted inside `@media screen` (print is always light); footnotes as `<sup class="fnref"><a href="#fn-N">` plus `<section class="footnotes">` with `<li id="fn-N">` and `a.fnback`; wide tables wrapped in `<div class="table">`; task-list items as `<li><label><input type="checkbox" disabled> text</label></li>`; a `wide` class on a figure lets it bleed to the screen edges on phones.
+  - Renderer contract: color tokens are emitted once as `--c-<key>: light-dark(<light>, <dark>)`, so `color-scheme` (system, toggle, print) switches the palette without a second block; footnotes as `<sup class="fnref"><a href="#fn-N">` plus `<section class="footnotes">` with `<li id="fn-N">` and `a.fnback`; code blocks as `<div class="code" data-lang="rust"><pre><code>` with `tok-keyword|string|number|constant|function|type|builtin|property|attr|tag|punct|operator|comment` spans; wide tables wrapped in `<div class="table">`; task-list items as `<li><label><input type="checkbox" disabled> text</label></li>`; a `wide` class on a figure lets it bleed to the screen edges on phones.
+  - Titles use **Inter Display** (Inter's display optical size, one static weight, Latin scripts only; Cyrillic and Greek titles fall back to the text cut).
+  - Home: pinned posts as a feature (cover, title, excerpt), then posts grouped by year, each with title, excerpt (clamped to 3 lines), date and reading time, and a thumbnail if present. The year hangs in the left margin on wide screens.
   - Sidenotes move into the margin from 76rem (~1216px) wide; narrower screens, folded or unfolded foldables included, get the inline toggle.
 - Footnotes are sidenotes: in the margin beside the sentence on wide screens, an inline toggle under the sentence on narrow screens, classic bottom footnotes when JS is off. About 1 KB JS.
 - AI workflow: `blog theme new | dev | check | push | rollback`. `check` reports template errors, missing dark tokens, contrast failures and size, each with file:line and a fix. Last 5 versions kept for rollback.
@@ -203,3 +205,4 @@ Each phase is one or more sessions; each ends with `scripts/check` green and evi
 - 2026-11-27 minimal theme first, font Inter with unicode-range subsets; footnotes as sidenotes.
 - 2026-11-27 No hard-coded text (all languages incl. English in locale files); no hard-coded layout (themes define page structure); small core, features via themes and plugins.
 - 2026-11-27 minimal: Inter weight axis 400-700 and text optical size only; dark mode softens text by color instead of a lighter weight; plum accent.
+- 2026-11-27 minimal v0.2 after owner review: Inter Display titles, syntax colors, drawn checkboxes, home with excerpts and year groups; color tokens via `light-dark()`.
