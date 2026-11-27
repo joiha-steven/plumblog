@@ -693,7 +693,7 @@ fn note_numbering(events: &[Event]) -> (HashSet<String>, Vec<String>) {
     (defined, order)
 }
 
-fn escape(out: &mut String, s: &str) {
+pub(crate) fn escape(out: &mut String, s: &str) {
     let mut last = 0;
     for (i, b) in s.bytes().enumerate() {
         let rep = match b {

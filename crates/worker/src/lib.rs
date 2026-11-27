@@ -1,5 +1,6 @@
 mod admin;
 mod api;
+mod comments;
 #[cfg(feature = "contract-tests")]
 mod contract;
 #[cfg(feature = "contract-tests")]
@@ -14,10 +15,8 @@ pub mod webhooks;
 use worker::{Context, Env, Request, Response, Result, ScheduleContext, ScheduledEvent, event};
 
 #[event(fetch)]
-async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
+async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
     // Test builds only: /__contract empties the database, so it never exists in a release build.
-    #[cfg(feature = "contract-tests")]
-    let mut req = req;
     #[cfg(feature = "contract-tests")]
     if let Some(res) = contract::handle(&req, &env).await? {
         return Ok(res);
@@ -33,7 +32,11 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     if req.path().starts_with(api::PREFIX) {
         return api::handle(req, &env).await;
     }
-    match (req.method().as_ref(), req.path().as_str()) {
+    let path = req.path();
+    if let ("POST", Some(slug)) = (req.method().as_ref(), pages::routes::comment_form(&path)) {
+        return comments::handle(&mut req, &env, slug).await;
+    }
+    match (req.method().as_ref(), path.as_str()) {
         ("GET", "/healthz") => Response::ok("ok"),
         ("GET" | "HEAD", p) if p == admin::PREFIX || p.starts_with("/admin/") => {
             admin::serve(&req).await

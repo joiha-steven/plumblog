@@ -3,7 +3,7 @@
 //! and every `<` and `&` in text is escaped. Byte-exact fixtures cannot catch a new hole;
 //! this test re-parses the output and checks each token.
 
-use plumblog_markdown::{Options, render};
+use plumblog_markdown::{COMMENT_LINK_REL, Options, render, render_comment};
 use std::fs;
 use std::path::Path;
 
@@ -86,6 +86,8 @@ const ATTRIBUTES: &[&str] = &[
     "data-provider",
     "data-id",
     "href",
+    // Comment links only (`nofollow ugc noopener`).
+    "rel",
     "title",
     "src",
     "alt",
@@ -378,4 +380,101 @@ fn hostile_inputs_render_safely() {
             }
         }
     }
+}
+
+/// Comment-only payloads on top of [`PAYLOADS`]: scheme obfuscation, reference links and
+/// autolinks, entities, invisible and bidi characters.
+const COMMENT_PAYLOADS: &[&str] = &[
+    "[x](jav&#x09;ascript:alert(1))",
+    "[x](JaVaScRiPt:alert(1))",
+    "[x](   javascript:alert(1))",
+    "[x](&#106;avascript:alert(1))",
+    "[x](data:text/html;base64,PHNjcmlwdD4=)",
+    "[x](vbscript:msgbox(1))",
+    "[x][r]\n\n[r]: javascript:alert(1)",
+    "[x][r]\n\n[r]: https://ok.example/",
+    "<javascript:alert(1)>",
+    "<https://a.example/\"onmouseover=\"alert(1)>",
+    "![x\" onerror=\"alert(1)](https://i.example/x.png)",
+    "![<img src=x onerror=alert(1)>](javascript:alert(1))",
+    "<style>body{display:none}</style>",
+    "<iframe src=https://evil.example></iframe>",
+    "&lt;script&gt;alert(1)&lt;/script&gt;",
+    "&#x3C;script&#x3E;",
+    "\u{202e}gnp.exe\u{200b}\u{2066}x\u{2069}",
+    "$$x$$ \\(y\\)",
+];
+
+fn comment_inputs() -> Vec<String> {
+    let contexts: &[fn(&str) -> String] = &[
+        |p| p.to_owned(),
+        |p| format!("*{p}*"),
+        |p| format!("[{p}]({p})"),
+        |p| format!("[x](https://a.com \"{p}\")"),
+        |p| format!("![{p}]({p} \"{p}\")"),
+        |p| format!("## {p}"),
+        |p| format!("`{p}`"),
+        |p| format!("```{p}\n{p}\n```"),
+        |p| format!("> {p}"),
+        |p| format!("- {p}"),
+        |p| format!("<{p}>"),
+        |p| format!("https://a.com/{p}"),
+    ];
+    let mut out = Vec::new();
+    for p in PAYLOADS.iter().chain(COMMENT_PAYLOADS) {
+        for c in contexts {
+            out.push(c(p));
+        }
+    }
+    out.push(format!("{}x{}", "*_".repeat(2500), "_*".repeat(2500)));
+    out.push("[".repeat(5000));
+    out.push("> ".repeat(2500));
+    out.push(format!("{}{}", "<script>".repeat(600), "x"));
+    out
+}
+
+/// What a browser would see as a scheme: entities decoded, spaces and controls gone.
+fn seen(html: &str) -> String {
+    decode_entities(html)
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+#[test]
+fn hostile_comments_render_safely() {
+    for src in comment_inputs() {
+        let html = render_comment(&src).html;
+        if let Err(e) = violations(&html) {
+            panic!("input {src:?}\noutput {html:?}\n{e}");
+        }
+        for banned in [
+            "<script", "<style", "<iframe", "<img", "<math", "<input", "<table", " id=",
+        ] {
+            assert!(!html.contains(banned), "{banned} in {html:?} from {src:?}");
+        }
+        for href in html.split("href=\"").skip(1) {
+            let value = href.split('"').next().unwrap_or_default();
+            let v = seen(value);
+            assert!(
+                v.starts_with("http://") || v.starts_with("https://"),
+                "comment link {value:?} from {src:?}"
+            );
+        }
+        assert_eq!(
+            html.matches("<a ").count(),
+            html.matches(&format!("rel=\"{COMMENT_LINK_REL}\"")).count(),
+            "every comment link carries rel: {html:?}"
+        );
+    }
+}
+
+#[test]
+fn comment_body_at_the_limit_renders() {
+    let body = "word *em* [l](https://a.example) ".repeat(150);
+    let body: String = body.chars().take(5000).collect();
+    let r = render_comment(&body);
+    assert!(violations(&r.html).is_ok());
+    assert!(r.links >= 140, "{} links", r.links);
 }
