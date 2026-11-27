@@ -43,6 +43,7 @@ pub(super) fn get_from(src: &impl ReaderSource, path: &str) -> (u16, &'static st
             status,
             content_type,
             body,
+            ..
         } => (status, content_type, body),
         Outcome::Redirect(to) => panic!("{path} redirected to {to}"),
     }

@@ -35,6 +35,9 @@ pub enum Outcome {
         status: u16,
         content_type: &'static str,
         body: String,
+        /// False when part of the page fell back after a failed store read: serve it, but
+        /// never let a cache keep it (see `cache_policy`).
+        cacheable: bool,
     },
     Redirect(String),
 }
@@ -60,31 +63,57 @@ fn theme() -> std::result::Result<&'static Theme, &'static ThemeError> {
         .as_ref()
 }
 
-/// The theme with this site's stored options and enabled plugins. Reading them may fail
-/// (D1 hiccup): the page then uses defaults rather than failing, and the log says why.
-async fn configured(ext: &impl ExtSource) -> std::result::Result<Theme, String> {
+/// The theme with this site's stored options and enabled plugins, and whether both were
+/// read. Reading them may fail (D1 hiccup): the page then uses defaults rather than failing,
+/// the log says why, and the caller must not let it be cached.
+async fn configured(ext: &impl ExtSource) -> std::result::Result<(Theme, bool), String> {
     let base = theme().map_err(|e| format!("theme: {e}"))?;
-    let stored = ext.theme_options(base.name()).await.unwrap_or_else(|e| {
-        warn(&format!(
-            "option.read_failed owner=theme:{} detail={e}",
-            base.name()
-        ));
-        Vec::new()
-    });
+    let mut complete = true;
+    let stored = match ext.theme_options(base.name()).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn(&format!(
+                "option.read_failed owner=theme:{} detail={e}",
+                base.name()
+            ));
+            complete = false;
+            Vec::new()
+        }
+    };
     // No bundled plugin: no query.
     let plugins = if base.plugin_names().is_empty() {
         Vec::new()
     } else {
-        ext.enabled_plugins().await.unwrap_or_else(|e| {
-            warn(&format!("plugin.read_failed detail={e}"));
-            Vec::new()
-        })
+        match ext.enabled_plugins().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn(&format!("plugin.read_failed detail={e}"));
+                complete = false;
+                Vec::new()
+            }
+        }
     };
     let (theme, problems) = base.with_options(&stored, &plugins);
     for p in problems {
         warn(&p);
     }
-    Ok(theme)
+    Ok((theme, complete))
+}
+
+/// `(etag and edge copy allowed, cache-control)` for a rendered page.
+fn cache_policy(status: u16, cacheable: bool) -> (bool, &'static str) {
+    if status == 200 && cacheable {
+        // max-age=0: browsers revalidate (cheap 304); s-maxage: the edge copy lives until
+        // the content version changes the key.
+        (
+            true,
+            "public, max-age=0, must-revalidate, s-maxage=31536000",
+        )
+    } else {
+        // 404s: random URLs must not fill the cache. Not cacheable: a page built after a
+        // failed store read would otherwise stay wrong until the next content write.
+        (false, "no-store")
+    }
 }
 
 /// Serves a reader page, from cache when possible.
@@ -148,27 +177,26 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
             status,
             content_type,
             body,
+            cacheable,
         } => {
             let h = Headers::new();
             h.set("content-type", content_type)?;
             // Server-Timing lets local runs and DevTools see render cost; on Cloudflare the
             // clock stands still while code runs, so it reads 0 there.
             h.set("server-timing", &format!("render;dur={render_ms}"))?;
-            if status == 200 {
+            let (store, cache_control) = cache_policy(status, cacheable);
+            if store {
                 h.set("etag", &etag)?;
-                // max-age=0: browsers revalidate (cheap 304); s-maxage: the edge copy lives
-                // until the content version changes the key.
-                h.set(
-                    "cache-control",
-                    "public, max-age=0, must-revalidate, s-maxage=31536000",
-                )?;
-            } else {
-                // 404s are not stored: random URLs must not fill the cache.
-                h.set("cache-control", "no-store")?;
             }
-            h.set("x-plumblog-cache", lookup.label())?;
+            h.set("cache-control", cache_control)?;
+            let label = if cacheable {
+                lookup.label()
+            } else {
+                cache::Lookup::Bypass.label()
+            };
+            h.set("x-plumblog-cache", label)?;
             let mut resp = Response::ok(body)?.with_status(status).with_headers(h);
-            if status == 200 && matches!(lookup, cache::Lookup::Miss) {
+            if store && matches!(lookup, cache::Lookup::Miss) {
                 cache::put_later(ctx, key, resp.cloned()?);
             }
             Ok(resp)
@@ -191,6 +219,7 @@ async fn live<S: ExtSource + SearchSource>(
         status,
         content_type,
         body,
+        ..
     } = outcome
     else {
         return Ok(failure("live page asked for a redirect"));
@@ -238,7 +267,21 @@ pub async fn render(
     path: &str,
     query: &str,
 ) -> std::result::Result<Outcome, String> {
-    let theme = configured(ext).await?;
+    let (theme, complete) = configured(ext).await?;
+    let mut out = route(src, theme, search, path, query).await?;
+    if let Outcome::Page { cacheable, .. } = &mut out {
+        *cacheable &= complete;
+    }
+    Ok(out)
+}
+
+async fn route(
+    src: &impl ReaderSource,
+    theme: Theme,
+    search: &impl SearchSource,
+    path: &str,
+    query: &str,
+) -> std::result::Result<Outcome, String> {
     let settings = src.settings().await.map_err(err)?;
     let origin = public_origin(&settings);
     let p = Pages {
@@ -284,6 +327,7 @@ fn doc(content_type: &'static str, body: String) -> Outcome {
         status: 200,
         content_type,
         body,
+        cacheable: true,
     }
 }
 
@@ -469,6 +513,7 @@ impl<S: ReaderSource> Pages<'_, S> {
             status: 404,
             content_type: HTML,
             body: self.not_found().await?,
+            cacheable: true,
         })
     }
 }

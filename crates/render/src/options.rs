@@ -63,7 +63,9 @@ impl FieldType {
                 "a string without line breaks, at most `max_len` characters ({SHORT_TEXT_MAX})"
             ),
             Self::LongText => format!("a string, at most `max_len` characters ({LONG_TEXT_MAX})"),
-            Self::Number => "a number within `min`..`max`, on the `step` grid from `min`".into(),
+            Self::Number => {
+                "a number within `min`..`max`, on the `step` grid from `min`; whole unless `min`, `max` or `step` has a fraction".into()
+            }
             Self::Toggle => "`true` or `false`".into(),
             Self::Choice => "the `value` of one choice that is not a draft".into(),
             Self::Color => "`{ light = \"#rrggbb\", dark = \"#rrggbb\" }` (3, 4, 6 or 8 hex digits); a theme color replaces its `token`".into(),
@@ -403,6 +405,18 @@ pub(crate) fn check_value(d: &OptionDecl, v: &Json) -> Result<Json, String> {
                     return Err(format!("{n} is not on the step of {step}"));
                 }
             }
+            // Stored JSON may say 10.0 for 10; templates and core read whole numbers as
+            // integers, so keep them as integers. A field whose bounds and step are all
+            // whole only takes whole numbers.
+            if let Some(i) = whole(n) {
+                return Ok(Json::from(i));
+            }
+            if [d.min, d.max, d.step]
+                .iter()
+                .all(|x| x.is_none_or(|x| whole(x).is_some()))
+            {
+                return Err(format!("{n} is not a whole number"));
+            }
         }
         FieldType::Toggle => {
             v.as_bool().ok_or("expected true or false")?;
@@ -431,7 +445,10 @@ pub(crate) fn check_value(d: &OptionDecl, v: &Json) -> Result<Json, String> {
         }
         FieldType::Image => match v {
             Json::String(s) if s.is_empty() => {}
-            Json::Number(n) if n.as_i64().is_some_and(|id| id > 0) => {}
+            Json::Number(n) => match n.as_f64().and_then(whole) {
+                Some(id) if id > 0 => return Ok(Json::from(id)),
+                _ => return Err("expected a media id or \"\"".to_owned()),
+            },
             _ => return Err("expected a media id or \"\"".to_owned()),
         },
         FieldType::List => {
@@ -449,6 +466,14 @@ pub(crate) fn check_value(d: &OptionDecl, v: &Json) -> Result<Json, String> {
         }
     }
     Ok(v.clone())
+}
+
+/// `n` as an integer when it is one (and exactly representable).
+fn whole(n: f64) -> Option<i64> {
+    // 2^53: beyond it f64 cannot tell neighbouring integers apart.
+    const EXACT: f64 = 9_007_199_254_740_992.0;
+    #[allow(clippy::cast_possible_truncation)] // checked: whole and within +-2^53
+    (n.fract() == 0.0 && n.abs() <= EXACT).then_some(n as i64)
 }
 
 fn is_hex_color(c: &str) -> bool {
@@ -516,6 +541,18 @@ mod tests {
     fn stored_values_must_fit_their_declaration() {
         let n = decl("type='number'\nlabel='x'\nmin=0\nmax=120\nstep=5\ndefault=55");
         assert!(check_value(&n, &json!(60)).is_ok());
+        // Whole floats are kept as integers; fractions fail where bounds and step are whole.
+        assert_eq!(check_value(&n, &json!(10.0)), Ok(json!(10)));
+        assert!(check_value(&n, &json!(10.0)).unwrap().is_u64());
+        let any = decl("type='number'\nlabel='x'\ndefault=1");
+        assert_eq!(check_value(&any, &json!(2.0)), Ok(json!(2)));
+        assert!(
+            check_value(&any, &json!(2.5))
+                .unwrap_err()
+                .contains("whole")
+        );
+        let frac = decl("type='number'\nlabel='x'\nmin=0\nmax=1\nstep=0.25\ndefault=0.5");
+        assert_eq!(check_value(&frac, &json!(0.75)), Ok(json!(0.75)));
         for bad in [json!(61), json!(-5), json!(125), json!("55"), json!(null)] {
             assert!(check_value(&n, &bad).is_err(), "{bad}");
         }
@@ -537,6 +574,8 @@ mod tests {
         }
         let img = decl("type='image'\nlabel='x'\ndefault=''");
         assert!(check_value(&img, &json!(7)).is_ok());
+        assert_eq!(check_value(&img, &json!(7.0)), Ok(json!(7)));
+        assert!(check_value(&img, &json!(7.5)).is_err());
         assert!(check_value(&img, &json!("")).is_ok());
         assert!(check_value(&img, &json!(0)).is_err());
         assert!(check_value(&img, &json!("/x.png")).is_err());

@@ -262,27 +262,13 @@ impl Theme {
             add_templates(&mut env, fallback, |p| theme.read(p).is_none())?;
         }
         add_templates(&mut env, theme, |_| true)?;
-        let mut plugin_catalogs = HashMap::new();
-        let mut infos = Vec::new();
-        for p in plugins {
-            for (slot, src) in &p.partials {
-                env.add_template_owned(p.template_name(slot), src.clone())?;
-            }
-            infos.push(PluginInfo {
-                slots: p.partials.iter().map(|(s, _)| s.clone()).collect(),
-                name: p.name.clone(),
-                schema: p.schema,
-                css: p.css,
-                js: p.js,
-            });
-            plugin_catalogs.insert(p.name, p.catalogs);
-        }
+        let (partials, infos) = partial_env(plugins)?;
 
         let catalogs = Arc::new(catalogs(strings));
         add_functions(
             &mut env,
             Arc::clone(&catalogs),
-            Arc::new(plugin_catalogs),
+            Arc::new(partials),
             assets_url,
             manifest.slots.clone(),
         );
@@ -784,6 +770,30 @@ fn load_css(
     Ok((faces_css, style_css, styles))
 }
 
+/// Filters whose output is marked safe, so a partial could print stored text unescaped
+/// (`tojson` is safe for `<`, `>` and `&` but not inside an attribute).
+const UNSAFE_FILTERS: &[&str] = &["safe", "tojson"];
+
+/// `t("section.key", name=value)` against `catalogs` in the page language, recording keys
+/// that exist nowhere.
+fn translate(
+    state: &State,
+    catalogs: &Catalogs,
+    key: &str,
+    kwargs: &Kwargs,
+) -> Result<String, minijinja::Error> {
+    let lang = page_lang(state);
+    let args = kwargs_strings(kwargs)?;
+    let args: Vec<(&str, String)> = args.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+    let fallback = MissingKeys::default();
+    let missing = state.lookup(MISSING_VAR);
+    let missing = missing
+        .as_ref()
+        .and_then(|v| v.downcast_object_ref::<RenderMissing>())
+        .map_or(&fallback, |m| &m.0);
+    Ok(catalogs.get(&lang).t_template(key, &args, missing))
+}
+
 /// Every `locales/<lang>.toml` of `files`, flattened, on top of `default`'s (templates that
 /// fall back to the default theme still find their keys).
 pub(crate) fn locale_strings(
@@ -824,35 +834,64 @@ pub(crate) fn catalogs(merged: BTreeMap<String, HashMap<String, String>>) -> Cat
     }
 }
 
+/// Partials get their own environment: same escaping, but without the filters that mark
+/// text safe, and without `slot()` (a partial cannot open another slot).
+fn partial_env(
+    plugins: Vec<Plugin>,
+) -> Result<(Environment<'static>, Vec<PluginInfo>), ThemeError> {
+    let mut partials = Environment::new();
+    partials.set_formatter(html_formatter);
+    for f in UNSAFE_FILTERS {
+        partials.remove_filter(f);
+    }
+    let mut plugin_catalogs = HashMap::new();
+    let mut infos = Vec::new();
+    for p in plugins {
+        for (slot, src) in &p.partials {
+            partials.add_template_owned(p.template_name(slot), src.clone())?;
+        }
+        infos.push(PluginInfo {
+            slots: p.partials.iter().map(|(s, _)| s.clone()).collect(),
+            name: p.name.clone(),
+            schema: p.schema,
+            css: p.css,
+            js: p.js,
+        });
+        plugin_catalogs.insert(p.name, p.catalogs);
+    }
+
+    partials.add_function(
+        "t",
+        move |state: &State, key: &str, kwargs: Kwargs| -> Result<String, minijinja::Error> {
+            let name = state.lookup(PLUGIN_VAR);
+            match name
+                .as_ref()
+                .and_then(Value::as_str)
+                .and_then(|n| plugin_catalogs.get(n))
+            {
+                Some(c) => translate(state, c, key, &kwargs),
+                None => Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    "t() outside a plugin partial",
+                )),
+            }
+        },
+    );
+    Ok((partials, infos))
+}
+
 /// `t`, `asset` and `slot`, the functions every template may call.
 fn add_functions(
     env: &mut Environment<'static>,
     theme_catalogs: Arc<Catalogs>,
-    plugin_catalogs: Arc<HashMap<String, Catalogs>>,
+    partials: Arc<Environment<'static>>,
     assets_url: &str,
     slots: Vec<String>,
 ) {
     env.add_function(
         "t",
         move |state: &State, key: &str, kwargs: Kwargs| -> Result<String, minijinja::Error> {
-            let lang = page_lang(state);
-            let args = kwargs_strings(&kwargs)?;
-            let args: Vec<(&str, String)> =
-                args.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-            let fallback = MissingKeys::default();
-            let missing = state.lookup(MISSING_VAR);
-            let missing = missing
-                .as_ref()
-                .and_then(|v| v.downcast_object_ref::<RenderMissing>())
-                .map_or(&fallback, |m| &m.0);
-            // Inside a plugin partial, text comes from that plugin's own locales.
-            let plugin = state.lookup(PLUGIN_VAR);
-            let catalogs = plugin
-                .as_ref()
-                .and_then(Value::as_str)
-                .and_then(|name| plugin_catalogs.get(name))
-                .unwrap_or(&theme_catalogs);
-            Ok(catalogs.get(&lang).t_template(key, &args, missing))
+            translate(state, &theme_catalogs, key, &kwargs)
         },
     );
     // Templates link theme files that only some pages need (the code highlighter) by name.
@@ -887,14 +926,14 @@ fn add_functions(
                     format!("slot({name:?}): {known}; declared: {}", slots.join(", ")),
                 ));
             }
-            Ok(Value::from_safe_string(fill_slot(state, name)))
+            Ok(Value::from_safe_string(fill_slot(state, &partials, name)))
         },
     );
 }
 
 /// Every enabled plugin's partial for `slot`, in plugin-name order. A partial that fails is
 /// left out and reported; the page still renders.
-fn fill_slot(state: &State, slot: &str) -> String {
+fn fill_slot(state: &State, partials: &Environment<'static>, slot: &str) -> String {
     let mut out = String::new();
     let Some(plugins) = state.lookup(PLUGINS_VAR) else {
         return out;
@@ -926,7 +965,7 @@ fn fill_slot(state: &State, slot: &str) -> String {
             continue;
         }
         let template = format!("@plugin/{name}/{slot}.html");
-        let rendered = state.env().get_template(&template).and_then(|t| {
+        let rendered = partials.get_template(&template).and_then(|t| {
             t.render(minijinja::context! {
                 site => state.lookup("site"),
                 page => state.lookup("page"),

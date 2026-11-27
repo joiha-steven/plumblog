@@ -64,3 +64,52 @@ fn a_bad_stored_value_never_breaks_a_page() {
         "every value fell back to its default"
     );
 }
+
+/// The store answers the content version but fails option and plugin reads.
+struct Flaky;
+
+impl ExtSource for Flaky {
+    fn content_version(&self) -> impl Future<Output = Result<u64, String>> {
+        std::future::ready(Ok(7))
+    }
+    fn theme_options(
+        &self,
+        _: &str,
+    ) -> impl Future<Output = Result<Vec<(String, String)>, String>> {
+        std::future::ready(Err("d1 timeout".to_owned()))
+    }
+    fn enabled_plugins(
+        &self,
+    ) -> impl Future<Output = Result<Vec<(String, Vec<(String, String)>)>, String>> {
+        std::future::ready(Err("d1 timeout".to_owned()))
+    }
+}
+
+#[test]
+fn a_failed_option_read_serves_defaults_that_nothing_caches() {
+    let db = MemoryStore::default();
+    for path in ["/", "/reading-on-screens", "/feed.xml", "/no-such-page"] {
+        let out = run(render(SampleSource::get(), &Flaky, &Db(&db), path, "")).unwrap();
+        let Outcome::Page {
+            status, cacheable, ..
+        } = out
+        else {
+            panic!("{path} redirected");
+        };
+        assert!(!cacheable, "{path}");
+        assert_eq!(
+            super::cache_policy(status, cacheable),
+            (false, "no-store"),
+            "{path}: no ETag, no edge copy"
+        );
+    }
+    // The same page from a healthy store may be cached.
+    let Outcome::Page { cacheable, .. } =
+        run(render(SampleSource::get(), &Db(&db), &Db(&db), "/", "")).unwrap()
+    else {
+        panic!("redirect");
+    };
+    assert!(cacheable);
+    assert!(super::cache_policy(200, true).0);
+    assert!(!super::cache_policy(404, true).0, "404s are never stored");
+}

@@ -49,7 +49,16 @@ pub struct Plugin {
 }
 
 /// Template tags a partial may not use: it fills a slot, it never takes over the page.
-const FORBIDDEN_TAGS: &[&str] = &["extends", "block", "include", "import", "from"];
+/// `autoescape` could switch escaping off; escaping filters are removed from the partial
+/// environment instead (see `theme::UNSAFE_FILTERS`).
+const FORBIDDEN_TAGS: &[&str] = &[
+    "extends",
+    "block",
+    "include",
+    "import",
+    "from",
+    "autoescape",
+];
 
 impl Plugin {
     /// Loads the plugin in folder `folder`. `assets_url` is where its `assets/` folder is
@@ -110,6 +119,11 @@ impl Plugin {
             if let Some(tag) = forbidden_tag(src) {
                 return Err(err(format!(
                     "{path}: {{% {tag} %}} is not allowed; a partial only fills its slot"
+                )));
+            }
+            if let Some(f) = unsafe_filter(src) {
+                return Err(err(format!(
+                    "{path}: the {f} filter is not allowed; partial output is always escaped"
                 )));
             }
             // Compile once here so a syntax error is a load error, not a broken page.
@@ -177,6 +191,21 @@ impl Plugin {
     }
 }
 
+/// Filters that would print stored text unescaped (also removed from the partial
+/// environment, so this only makes the mistake a clear load error).
+const UNSAFE_FILTERS: &[&str] = &["safe", "tojson"];
+
+/// The first `| safe` or `| tojson` in `src`, if any.
+fn unsafe_filter(src: &str) -> Option<&'static str> {
+    src.match_indices('|').find_map(|(i, _)| {
+        let rest = src[i + 1..].trim_start();
+        UNSAFE_FILTERS.iter().copied().find(|f| {
+            rest.strip_prefix(f)
+                .is_some_and(|after| !after.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+        })
+    })
+}
+
 fn is_name(n: &str) -> bool {
     n.starts_with(|c: char| c.is_ascii_lowercase())
         && n.len() <= 64
@@ -197,7 +226,7 @@ fn forbidden_tag(src: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{forbidden_tag, is_name};
+    use super::{forbidden_tag, is_name, unsafe_filter};
 
     #[test]
     fn names_and_tags() {
@@ -214,5 +243,13 @@ mod tests {
         assert_eq!(forbidden_tag("{%+include 'x' %}"), Some("include"));
         assert_eq!(forbidden_tag("{% if blocked %}{% endif %}"), None);
         assert_eq!(forbidden_tag("{% for x in imports %}{% endfor %}"), None);
+        assert_eq!(
+            forbidden_tag("{% autoescape false %}x{% endautoescape %}"),
+            Some("autoescape")
+        );
+        assert_eq!(unsafe_filter("{{ x|safe }}"), Some("safe"));
+        assert_eq!(unsafe_filter("{{ x | tojson }}"), Some("tojson"));
+        assert_eq!(unsafe_filter("{{ x | safely_named }}"), None);
+        assert_eq!(unsafe_filter("{{ a or b }}"), None);
     }
 }

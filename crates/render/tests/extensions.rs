@@ -1,7 +1,8 @@
 //! Theme options and declarative plugins: schema checks at load, stored values that do not
 //! fit, and the fixture plugin (tests/fixtures/plugins/hello) filling the minimal theme.
 
-use plumblog_render::{Body, PageInfo, Plugin, Site, Theme};
+use plumblog_markdown::Rendered;
+use plumblog_render::{Body, PageInfo, Plugin, Post, Site, Theme};
 use std::path::Path;
 
 fn dir_files(root: &Path) -> Vec<(String, String)> {
@@ -322,6 +323,43 @@ fn bad_plugin_cases() -> Vec<(Vec<(String, String)>, &'static str)> {
 }
 
 #[test]
+fn partials_cannot_switch_escaping_off() {
+    let hostile = "\"</style><script>x</script>\"";
+    // Rejected at load with a clear message...
+    for (src, want) in [
+        (
+            "{{ plugin.options.greeting|safe }}",
+            "the safe filter is not allowed",
+        ),
+        (
+            "{{ plugin.options.greeting | tojson }}",
+            "the tojson filter is not allowed",
+        ),
+        (
+            "{% autoescape false %}{{ plugin.options.greeting }}{% endautoescape %}",
+            "{% autoescape %} is not allowed",
+        ),
+    ] {
+        let files = edit(&hello(), "partials/footer.html", |_| src.into());
+        let err = plugin(&files).err().unwrap_or_default();
+        assert!(err.contains(want), "{src}: {err}");
+    }
+    // ...and the partial environment lacks them anyway: other spellings render nothing raw.
+    for src in [
+        "{% filter safe %}{{ plugin.options.greeting }}{% endfilter %}",
+        "{% set f = 'safe' %}{{ plugin.options.greeting }}",
+        "{{ slot(\"head\") }}",
+    ] {
+        let files = edit(&hello(), "partials/footer.html", |_| src.into());
+        let theme = theme_with(&minimal(), vec![plugin(&files).unwrap()]).unwrap();
+        let (on, _) = theme.with_options(&[], &[("hello".into(), vec![s("greeting", hostile)])]);
+        let r = home(&on);
+        assert!(!r.html.contains("<script>x</script>"), "{src}");
+        assert!(!r.html.contains("</style><script>"), "{src}");
+    }
+}
+
+#[test]
 fn bad_plugins_do_not_load_and_say_why() {
     let cases = bad_plugin_cases();
     for (files, want) in cases {
@@ -448,6 +486,60 @@ fn stored_theme_values_that_do_not_fit_fall_back_and_are_reported() {
 }
 
 #[test]
+fn whole_numbers_stored_as_floats_still_count() {
+    let post = Post {
+        url: "/a".into(),
+        title: "A".into(),
+        lang: "en".into(),
+        published_at: 0,
+        pinned: false,
+        excerpt: None,
+        body: Rendered {
+            excerpt: "one two three four five six seven".into(),
+            ..Rendered::default()
+        },
+        tags: vec![],
+        cover: None,
+        thumb: None,
+        translations: vec![],
+    };
+    let home = |t: &Theme| {
+        t.render_reporting(
+            &site(),
+            &PageInfo {
+                lang: "en".into(),
+                canonical: "https://example.com/".into(),
+                origin: "https://example.com".into(),
+            },
+            &Body::Home {
+                posts: &[&post],
+                older_url: None,
+                newer_url: None,
+            },
+        )
+        .unwrap()
+    };
+    let theme = theme_with(&minimal(), Vec::new()).unwrap();
+    let (int, p1) = theme.with_options(&[s("excerpt_words", "0")], &[]);
+    let (float, p2) = theme.with_options(&[s("excerpt_words", "0.0")], &[]);
+    assert!(p1.is_empty() && p2.is_empty(), "{p1:?} {p2:?}");
+    let (default, _) = theme.with_options(&[], &[]);
+    assert_ne!(home(&int).html, home(&default).html, "0 hides excerpts");
+    assert_eq!(
+        home(&float).html,
+        home(&int).html,
+        "0.0 is 0, not the default"
+    );
+    let (frac, p3) = theme.with_options(&[s("excerpt_words", "10.5")], &[]);
+    assert_eq!(home(&frac).html, home(&default).html);
+    assert!(
+        p3.join("\n")
+            .contains("option.invalid owner=theme:minimal key=excerpt_words reason=10.5"),
+        "{p3:?}"
+    );
+}
+
+#[test]
 fn stored_theme_values_reach_templates_and_css() {
     let theme = theme_with(&minimal(), Vec::new()).unwrap();
     let (on, problems) = theme.with_options(
@@ -470,6 +562,24 @@ fn stored_theme_values_reach_templates_and_css() {
 /// over (pages are served; the admin will warn), but no single bundled one may.
 const CSS_RAW_CAP: usize = 40_000;
 
+/// Bytes of CSS the minimal theme inlines with plugin `name` enabled, or why it does not fit.
+fn css_with(name: &str, files: &[(String, String)]) -> Result<usize, String> {
+    let p = Plugin::load(name, &refs(files).as_slice(), &format!("/plugin/{name}"))
+        .map_err(|e| e.detail)?;
+    let theme = theme_with(&minimal(), vec![p])?;
+    let (on, problems) = theme.with_options(&[], &[(name.to_owned(), Vec::new())]);
+    if !problems.is_empty() {
+        return Err(format!("plugins/{name}: {problems:?}"));
+    }
+    let len = on.css().len();
+    if len >= CSS_RAW_CAP {
+        return Err(format!(
+            "plugins/{name}: minimal + this plugin inline {len} bytes of CSS (cap {CSS_RAW_CAP})"
+        ));
+    }
+    Ok(len)
+}
+
 #[test]
 fn every_bundled_plugin_loads_and_fits_the_css_budget_alone() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
@@ -480,18 +590,30 @@ fn every_bundled_plugin_loads_and_fits_the_css_budget_alone() {
             continue;
         }
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        let files = dir_files(&dir);
-        let p = Plugin::load(&name, &refs(&files).as_slice(), &format!("/plugin/{name}"))
-            .unwrap_or_else(|e| panic!("{}", e.detail));
-        let theme = theme_with(&minimal(), vec![p]).unwrap();
-        let (on, problems) = theme.with_options(&[], &[(name.clone(), Vec::new())]);
-        assert!(problems.is_empty(), "{name}: {problems:?}");
-        let len = on.css().len();
-        assert!(
-            len < CSS_RAW_CAP,
-            "plugins/{name}: minimal + this plugin inline {len} bytes of CSS (cap {CSS_RAW_CAP})"
-        );
+        css_with(&name, &dir_files(&dir)).unwrap_or_else(|e| panic!("{e}"));
         checked.push(name);
     }
     println!("bundled plugins checked: {checked:?}");
+}
+
+/// The check above passes vacuously while `plugins/` is empty, so prove it on the fixture.
+#[test]
+fn the_css_budget_check_counts_plugin_css_and_bites() {
+    let alone = theme_with(&minimal(), Vec::new()).unwrap().css().len();
+    let with = css_with("hello", &hello()).unwrap();
+    assert!(
+        with > alone,
+        "the plugin's CSS is counted: {with} > {alone}"
+    );
+    let heavy = edit(&hello(), "assets/hello.css", |t| {
+        let mut rules = t.to_owned();
+        for i in 0..CSS_RAW_CAP / 20 {
+            rules.push_str(".hello-");
+            rules.push_str(&i.to_string());
+            rules.push_str("{color:red}");
+        }
+        rules
+    });
+    let err = css_with("hello", &heavy).unwrap_err();
+    assert!(err.contains("bytes of CSS (cap 40000)"), "{err}");
 }
