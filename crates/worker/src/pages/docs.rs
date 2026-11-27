@@ -228,21 +228,34 @@ mod tests {
 
     #[test]
     fn sitemap_alternates_stay_linear_at_the_sitemap_limit() {
-        // 50,000 posts in 25,000 pairs: a per-post scan of the list would be 2.5e9 steps.
-        let posts: Vec<SitemapPost> = (0..50_000)
-            .map(|i| {
-                row(
-                    if i % 2 == 0 { "en" } else { "vi" },
-                    &format!("p{i}"),
-                    i64::from(i / 2),
-                )
-            })
-            .collect();
-        let started = std::time::Instant::now();
-        let alt = sitemap_alternates(&posts, "en");
-        assert!(alt.iter().all(|a| a.len() == 3));
-        // Linear work takes milliseconds; the bound only separates it from the quadratic scan.
-        assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+        // Pairs of translations. Gate on the 4x-input ratio, never on wall-clock (#57): linear
+        // work grows about 4x, a per-post scan of the list 16x. At the 50,000 limit that scan
+        // would be 2.5e9 steps.
+        let posts = |n: i64| -> Vec<SitemapPost> {
+            (0..n)
+                .map(|i| {
+                    row(
+                        if i % 2 == 0 { "en" } else { "vi" },
+                        &format!("p{i}"),
+                        i / 2,
+                    )
+                })
+                .collect()
+        };
+        let fastest = |list: &[SitemapPost]| {
+            (0..5)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    let alt = sitemap_alternates(std::hint::black_box(list), "en");
+                    assert!(alt.iter().all(|a| a.len() == 3));
+                    t.elapsed()
+                })
+                .min()
+                .unwrap_or_default()
+        };
+        let (small, large) = (posts(12_500), posts(50_000));
+        let ratio = fastest(&large).as_secs_f64() / fastest(&small).as_secs_f64();
+        assert!(ratio < 8.0, "4x the posts took {ratio:.1}x the time");
     }
 
     #[test]

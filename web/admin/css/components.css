@@ -244,6 +244,12 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 .row-ex { font: var(--type-small); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-date { font: var(--type-meta); color: var(--muted); font-variant-numeric: tabular-nums; }
 .row-lang { display: flex; gap: var(--sp-6); justify-content: flex-end; }
+/* Under the rows: "Load more", or the error with its retry. */
+.more { display: flex; flex-direction: column; align-items: center; gap: var(--sp-12); padding: 0 max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-32) max(var(--gutter), env(safe-area-inset-left, 0px)); }
+.more:empty { display: none; }
+/* Drafts kept only in this browser, above the list. */
+.device .row { grid-template-areas: "main"; }
+.dev-label { padding: 0 max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-6) max(var(--gutter), env(safe-area-inset-left, 0px)); color: var(--muted); }
 @media (min-width: 900px) { .row-meta { display: contents; } }
 @media (max-width: 899px) {
   .colhead { display: none; }

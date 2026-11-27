@@ -558,7 +558,7 @@ impl Writer {
     /// Readers see the TeX source; the author gets a warning to fix it.
     fn math_error(&mut self, tex: &str, detail: &str) {
         self.warnings.push(Warning {
-            code: "markdown.math_invalid",
+            code: crate::MATH_INVALID,
             detail: format!("{detail}: {tex}"),
         });
         self.push("<code class=\"math-error\">");

@@ -56,6 +56,29 @@ empty_hint = "Bài bạn viết sẽ hiện ở đây."
 empty = "Chưa có trang nào"
 empty_hint = "Trang dành cho nội dung ít thay đổi, như Giới thiệu hay Liên hệ."
 
+[admin.list]
+filter = "Lọc theo trạng thái"
+all = "Tất cả"
+col_title = "Tiêu đề"
+col_status = "Trạng thái"
+col_date = "Ngày"
+col_lang = "Ngôn ngữ"
+empty_status = "Chưa có bài {status} nào"
+empty_scheduled_hint = "Muốn hẹn giờ, chọn \u201cHẹn giờ\u201d trong phần cài đặt bài khi viết."
+empty_hint = "Bài bạn viết sẽ hiện ở đây."
+more = "Tải thêm"
+loading_more = "Đang tải\u2026"
+edited = "Sửa {when}"
+device_title = "Trên thiết bị này"
+device_kept = "Lưu trên thiết bị này, {when}"
+
+[admin.list.lc]
+# The status inside a sentence ("Chưa có bài {status} nào").
+draft = "nháp"
+scheduled = "hẹn giờ"
+published = "đã đăng"
+trashed = "đã xoá"
+
 [admin.media]
 empty = "Chưa có ảnh nào"
 empty_hint = "Ảnh bạn thêm vào bài sẽ hiện ở đây."
@@ -441,6 +464,7 @@ never_share = "Đừng dán token vào khung chat, issue hay file nào được 
 draft = "Bản nháp"
 scheduled = "Đã hẹn giờ"
 published = "Đã đăng"
+trashed = "Đã xoá"
 
 [admin.common]
 cancel = "Huỷ"
@@ -542,6 +566,7 @@ selection_bar = "Định dạng đoạn đã chọn"
 more_tools = "Thêm công cụ"
 blocks = "Chèn khối"
 saving = "Đang lưu…"
+saved = "Đã lưu"
 saved_here = "Đã lưu trên máy này"
 not_saved = "Chưa lưu được"
 not_saved_hint = "Trình duyệt này không cho trang quản trị giữ bản nháp. Hãy chép bài ra chỗ an toàn, rồi kiểm tra cài đặt lưu trữ của trang."
@@ -587,6 +612,13 @@ tab_title = "Bản nháp này vừa được sửa ở một tab khác."
 tab_hint = "Tạm dừng lưu ở đây để không mất bản nào."
 keep_this = "Giữ bản này"
 load_other = "Tải bản kia"
+
+[admin.editor.sync]
+failed = "Chưa lưu được lên trang. Bài vẫn được giữ trên máy này và sẽ được gửi lại khi bạn sửa tiếp hoặc có mạng trở lại."
+slug_taken = "Chưa lưu được lên trang: địa chỉ theo tiêu đề này đã có bài dùng. Hãy đổi tiêu đề một chút rồi viết tiếp."
+
+[admin.editor.warning.markdown]
+math_invalid = "Có công thức chưa hiển thị được; hãy xem lại phần TeX giữa hai dấu đô la."
 
 [admin.editor.mode]
 write = "Viết"

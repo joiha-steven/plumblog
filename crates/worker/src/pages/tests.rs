@@ -287,9 +287,24 @@ fn not_found_is_friendly_and_suggests_posts() {
 #[test]
 fn every_page_renders_without_a_blowup() {
     // Wall time on a shared CI runner is a poor clock, and a debug build on the host says
-    // little about wasm, so this gates only on a bound about 8x what a CI runner takes (0.4 ms on a
-    // laptop, ~1 ms on CI): it catches a slowdown, not the budget. The real per-page time is the `perf` line below (`scripts/perf`
-    // shows it; PLUMBLOG_PERF_STRICT holds it to 2 ms natively) and the Worker's Server-Timing.
+    // little about wasm, so this gates only on a ratio to a reference workload (a serial hash
+    // of a fixed buffer, same build profile) timed in the same loop, so a slow machine slows
+    // both. Measured normal ratio: see the `ratio` in the `perf` line (1.0-1.9 per page, debug
+    // build, laptop); K = 8 is about 4x that, so a uniform 10x slowdown fails. It catches a slowdown, not the budget. The real
+    // per-page time is the `perf` line (`scripts/perf` shows it; PLUMBLOG_PERF_STRICT holds it
+    // to 2 ms natively) and the Worker's Server-Timing.
+    const K: f64 = 8.0;
+    let buf = vec![0x5a_u8; 64 * 1024];
+    let reference = || {
+        let t = std::time::Instant::now();
+        let h = std::hint::black_box(&buf)
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |h, &b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+            });
+        std::hint::black_box(h);
+        t.elapsed()
+    };
     for path in [
         "/",
         "/reading-on-screens",
@@ -298,23 +313,25 @@ fn every_page_renders_without_a_blowup() {
         "/x/y",
     ] {
         get(path);
-        let per = (0..5)
-            .map(|_| {
-                let start = std::time::Instant::now();
-                for _ in 0..20 {
-                    get(path);
-                }
-                start.elapsed() / 20
-            })
-            .min()
-            .unwrap();
-        eprintln!("perf page render {path}: {per:?} (budget 2ms natively)");
+        // Interleaved single renders, minimum per side: a window much longer than the reference
+        // would catch scheduler time slices that the reference escapes.
+        let (mut per, mut calibration) = (std::time::Duration::MAX, std::time::Duration::MAX);
+        for _ in 0..100 {
+            let start = std::time::Instant::now();
+            get(path);
+            per = per.min(start.elapsed());
+            calibration = calibration.min(reference());
+        }
+        eprintln!(
+            "perf page render {path}: {per:?} (budget 2ms natively); reference {calibration:?}, ratio {:.2} (limit {K})",
+            per.as_secs_f64() / calibration.as_secs_f64()
+        );
         if std::env::var_os("PLUMBLOG_PERF_STRICT").is_some() {
             assert!(per.as_micros() < 2_000, "{path} took {per:?} natively");
         }
         assert!(
-            per.as_millis() < 8,
-            "{path} took {per:?}, about 8x CI-normal"
+            per.as_secs_f64() < K * calibration.as_secs_f64(),
+            "{path} took {per:?}, reference {calibration:?}: over {K}x"
         );
     }
 }
