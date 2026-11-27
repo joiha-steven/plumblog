@@ -174,7 +174,7 @@ export function mountAuth(o: AuthOptions): void {
   const alert = h("div", { class: "auth-alert", role: "alert", tabindex: "-1" });
   const challenge = h("div", { class: "auth-challenge", role: "group", "aria-label": t("admin.auth.challenge"), hidden: true });
   const submit = h("button", { class: "btn primary lg block", type: "submit" }, signin ? t("admin.auth.signin") : t("admin.auth.create"));
-  const passkey = signin ? h("button", { class: "btn lg block", type: "button", onclick: () => void attempt(true, (tok) => signInPasskey(api, tok)) }, t("admin.auth.passkey")) : null;
+  const passkey = signin ? h("button", { class: "btn lg block", type: "button", onclick: () => submitOnce(true, (tok) => signInPasskey(api, tok)) }, t("admin.auth.passkey")) : null;
 
   const say = (text: string | undefined, invalid?: HTMLInputElement): void => {
     alert.textContent = text ?? "";
@@ -192,25 +192,54 @@ export function mountAuth(o: AuthOptions): void {
     if (passkey) passkey.textContent = on && viaPasskey ? t("admin.auth.passkey_busy") : t("admin.auth.passkey");
   };
 
-  let again: ((token: string) => void) | undefined;
+  // A Turnstile token is single use and the widget may solve itself (managed or invisible
+  // mode, and again after every reset), so a token never triggers a request on its own: each
+  // writer submit sends at most one request. `fresh` is an unused token; `pending` is the
+  // submit waiting for one (the widget was reset for it), run once and then cleared.
+  let shown = false;
+  let fresh: string | undefined;
+  let pending: ((token: string) => void) | undefined;
   const widget = turnstileBox(
     api,
     challenge,
-    (token) => again?.(token),
-    () => say(t("admin.auth.err_turnstile_load")),
+    (token) => {
+      const run = pending;
+      pending = undefined;
+      if (run) run(token);
+      else fresh = token;
+    },
+    () => {
+      pending = undefined;
+      if (busy) setBusy(false, false);
+      say(t("admin.auth.err_turnstile_load"));
+    },
   );
 
-  /** Shows the widget and resubmits by itself when the writer passes it. */
+  /** Shows the widget; the writer passes it, then submits again. */
   async function challenged(): Promise<void> {
     const r = await widget.show();
     // Without a key there is nothing to pass: the writer can only wait.
     if (r === "no_key") return say(t("admin.auth.err_locked"));
-    say(r === "ok" ? t("admin.auth.err_turnstile") : t("admin.auth.err_turnstile_load"));
+    shown = r === "ok";
+    say(shown ? t("admin.auth.err_turnstile") : t("admin.auth.err_turnstile_load"));
   }
 
-  async function attempt(viaPasskey: boolean, run: (token?: string) => Promise<Result<unknown>>, token?: string): Promise<void> {
+  /** One writer submit: with the widget showing it needs a token, used once. */
+  function submitOnce(viaPasskey: boolean, run: (token?: string) => Promise<Result<unknown>>): void {
     if (busy) return;
-    again = (tok) => void attempt(viaPasskey, run, tok);
+    if (!shown) return void attempt(viaPasskey, run);
+    const token = fresh;
+    fresh = undefined;
+    if (token) return void attempt(viaPasskey, run, token);
+    // The last token was spent: a new one, then this submit goes once.
+    say(undefined);
+    setBusy(true, viaPasskey);
+    pending = (tok) => void attempt(viaPasskey, run, tok, true);
+    widget.reset();
+  }
+
+  async function attempt(viaPasskey: boolean, run: (token?: string) => Promise<Result<unknown>>, token?: string, waited = false): Promise<void> {
+    if (busy && !waited) return;
     say(undefined);
     setBusy(true, viaPasskey);
     const r = await run(token);
@@ -220,7 +249,6 @@ export function mountAuth(o: AuthOptions): void {
       return;
     }
     setBusy(false, viaPasskey);
-    if (token) widget.reset();
     if (r.error.code === "auth.turnstile_required") return challenged();
     say(message(r.error, viaPasskey));
   }
@@ -247,7 +275,7 @@ export function mountAuth(o: AuthOptions): void {
         if (busy) return;
         const user = login.input.value.trim();
         if (signin) {
-          void attempt(false, (tok) => signIn(api, user, password.input.value, tok));
+          submitOnce(false, (tok) => signIn(api, user, password.input.value, tok));
           return;
         }
         const bad = invalid();
@@ -262,7 +290,7 @@ export function mountAuth(o: AuthOptions): void {
           display_name: name.input.value.trim(),
           password: password.input.value,
         };
-        void attempt(false, (tok) => (kind === "setup" ? setup(api, account, tok) : acceptInvite(api, account, tok)));
+        submitOnce(false, (tok) => (kind === "setup" ? setup(api, account, tok) : acceptInvite(api, account, tok)));
       },
     },
     alert,
