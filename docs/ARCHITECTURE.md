@@ -25,7 +25,7 @@ agent a Cloudflare API token, and the agent sets up, writes, translates, themes 
 6. **Heavy work happens off the Worker.** The browser (admin) or the user's machine (CLI) does expensive work; the Worker validates, stores and serves.
 7. **No hard-coded text.** Every user-facing string, English included, lives in a locale file (`locales/` for core and admin, the theme's own locale files for theme text). Code and templates only reference keys.
 8. **No hard-coded layout.** Core produces data and semantic content; every reader-facing page structure (what appears, where, in which order) is defined by the theme's templates. Core ships no reader HTML layout of its own beyond the default theme.
-9. **Small core, extensible edges.** Core contains only what a working blog needs. Anything else is added by themes or plugins through stable extension points. The plugin mechanism is still to be designed (constraint: one Worker bundle on the free plan, so no runtime loading of native code; likely candidates are declarative hooks, theme-level JS, and build-time plugins compiled into the Worker).
+9. **Small core, extensible edges.** Core contains only what a working blog needs. Themes and declarative plugins add the rest (see Plugins and options); complex needs use the API and webhooks from outside.
 
 ## Platform
 
@@ -133,6 +133,15 @@ Not built: PWA/offline, newsletter (later), reactions.
 - The template variable reference is generated from Rust types, never written by hand.
 - Owner-only admin page for colors, fonts, logo.
 
+## Plugins and options
+
+- Themes and plugins declare options; they never ship admin UI. A declaration lists fields from a fixed set of types owned by the admin (short text, long text, number, toggle, single choice, color, image, list), with labels and help as locale keys, grouping, and icons by name from the admin icon set. The admin renders every field with its own components, so every theme and plugin tab follows the admin design language.
+- Settings: **Appearance** shows the active theme's options; **Plugins** lists plugins (enable/disable) with one tab per plugin, generated from its declaration.
+- Plugins are declarative only: settings, HTML partials for named slots that themes must expose (head, body end, before/after post, footer...), browser JS/CSS, locale files. No server code inside the blog. A disabled plugin costs zero bytes.
+- Complex needs are the user's own project: a separate Worker or service talking to plumblog through the API and outgoing webhooks (post published/updated/deleted). Core adds webhooks, nothing more.
+- Isolation: no theme or plugin HTML, CSS or JS ever runs in the admin. Theme CSS needed in the admin (editor typography, live preview) loads in an isolated frame. Admin has a strict CSP. `blog theme check` and `blog plugin check` reject unknown field types, hard-coded text and admin-targeted files.
+- A broken plugin is disabled automatically and named in the admin; the blog keeps working.
+
 ## Admin and editor
 
 - Markdown source editor (CodeMirror 6) with live styling: syntax marks dimmed, headings and emphasis styled as typed. Modes: Write / Split / Preview (tabs on mobile).
@@ -196,3 +205,4 @@ Each phase is one or more sessions; each ends with `scripts/check` green and evi
 - 2026-11-27 Reading and writing first; book-like typography tuned per font; foldables first-class.
 - 2026-11-27 minimal theme first, font Inter with unicode-range subsets; footnotes as sidenotes.
 - 2026-11-27 No hard-coded text (all languages incl. English in locale files); no hard-coded layout (themes define page structure); small core, features via themes and plugins.
+- 2026-11-27 Theme and plugin options are declarations rendered by the admin; plugins are declarative only; complex needs use API + webhooks; nothing from themes/plugins runs in the admin.
