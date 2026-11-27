@@ -296,3 +296,19 @@ pub trait PostStore {
     /// returns nothing; user text is never passed to FTS raw (see `search::to_fts_query`).
     async fn search(&self, lang: &str, query: &str, limit: u32) -> Result<Vec<PostSummary>>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{PostKind, PostStatus};
+    use plumblog_model::shape;
+
+    /// The model crate cannot see these enums, so it keeps copies for the admin's types.
+    #[test]
+    fn model_code_lists_match_the_enums() {
+        let statuses: Vec<_> = PostStatus::ALL.iter().map(|s| s.as_str()).collect();
+        let kinds: Vec<_> = PostKind::ALL.iter().map(|k| k.as_str()).collect();
+        assert_eq!(shape::POST_STATUSES, statuses);
+        assert_eq!(shape::POST_KINDS, kinds);
+        assert_eq!(shape::RENDER_WARNINGS, plumblog_markdown::WARNING_CODES);
+    }
+}

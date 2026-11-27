@@ -63,6 +63,29 @@ empty_hint = "What you write shows up here."
 empty = "No pages yet"
 empty_hint = "Pages are for things that stay put, like About or Contact."
 
+[admin.list]
+filter = "Filter by status"
+all = "All"
+col_title = "Title"
+col_status = "Status"
+col_date = "Date"
+col_lang = "Language"
+empty_status = "No {status} posts yet"
+empty_scheduled_hint = "To schedule a post, choose \u201cSchedule\u201d in its settings while you write."
+empty_hint = "What you write shows up here."
+more = "Load more"
+loading_more = "Loading\u2026"
+edited = "Edited {when}"
+device_title = "On this device"
+device_kept = "Kept on this device, {when}"
+
+[admin.list.lc]
+# The status inside a sentence ("No {status} posts yet").
+draft = "draft"
+scheduled = "scheduled"
+published = "published"
+trashed = "trashed"
+
 [admin.media]
 empty = "No pictures yet"
 empty_hint = "Pictures you add to posts show up here."
@@ -455,6 +478,7 @@ never_share = "Never paste the token into a chat, an issue or a committed file. 
 draft = "Draft"
 scheduled = "Scheduled"
 published = "Published"
+trashed = "Trashed"
 
 [admin.common]
 cancel = "Cancel"
@@ -556,6 +580,7 @@ selection_bar = "Format selection"
 more_tools = "More tools"
 blocks = "Insert a block"
 saving = "Saving…"
+saved = "Saved"
 saved_here = "Saved on this device"
 not_saved = "Not saved"
 not_saved_hint = "This browser is not letting the admin keep drafts. Copy your text somewhere safe, then check the site's storage settings."
@@ -601,6 +626,13 @@ tab_title = "This draft was changed in another tab."
 tab_hint = "Saving here is paused so neither copy is lost."
 keep_this = "Keep this one"
 load_other = "Load that version"
+
+[admin.editor.sync]
+failed = "Could not save to the site. Your text is kept on this device; it is sent again when you next edit or come back online."
+slug_taken = "Could not save to the site: posts with this title's address already exist. Change the title a little and keep writing."
+
+[admin.editor.warning.markdown]
+math_invalid = "A formula could not be rendered; check the TeX between the dollar signs."
 
 [admin.editor.mode]
 write = "Write"

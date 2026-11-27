@@ -14,6 +14,12 @@ mod text;
 pub use comment::{COMMENT_LINK_REL, CommentHtml, render_comment};
 pub use text::{heading_id, word_count};
 
+/// A TeX formula that did not render.
+pub const MATH_INVALID: &str = "markdown.math_invalid";
+
+/// Every [`Warning::code`] the renderer can emit; the API reference and admin types list them.
+pub const WARNING_CODES: &[&str] = &[MATH_INVALID];
+
 /// Knobs that change the output. The excerpt length is the theme option `excerpt_words`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Options {

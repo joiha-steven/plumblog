@@ -1,14 +1,15 @@
 /**
- * The screens of the first admin build. Lists stay empty until the posts and media APIs land
- * (issue #10); each screen already has its real header, empty and no-permission states.
+ * The screens of the admin shell. The posts and pages lists are in lists.ts; media is empty
+ * until its API lands (issue #10).
  */
 
-import type { Api, Me, PostSummary } from "./api/client";
+import type { Api, Me } from "./api/client";
 import { PERMISSION_ROLES } from "./api/model.gen";
 import { type Child, h } from "./dom";
 import { icon } from "./icons";
 import { t } from "./i18n";
-import { HREF, type Screen, editHref } from "./router";
+import { pagesList, postsList } from "./lists";
+import { HREF, type Screen } from "./router";
 import { empty, failed, head, loadingRows } from "./ui";
 
 /** In the header the label folds away on phones (`.new-label`); in an empty state it stays. */
@@ -19,36 +20,6 @@ const newPost = (folding: boolean): HTMLElement =>
     icon("plus"),
     folding ? h("span", { class: "new-label" }, t("admin.posts.new")) : t("admin.posts.new"),
   );
-
-const statusName = (s: PostSummary["status"]): string =>
-  // i18n: admin.status.draft admin.status.scheduled admin.status.published
-  t(`admin.status.${s}`);
-
-/** Title / status / date / language, aligned so the eye can run down each column. */
-function row(p: PostSummary): HTMLElement {
-  const when = new Intl.DateTimeFormat(document.documentElement.lang, { dateStyle: "medium" }).format(p.updated_at);
-  return h(
-    "a",
-    { class: "row", href: editHref(p.id) },
-    h("div", { class: "row-main" }, h("span", { class: "row-title", lang: p.lang }, p.title || t("admin.posts.untitled")), p.excerpt ? h("span", { class: "row-ex", lang: p.lang }, p.excerpt) : null),
-    h("div", { class: "row-meta" }, h("span", {}, h("span", { class: `st ${p.status}` }, statusName(p.status))), h("span", { class: "row-date" }, when)),
-    h("div", { class: "row-lang" }, h("span", { class: "lang" }, p.lang)),
-  );
-}
-
-/** The posts list: loads, then shows rows, the empty state or a plain error with retry. */
-function postsList(api: Api): HTMLElement {
-  const box = h("div", {}, loadingRows());
-  const load = async () => {
-    box.replaceChildren(loadingRows());
-    const r = await api.posts();
-    if (!r.ok) box.replaceChildren(failed(r.error, () => void load()));
-    else if (!r.value.length) box.replaceChildren(empty({ icon: "posts", title: t("admin.posts.empty"), hint: t("admin.posts.empty_hint"), action: newPost(false) }));
-    else box.replaceChildren(h("div", { class: "rows" }, ...r.value.map(row)));
-  };
-  void load();
-  return box;
-}
 
 /** The account screen lives in the auth chunk: the shell never carries it. */
 function accountBox(me: Me, api: Api): HTMLElement {
@@ -76,9 +47,9 @@ function accountBox(me: Me, api: Api): HTMLElement {
 export function screen(name: Screen, me: Me, api: Api): Child[] {
   switch (name) {
     case "posts":
-      return [head(t("admin.nav.posts"), newPost(true)), postsList(api)];
+      return [head(t("admin.nav.posts"), newPost(true)), postsList(api, { user: me.id, newPost: () => newPost(false) })];
     case "pages":
-      return [head(t("admin.nav.pages")), empty({ icon: "pages", title: t("admin.pages.empty"), hint: t("admin.pages.empty_hint") })];
+      return [head(t("admin.nav.pages")), pagesList(api)];
     case "media":
       return [head(t("admin.nav.media")), empty({ icon: "media", title: t("admin.media.empty"), hint: t("admin.media.empty_hint") })];
     case "settings":
