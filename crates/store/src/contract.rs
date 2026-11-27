@@ -109,6 +109,8 @@ cases! {
     site::comments_round_trip,
     site::comment_delete_cascades,
     site::comment_versions,
+    site::comment_moderation,
+    site::comment_submit_and_latest,
     site::reader_metadata_versions,
     site::settings_round_trip,
     site::options_round_trip,

@@ -291,3 +291,38 @@ fn every_page_renders_well_under_the_cpu_budget() {
         assert!(per.as_micros() < 2_000, "{path} took {per:?} natively");
     }
 }
+
+/// Comments stored before `0004_comment_html.sql` have no HTML: the page renders them from
+/// the Markdown; newer rows use the HTML stored at submit.
+#[test]
+fn comment_without_stored_html_is_rendered_from_markdown() {
+    use super::db::ExtSource;
+    use plumblog_markdown::render_comment;
+    use plumblog_store::{CommentStatus, CommentStore, NewComment, PostStore, SettingsStore};
+
+    let db = MemoryStore::default();
+    run(super::seed::sample_posts(&db)).unwrap();
+    run(db.put_setting(plumblog_store::comment::SETTING_ENABLED, "true", 1)).unwrap();
+    let post = run(db.find_post("en", "first-post")).unwrap().unwrap();
+    let add = |body: &str, body_html: Option<&str>, at| {
+        run(db.add_comment(NewComment {
+            post_id: post.id,
+            parent_id: None,
+            author_name: "A".into(),
+            body: body.into(),
+            body_html: body_html.map(str::to_owned),
+            status: CommentStatus::Approved,
+            created_at: at,
+        }))
+        .unwrap()
+    };
+    add("*a*", None, 1);
+    add("*b*", Some("<p>stored</p>\n"), 2);
+    let c = run(Db(&db).comments("en", "first-post")).unwrap().unwrap();
+    let html: Vec<&str> = c.items.iter().map(|i| i.html.as_str()).collect();
+    assert_eq!(
+        html,
+        [render_comment("*a*").html.as_str(), "<p>stored</p>\n"]
+    );
+    assert_eq!(html[0], "<p><em>a</em></p>\n");
+}

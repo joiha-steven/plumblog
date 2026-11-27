@@ -2,7 +2,9 @@
 //! breaks a page fails here before it reaches the Worker.
 
 use plumblog_markdown::Rendered;
-use plumblog_render::{Alternate, Body, Image, Link, PageInfo, Post, Site, Theme, ThemeFiles};
+use plumblog_render::{
+    Alternate, Body, CommentItem, Comments, Image, Link, PageInfo, Post, Site, Theme, ThemeFiles,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -129,6 +131,7 @@ fn every_page_kind_renders() {
                 post: &a,
                 prev: Some(&b),
                 next: None,
+                comments: None,
             },
         )
         .unwrap();
@@ -312,6 +315,7 @@ fn highlighter_loads_only_on_posts_with_code() {
                     post: p,
                     prev: None,
                     next: None,
+                    comments: None,
                 },
             )
             .unwrap()
@@ -351,6 +355,7 @@ fn post_flags_reach_templates() {
                 post: &p,
                 prev: None,
                 next: None,
+                comments: None,
             },
         )
         .unwrap();
@@ -434,6 +439,7 @@ fn post_seo_uses_cover_translations_and_absolute_urls() {
                 post: &p,
                 prev: None,
                 next: None,
+                comments: None,
             },
         )
         .unwrap();
@@ -505,6 +511,7 @@ fn json_ld_cannot_close_its_script_element() {
                 post: &p,
                 prev: None,
                 next: None,
+                comments: None,
             },
         )
         .unwrap();
@@ -518,4 +525,68 @@ fn json_ld_cannot_close_its_script_element() {
         "JSON-LD escapes < so the title cannot end the script: {ld}"
     );
     assert!(ld.contains("\\u003c/script\\u003e"));
+}
+
+/// The comment section: absent when off; approved items with escaped names, a no-JS note,
+/// the notice whitelist for theme JS (never a notice in the HTML itself), and the note when
+/// older comments are left out.
+#[test]
+fn comments_section() {
+    let theme = load(&theme_files(), &BTreeMap::new());
+    let p = post("x", "X", 0, false);
+    let show = |c: Option<&Comments>| {
+        theme
+            .render(
+                &site(),
+                &page("en"),
+                &Body::Post {
+                    post: &p,
+                    prev: None,
+                    next: None,
+                    comments: c,
+                },
+            )
+            .unwrap()
+    };
+    assert!(!show(None).contains("id=\"comments\""));
+    let mut c = Comments {
+        open: true,
+        items: vec![CommentItem {
+            id: 7,
+            author: "<b>Ann</b>".into(),
+            owner: false,
+            created_at: 1_772_668_800,
+            html: "<p>hi</p>\n".into(),
+        }],
+        action_url: "/x/comments".into(),
+        turnstile_key: String::new(),
+        max_length: 5000,
+        name_max_length: 60,
+        max_links: 30,
+        more: false,
+    };
+    let html = show(Some(&c));
+    assert!(html.contains("<li class=\"comment\" id=\"c7\">"), "{html}");
+    assert!(html.contains("&lt;b&gt;Ann&lt;/b&gt;"));
+    assert!(html.contains("<time datetime=\"2026-03-05\">"));
+    assert!(html.contains("<p>hi</p>"));
+    assert!(html.contains("action=\"/x/comments\" method=\"post\""));
+    assert!(html.contains("class=\"hint nojs\""));
+    assert!(!html.contains("class=\"notice"));
+    assert!(html.contains("<template id=\"comment-notices\">"));
+    assert!(html.contains("<p data-code=\"pending\">Thanks."));
+    assert!(html.contains(
+        "<p data-code=\"comments.too_many_links\">Too many links: a comment may hold at most 30.</p>"
+    ));
+    assert!(html.contains("Enter a name of 1 to 60 characters."));
+    assert!(html.contains("Write a comment of 1 to 5000 characters."));
+    assert!(html.contains("maxlength=\"60\" autocomplete=\"name\""));
+    assert!(html.contains("<p data-code=\"error\">Your comment was not sent."));
+    assert!(!html.contains("Only the newest"));
+    c.more = true;
+    assert!(show(Some(&c)).contains("Only the newest 1 comments are shown."));
+    c.open = false;
+    let closed = show(Some(&c));
+    assert!(!closed.contains("<form class=\"comment-form\""));
+    assert!(closed.contains("Comments are closed."));
 }

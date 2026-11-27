@@ -56,6 +56,20 @@ export interface PostSummary {
   updated_at: number;
 }
 
+/**
+ * A stored picture, as an upload returns it. The media API (#10) defines the real shape;
+ * width and height let the editor reserve the picture's box before it loads.
+ */
+export interface Media {
+  id: number;
+  url: string;
+  width: number;
+  height: number;
+}
+
+/** Called with the share of an upload sent so far, 0 to 1. */
+export type Progress = (sent: number) => void;
+
 export interface Api {
   me(): Promise<Result<Me>>;
   posts(): Promise<Result<PostSummary[]>>;
@@ -71,6 +85,8 @@ export interface Api {
    * or empty answer resolves to `undefined`.
    */
   call<T>(method: Method, path: string, body?: Record<string, string | boolean>): Promise<Result<T>>;
+  /** Stores a picture; `progress` follows the upload. */
+  upload(file: File, progress: Progress, signal?: AbortSignal): Promise<Result<Media>>;
 }
 
 export type Method = "GET" | "POST" | "PATCH" | "DELETE";
@@ -134,6 +150,46 @@ async function request<T>(
 }
 
 const getJson = <T>(path: string): Promise<Result<T>> => request<T>("GET", path, undefined, false);
+/** `POST /api/media` with the file as multipart `file`. XHR, not fetch: fetch reports no upload
+ * progress. The posts and media API is issue #10; this follows its draft. */
+function upload(file: File, progress: Progress, signal?: AbortSignal): Promise<Result<Media>> {
+  const path = "/api/media";
+  return new Promise((resolve) => {
+    const x = new XMLHttpRequest();
+    x.open("POST", path);
+    x.responseType = "json";
+    x.setRequestHeader("accept", "application/json");
+    x.upload.onprogress = (e) => {
+      if (e.lengthComputable) progress(e.loaded / e.total);
+    };
+    x.onerror = () => {
+      console.error(`api: POST ${path}: no response`);
+      resolve(fail("network", 0));
+    };
+    x.onload = () => {
+      const body: unknown = x.response;
+      if (x.status >= 200 && x.status < 300 && body && typeof (body as Media).url === "string") {
+        resolve({ ok: true, value: body as Media });
+        return;
+      }
+      const code = (body as { error?: unknown } | null)?.error;
+      console.warn(`api: POST ${path}: ${x.status} ${String(code)}`);
+      resolve(fail(isCode(code) ? code : "bad_response", x.status));
+    };
+    const form = new FormData();
+    form.append("file", file);
+    if (signal?.aborted) return resolve(fail("cancelled", 0));
+    signal?.addEventListener(
+      "abort",
+      () => {
+        x.abort();
+        resolve(fail("cancelled", 0));
+      },
+      { once: true },
+    );
+    x.send(form);
+  });
+}
 
 export function httpApi(): Api {
   return {
@@ -146,5 +202,6 @@ export function httpApi(): Api {
     post: (id) => getJson<PostDraft>(`/api/posts/${id}`),
     previewUrl: undefined,
     call: (method, path, body) => request(method, path, body, true),
+    upload,
   };
 }

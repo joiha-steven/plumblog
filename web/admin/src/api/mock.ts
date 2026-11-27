@@ -7,13 +7,14 @@
  * token never answers, to hold the busy state for a screenshot); otherwise a call succeeds after a short wait.
  * Adding or removing a passkey (account screen): `reauth_wrong|reauth|conflict|origin|unsupported|turnstile`
  * fail as the server does (`turnstile`: removing only; adding sends its token after the browser prompt), before any browser prompt (no real WebAuthn runs in shots); `?passkeys=0`
- * starts with none. Removing works on a list kept in memory.
+ * starts with none. Removing works on a list kept in memory. `?upload=fail` makes uploads fail
+ * halfway and `?upload=slow` takes 20 s.
  */
 
 import me from "../../fixtures/me.json";
 import posts from "../../fixtures/posts.json";
 import longPost from "../../fixtures/post-1.txt";
-import { type Api, type Me, type Method, type PostDraft, type PostSummary, type Result, fail } from "./client";
+import { type Api, type Me, type Media, type Method, type PostDraft, type PostSummary, type Result, fail } from "./client";
 
 /** Cloudflare's public always-pass Turnstile key: the real widget works in dev. */
 const TEST_SITE_KEY = "1x00000000000000000000AA";
@@ -109,6 +110,8 @@ async function auth<T>(params: URLSearchParams, method: Method, path: string, bo
 
 export function mockApi(params: URLSearchParams): Api {
   const mode = params.get("mock");
+  const up = params.get("upload");
+  let mediaId = 100;
   const role = params.get("role") === "writer" ? "writer" : "owner";
   const settle = async () => {
     if (mode === "loading") await new Promise(() => undefined);
@@ -141,5 +144,28 @@ export function mockApi(params: URLSearchParams): Api {
     // The dev Worker's real renderer (crates/worker/src/contract.rs, test builds only).
     previewUrl: "/__preview",
     call: <T>(method: Method, path: string, body?: Body) => auth<T>(params, method, path, body),
+    // Sends nothing: progress over a second or two, then the picture from this browser.
+    async upload(file, progress, signal) {
+      if (mode === "offline") return fail("network", 0);
+      const steps = 12;
+      for (let i = 1; i <= steps; i++) {
+        await new Promise((r) => {
+          const id = setTimeout(r, up === "slow" ? 1700 : 120);
+          signal?.addEventListener("abort", () => (clearTimeout(id), r(undefined)), { once: true });
+        });
+        if (signal?.aborted) return fail("cancelled", 0);
+        if (up === "fail" && i > steps / 2) return fail("internal", 500);
+        progress(i / steps);
+      }
+      const url = URL.createObjectURL(file);
+      const size = await new Promise<[number, number]>((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve([img.naturalWidth, img.naturalHeight]);
+        img.onerror = () => resolve([0, 0]);
+        img.src = url;
+      });
+      const media: Media = { id: ++mediaId, url, width: size[0], height: size[1] };
+      return { ok: true, value: media };
+    },
   };
 }

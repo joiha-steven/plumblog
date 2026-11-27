@@ -72,9 +72,12 @@ test.after?.(() => console.log(`slowest block: ${slowest.ms.toFixed(1)} ms (${sl
 for (const lang of LANGS) {
   test(`${lang}: hostile input stays under ${BUDGET_MS} ms and keeps the text`, () => {
     for (const [name, text] of Object.entries(CORPUS)) {
-      // Best of three: the budget is about growth with input size, not machine noise.
+      // Best of seven: the budget is about growth with input size, not machine noise. A busy
+      // machine (scripts/check runs cargo and wrangler alongside) slows some runs, rarely all
+      // seven; the median would fail on any sustained slowdown, and CPU time counts Node's GC
+      // threads too, reading higher than the script's own cost.
       let b, ms = Infinity;
-      for (let k = 0; k < 3; k++) {
+      for (let k = 0; k < 7; k++) {
         b = block(lang, text);
         ms = Math.min(ms, run([b]));
       }

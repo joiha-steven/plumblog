@@ -109,6 +109,38 @@ const seedDrafts = (page) =>
   );
 
 // [name, path, element to wait for, action before the shot, widths it applies to]
+// Pastes into the writing column what a clipboard would hold: a picture made on a canvas, or
+// HTML as Google Docs puts it there.
+const paste = (page, what) =>
+  page.evaluate(async (w) => {
+    const cm = document.querySelector(".cm-content");
+    cm.focus();
+    const dt = new DataTransfer();
+    if (w === "picture") {
+      const c = document.createElement("canvas");
+      c.width = 1200;
+      c.height = 800;
+      const g = c.getContext("2d");
+      const grad = g.createLinearGradient(0, 0, 1200, 800);
+      grad.addColorStop(0, "#c9b79c");
+      grad.addColorStop(1, "#4f6b5a");
+      g.fillStyle = grad;
+      g.fillRect(0, 0, 1200, 800);
+      const blob = await new Promise((r) => c.toBlob(r, "image/png"));
+      dt.items.add(new File([blob], "doi-thong-buoi-sang.png", { type: "image/png" }));
+    } else {
+      dt.setData("text/plain", "x");
+      dt.setData("text/html", w);
+    }
+    cm.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  }, what);
+const DOCS_HTML =
+  '<b style="font-weight:normal" id="docs-internal-guid-1"><h1><span style="font-weight:400">K\u1ebf ho\u1ea1ch chuy\u1ebfn \u0111i</span></h1>' +
+  '<p><span>Ch\u00fang t\u00f4i \u0111i l\u00fac </span><span style="font-weight:700">s\u00e1u gi\u1edd</span><span>, </span><span style="font-style:italic">tr\u01b0\u1edbc c\u01a1n m\u01b0a</span><span>. Xem </span>' +
+  '<a href="https://www.google.com/url?q=https://example.com/ban-do&amp;sa=D"><span>b\u1ea3n \u0111\u1ed3</span></a><span>.</span></p>' +
+  "<ul><li><p><span>Tr\u00e0 n\u00f3ng</span></p></li><li><p><span>\u00c1o m\u01b0a</span></p></li></ul>" +
+  "<table><tr><td><p>Ng\u00e0y</p></td><td><p>N\u01a1i</p></td></tr><tr><td><p>1</p></td><td><p>Ch\u1ee3 s\u1edbm</p></td></tr></table></b>";
+
 const STATES = [
   ["posts", "/admin/"],
   ["empty", "/admin/?mock=empty"],
@@ -242,6 +274,55 @@ const STATES = [
       await page.waitForSelector(".pop");
       await page.click(".pop [data-act=signout]");
       await page.waitForSelector(".confirm");
+      await settle(page, ".pop");
+    },
+  ],
+  [
+    "paste-docs",
+    "/admin/posts/new",
+    EDITOR,
+    async (page) => {
+      await paste(page, DOCS_HTML);
+      await page.waitForFunction(() => document.querySelector(".cm-content")?.textContent?.includes("Ch\u1ee3 s\u1edbm"));
+    },
+  ],
+  [
+    "upload",
+    "/admin/posts/3?upload=slow",
+    EDITOR,
+    async (page) => {
+      await paste(page, "picture");
+      await page.waitForFunction(() => document.querySelector(".up .bar i")?.style.transform.includes("0.1"));
+    },
+  ],
+  [
+    "upload-failed",
+    "/admin/posts/3?upload=fail",
+    EDITOR,
+    async (page) => {
+      await paste(page, "picture");
+      await page.waitForSelector(".up.fail");
+    },
+  ],
+  [
+    "upload-offline",
+    "/admin/posts/3",
+    EDITOR,
+    async (page) => {
+      await page.evaluate(() => Object.defineProperty(navigator, "onLine", { get: () => false }));
+      await paste(page, "picture");
+      await page.waitForSelector(".toast");
+      await settle(page, ".toast");
+    },
+  ],
+  [
+    "picture-alt",
+    "/admin/posts/3",
+    EDITOR,
+    async (page) => {
+      await paste(page, "picture");
+      await page.waitForSelector(".altpop");
+      await pictures(page);
       await settle(page, ".pop");
     },
   ],
