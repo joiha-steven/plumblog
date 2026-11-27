@@ -45,8 +45,8 @@ DISPLAY_WGHT = 650  # titles only; one static weight is ~40% smaller than a rang
 OPSZ = 14
 
 # Layout features kept. cv05 (l with tail) and cv08 (I with serifs) disambiguate I/l/1;
-# tnum aligns dates; case raises punctuation in all-caps labels.
-FEATURES = ["kern", "calt", "ccmp", "locl", "mark", "mkmk", "case", "tnum", "cv05", "cv08"]
+# tnum aligns dates. No `case`: the theme sets no all-caps text.
+FEATURES = ["kern", "calt", "ccmp", "locl", "mark", "mkmk", "tnum", "cv05", "cv08"]
 # Code: no ligatures (readers should see the characters that are typed), marks for Vietnamese.
 MONO_FEATURES = ["ccmp", "locl", "mark", "mkmk"]
 

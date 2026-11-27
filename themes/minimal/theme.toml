@@ -10,8 +10,9 @@ family = "Inter"
 faces = "assets/fonts/faces.css"
 # Preload the body latin subset and the title cut, plus the subsets of the page language so its
 # letters do not swap in late and nudge the layout. Other scripts load only when a page uses them.
-preload = ["assets/fonts/inter-latin.woff2", "assets/fonts/inter-display-latin.woff2"]
-preload_by_lang = { vi = ["assets/fonts/inter-vietnamese.woff2", "assets/fonts/inter-display-vietnamese.woff2"], ru = ["assets/fonts/inter-cyrillic.woff2"], uk = ["assets/fonts/inter-cyrillic.woff2"], bg = ["assets/fonts/inter-cyrillic.woff2"], sr = ["assets/fonts/inter-cyrillic.woff2"], el = ["assets/fonts/inter-greek.woff2"] }
+# Mono is preloaded too: the writer style sets the site name and dates in it, above the fold.
+preload = ["assets/fonts/inter-latin.woff2", "assets/fonts/inter-display-latin.woff2", "assets/fonts/mono-latin.woff2"]
+preload_by_lang = { vi = ["assets/fonts/inter-vietnamese.woff2", "assets/fonts/inter-display-vietnamese.woff2", "assets/fonts/mono-vietnamese.woff2"], ru = ["assets/fonts/inter-cyrillic.woff2"], uk = ["assets/fonts/inter-cyrillic.woff2"], bg = ["assets/fonts/inter-cyrillic.woff2"], sr = ["assets/fonts/inter-cyrillic.woff2"], el = ["assets/fonts/inter-greek.woff2"] }
 
 [js]
 # Theme toggle, sidenotes, copy-code button. Deferred; every page works fully without it.
