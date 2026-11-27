@@ -144,10 +144,12 @@ test("picture descriptions are one line with brackets and backslashes escaped", 
   assert.equal(md('<img src="https://x.test/a.png" alt="a\nb\n\n  c [d] e\\">'), "![a b c \\[d\\] e\\\\](https://x.test/a.png)");
 });
 
-// Wall time on a shared CI runner is a poor clock, so this checks how the work grows, not a
-// fixed number of milliseconds: four times the input must take well under 16 times the time
-// (linear work takes about 4x, quadratic 16x). Only conversion is timed, never happy-dom's parsing;
-// best of three conversions per size. The absolute bound is a backstop far above normal.
+// Wall time on a shared CI runner is a poor clock (CI measured 4.5x for 2x the input), so
+// linearity is checked on a count instead: every read the converter makes of the tree, with
+// the reads that cost in proportion to what they return (`childNodes`, `children`,
+// `textContent`) weighted by its length. Re-walking a subtree, the usual way such code turns
+// quadratic, shows in the count exactly, whatever the machine. A wall-time bound far above
+// normal (about 80 ms on CI) backstops work the count cannot see, such as string building.
 const nest = (tag, n, inner = "x") => `<${tag}>`.repeat(n) + inner + `</${tag}>`.repeat(n);
 const SHAPES = {
   spans: (n) => nest("span", n),
@@ -158,36 +160,56 @@ const SHAPES = {
   quotes: (n) => nest("blockquote", n),
 };
 const parsed = (html) => new win.DOMParser().parseFromString(html, "text/html").body;
-const convertMs = (body) => {
-  const t = performance.now();
-  const out = htmlToMarkdown(body);
-  return [performance.now() - t, out];
-};
-// One parse, three conversions: conversion only reads the tree.
-const best = (html) => {
-  const body = parsed(html);
-  let ms = Infinity;
-  let out = "";
-  for (let i = 0; i < 3; i++) {
-    const [took, o] = convertMs(body);
-    ms = Math.min(ms, took);
-    out = o;
-  }
-  return [ms, out];
-};
 
-test("deep and wide nesting converts in time linear in its size, and never throws", () => {
+/** Runs `fn` with every tree read the converter uses counted; returns [result, reads]. */
+function counting(fn) {
+  const sample = parsed("<p>x</p>").firstChild;
+  const weigh = (v) => (v && typeof v.length === "number" ? v.length : 1);
+  const undo = [];
+  let reads = 0;
+  for (const name of ["tagName", "nodeType", "childNodes", "children", "parentElement", "textContent", "getAttribute"]) {
+    let proto = sample;
+    while (proto && !Object.prototype.hasOwnProperty.call(proto, name)) proto = Object.getPrototypeOf(proto);
+    assert.ok(proto, `happy-dom has ${name}`);
+    const d = Object.getOwnPropertyDescriptor(proto, name);
+    const counted = { ...d };
+    if (d.get) {
+      counted.get = function () {
+        const v = d.get.call(this);
+        reads += name === "childNodes" || name === "children" || name === "textContent" ? weigh(v) : 1;
+        return v;
+      };
+    } else {
+      counted.value = function (...a) {
+        reads += 1;
+        return d.value.apply(this, a);
+      };
+    }
+    Object.defineProperty(proto, name, counted);
+    undo.push(() => Object.defineProperty(proto, name, d));
+  }
+  try {
+    return [fn(), reads];
+  } finally {
+    for (const u of undo) u();
+  }
+}
+
+test("deep and wide nesting converts with work linear in its size, and never throws", () => {
   for (const [name, make] of Object.entries(SHAPES)) {
-    // 4x the size: linear time grows about 4x (up to 6.5x seen with garbage collection under
-    // load), quadratic 16x; the bound of 10 clears both by 1.5x. At 2x, 3.03 against 3 failed.
-    const [small, outSmall] = best(make(5_000));
-    const [large, outLarge] = best(make(20_000));
+    const small = parsed(make(5_000));
+    const large = parsed(make(20_000));
+    const [outSmall, readsSmall] = counting(() => htmlToMarkdown(small));
+    const t = performance.now();
+    const [outLarge, readsLarge] = counting(() => htmlToMarkdown(large));
+    const ms = performance.now() - t;
     assert.match(outSmall, /x/, name);
     assert.match(outLarge, /x/, name);
-    // A floor keeps timer noise on tiny durations from deciding the ratio.
-    const ratio = large / Math.max(small, 5);
-    assert.ok(ratio < 10, `${name}: ${small.toFixed(0)} ms -> ${large.toFixed(0)} ms (x${ratio.toFixed(2)})`);
-    assert.ok(large < 10_000, `${name}: ${large.toFixed(0)} ms`);
+    assert.ok(readsSmall > 5_000, `${name}: the count sees the walk (${readsSmall} reads)`);
+    // 4x the input: linear work reads 4x (plus a constant), quadratic 16x.
+    const ratio = readsLarge / readsSmall;
+    assert.ok(ratio < 4.5, `${name}: ${readsSmall} -> ${readsLarge} reads (x${ratio.toFixed(2)})`);
+    assert.ok(ms < 3_000, `${name}: ${ms.toFixed(0)} ms`);
   }
 });
 
