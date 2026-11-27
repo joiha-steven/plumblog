@@ -184,7 +184,8 @@ pub fn build(
             name.clone_into(&mut seo.title);
             vec![c.collection(name), c.breadcrumbs(name)]
         }
-        Body::NotFound { .. } => Vec::new(),
+        // Neither is a page to index: no structured data.
+        Body::NotFound { .. } | Body::Search { .. } => Vec::new(),
     };
     if !graph.is_empty() {
         seo.json_ld = J::obj(vec![

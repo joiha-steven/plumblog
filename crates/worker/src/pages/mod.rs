@@ -4,6 +4,7 @@
 mod cache;
 mod docs;
 mod routes;
+mod search;
 pub mod source;
 
 use crate::keys;
@@ -11,10 +12,11 @@ use plumblog_i18n::{Catalog, Key};
 use plumblog_model::VERSION;
 use plumblog_render::{Body, Link, PageInfo, Post, Site, Theme, ThemeError};
 use routes::Route;
+use search::{EnvSearch, SearchSource};
 use source::{Filter, ReaderSource, SampleSource, Settings, StoredPost};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
-use worker::{Context, Headers, Request, Response, Result, console_error, console_warn};
+use worker::{Context, Env, Headers, Request, Response, Result, console_error, console_warn};
 
 /// Where the default theme's `assets/` folder is served (Workers static assets).
 pub const THEME_ASSETS_URL: &str = "/theme/minimal";
@@ -50,11 +52,21 @@ fn theme() -> std::result::Result<&'static Theme, &'static ThemeError> {
 }
 
 /// Serves a reader page, from cache when possible.
-pub async fn serve(req: &Request, ctx: &Context) -> Result<Response> {
+pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> {
     let url = req.url()?;
     let path = url.path().to_owned();
     let origin = url.origin().ascii_serialization();
     let src = SampleSource::get();
+    // Search results depend on the query string and on the store, neither of which is in
+    // the cache key or the ETag, so they skip both.
+    if path == routes::SEARCH {
+        let query = url
+            .query_pairs()
+            .find(|(k, _)| k == "q")
+            .map(|(_, v)| v.into_owned())
+            .unwrap_or_default();
+        return live(src, &EnvSearch(env), &path, &query).await;
+    }
 
     let version = match src.content_version().await {
         Ok(v) => v,
@@ -75,7 +87,7 @@ pub async fn serve(req: &Request, ctx: &Context) -> Result<Response> {
     }
 
     let started = worker::Date::now().as_millis();
-    let outcome = match render(src, &path).await {
+    let outcome = match render(src, &NoSearch, &path, "").await {
         Ok(o) => o,
         Err(detail) => return Ok(failure(&detail)),
     };
@@ -122,6 +134,46 @@ pub async fn serve(req: &Request, ctx: &Context) -> Result<Response> {
     }
 }
 
+/// A page rendered for this request only: no `ETag`, no Cache API, never stored by browsers.
+async fn live(
+    src: &impl ReaderSource,
+    search: &impl SearchSource,
+    path: &str,
+    query: &str,
+) -> Result<Response> {
+    let outcome = match render(src, search, path, query).await {
+        Ok(o) => o,
+        Err(detail) => return Ok(failure(&detail)),
+    };
+    let Outcome::Page {
+        status,
+        content_type,
+        body,
+    } = outcome
+    else {
+        return Ok(failure("live page asked for a redirect"));
+    };
+    let h = Headers::new();
+    h.set("content-type", content_type)?;
+    h.set("cache-control", "no-store")?;
+    h.set("x-plumblog-cache", cache::Lookup::Bypass.label())?;
+    Ok(Response::ok(body)?.with_status(status).with_headers(h))
+}
+
+/// For cached pages, which never search.
+struct NoSearch;
+
+impl SearchSource for NoSearch {
+    fn search(
+        &self,
+        _: &str,
+        _: &str,
+        _: u32,
+    ) -> impl Future<Output = std::result::Result<Vec<plumblog_store::PostSummary>, String>> {
+        std::future::ready(Err("search outside the search route".to_owned()))
+    }
+}
+
 /// Plain-text 500 from the core locale, for when the theme or the data cannot produce a page.
 fn failure(detail: &str) -> Response {
     console_error!("pages: render failed: {detail}");
@@ -148,7 +200,14 @@ fn core_text(lang: &str, key: Key) -> String {
 /// A storage or template failure, as a detail for the log.
 /// Takes no request origin on purpose: the Host header is the client's to choose, so it must
 /// never reach a public URL (canonical, feed and entry ids, sitemap).
-pub async fn render(src: &impl ReaderSource, path: &str) -> std::result::Result<Outcome, String> {
+///
+/// `query` is the `q` parameter, read only by the search route; `search` serves it.
+pub async fn render(
+    src: &impl ReaderSource,
+    search: &impl SearchSource,
+    path: &str,
+    query: &str,
+) -> std::result::Result<Outcome, String> {
     let theme = theme().map_err(|e| format!("theme: {e}"))?;
     let settings = src.settings().await.map_err(err)?;
     let origin = public_origin(&settings);
@@ -170,6 +229,7 @@ pub async fn render(src: &impl ReaderSource, path: &str) -> std::result::Result<
         Route::Post { slug } => p.post(&slug).await?,
         Route::Tag { slug, page } => p.tag(&slug, page).await?,
         Route::Archive { year, page } => p.archive(year, page).await?,
+        Route::Search => p.search(search, query).await?,
         Route::Feed { lang, format } => {
             return Ok(match p.feed(&settings, lang.as_deref(), format).await? {
                 Some(body) => doc(format.content_type(), body),
@@ -388,8 +448,7 @@ fn site(s: &Settings, lang: &str) -> Site {
         description: s.description.clone(),
         default_lang: s.lang.clone(),
         home_url: "/".to_owned(),
-        // Search lands with its own issue (#16).
-        search_url: None,
+        search_url: Some(routes::SEARCH.to_owned()),
         feed_url: routes::feed(feed_lang, routes::FeedFormat::Atom),
         rss_url: routes::feed(feed_lang, routes::FeedFormat::Rss),
         json_feed_url: routes::feed(feed_lang, routes::FeedFormat::Json),
@@ -435,6 +494,10 @@ fn to_render(p: &StoredPost) -> Post {
 
 #[cfg(test)]
 mod docs_tests;
+#[cfg(test)]
+mod search_tests;
+#[cfg(any(test, feature = "contract-tests"))]
+pub mod seed;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

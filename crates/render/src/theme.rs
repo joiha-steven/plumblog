@@ -304,15 +304,45 @@ impl Theme {
     ///
     /// # Errors
     /// A template error, with template name and line.
-    pub fn render_reporting<'b>(
+    pub fn render_reporting(
         &self,
         site: &Site,
         page: &PageInfo,
-        body: &Body<'b>,
+        body: &Body<'_>,
     ) -> Result<(String, Vec<(String, String)>), ThemeError> {
         let lang = page.lang.as_str();
+        let (kind, description, data) = self.body_data(site, body);
+        let mut preload: Vec<&str> = self.preload.iter().map(String::as_str).collect();
+        if let Some(extra) = self.preload_by_lang.get(lang) {
+            preload.extend(extra.iter().map(String::as_str));
+        }
+        let list_title = self.list_title(lang, body);
+        let seo = seo::build(site, page, body, list_title.as_deref(), &description);
+        let ctx = Context {
+            site,
+            page: PageData {
+                kind: kind.as_str(),
+                lang,
+                dir: if is_rtl(lang) { "rtl" } else { "ltr" },
+                description: &description,
+                canonical: &page.canonical,
+                seo,
+            },
+            theme: ThemeData {
+                css: &self.css,
+                js: &self.js,
+                preload,
+                colors: &self.colors,
+                options: &self.options,
+            },
+        };
+        self.run(kind, ser(&ctx), data)
+    }
+
+    /// Template kind, meta description and template data for one body.
+    fn body_data<'b>(&self, site: &Site, body: &Body<'b>) -> (PageKind, String, Value) {
         let entries = |posts: &[&'b Post]| self.entries(posts);
-        let (kind, description, data) = match body {
+        match body {
             Body::Home {
                 posts,
                 older_url,
@@ -380,32 +410,16 @@ impl Theme {
                     posts: entries(recent),
                 }),
             ),
-        };
-        let mut preload: Vec<&str> = self.preload.iter().map(String::as_str).collect();
-        if let Some(extra) = self.preload_by_lang.get(lang) {
-            preload.extend(extra.iter().map(String::as_str));
+            Body::Search { query, posts, more } => (
+                PageKind::Search,
+                site.description.clone(),
+                ser(SearchData {
+                    query,
+                    results: entries(posts),
+                    more: *more,
+                }),
+            ),
         }
-        let list_title = self.list_title(lang, body);
-        let seo = seo::build(site, page, body, list_title.as_deref(), &description);
-        let ctx = Context {
-            site,
-            page: PageData {
-                kind: kind.as_str(),
-                lang,
-                dir: if is_rtl(lang) { "rtl" } else { "ltr" },
-                description: &description,
-                canonical: &page.canonical,
-                seo,
-            },
-            theme: ThemeData {
-                css: &self.css,
-                js: &self.js,
-                preload,
-                colors: &self.colors,
-                options: &self.options,
-            },
-        };
-        self.run(kind, ser(&ctx), data)
     }
 
     /// Renders `kind`'s template with a fresh missing-key collector for this render only.
@@ -542,6 +556,13 @@ struct ArchiveData<'a> {
 #[derive(Serialize)]
 struct NotFoundData<'a> {
     posts: Vec<EntryData<'a>>,
+}
+
+#[derive(Serialize)]
+struct SearchData<'a> {
+    query: &'a str,
+    results: Vec<EntryData<'a>>,
+    more: bool,
 }
 
 /// minijinja's HTML escaping also escapes `/`, which turns every URL into `&#x2f;` noise and

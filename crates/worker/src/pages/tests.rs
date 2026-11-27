@@ -8,7 +8,7 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 /// The sample source never awaits, so one poll finishes; no executor dependency for tests.
-fn run<F: Future>(f: F) -> F::Output {
+pub(super) fn run<F: Future>(f: F) -> F::Output {
     match pin!(f).poll(&mut Context::from_waker(Waker::noop())) {
         Poll::Ready(v) => v,
         Poll::Pending => panic!("sample source future was pending"),
@@ -16,7 +16,7 @@ fn run<F: Future>(f: F) -> F::Output {
 }
 
 fn get(path: &str) -> (u16, String) {
-    match run(render(SampleSource::get(), path)).unwrap() {
+    match run(render(SampleSource::get(), &super::NoSearch, path, "")).unwrap() {
         Outcome::Page { status, body, .. } => (status, body),
         Outcome::Redirect(to) => (301, to),
     }
@@ -27,7 +27,7 @@ pub(super) fn get_typed(path: &str) -> (u16, &'static str, String) {
 }
 
 pub(super) fn get_from(src: &impl ReaderSource, path: &str) -> (u16, &'static str, String) {
-    match run(render(src, path)).unwrap() {
+    match run(render(src, &super::NoSearch, path, "")).unwrap() {
         Outcome::Page {
             status,
             content_type,

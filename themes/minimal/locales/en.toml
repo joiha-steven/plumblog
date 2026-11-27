@@ -36,6 +36,7 @@ hint = "Search titles and text of every post."
 count_one = "1 post for “{query}”"
 count_other = "{count} posts for “{query}”"
 none = "Nothing found for “{query}”. Try fewer or different words."
+count_more = "The {count} newest posts for “{query}”. Add a word to narrow it down."
 
 [comments]
 title = "Comments"
