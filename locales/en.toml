@@ -122,6 +122,16 @@ preview_offline_hint = "Your writing is saved on this device. The preview comes 
 preview_missing_title = "Preview is not available yet"
 preview_missing_hint = "It arrives with the posts API. Write mode shows the text close to how it will look."
 
+[admin.editor.conflict]
+server_title = "This post changed since your draft on this device."
+server_hint = "Choose the text to keep; the other is replaced."
+keep_mine = "Keep my draft"
+use_saved = "Use the saved version"
+tab_title = "This draft was changed in another tab."
+tab_hint = "Saving here is paused so neither copy is lost."
+keep_this = "Keep this one"
+load_other = "Load that version"
+
 [admin.editor.mode]
 write = "Write"
 split = "Split"

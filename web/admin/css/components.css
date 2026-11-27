@@ -274,6 +274,9 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 .skel { height: var(--sp-12); border-radius: var(--r-4); background: var(--field); }
 .skel.sm { height: var(--sp-8); }
 .banner { display: flex; gap: var(--sp-12); align-items: center; padding: var(--sp-12) max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-12) max(var(--gutter), env(safe-area-inset-left, 0px)); background: var(--st-sched-bg); color: var(--st-sched); font: var(--type-small); }
+/* A banner that asks: its buttons wrap under the text on narrow screens. */
+.banner.choice { flex-wrap: wrap; }
+.banner.choice .grow { flex: 1 1 var(--pop-w); }
 
 /* ===== Sections: plain blocks separated by hairlines, no cards ===== */
 .sec { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-16); padding-bottom: var(--sp-32); margin-bottom: var(--sp-32); border-bottom: 1px solid var(--line); max-width: var(--measure); }

@@ -16,13 +16,15 @@ import { closePop, openPop, openPopEl, toast } from "../ui";
 import { BLOCKS, type Block, blockName, fold } from "./blocks";
 import { createEditor } from "./cm";
 import { countWords, heading, link, linePrefix, wrap } from "./commands";
-import { loadDraft, saveDraft } from "./drafts";
+import { draftKey, loadDraft, saveDraft } from "./drafts";
 
 export interface EditorOptions {
   root: HTMLElement;
   api: Api;
   /** The post being edited; undefined for a new one. */
   post: PostDraft | undefined;
+  /** The signed-in user: drafts are kept per user. */
+  user: number;
   lang: string;
   /** The page's CSP nonce (boot data), for CodeMirror's `<style>` element. */
   nonce: string;
@@ -86,10 +88,28 @@ const statusName = (s: PostDraft["status"]): string =>
 
 export async function mountEditor(o: EditorOptions): Promise<void> {
   const post = o.post;
-  const key = post ? `post-${post.id}` : "new";
+  // A new post's draft key lives in its URL (?draft=), so a reload finds it again and two new
+  // posts, in two tabs, never share one.
+  const url = new URL(location.href);
+  let newId = url.searchParams.get("draft") ?? "";
+  if (post === undefined && !/^[a-z0-9]{12,32}$/.test(newId)) {
+    newId = crypto.randomUUID().replaceAll("-", "").slice(0, 16);
+    url.searchParams.set("draft", newId);
+    history.replaceState(history.state, "", url);
+  }
+  const key = draftKey(o.user, post?.id, newId);
   const local = await loadDraft(key);
-  // A draft kept here newer than the server's copy wins: it is what the writer last saw.
-  const fromLocal = local !== undefined && (post === undefined || local.savedAt > post.updated_at);
+  const same = local !== undefined && post !== undefined && local.title === post.title && local.body === post.body;
+  const fromLocal = local !== undefined && !same;
+  // The draft is the writer's latest text, unless the server copy moved on since the version
+  // the draft started from: then both exist and the writer chooses (never a silent pick).
+  const serverMoved = fromLocal && post !== undefined && local.base !== post.updated_at;
+  /** The server version the text in this editor started from. */
+  let base: number | null = fromLocal ? local.base : (post?.updated_at ?? null);
+  /** The stored draft's `rev` this tab last read or wrote; saves expect it. */
+  let rev = local?.rev ?? 0;
+  /** Saving waits while another tab's newer draft is unresolved. */
+  let paused = false;
   const lang = post?.lang ?? o.lang;
   const status = post?.status ?? "draft";
   let title = fromLocal ? local.title : (post?.title ?? "");
@@ -119,10 +139,12 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   const cmHost = h("div", { lang });
   const toolbar = h("div", { class: "tools", role: "toolbar", "aria-label": t("admin.editor.toolbar") });
   const toolsWrap = h("div", { class: "tools-wrap" }, toolbar);
+  const choiceSlot = h("div", {});
   const write = h(
     "div",
     { class: "pane ed-write" },
     toolsWrap,
+    choiceSlot,
     h(
       "div",
       { class: "col" },
@@ -174,12 +196,35 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   // the published page, and no theme code ever runs in the admin itself. No scripts in the
   // frame: the page is complete as rendered (math, code), so same-origin is safe to grant and
   // lets the theme's fonts load (an opaque origin fails their CORS check).
-  const frame = h("iframe", { class: "pv-frame", name: "pb-preview", title: t("admin.editor.preview_label"), sandbox: "allow-same-origin" });
+  // Each preview loads into a fresh frame, swapped in once loaded: a frame's first load
+  // replaces its blank page instead of adding to the history, so Back still leaves the editor.
+  let frame: HTMLIFrameElement | undefined;
+  let frames = 0;
   const field = (name: string) => h("input", { type: "hidden", name });
   const fTitle = field("title");
   const fBody = field("body");
   const fLang = field("lang");
-  const form = h("form", { method: "post", target: "pb-preview", class: "sr", "aria-hidden": "true" }, fTitle, fBody, fLang);
+  const form = h("form", { method: "post", class: "sr", "aria-hidden": "true" }, fTitle, fBody, fLang);
+  const loadPreview = () => {
+    const next = h("iframe", { class: "pv-frame", name: `pb-preview-${++frames}`, title: t("admin.editor.preview_label"), sandbox: "allow-same-origin" });
+    next.hidden = true;
+    next.addEventListener(
+      "load",
+      () => {
+        // Same origin (no scripts in it), so the reading position carries over.
+        const y = frame?.contentWindow?.scrollY ?? 0;
+        frame?.remove();
+        frame = next;
+        next.hidden = false;
+        next.contentWindow?.scrollTo(0, y);
+      },
+      { once: true },
+    );
+    if (!form.isConnected || (frame && !frame.isConnected)) previewPane.replaceChildren(...(frame ? [frame] : []), form);
+    previewPane.append(next);
+    form.target = next.name;
+    form.submit();
+  };
   let previewTimer: ReturnType<typeof setTimeout> | undefined;
   const preview = () => {
     clearTimeout(previewTimer);
@@ -194,12 +239,12 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
         );
       if (o.offline()) return previewPane.replaceChildren(note("offline"));
       if (!o.api.previewUrl) return previewPane.replaceChildren(note("missing"));
-      if (!frame.isConnected) previewPane.replaceChildren(frame, form);
+      if (!form.isConnected) previewPane.replaceChildren(form);
       form.action = o.api.previewUrl;
       fTitle.value = titleIn.value;
       fBody.value = view.state.doc.toString();
       fLang.value = lang;
-      form.submit();
+      loadPreview();
     }, 350);
   };
 
@@ -217,18 +262,96 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     clearTimeout(quietTimer);
     setSaved(t("admin.editor.saving"));
     saveTimer = setTimeout(async () => {
-      const ok = await saveDraft(key, { title: titleIn.value, body: view.state.doc.toString(), savedAt: Date.now() });
-      if (!ok) {
+      if (paused) return setSaved(t("admin.editor.not_saved"));
+      const res = await saveDraft(key, { title: titleIn.value, body: view.state.doc.toString(), base, savedAt: Date.now() }, rev);
+      if (res === "conflict") {
+        paused = true;
+        setSaved(t("admin.editor.not_saved"));
+        otherTab();
+        return;
+      }
+      if (res === "failed") {
         setSaved(t("admin.editor.not_saved"));
         toast(t("admin.editor.not_saved_hint"), 6000);
         return;
       }
+      rev++;
       setSaved(t("admin.editor.saved_here"));
       quietTimer = setTimeout(() => setSaved(t("admin.editor.saved_here"), true), 1800);
       if (mode !== "write") preview();
     }, 700);
   };
   setSaved(fromLocal || post ? t("admin.editor.saved_here") : "", true);
+
+  /* ---------- two texts: the writer chooses, never a silent pick ---------- */
+  const setText = (tt: string, bb: string) => {
+    titleIn.value = tt;
+    title = tt;
+    fit();
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: bb } });
+    count();
+  };
+  const choice = (head: string, hint: string, keep: [string, () => void], other: [string, () => void]) => {
+    const pick = (f: () => void) => () => {
+      choiceSlot.replaceChildren();
+      f();
+    };
+    choiceSlot.replaceChildren(
+      h(
+        "div",
+        { class: "banner choice", role: "alert" },
+        icon("alert"),
+        h("div", { class: "grow" }, h("b", {}, head), " ", hint),
+        h("button", { type: "button", class: "btn", onclick: pick(keep[1]) }, keep[0]),
+        h("button", { type: "button", class: "btn quiet", onclick: pick(other[1]) }, other[0]),
+      ),
+    );
+  };
+  /** The server copy moved on since this device's draft began. */
+  const serverChoice = (p: PostDraft) =>
+    choice(
+      t("admin.editor.conflict.server_title"),
+      t("admin.editor.conflict.server_hint"),
+      [
+        t("admin.editor.conflict.keep_mine"),
+        () => {
+          base = p.updated_at;
+          dirty();
+        },
+      ],
+      [
+        t("admin.editor.conflict.use_saved"),
+        () => {
+          base = p.updated_at;
+          setText(p.title, p.body);
+        },
+      ],
+    );
+  /** Another tab saved this draft after this tab last read it. */
+  const otherTab = () =>
+    choice(
+      t("admin.editor.conflict.tab_title"),
+      t("admin.editor.conflict.tab_hint"),
+      [
+        t("admin.editor.conflict.keep_this"),
+        async () => {
+          rev = (await loadDraft(key))?.rev ?? 0;
+          paused = false;
+          dirty();
+        },
+      ],
+      [
+        t("admin.editor.conflict.load_other"),
+        async () => {
+          const d = await loadDraft(key);
+          paused = false;
+          if (!d) return dirty();
+          rev = d.rev;
+          base = d.base;
+          setText(d.title, d.body);
+        },
+      ],
+    );
 
   const count = () => {
     const words = countWords(`${titleIn.value} ${view.state.doc.toString()}`);
@@ -616,6 +739,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   }).observe(o.root, { childList: true });
 
   drawModes();
+  if (serverMoved && post) serverChoice(post);
   if (!body && !title) titleIn.focus();
   else if (!phone()) {
     view.focus();

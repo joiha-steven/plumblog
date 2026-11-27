@@ -151,6 +151,8 @@ test("a draft previews as the published page, with no script for the frame to bl
   assert.equal(res.headers.get("cache-control"), "no-store");
   assert.equal(res.headers.get("x-robots-tag"), "noindex");
   assert.match(res.headers.get("server-timing"), /^render;dur=\d+$/);
+  // No script even opened on its own; framed only by the admin.
+  assert.equal(res.headers.get("content-security-policy"), "sandbox allow-same-origin; script-src 'none'; frame-ancestors 'self'");
   const html = await res.text();
   assert.match(html, /B\u00e0i &lt;m\u1edbi&gt;/);
   assert.match(html, /<math/);

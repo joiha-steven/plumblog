@@ -41,7 +41,8 @@ async function editor(route: Route): Promise<void> {
   }
   try {
     const { mountEditor } = await import("./editor/index");
-    await mountEditor({ root, api, post, lang: boot.lang, nonce: boot.nonce, offline: () => forceOffline || !navigator.onLine });
+    const user = me?.ok ? me.value.id : 0;
+    await mountEditor({ root, api, post, user, lang: boot.lang, nonce: boot.nonce, offline: () => forceOffline || !navigator.onLine });
   } catch (e) {
     // A chunk that failed to load (offline, new deploy): say so instead of a blank screen.
     console.error("admin: editor failed to load", e);

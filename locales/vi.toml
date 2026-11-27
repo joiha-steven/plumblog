@@ -115,6 +115,16 @@ preview_offline_hint = "Bài của bạn đã lưu trên máy này. Xem trước
 preview_missing_title = "Chưa xem trước được"
 preview_missing_hint = "Tính năng này đến cùng API bài viết. Chế độ Viết đã hiển thị gần giống bài khi đăng."
 
+[admin.editor.conflict]
+server_title = "Bài này đã đổi từ khi bạn bắt đầu bản nháp trên máy này."
+server_hint = "Chọn bản muốn giữ; bản còn lại sẽ bị thay."
+keep_mine = "Giữ bản nháp của tôi"
+use_saved = "Dùng bản đã lưu"
+tab_title = "Bản nháp này vừa được sửa ở một tab khác."
+tab_hint = "Tạm dừng lưu ở đây để không mất bản nào."
+keep_this = "Giữ bản này"
+load_other = "Tải bản kia"
+
 [admin.editor.mode]
 write = "Viết"
 split = "Chia đôi"

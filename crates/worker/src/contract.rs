@@ -16,6 +16,12 @@ const PREFIX: &str = "/__contract";
 const SEED: &str = "/__seed";
 const OPTION: &str = "/__option";
 const PREVIEW: &str = "/__preview";
+/// The preview page runs no script even if opened outside the editor's frame, and only the
+/// admin may frame it. `allow-same-origin` keeps the site's origin so the theme's fonts pass
+/// their CORS check; scripts stay off (`sandbox` without `allow-scripts`, and `script-src`).
+/// `/api/preview` (#10) sends the same.
+pub const PREVIEW_CSP: &str =
+    "sandbox allow-same-origin; script-src 'none'; frame-ancestors 'self'";
 
 /// Second lock besides the cargo feature: the route empties the database, so it also needs
 /// this variable, which only tools/wrangler.dev.toml sets.
@@ -117,6 +123,7 @@ async fn preview(req: &Request, env: &Env) -> Result<Response> {
             h.set("content-type", "text/html; charset=utf-8")?;
             h.set("cache-control", "no-store")?;
             h.set("x-robots-tag", "noindex")?;
+            h.set("content-security-policy", PREVIEW_CSP)?;
             // As on reader pages: the render cost of a long draft, for local measurement.
             let ms = worker::Date::now().as_millis().saturating_sub(started);
             h.set("server-timing", &format!("render;dur={ms}"))?;
