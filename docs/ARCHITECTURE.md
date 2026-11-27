@@ -35,7 +35,7 @@ agent a Cloudflare API token, and the agent sets up, writes, translates, themes 
 | Posts, users, settings, sessions | D1 | FTS5 for search |
 | Images, theme bundles | R2 | |
 | Admin JS/CSS, default theme assets | Workers static assets | |
-| Rendered pages | Cache API | Purged per affected URL on publish |
+| Rendered pages | Cache API | Cache keys include a site content version that every publish bumps, so no purge calls. Cache API needs a custom domain: production blogs must use one; `*.workers.dev` is for trying only |
 | Scheduled publishing | Cron Trigger | |
 | Spam protection | Turnstile | Login after failures, comments |
 | Analytics | Cloudflare Web Analytics | Not built into admin; an AI guide fetches numbers |
@@ -47,17 +47,27 @@ Free-plan rules that shape the design:
 
 ## Code layout
 
+One crate per module, each with a small public API, so a module can be fixed, upgraded or replaced without touching the others. Dependencies only point down the list; `scripts/check` enforces the allowed graph.
+
 ```
-crates/core     shared, no I/O: Markdown renderer, models, i18n, validation. Also compiled for the browser so the editor preview is byte-identical to the published page.
-crates/worker   the Cloudflare Worker: public pages, admin API, MCP endpoint
-crates/cli      the `blog` binary: setup, deploy, content and theme commands, guides
-guides/         AI guides, embedded into `blog guide` and exposed over MCP
-locales/        UI strings, one TOML file per language
-migrations/     D1 SQL, forward-only, numbered
-themes/         the three default themes
-web/admin       admin frontend (editor)
-scripts/check   the one check; pre-commit hook and CI run it
+crates/model      shared types, ids, errors, permissions table; no I/O
+crates/markdown   Markdown -> HTML, TOC, excerpt, heading ids (pulldown-cmark + own extensions)
+crates/i18n       locale files, lookup, plural rules
+crates/auth       password scheme, passkey verification, sessions, roles; crypto behind a trait
+crates/syslog     system log event types and the logging interface
+crates/store      storage traits (posts, users, media, settings, log...) + in-memory impl for tests
+crates/render     theme runtime: minijinja templates, template data, theme/plugin options
+crates/worker     wiring only: routes per feature (pages, api, mcp, media, cron), D1/R2/cache adapters
+crates/cli        the `blog` binary: setup, deploy, content and theme commands, guides
+guides/           AI guides, embedded into `blog guide` and exposed over MCP
+locales/          core and admin UI strings, one TOML file per language
+migrations/       D1 SQL, forward-only, numbered
+themes/           default themes
+web/admin         admin frontend
+scripts/check     the one check; pre-commit hook and CI run it
 ```
+
+Each feature (posts, media, auth, search, comments, webhooks, feeds...) is a module with the same shape: types in `model`, logic in its own crate or module, storage behind a `store` trait, one route module in `worker`. Logic never calls D1, R2 or `fetch` directly, so every module is testable without Cloudflare.
 
 Users do not need Rust: releases ship the built Worker and `blog` binaries for macOS, Linux and Windows. Only contributors compile.
 
@@ -91,7 +101,7 @@ CommonMark + GFM (tables, task lists, strikethrough, autolinks), footnotes, call
 
 **Raw HTML in Markdown is not allowed** (stripped). Revisit later only with a safe-tag allowlist.
 
-Code highlighting must not run on the Worker. Highlighting is produced by `core` in the browser at save time and the Worker re-validates the output.
+Code highlighting runs on the reader page: a small deferred script (<= 8 KB gzip) loaded only on pages that contain code. Nothing is highlighted at save time, so posts from the admin, the CLI and MCP all look the same.
 
 ### Images
 
@@ -164,6 +174,27 @@ Not built: offline reading, newsletter (later), reactions.
 - Done as guides, not features: import (WordPress, Ghost, Hugo/Jekyll/Zola), full export, backup, translation, unused-media cleanup, analytics.
 - The admin shows "last backup" as recorded by the backup guide's final command, as a nudge.
 
+## System log
+
+- Owner-only page in Settings: a readable timeline of what the system did, with filters (type, user, date) and a request id on each entry.
+- Recorded: sign-ins and failures, content changes (who, what), settings/theme/plugin changes, deploys and migrations, scheduled jobs, webhook deliveries, automatic plugin disables, errors with a plain message and an error code.
+- Never recorded: page views, passwords, tokens, personal data beyond the acting user.
+- Stored in D1 with a retention cap (age and row count) so it stays inside free-plan write limits; one write per event, never per view.
+- Worker logs carry the same request id, so an AI can go from an admin entry to the full trace.
+
+## Testing
+
+| Layer | What it proves | Runs in |
+|---|---|---|
+| Unit | markdown, i18n, auth, permissions, render | `cargo test` |
+| Fixtures | Markdown output byte-for-byte against a corpus | `cargo test` |
+| Worker integration | every route, roles (writer cannot reach settings), publish flow, cache versioning | local `wrangler dev` |
+| Browser | admin flows: write, paste image, publish | Playwright |
+| Performance | Lighthouse 100 + CLS 0; render of a long post under a CPU budget | local |
+| Migrations | applied to sample data, no rows lost | local |
+
+Node.js is a contributor-only tool (wrangler, Playwright, Lighthouse). Users never need it.
+
 ## Budgets
 
 | Item | Budget |
@@ -180,17 +211,14 @@ Which Markdown files may exist, and how long each may be, is enforced by `script
 
 ## Roadmap
 
-Each phase is one or more sessions; each ends with `scripts/check` green and evidence (screenshots, scores).
+Work is tracked as GitHub Issues grouped in one milestone per phase; this list only names the phases. One issue = one session = one PR; `scripts/check` and CI green, reviewed, then merged. Each phase ends with a demo Hung can click through.
 
-1. Skeleton: workspace, check, CI, guides mechanism.
-2. Core: Markdown renderer with a fixture corpus; D1 schema; `blog setup` / `blog deploy`; local dev with `wrangler dev`.
-3. Public site: default theme (light/dark), i18n, feeds, sitemap, SEO, cache.
-4. Auth: password, passkeys, sessions, roles, setup code, reset, invites.
-5. Admin and editor; media upload with AVIF.
-6. API, tokens, CLI content commands, MCP.
-7. Theme system: three themes, `blog theme` commands.
-8. Search, scheduling, revisions, trash, redirects, comments.
-9. Release: prebuilt binaries, safe upgrades, guides for import/export/backup/translate.
+0. Design prototypes merged (minimal theme, admin prototype).
+1. Foundations: module crates, shared types, error and log conventions, dependency-graph check, local Worker test harness.
+2. In parallel: markdown + i18n; storage + migrations + `blog setup`/`blog deploy`; reader rendering (theme runtime, cache, minimal templates).
+3. Auth, API, system log; real admin and editor; media upload (AVIF).
+4. MCP, theme options and plugins, search, comments, webhooks, feeds and SEO.
+5. Release pipeline, guides, first real deploy on a custom domain, production measurements.
 
 ## Decision log
 
@@ -209,3 +237,7 @@ Each phase is one or more sessions; each ends with `scripts/check` green and evi
 - 2026-11-27 No hard-coded text (all languages incl. English in locale files); no hard-coded layout (themes define page structure); small core, features via themes and plugins.
 - 2026-11-27 Theme and plugin options are declarations rendered by the admin; plugins are declarative only; complex needs use API + webhooks; nothing from themes/plugins runs in the admin.
 - 2026-11-27 Reader site and admin are installable web apps with distinct manifests and icon colors; no offline reading.
+- 2026-11-27 One crate per module with an enforced dependency graph; logic is storage-agnostic behind store traits.
+- 2026-11-27 Code highlighting on the reader page (deferred, <= 8 KB, only pages with code); nothing at save time.
+- 2026-11-27 Production needs a custom domain (Cache API); cache invalidation by content version.
+- 2026-11-27 Owner-facing system log in Settings; Node.js is contributor-only.
