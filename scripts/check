@@ -38,9 +38,10 @@ cargo test -q -p plumblog-i18n --test locale_keys \
 # --- end locale keys ---
 
 # --- markdown CPU budget (issue #4) ---
-step "markdown render CPU budget (release)"
+step "markdown render and strict JSON parse CPU budgets (release)"
 # Debug builds measure the compiler, not the renderer; the budget is in tests/perf.rs.
 cargo test -q --release -p plumblog-markdown --test perf || fail "markdown render over its CPU budget"
+cargo test -q --release -p plumblog-auth --test perf || fail "strict JSON parse over its CPU budget"
 # --- end markdown CPU budget ---
 
 step "worker wasm build + size budget (what a deploy ships)"
