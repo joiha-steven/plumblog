@@ -1,0 +1,244 @@
+# Builds and publishes a release (docs/ARCHITECTURE.md, Release bundle).
+# A tag vX.Y.Z on main makes a DRAFT GitHub Release; a human publishes it.
+# workflow_dispatch is a dry run: everything is built and uploaded as workflow artifacts,
+# nothing is signed and no release is created.
+name: release
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+
+# Nothing by default; each job asks for what it needs.
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # Git Bash on Windows, so scripts/package-release runs the same on every runner.
+    shell: bash
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      # fetch-depth 0 fetches every branch, so origin/main is there for the ancestry check.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: v
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(scripts/package-release version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" != push ]; then
+            echo "dry run of v$version from $GITHUB_SHA: no checks on tag, key or main"
+            exit 0
+          fi
+          [ "$REF_TYPE" = tag ] || { echo "::error::not a tag push"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag $TAG is not vX.Y.Z"; exit 1; }
+          [ "$TAG" = "v$version" ] || { echo "::error::tag $TAG does not match Cargo.toml version $version"; exit 1; }
+          git rev-parse --verify -q refs/remotes/origin/main > /dev/null \
+            || { echo "::error::origin/main was not fetched"; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main \
+            || { echo "::error::tag $TAG ($GITHUB_SHA) is not on main"; exit 1; }
+          if grep -qx PLACEHOLDER release/minisign.pub || ! grep -q '^untrusted comment:' release/minisign.pub; then
+            echo "::error::release/minisign.pub is not a real public key; run blog-release keygen first"
+            exit 1
+          fi
+
+  check:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain (reads rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: scripts/check
+
+  bundle:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain (reads rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - id: pack
+        run: |
+          scripts/build-bundle "$RUNNER_TEMP/bundle"
+          file=$(scripts/package-release bundle "$RUNNER_TEMP/bundle" dist)
+          sha=$(sha256sum "$file" | cut -d' ' -f1)
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "$sha  $(basename "$file")" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bundle
+          path: dist/
+          if-no-files-found: error
+
+  cli:
+    needs: bundle
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # test: the runner can run this target, so the CLI tests run once per OS first.
+          - { target: aarch64-apple-darwin, os: macos-14, test: true, zig: false }
+          - { target: x86_64-apple-darwin, os: macos-14, test: false, zig: false }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, test: true, zig: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, test: false, zig: true }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, test: true, zig: false }
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain and target
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+      - name: Install zig and cargo-zigbuild (pinned)
+        if: matrix.zig
+        env:
+          ZIG_VERSION: 0.15.1
+          # From https://ziglang.org/download/index.json, checked against a local download.
+          ZIG_SHA256: c61c5da6edeea14ca51ecd5e4520c6f4189ef5250383db33d01848293bfafe05
+          ZIGBUILD_VERSION: 0.24.1
+        run: |
+          archive="$RUNNER_TEMP/zig.tar.xz"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+          echo "$ZIG_SHA256  $archive" | sha256sum -c -
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-$ZIG_VERSION" >> "$GITHUB_PATH"
+          cargo install --locked "cargo-zigbuild@$ZIGBUILD_VERSION"
+      - name: Test CLI
+        if: matrix.test
+        run: cargo test -p plumblog-cli --locked
+      - name: Build blog
+        env:
+          # The bundle this CLI deploys; the CLI refuses any other (release contract).
+          PLUMBLOG_BUNDLE_SHA256: ${{ needs.bundle.outputs.sha256 }}
+          USE_ZIG: ${{ matrix.zig }}
+        run: |
+          [[ "$PLUMBLOG_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no bundle sha256 from the bundle job"; exit 1; }
+          build=build
+          [ "$USE_ZIG" = true ] && build=zigbuild
+          cargo "$build" -p plumblog-cli --bin blog --release --locked --target "$TARGET"
+      - name: Package
+        run: |
+          exe=blog
+          case "$TARGET" in *-windows-*) exe=blog.exe ;; esac
+          scripts/package-release cli "$TARGET" "target/$TARGET/release/$exe" dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cli-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    needs: [verify, check, bundle, cli]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Required reviewer; the only place PLUMBLOG_RELEASE_KEY exists.
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      BUNDLE_SHA256: ${{ needs.bundle.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain (reads rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Exactly the release files, and the bundle the CLIs trust
+        run: |
+          want=$({
+            echo "plumblog-bundle-v$VERSION.tar.gz"
+            for t in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+              echo "blog-v$VERSION-$t.tar.gz"
+            done
+            echo "blog-v$VERSION-x86_64-pc-windows-msvc.zip"
+          } | LC_ALL=C sort)
+          have=$(cd dist && find . -mindepth 1 | sed 's|^\./||' | LC_ALL=C sort)
+          [ "$want" = "$have" ] || { echo "::error::release files differ"; diff <(echo "$want") <(echo "$have"); exit 1; }
+          scripts/package-release sums dist
+          got=$(awk -v f="plumblog-bundle-v$VERSION.tar.gz" '$2 == f {print $1}' dist/SHA256SUMS)
+          [ "$got" = "$BUNDLE_SHA256" ] || { echo "::error::bundle sha256 $got != baked $BUNDLE_SHA256"; exit 1; }
+          cat dist/SHA256SUMS
+      # Built before the secret is in any step's environment.
+      - name: Build the signing tool
+        run: cargo build -p plumblog-cli --bin blog-release --locked
+      - name: Sign SHA256SUMS
+        env:
+          PLUMBLOG_RELEASE_KEY: ${{ secrets.PLUMBLOG_RELEASE_KEY }}
+        run: |
+          [ -n "$PLUMBLOG_RELEASE_KEY" ] || { echo "::error::secret PLUMBLOG_RELEASE_KEY is not set in environment release"; exit 1; }
+          # The binary built above, never cargo: a rebuild would run build scripts with the secret.
+          target/debug/blog-release sign dist/SHA256SUMS
+      - name: Verify the signature with minisign (independent implementation, pinned)
+        env:
+          MINISIGN_VERSION: "0.12"
+          # Checked locally with minisign -V against the author's key RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3.
+          MINISIGN_SHA256: 9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
+        run: |
+          archive="$RUNNER_TEMP/minisign.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://github.com/jedisct1/minisign/releases/download/$MINISIGN_VERSION/minisign-$MINISIGN_VERSION-linux.tar.gz"
+          echo "$MINISIGN_SHA256  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/minisign-linux/x86_64/minisign" -V -p release/minisign.pub \
+            -m dist/SHA256SUMS -x dist/SHA256SUMS.minisig
+          (cd dist && sha256sum -c SHA256SUMS)
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --draft --verify-tag --title "$TAG" --generate-notes dist/*

@@ -81,6 +81,8 @@ cli      serde                  # typed Cloudflare API responses
 cli      serde_json             # Cloudflare API bodies are JSON
 cli      getrandom              # WEBHOOK_KEY, site id and setup code randomness
 cli      toml                   # site.local.toml (read and write)
+cli      ring                   # Ed25519 release signatures (already linked through rustls)
+cli      miniz_oxide            # DEFLATE for release .tar.gz/.zip (pure Rust)
 cli      rusqlite               # tests only: the fake D1 runs real SQLite
 markdown unicode-normalization  # NFC before heading ids (pure Rust, no I/O)
 render   minijinja              # theme templates (pure Rust, no I/O)
@@ -274,5 +276,71 @@ for f in "${manifests[@]}"; do
   if [ -n "$out" ]; then bad+="$f "; echo "$out" | sed 's/^/  /'; fi
 done
 [ -z "$bad" ] || fail "dependency not using workspace = true: $bad"
+
+# --- release pipeline (issue #21) ---
+step "workflow actions pinned to commit SHAs"
+# A tag can be moved to other code; a full commit SHA cannot. The comment keeps it readable.
+workflows=()
+for f in "${files[@]}"; do case "$f" in .github/workflows/*.yml|.github/workflows/*.yaml) workflows+=("$f") ;; esac; done
+[ "${#workflows[@]}" -gt 0 ] || fail "no workflow files found in .github/workflows"
+rc=0
+uses=$(grep -nHE '^[[:space:]]*(-[[:space:]]+)?uses:' "${workflows[@]}") || rc=$?
+[ "$rc" -le 1 ] || fail "grep error while reading workflows"
+if [ -n "$uses" ]; then
+  rc=0
+  unpinned=$(printf '%s\n' "$uses" \
+    | grep -vE 'uses:[[:space:]]*([^@[:space:]]+@[0-9a-f]{40}[[:space:]]+#[[:space:]]*v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$|\./)') || rc=$?
+  [ "$rc" -le 1 ] || fail "grep error while checking workflow pins"
+  if [ -n "$unpinned" ]; then echo "$unpinned" | sed 's/^/  /'; fail "pin every uses: to a 40-hex commit SHA with a '# vX.Y.Z' comment"; fi
+fi
+grep -qx 'permissions: {}' .github/workflows/release.yml \
+  || fail "release.yml must start from 'permissions: {}' (each job asks for its own)"
+
+step "workflow lint (actionlint)"
+# Pinned by version and sha256 like worker-build; shellcheck lints run: scripts when on PATH (CI has it).
+ACTIONLINT_VERSION=1.7.12
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) al_plat=darwin_arm64; al_sha=aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f ;;
+  Darwin-x86_64) al_plat=darwin_amd64; al_sha=5b44c3bc2255115c9b69e30efc0fecdf498fdb63c5d58e17084fd5f16324c644 ;;
+  Linux-x86_64) al_plat=linux_amd64; al_sha=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 ;;
+  Linux-aarch64|Linux-arm64) al_plat=linux_arm64; al_sha=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6 ;;
+  *) fail "no pinned actionlint for $(uname -s)-$(uname -m); add its sha256 from the actionlint release checksums" ;;
+esac
+al_dir=target/tools/actionlint-$ACTIONLINT_VERSION
+if [ ! -x "$al_dir/actionlint" ]; then
+  echo "check: installing actionlint $ACTIONLINT_VERSION (first run only)"
+  mkdir -p "$al_dir"
+  al_tgz="$al_dir/actionlint.tar.gz"
+  curl -fsSL --retry 3 -o "$al_tgz" \
+    "https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION/actionlint_${ACTIONLINT_VERSION}_$al_plat.tar.gz" \
+    || fail "downloading actionlint $ACTIONLINT_VERSION failed (offline?)"
+  got=$( (sha256sum "$al_tgz" 2>/dev/null || shasum -a 256 "$al_tgz") | cut -d' ' -f1)
+  [ "$got" = "$al_sha" ] || { rm -f "$al_tgz"; fail "actionlint download sha256 $got != pinned $al_sha"; }
+  tar -xzf "$al_tgz" -C "$al_dir" actionlint || fail "unpacking actionlint failed"
+  rm -f "$al_tgz"
+fi
+command -v shellcheck > /dev/null || echo "check: note: shellcheck not on PATH; run: scripts are not linted here (CI lints them)"
+"$al_dir/actionlint" "${workflows[@]}" || fail "actionlint found problems in .github/workflows (above)"
+
+step "release bundle is reproducible"
+# Same input twice, with mtimes and modes changed in between, must give the same bytes:
+# the CLI bakes in the bundle's sha256, and anyone must be able to rebuild and compare.
+fx=target/package-release-test
+rm -rf "$fx"
+mkdir -p "$fx/in/worker" "$fx/in/assets/css" "$fx/in/migrations"
+echo 'export default {}' > "$fx/in/worker/index.js"
+echo 'body{}' > "$fx/in/assets/css/app.css"
+echo 'CREATE TABLE t(x);' > "$fx/in/migrations/0001_init.sql"
+a=$(scripts/package-release bundle "$fx/in" "$fx/a") || fail "package-release bundle failed"
+touch -t 202001020304 "$fx/in/worker/index.js"
+chmod 600 "$fx/in/assets/css/app.css"
+b=$(scripts/package-release bundle "$fx/in" "$fx/b") || fail "package-release bundle failed (second run)"
+cmp -s "$a" "$b" || fail "package-release bundle is not reproducible: $a and $b differ"
+bj=$(tar -xzOf "$a" bundle.json) || fail "no bundle.json in $a"
+case "$bj" in *'"files":{"assets/css/app.css":"'*) ;; *) fail "bundle.json wrong in $a: $bj" ;; esac
+ln -s index.js "$fx/in/worker/link.js"
+if scripts/package-release bundle "$fx/in" "$fx/c" 2> /dev/null; then fail "package-release accepted a symlink"; fi
+rm -rf "$fx"
+# --- end release pipeline ---
 
 echo "check: all passed"
