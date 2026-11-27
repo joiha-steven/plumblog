@@ -7,7 +7,7 @@ you are touching. The owner does not read code: report with evidence (output, sc
 
 ```sh
 scripts/check                      # the only check; also runs on commit and in CI
-cargo test -p plumblog-core        # fast loop
+cargo test -p plumblog-<crate>     # fast loop
 cargo run -p plumblog-cli -- guide # the `blog` CLI
 ```
 
@@ -30,8 +30,10 @@ Never bypass or weaken `scripts/check`. If a rule is wrong, change it in the sam
 
 | Adding | Goes in |
 |---|---|
-| Markdown, models, validation, i18n (no I/O) | `crates/core` |
-| Routes, D1/R2, MCP | `crates/worker` |
+| Types, ids, error codes, permissions | `crates/model` |
+| Markdown, i18n, auth, system log, theme runtime (no I/O) | `crates/{markdown,i18n,auth,syslog,render}` |
+| Storage trait or in-memory impl | `crates/store` |
+| Routes, D1/R2/fetch, MCP (only crate with I/O) | `crates/worker` |
 | A `blog` command | `crates/cli` |
 | Instructions for an AI running a blog | `guides/<topic>.md` |
 | UI text | `locales/<lang>.toml` |

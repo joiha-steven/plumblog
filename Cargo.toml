@@ -1,6 +1,16 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/worker", "crates/cli"]
+members = [
+  "crates/model",
+  "crates/markdown",
+  "crates/i18n",
+  "crates/auth",
+  "crates/syslog",
+  "crates/store",
+  "crates/render",
+  "crates/worker",
+  "crates/cli",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,8 +24,14 @@ publish = false
 worker = "0.9.0"
 # Argument parsing for the `blog` CLI; derive keeps commands declarative.
 clap = { version = "4.6.7", features = ["derive"] }
-# Internal crate shared by worker and cli.
-plumblog-core = { path = "crates/core" }
+# Internal module crates; allowed edges between them are enforced by scripts/check.
+plumblog-model = { path = "crates/model" }
+plumblog-markdown = { path = "crates/markdown" }
+plumblog-i18n = { path = "crates/i18n" }
+plumblog-auth = { path = "crates/auth" }
+plumblog-syslog = { path = "crates/syslog" }
+plumblog-store = { path = "crates/store" }
+plumblog-render = { path = "crates/render" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
