@@ -5,11 +5,13 @@
 //! the source is dropped, every URL is checked against a scheme allowlist, and no element
 //! makes a third-party request until the reader clicks it.
 
+mod comment;
 mod html;
 mod link;
 mod mathml;
 mod text;
 
+pub use comment::{COMMENT_LINK_REL, CommentHtml, render_comment};
 pub use text::{heading_id, word_count};
 
 /// Knobs that change the output. The excerpt length is the theme option `excerpt_words`.

@@ -489,6 +489,7 @@ pub fn comment(
         parent_id: parent,
         author_name: "Reader".into(),
         body: "Nice".into(),
+        body_html: None,
         status,
         created_at: T0,
     }

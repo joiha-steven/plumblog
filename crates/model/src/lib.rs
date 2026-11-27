@@ -73,6 +73,16 @@ stable_codes! {
         WebhookSecretUnreadable => "webhook.secret_unreadable",
         WebhookDeliveryFailed => "webhook.delivery_failed",
         TooComplex => "input.too_complex",
+        // Reader comments (docs/ARCHITECTURE.md, Reader site): the form redirects with one
+        // of these, and the theme maps it to a message, so input is never echoed back.
+        CommentsUnavailable => "comments.unavailable",
+        CommentsClosed => "comments.closed",
+        CommentName => "comments.name_invalid",
+        CommentBody => "comments.body_invalid",
+        CommentLinks => "comments.too_many_links",
+        CommentForm => "comments.form_invalid",
+        CommentCheckFailed => "comments.check_failed",
+        CommentRateLimited => "comments.rate_limited",
     }
 }
 
@@ -202,12 +212,14 @@ impl Permission {
             | Self::EditAnyPost
             | Self::DeleteAnyPost
             | Self::UploadMedia
-            | Self::CreateOwnToken => BOTH,
+            | Self::CreateOwnToken
+            // Moderation is content work: writers already edit any post. The site-wide
+            // comments switch is a setting, so it stays with ManageSettings (owner).
+            | Self::ModerateComments => BOTH,
             Self::ManageSettings
             | Self::ManageThemes
             | Self::ManagePlugins
             | Self::ManageUsers
-            | Self::ModerateComments
             | Self::ViewSystemLog => OWNER,
         }
     }
@@ -310,6 +322,14 @@ mod tests {
                 ),
                 (ErrorCode::WebhookDeliveryFailed, "webhook.delivery_failed"),
                 (ErrorCode::TooComplex, "input.too_complex"),
+                (ErrorCode::CommentsUnavailable, "comments.unavailable"),
+                (ErrorCode::CommentsClosed, "comments.closed"),
+                (ErrorCode::CommentName, "comments.name_invalid"),
+                (ErrorCode::CommentBody, "comments.body_invalid"),
+                (ErrorCode::CommentLinks, "comments.too_many_links"),
+                (ErrorCode::CommentForm, "comments.form_invalid"),
+                (ErrorCode::CommentCheckFailed, "comments.check_failed"),
+                (ErrorCode::CommentRateLimited, "comments.rate_limited"),
             ]
         );
     }
@@ -338,7 +358,6 @@ mod tests {
             Permission::ManageThemes,
             Permission::ManagePlugins,
             Permission::ManageUsers,
-            Permission::ModerateComments,
             Permission::ViewSystemLog,
         ];
         for p in Permission::ALL {
@@ -381,6 +400,15 @@ mod tests {
             assert_eq!(Writer.can(*p), Role::Writer.can(*p), "writer and {p:?}");
             assert_eq!(Owner.can(*p), Role::Owner.can(*p), "owner and {p:?}");
         }
+    }
+
+    /// Owner and writer moderate comments; only the owner turns comments on for the site.
+    #[test]
+    fn comment_moderation_is_content_work() {
+        assert!(Role::Owner.can(Permission::ModerateComments));
+        assert!(Role::Writer.can(Permission::ModerateComments));
+        assert!(Role::Owner.can(Permission::ManageSettings));
+        assert!(!Role::Writer.can(Permission::ManageSettings));
     }
 
     #[test]

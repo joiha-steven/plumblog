@@ -72,7 +72,7 @@ export function offlineBanner(): HTMLElement {
 
 let pop: { el: HTMLElement; anchor: HTMLElement } | undefined;
 
-export function closePop(): void {
+export function closePop(refocus = true): void {
   if (!pop) return;
   const { el, anchor } = pop;
   pop = undefined;
@@ -80,7 +80,7 @@ export function closePop(): void {
   anchor.setAttribute("aria-expanded", "false");
   document.removeEventListener("pointerdown", outside, true);
   document.removeEventListener("keydown", onKey, true);
-  anchor.focus();
+  if (refocus) anchor.focus();
 }
 
 function outside(e: Event): void {
@@ -96,13 +96,24 @@ function onKey(e: KeyboardEvent): void {
 }
 
 /** A popover next to `anchor`: beside it on wide screens, above it on phones. */
-export function openPop(anchor: HTMLElement, content: HTMLElement, label: string): void {
-  const reopen = pop?.anchor !== anchor;
-  closePop();
-  if (!reopen) return;
-  const el = h("div", { class: "pop", role: "dialog", "aria-label": label }, content);
+export interface PopOptions {
+  /** Where to place it instead of the anchor's own box (a text position, say). */
+  at?: DOMRect;
+  /** Extra class on the popover (`slash`). */
+  cls?: string;
+  /** Keep focus where it is (the "/" menu: the writer keeps typing). */
+  keepFocus?: boolean;
+  /** Below the anchor instead of beside it. */
+  below?: boolean;
+}
+
+export function openPop(anchor: HTMLElement, content: HTMLElement, label: string, o: PopOptions = {}): HTMLElement | undefined {
+  const reopen = pop?.anchor !== anchor || o.at !== undefined;
+  closePop(!o.keepFocus);
+  if (!reopen) return undefined;
+  const el = h("div", { class: o.cls ? `pop ${o.cls}` : "pop", role: "dialog", "aria-label": label }, content);
   document.body.append(el);
-  const r = anchor.getBoundingClientRect();
+  const r = o.at ?? anchor.getBoundingClientRect();
   const p = el.getBoundingClientRect();
   const vw = document.documentElement.clientWidth;
   const vh = window.innerHeight;
@@ -110,7 +121,10 @@ export function openPop(anchor: HTMLElement, content: HTMLElement, label: string
   const edge = 16;
   let x: number;
   let y: number;
-  if (vw >= 600) {
+  if (o.below || o.at) {
+    x = r.left;
+    y = r.bottom + p.height + gap > vh ? r.top - p.height - gap : r.bottom + gap;
+  } else if (vw >= 600) {
     x = r.right + gap;
     y = Math.min(r.bottom - p.height, vh - p.height - edge);
   } else {
@@ -123,5 +137,20 @@ export function openPop(anchor: HTMLElement, content: HTMLElement, label: string
   pop = { el, anchor };
   setTimeout(() => document.addEventListener("pointerdown", outside, true));
   document.addEventListener("keydown", onKey, true);
-  el.querySelector<HTMLElement>("button, a, input")?.focus();
+  if (!o.keepFocus) el.querySelector<HTMLElement>("input, button, a")?.focus();
+  return el;
+}
+
+/** The open popover's element, if any. */
+export const openPopEl = (): HTMLElement | undefined => pop?.el;
+
+let toastTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** A short note at the bottom of the screen, read out by screen readers. */
+export function toast(text: string, ms = 2600): void {
+  document.querySelector(".toast")?.remove();
+  clearTimeout(toastTimer);
+  const el = h("div", { class: "toast", role: "status" }, text);
+  document.body.append(el);
+  toastTimer = setTimeout(() => el.remove(), ms);
 }

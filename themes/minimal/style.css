@@ -279,7 +279,7 @@ textarea.field { resize: vertical; line-height: 1.55; }
 .comments { margin-top: 3.5em; padding-top: 1.5em; border-top: 1px solid var(--c-rule); }
 .comments h2 { font-size: var(--t-md); margin: 0 0 1.2em; }
 .comments .count { font: var(--t-sm) var(--mono); color: var(--c-text-2); margin-left: .3em; }
-.comment-list { list-style: none; padding: 0; margin: 0 0 2.5em; display: grid; gap: 1.8em; }
+.comment-list { list-style: none; padding: 0; margin: 0 0 2.5em; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.8em; }
 .comment .meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2em .7em; margin: 0 0 .35em; }
 .comment .meta > * + *::before { content: none; }
 .comment .meta b { font: var(--w-strong) var(--t-sm) var(--font); color: var(--c-text); }
@@ -288,7 +288,11 @@ textarea.field { resize: vertical; line-height: 1.55; }
 .comment-body > :last-child { margin-bottom: 0; }
 .comments-empty { color: var(--c-text-2); }
 .comment-form { display: grid; gap: 1em; margin-top: 1.5em; }
-.turnstile:empty { display: none; } /* filled by Turnstile once the reader starts writing */
+/* Turnstile fills this once the reader starts writing; its box (65px, flexible width) is
+   reserved up front so nothing below it moves. Without JS or a site key it takes no space. */
+.turnstile { display: none; }
+.js .comment-form:not([data-turnstile=""]) .turnstile { display: block; min-height: 65px; }
+.js .nojs { display: none; }
 .form-row { display: grid; gap: .35em; margin: 0; }
 .form-row label { font-size: var(--t-sm); font-weight: 500; }
 .form-foot { display: flex; flex-wrap: wrap; align-items: center; gap: .6em 1em; margin: 0; }

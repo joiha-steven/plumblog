@@ -27,6 +27,14 @@ export const ERROR_CODES = [
   "webhook.secret_unreadable",
   "webhook.delivery_failed",
   "input.too_complex",
+  "comments.unavailable",
+  "comments.closed",
+  "comments.name_invalid",
+  "comments.body_invalid",
+  "comments.too_many_links",
+  "comments.form_invalid",
+  "comments.check_failed",
+  "comments.rate_limited",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
@@ -64,6 +72,6 @@ export const PERMISSION_ROLES: Readonly<Record<Permission, readonly Role[]>> = {
   "theme.manage": ["owner"],
   "plugin.manage": ["owner"],
   "user.manage": ["owner"],
-  "comment.moderate": ["owner"],
+  "comment.moderate": ["owner", "writer"],
   "syslog.view": ["owner"],
 };

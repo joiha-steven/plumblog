@@ -5,12 +5,12 @@
 //! log the detail with the request id; no user-facing text is produced here.
 
 mod auth;
-mod body;
+pub(crate) mod body;
 mod fields;
-mod limit;
+pub(crate) mod limit;
 mod passkey;
 mod principal;
-mod site;
+pub(crate) mod site;
 mod tokens;
 mod v1;
 
@@ -101,14 +101,22 @@ impl Reply {
 /// HTTP status for each stable code. Exhaustive, so a new code must pick one.
 fn status(code: ErrorCode) -> u16 {
     match code {
-        ErrorCode::InvalidInput | ErrorCode::PasskeyInvalid | ErrorCode::WebhookUrlBlocked => 400,
+        ErrorCode::InvalidInput
+        | ErrorCode::PasskeyInvalid
+        | ErrorCode::WebhookUrlBlocked
+        | ErrorCode::CommentName
+        | ErrorCode::CommentBody
+        | ErrorCode::CommentLinks
+        | ErrorCode::CommentForm => 400,
         ErrorCode::Unauthenticated | ErrorCode::InvalidCredentials => 401,
         // A signed-in user must prove it again (adding or removing a passkey): not a dead
         // session, so not 401.
         ErrorCode::Forbidden
         | ErrorCode::SetupInvalid
         | ErrorCode::TurnstileRequired
-        | ErrorCode::ReauthRequired => 403,
+        | ErrorCode::ReauthRequired
+        | ErrorCode::CommentsClosed
+        | ErrorCode::CommentCheckFailed => 403,
         ErrorCode::PostNotFound
         | ErrorCode::UserNotFound
         | ErrorCode::NotFound
@@ -118,13 +126,15 @@ fn status(code: ErrorCode) -> u16 {
         ErrorCode::LengthRequired => 411,
         // A size cap like the byte cap: the client must send less, not fix a field.
         ErrorCode::BodyTooLarge | ErrorCode::TooComplex => 413,
-        ErrorCode::Locked => 429,
+        ErrorCode::Locked | ErrorCode::CommentRateLimited => 429,
         ErrorCode::Storage | ErrorCode::Internal | ErrorCode::WebhookSecretUnreadable => 500,
         // The receiver failed, not this server.
         ErrorCode::WebhookDeliveryFailed => 502,
         // The site is not set up for this yet (no configured origin, no WEBHOOK_KEY): not the
         // client's fault.
-        ErrorCode::OriginMissing | ErrorCode::WebhookKeyInvalid => 503,
+        ErrorCode::OriginMissing
+        | ErrorCode::WebhookKeyInvalid
+        | ErrorCode::CommentsUnavailable => 503,
     }
 }
 
