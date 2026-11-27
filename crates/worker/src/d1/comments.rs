@@ -4,10 +4,11 @@ use worker::wasm_bindgen::JsValue;
 
 use super::{
     D1Store, Failure, Row, bound, bump, bump_if, guard, int, invalid, limit, not_found, opt_int,
-    text,
+    opt_text, text,
 };
 
-const COMMENT_COLS: &str = "id, post_id, parent_id, author_name, body, status, created_at";
+const COMMENT_COLS: &str =
+    "id, post_id, parent_id, author_name, body, body_html, status, created_at";
 
 fn read_comment(r: &mut Row) -> Result<Comment> {
     Ok(Comment {
@@ -16,6 +17,7 @@ fn read_comment(r: &mut Row) -> Result<Comment> {
         parent_id: r.opt_int()?.map(CommentId),
         author_name: r.text()?,
         body: r.text()?,
+        body_html: r.opt_text()?,
         status: r.code("comment status", CommentStatus::parse)?,
         created_at: r.int()?,
     })
@@ -37,13 +39,14 @@ impl CommentStore for D1Store {
         // A missing post fails the FK: InvalidInput.
         stmts.push(self.stmt(
             "add_comment",
-            "INSERT INTO comments (post_id, parent_id, author_name, body, status, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO comments (post_id, parent_id, author_name, body, body_html, status, \
+             created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             &[
                 int(c.post_id.0)?,
                 opt_int(c.parent_id.map(|p| p.0))?,
                 text(&c.author_name),
                 text(&c.body),
+                opt_text(c.body_html.as_deref()),
                 text(c.status.as_str()),
                 int(c.created_at)?,
             ],
@@ -62,7 +65,53 @@ impl CommentStore for D1Store {
         }
     }
 
-    // 1 query (post page: approved comments).
+    // 1 query.
+    async fn get_comment(&self, id: CommentId) -> Result<Comment> {
+        let s = self.stmt(
+            "get_comment",
+            &format!("SELECT {COMMENT_COLS} FROM comments WHERE id = ?"),
+            &[bound(id.0)],
+        )?;
+        match self.row(s).await? {
+            Some(mut r) => read_comment(&mut r),
+            None => Err(not_found("comment", id.0)),
+        }
+    }
+
+    // 1 query (post page: the newest approved comments). Reads one row past the page to
+    // know whether more exist; comments_post serves it backwards.
+    async fn latest_comments(
+        &self,
+        post: PostId,
+        status: CommentStatus,
+        limit_n: u32,
+    ) -> Result<(Vec<Comment>, bool)> {
+        let keep = plumblog_store::page_len(limit_n);
+        let s = self.stmt(
+            "latest_comments",
+            &format!(
+                "SELECT {COMMENT_COLS} FROM comments WHERE post_id = ? AND status = ? \
+                 ORDER BY created_at DESC, id DESC LIMIT ?"
+            ),
+            &[
+                bound(post.0),
+                text(status.as_str()),
+                bound(i64::try_from(keep).unwrap_or(0) + 1),
+            ],
+        )?;
+        let mut rows = self
+            .rows(s)
+            .await?
+            .iter_mut()
+            .map(read_comment)
+            .collect::<Result<Vec<_>>>()?;
+        let more = rows.len() > keep;
+        rows.truncate(keep);
+        rows.reverse();
+        Ok((rows, more))
+    }
+
+    // 1 query.
     async fn list_comments(&self, post: PostId, status: CommentStatus) -> Result<Vec<Comment>> {
         let s = self.stmt(
             "list_comments",

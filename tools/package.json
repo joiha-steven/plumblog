@@ -28,7 +28,7 @@
     "esbuild": "admin bundle: TypeScript to minified ES modules with code splitting, one fast binary",
     "typescript": "type-checks the admin (tsc --noEmit); esbuild only strips types",
     "playwright-core": "admin screenshots and smoke tests in the system Chrome; no browser download",
-    "happy-dom": "DOM for theme script tests",
+    "happy-dom": "DOM for theme and admin script tests",
     "wrangler": "runs the Worker locally (workerd, local D1/R2)",
     "@codemirror/*": "the admin editor: CodeMirror 6 (state, view, commands, language, lang-markdown); one version each, pinned together, because CM breaks when packages resolve different @codemirror/view copies",
     "@lezer/markdown, @lezer/highlight": "the Markdown parser and style tags CodeMirror's live styling reads (GFM tables, task lists, strikethrough)"

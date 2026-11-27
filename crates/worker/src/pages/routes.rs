@@ -101,6 +101,18 @@ pub fn parse(path: &str) -> Route {
     }
 }
 
+/// The slug of `/<slug>/comments`, where a post's comment form posts (POST only; GET there
+/// is a 404 like any unknown path).
+pub fn comment_form(path: &str) -> Option<&str> {
+    let slug = path.strip_prefix('/')?.strip_suffix("/comments")?;
+    (is_slug(slug) && !RESERVED.contains(&slug)).then_some(slug)
+}
+
+/// Where a post's comment form posts.
+pub fn comments(slug: &str) -> String {
+    format!("{}/comments", post(slug))
+}
+
 const RESERVED: &[&str] = &["page", "tag", "archive", "search", "theme", "admin", "api"];
 
 /// The search page; results are `?q=` on it.

@@ -803,3 +803,172 @@ pub async fn reader_metadata_versions<S: Store>(db: &S) -> Check {
     ok("delete_redirect absent", db.delete_redirect("/vi/a").await)?;
     version_is(db, "delete_redirect of an absent path", v + 4).await
 }
+
+/// `get_comment` and the shared moderation function on each store: permission first, one
+/// `comment.moderated` event with ids only, the content version bumped when readers see it.
+pub async fn comment_moderation<S: Store>(db: &S) -> Check {
+    use crate::comment::moderate;
+    use crate::{Actor, Moderation};
+    use plumblog_model::{RequestId, Role};
+    use plumblog_syslog::Scope;
+
+    let u = user(db, "alice").await?;
+    let pid = save(db, post(u, "vi", "p", PostStatus::Published)).await?;
+    let cid = ok(
+        "add_comment",
+        db.add_comment(comment(pid, None, CommentStatus::Pending))
+            .await,
+    )?;
+    let got = ok("get_comment", db.get_comment(cid).await)?;
+    eq!(
+        "get_comment",
+        (got.id, got.post_id, got.status, got.author_name.as_str()),
+        (cid, pid, CommentStatus::Pending, "Reader"),
+    )?;
+    fails(
+        "get_comment unknown",
+        db.get_comment(CommentId(cid.0 + 99)).await,
+        ErrorCode::NotFound,
+    )?;
+    let scope = Scope::new(RequestId::parse("req-mod").ok_or("request id")?, Some(u));
+    let writer = Actor {
+        id: u,
+        role: Role::Writer,
+    };
+    let ver = version(db).await?;
+    fails(
+        "moderate without an actor",
+        moderate(db, &scope, None, cid, Moderation::Approve, 5, |_| {}).await,
+        ErrorCode::Unauthenticated,
+    )?;
+    version_is(db, "refused moderation changes nothing", ver).await?;
+    ok(
+        "moderate approve (writer)",
+        moderate(
+            db,
+            &scope,
+            Some(writer),
+            cid,
+            Moderation::Approve,
+            6,
+            |_| {},
+        )
+        .await,
+    )?;
+    version_is(db, "approve bumps", ver + 1).await?;
+    eq!(
+        "approved",
+        ok("get_comment", db.get_comment(cid).await)?.status,
+        CommentStatus::Approved,
+    )?;
+    fails(
+        "moderate unknown",
+        moderate(
+            db,
+            &scope,
+            Some(writer),
+            CommentId(cid.0 + 99),
+            Moderation::Spam,
+            7,
+            |_| {},
+        )
+        .await,
+        ErrorCode::NotFound,
+    )?;
+    ok(
+        "moderate delete",
+        moderate(db, &scope, Some(writer), cid, Moderation::Delete, 8, |_| {}).await,
+    )?;
+    fails("deleted", db.get_comment(cid).await, ErrorCode::NotFound)?;
+    moderation_log(db, u, cid, pid).await
+}
+
+/// The `comment.moderated` entries `comment_moderation` leaves: ids and status only.
+async fn moderation_log<S: Store>(
+    db: &S,
+    u: plumblog_model::UserId,
+    cid: CommentId,
+    pid: PostId,
+) -> Check {
+    let log = ok(
+        "query_log",
+        db.query_log(LogQuery {
+            kind: Some(EventKind::CommentModerated),
+            actor: None,
+            from_ms: None,
+            to_ms: None,
+            before: None,
+            limit: 10,
+        })
+        .await,
+    )?;
+    let seen: Vec<_> = log
+        .iter()
+        .map(|e| (e.event.actor_id(), e.event.fields().to_vec()))
+        .collect();
+    let fields = |status: &str| {
+        vec![
+            ("comment".to_owned(), cid.0.to_string()),
+            ("post".to_owned(), pid.0.to_string()),
+            ("status".to_owned(), status.to_owned()),
+        ]
+    };
+    eq!(
+        "one event per action, newest first, ids only",
+        seen,
+        vec![(Some(u), fields("deleted")), (Some(u), fields("approved"))],
+    )
+}
+
+/// `submit` stores the comment pending with its HTML rendered once; `latest_comments` keeps
+/// the newest `limit`, oldest first, and says whether older ones were left out.
+pub async fn comment_submit_and_latest<S: Store>(db: &S) -> Check {
+    use crate::comment::{check, submit};
+    use plumblog_markdown::render_comment;
+    use plumblog_model::RequestId;
+    use plumblog_syslog::Scope;
+
+    let u = user(db, "alice").await?;
+    let pid = save(db, post(u, "vi", "p", PostStatus::Published)).await?;
+    let scope = Scope::new(RequestId::unknown(), None);
+    let body = "Hi *there* [x](https://a.example/) <b>b</b>";
+    let checked = check("Ann", body).map_err(|e| format!("check: {e}"))?;
+    let cid = ok("submit", submit(db, &scope, pid, checked, 7, |_| {}).await)?;
+    let got = ok("get_comment", db.get_comment(cid).await)?;
+    eq!(
+        "submitted comment",
+        (got.status, got.body.as_str(), got.body_html.as_deref()),
+        (
+            CommentStatus::Pending,
+            body,
+            Some(render_comment(body).html.as_str())
+        ),
+    )?;
+
+    let mut ids = Vec::new();
+    for t in 0..5 {
+        ids.push(ok(
+            "add_comment",
+            db.add_comment(at(comment(pid, None, CommentStatus::Approved), 100 + t))
+                .await,
+        )?);
+    }
+    let latest = |limit| db.latest_comments(pid, CommentStatus::Approved, limit);
+    let (rows, more) = ok("latest_comments 3", latest(3).await)?;
+    eq!(
+        "newest 3, oldest first, more left",
+        (rows.iter().map(|c| c.id).collect::<Vec<_>>(), more),
+        (ids[2..].to_vec(), true),
+    )?;
+    let (rows, more) = ok("latest_comments 5", latest(5).await)?;
+    eq!("all 5, none left", (rows.len(), more), (5, false))?;
+    let (rows, more) = ok(
+        "latest_comments pending",
+        db.latest_comments(pid, CommentStatus::Pending, 10).await,
+    )?;
+    eq!(
+        "one status only",
+        (rows.iter().map(|c| c.id).collect::<Vec<_>>(), more),
+        (vec![cid], false),
+    )
+}

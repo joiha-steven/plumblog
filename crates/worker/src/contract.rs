@@ -4,10 +4,14 @@
 //! runs one case. Cases share one database, so the caller runs them one at a time.
 //! D1-only cases (`d1::selftest`) are listed and run the same way. `POST /__seed` empties the
 //! database and saves the sample posts (search tests, local previews); `POST /__option`
-//! stores one option value (options tests). `POST /__preview` renders a draft (form fields
+//! stores one option value (options tests). `POST /__moderate` runs the real moderation
+//! function (comments tests). `POST /__preview` renders a draft (form fields
 //! `title`, `body`, `lang`) as the page it would publish as, for the admin mock.
 
-use plumblog_store::{OptionOwner, SettingsStore, contract};
+use plumblog_model::{CommentId, RequestId, Role, UserId};
+use plumblog_store::comment::moderate;
+use plumblog_store::{Actor, Moderation, OptionOwner, SettingsStore, contract};
+use plumblog_syslog::Scope;
 use worker::{Env, Request, Response, Result};
 
 use crate::d1::{D1Store, selftest};
@@ -15,6 +19,7 @@ use crate::d1::{D1Store, selftest};
 const PREFIX: &str = "/__contract";
 const SEED: &str = "/__seed";
 const OPTION: &str = "/__option";
+const MODERATE: &str = "/__moderate";
 const PREVIEW: &str = "/__preview";
 /// The preview page runs no script even if opened outside the editor's frame, and only the
 /// admin may frame it. `allow-same-origin` keeps the site's origin so the theme's fonts pass
@@ -66,6 +71,35 @@ pub async fn handle(req: &Request, env: &Env) -> Result<Option<Response>> {
         {
             Ok(()) => Response::ok("ok").map(Some),
             Err(e) => Response::error(format!("put_option failed: {e}"), 500).map(Some),
+        };
+    }
+    // `?id=<comment>&action=approved|spam|trashed|deleted[&role=owner|writer&user=<id>]`;
+    // no role means no signed-in user.
+    if path == MODERATE && method == "POST" {
+        let url = req.url()?;
+        let q = |k: &str| {
+            url.query_pairs()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default()
+        };
+        let (Ok(id), Some(action)) = (q("id").parse(), Moderation::parse(&q("action"))) else {
+            return Response::error("id and action", 400).map(Some);
+        };
+        let actor = Role::parse(&q("role")).map(|role| Actor {
+            id: UserId(q("user").parse().unwrap_or(1)),
+            role,
+        });
+        let scope = Scope::new(
+            RequestId::parse("test-moderate").unwrap_or_else(RequestId::unknown),
+            actor.map(|a| a.id),
+        );
+        let store = D1Store::new(env.d1("DB")?);
+        let now = worker::Date::now().as_millis();
+        let report = |m: &str| worker::console_error!("{m}");
+        return match moderate(&store, &scope, actor, CommentId(id), action, now, report).await {
+            Ok(()) => Response::ok("ok").map(Some),
+            Err(e) => Response::error(e.code.as_str(), 403).map(Some),
         };
     }
     if path == PREVIEW && method == "POST" {

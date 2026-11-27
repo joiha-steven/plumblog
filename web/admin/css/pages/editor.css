@@ -38,6 +38,7 @@
 .cm-cursor { border-left: 2px solid var(--accent) !important; }
 .cm-selectionBackground, .cm-editor .cm-content ::selection, .cm-focused .cm-selectionBackground { background: var(--sel) !important; }
 /* Upload card shown in the text while an image is compressed and sent. */
+.cm-upload { padding-block: var(--sp-12); }
 .up { display: grid; gap: var(--sp-12); padding: var(--sp-16); border: 1px solid var(--line); border-radius: var(--r-12); background: var(--field); color: var(--muted); font: var(--type-small); }
 .up .bar { height: var(--sp-4); border-radius: var(--r-4); background: var(--line); overflow: hidden; }
 .up .bar i { display: block; height: 100%; background: var(--ink); transform-origin: left; transition: transform var(--dur-2) linear; }

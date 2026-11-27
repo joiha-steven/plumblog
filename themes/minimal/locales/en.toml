@@ -50,6 +50,16 @@ moderated = "Comments appear after the author approves them."
 notice_pending = "Thanks. Your comment will appear once it is approved."
 notice_error = "Your comment was not sent. Check your connection and try again; your text is still here."
 check_failed = "The spam check could not load, so the comment cannot be sent yet. Reload the page and try again."
+latest_only = "Only the newest {n} comments are shown."
+needs_js = "Sending a comment needs JavaScript (for the spam check). Reading works without it."
+error_unavailable = "Comments cannot be sent right now. Please try again later."
+error_closed = "Comments are closed on this post."
+error_name = "Enter a name of 1 to {n} characters."
+error_body = "Write a comment of 1 to {n} characters."
+error_links = "Too many links: a comment may hold at most {n}."
+error_form = "The form could not be read. Please try again."
+error_check = "The spam check did not pass. Please try again; your text is still here."
+error_rate = "Too many comments from your connection. Please wait a few minutes."
 
 [date]
 # Post dates in lists and post headers; {month} is one of the month_N names below.

@@ -81,6 +81,7 @@ markdown pulldown-cmark         # CommonMark + GFM parser
 markdown pulldown-latex         # LaTeX to MathML at save time
 i18n     toml                   # locale files are TOML
 store unicode-normalization  # in-memory search folds diacritics like FTS5 unicode61
+store unicode-properties     # tests only: checks the comment-name invisible table against Unicode
 webhook serde_json            # payload JSON
 '
 meta=$(cargo metadata -q --format-version 1 --no-deps) || fail "cargo metadata failed"
@@ -110,6 +111,8 @@ scripts/admin-build || fail "admin build (run scripts/admin-build for details)"
 # Own block: the real Worker over HTTP under local wrangler (about 5 s warm). Needs Node.
 step "worker integration (wrangler dev, local D1/R2)"
 scripts/worker-test --admin-prebuilt || fail "worker integration tests (run scripts/worker-test for details)"
+step "admin script tests (node)"
+node --test "tools/admin-test/*.test.mjs" || fail "admin script tests (run: node --test 'tools/admin-test/*.test.mjs')"
 step "theme script tests (node)"
 node --test "tools/theme-test/*.test.mjs" || fail "theme script tests (run: node --test 'tools/theme-test/*.test.mjs')"
 

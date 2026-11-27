@@ -12,7 +12,9 @@ mod plugin;
 mod seo;
 mod theme;
 
-pub use data::{Alternate, Body, Image, Link, NavItem, PageInfo, Post, Site};
+pub use data::{
+    Alternate, Body, CommentItem, Comments, Image, Link, NavItem, PageInfo, Post, Site,
+};
 pub use plugin::Plugin;
 pub use theme::{Report, Theme, ThemeError, ThemeFiles};
 
