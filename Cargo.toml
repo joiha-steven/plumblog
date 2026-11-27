@@ -51,6 +51,12 @@ pulldown-latex = "0.8.0"
 # Tests only: a real XML parser proves feeds and the sitemap parse; the hand checker can share
 # blind spots with the writer it tests. Not linked into the Worker.
 roxmltree = "0.21.2"
+# Pinned to the stub back end of `idna` (via `url`, only through `worker`): no Unicode tables, so
+# 48 KB gzip less in the wasm. Costs: a non-ASCII host is refused ("invalid international domain
+# name"; we ask for the `xn--` form), and `xn--` labels are accepted without the UTS 46 checks
+# (bidi, joining, validity). Hosts here come from the owner's settings or the platform, which
+# send punycode already. Other versions of this crate pull in ICU4X or unicode-rs.
+idna_adapter = "=1.0.0"
 # Internal module crates; allowed edges between them are enforced by scripts/check.
 plumblog-model = { path = "crates/model" }
 plumblog-markdown = { path = "crates/markdown" }

@@ -13,7 +13,7 @@ import { after, before, describe, test } from "node:test";
 import { promisify } from "node:util";
 
 import { startWorker } from "./harness.mjs";
-import { stretch as stretchJs } from "../../web/admin/js/stretch.js";
+import { stretch as stretchJs } from "../../web/admin/src/auth/stretch.ts";
 
 const ITER = 600000; // crates/auth STRETCH_ITERATIONS; stretch.test.mjs pins it.
 const COOKIE = "__Host-plumblog_session";
@@ -633,7 +633,7 @@ describe("blank site", () => {
     assert.ok(keys.includes("open-1"));
   });
 
-  test("Rust stretch in the Worker equals stretch.js on a fixed Unicode vector", async () => {
+  test("Rust stretch in the Worker equals stretch.ts on a fixed Unicode vector", async () => {
     const v = { site_id: "s1te-ID", login: "Tr\u1ea6N Alice", password: "correct horse \u00e9" };
     const rust = await crypto({ op: "stretch", ...v });
     assert.equal(rust, await stretchJs(v.site_id, v.login, v.password));
