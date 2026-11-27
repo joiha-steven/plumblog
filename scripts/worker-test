@@ -4,7 +4,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-WORKER_BUILD_VERSION=0.9.0 # keep in step with the `worker` crate version in Cargo.toml
 NODE_MAJOR_MIN=22
 
 fail() { echo "worker-test: FAIL: $1" >&2; exit 1; }
@@ -22,13 +21,8 @@ if ! cmp -s tools/package-lock.json "$stamp" 2>/dev/null; then
   cp tools/package-lock.json "$stamp"
 fi
 
-# Pinned worker-build, installed into target/ so it is cached with the cargo build.
-wb=target/tools/bin/worker-build
-if [ "$("$wb" --version 2>/dev/null || true)" != "$WORKER_BUILD_VERSION" ]; then
-  echo "worker-test: installing worker-build $WORKER_BUILD_VERSION (first run only, about 30 s)"
-  cargo install -q "worker-build@$WORKER_BUILD_VERSION" --locked --root target/tools \
-    || fail "cargo install worker-build failed"
-fi
+# Pinned worker-build (scripts/worker-build installs it on first use).
+wb=$(scripts/worker-build) || fail "worker-build unavailable"
 
 # Build once here: node --test runs each file in its own process, in parallel.
 # --no-opt: wasm-opt is for deploy size; tests want the fastest correct build.
@@ -36,7 +30,7 @@ fi
 # empties the database to run the store contract suite on D1. Its own target dir keeps that
 # wasm away from target/wasm32-unknown-unknown/release, the deploy and size-budget build.
 contract_target="$PWD/target/contract-tests"
-(cd crates/worker && "../../$wb" --release --no-opt --out-dir ../../target/worker-dev \
+(cd crates/worker && "$wb" --release --no-opt --out-dir ../../target/worker-dev \
   -- --features contract-tests --target-dir "$contract_target") \
   || fail "worker-build failed"
 

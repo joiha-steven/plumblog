@@ -63,7 +63,9 @@ pedantic = { level = "warn", priority = -1 }
 
 # Small wasm matters: the free plan limits Worker size and startup CPU.
 [profile.release]
-opt-level = "s"
+# "z" over "s": the shipped Worker (after wasm-opt) is 878,941 -> 769,275 B gzip with no
+# measurable change in cold start or page latency under wrangler dev (issue #50).
+opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"

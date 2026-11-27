@@ -271,7 +271,7 @@ Node.js is a contributor-only tool (wrangler, Playwright, Lighthouse). Users nev
 
 | Item | Budget |
 |---|---|
-| Worker wasm, gzip | <= 1 MiB |
+| Worker wasm, gzip, as deployed (after wasm-bindgen and wasm-opt; `scripts/check` builds it with the pinned worker-build) | <= 1 MiB |
 | Reader page JS | 0 KB by default, <= 5 KB with theme toggle and TOC |
 | Reader page CSS (inlined) | <= 15 KB |
 | Admin JS | measured every build, budget set when the editor lands |
@@ -325,3 +325,4 @@ Work is tracked as GitHub Issues grouped in one milestone per phase; this list o
 - 2026-11-27 Storage: D1 schema v1, store traits with in-memory and D1 implementations checked by one contract suite; atomic batches; FTS5 search with app-side d-stroke folding; keyset paging.
 - 2026-11-27 Theme and plugin options at runtime: JSON values checked against the declaration, defaults on any mismatch (logged); `image` as a media id read via `.id`, `list` as short strings; plugins are bundled folders (`plugin.toml`, `partials/`, `assets/`, `locales/`) whose partials only fill theme-declared slots; plugin CSS inlined and JS deferred only when enabled; broken plugins skipped and logged; `blog guide options` generated from the Rust types.
 - 2026-11-27 Auth: browser-stretched passwords, hashed-key D1 rate limit with Turnstile step, rotating SameSite=Strict sessions with Origin check, passkeys (none attestation, ES256/RS256/Ed25519, own CBOR reader), setup code in settings.
+- 2026-11-27 The wasm budget is measured on what a deploy ships (worker-build with wasm-opt), not the raw cargo output, and the release profile uses `opt-level = "z"`: 769 KB instead of 879 KB shipped, with no measurable cold-start or latency cost in wrangler dev.
