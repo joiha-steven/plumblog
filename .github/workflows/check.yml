@@ -42,3 +42,9 @@ jobs:
           key: cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/worker-test') }}
           restore-keys: cargo-
       - run: scripts/check
+      # The real CPU budgets, for the log. Over-budget never fails (wall time on a shared runner
+      # is noisy; scripts/check gates on work and scaling instead), but a perf test that does not
+      # build or run, so no numbers, does.
+      - name: Perf report
+        if: always()
+        run: scripts/perf
