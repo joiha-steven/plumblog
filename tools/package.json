@@ -1,0 +1,14 @@
+{
+  "name": "plumblog-tools",
+  "private": true,
+  "description": "Contributor-only tooling (local Worker tests). Blog owners never need Node.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test:worker": "node --test \"worker-test/*.test.mjs\""
+  },
+  "devDependencies": {
+    "wrangler": "4.160.0"
+  }
+}

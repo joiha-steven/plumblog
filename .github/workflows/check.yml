@@ -15,12 +15,21 @@ jobs:
         run: |
           rustup toolchain install
           rustup target list --installed | grep -qx wasm32-unknown-unknown
+      # Node runs the local Worker tests (scripts/worker-test); npm cache keyed on the pinned lockfile.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/package-lock.json
       - uses: actions/cache@v4
         with:
+          # target/ also holds the pinned worker-build binary (target/tools);
+          # ~/.cache/worker-build holds the wasm-bindgen and esbuild it downloads.
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cache/worker-build
             target
-          key: cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/worker-test') }}
           restore-keys: cargo-
       - run: scripts/check

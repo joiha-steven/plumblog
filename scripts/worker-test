@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Worker integration tests: the real wasm under `wrangler dev` with local D1/R2, over HTTP.
+# Contributor-only; needs Node (pinned tools live in tools/). Run by scripts/check and CI.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+WORKER_BUILD_VERSION=0.9.0 # keep in step with the `worker` crate version in Cargo.toml
+NODE_MAJOR_MIN=22
+
+fail() { echo "worker-test: FAIL: $1" >&2; exit 1; }
+
+command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 \
+  || fail "Node.js $NODE_MAJOR_MIN+ with npm is required for Worker tests (contributors only). Install it from https://nodejs.org or with your package manager, then rerun."
+major=$(node -p 'process.versions.node.split(".")[0]')
+[ "$major" -ge "$NODE_MAJOR_MIN" ] || fail "Node.js $NODE_MAJOR_MIN+ is required, found $(node -v). Upgrade Node, then rerun."
+
+# Pinned wrangler from tools/package-lock.json; reinstall only when the lockfile changed.
+stamp=tools/node_modules/.lock-stamp
+if ! cmp -s tools/package-lock.json "$stamp" 2>/dev/null; then
+  echo "worker-test: npm ci in tools/ (first run or lockfile change only)"
+  npm ci --prefix tools --no-audit --no-fund --loglevel=error || fail "npm ci in tools/ failed"
+  cp tools/package-lock.json "$stamp"
+fi
+
+# Pinned worker-build, installed into target/ so it is cached with the cargo build.
+wb=target/tools/bin/worker-build
+if [ "$("$wb" --version 2>/dev/null || true)" != "$WORKER_BUILD_VERSION" ]; then
+  echo "worker-test: installing worker-build $WORKER_BUILD_VERSION (first run only, about 30 s)"
+  cargo install -q "worker-build@$WORKER_BUILD_VERSION" --locked --root target/tools \
+    || fail "cargo install worker-build failed"
+fi
+
+# Build once here: node --test runs each file in its own process, in parallel.
+# --no-opt: wasm-opt is for deploy size; tests want the fastest correct build.
+(cd crates/worker && "../../$wb" --release --no-opt --out-dir ../../target/worker-dev) \
+  || fail "worker-build failed"
+
+# The harness cleans up after itself, even on Ctrl-C. This trap is the second line of
+# defence: kill any wrangler process group it recorded and remove its temp state.
+run_dir=$(mktemp -d "${TMPDIR:-/tmp}/plumblog-worker-test.XXXXXX")
+cleanup() {
+  for f in "$run_dir"/*.pgid; do
+    [ -e "$f" ] || continue
+    pgid=$(basename "$f" .pgid)
+    kill -KILL -- "-$pgid" 2>/dev/null || true
+  done
+  rm -rf "$run_dir"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+WORKER_TEST_RUN_DIR="$run_dir" node --test "tools/worker-test/*.test.mjs" \
+  || fail "Worker integration tests failed"

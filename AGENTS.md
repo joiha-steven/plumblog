@@ -8,6 +8,7 @@ you are touching. The owner does not read code: report with evidence (output, sc
 ```sh
 scripts/check                      # the only check; also runs on commit and in CI
 cargo test -p plumblog-<crate>     # fast loop
+scripts/worker-test                # real Worker over HTTP (wrangler dev, local D1/R2); tests in tools/worker-test/
 cargo run -p plumblog-cli -- guide # the `blog` CLI
 ```
 
