@@ -1,7 +1,7 @@
 //! The owner's timeline (`system_log`).
 
 use plumblog_model::{Result, UserId};
-use plumblog_syslog::{Event, EventKind, Retention, Scope};
+use plumblog_syslog::{Event, EventKind, LogSink, Retention, Scope};
 
 /// A stored event with its row id.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,16 +43,17 @@ pub const RETENTION_JOB: &str = "system_log.retention";
 /// The daily retention job (docs/ARCHITECTURE.md, System log): deletes up to
 /// `retention.per_run` rows past the age or row cap, then records one `job.run` event with
 /// how many went, or the error code if pruning failed. The event is written after the
-/// prune, so the log may hold `max_rows + 1` rows until the next run. Returns the prune
-/// result; a failure to record the event is returned only if the prune itself succeeded.
+/// prune, so the log may hold `max_rows + 1` rows until the next run. Recording goes
+/// through [`plumblog_syslog::record`]: its failure reaches `report`, never the result.
 ///
 /// # Errors
-/// The prune's error, else the append's.
-pub async fn retention_job<S: LogStore>(
+/// The prune's error.
+pub async fn retention_job<S: LogStore + LogSink>(
     store: &S,
     scope: &Scope,
     retention: Retention,
     now_ms: u64,
+    report: impl FnOnce(&str),
 ) -> Result<u64> {
     let pruned = store
         .prune_log(
@@ -68,7 +69,6 @@ pub async fn retention_job<S: LogStore>(
         Ok(n) => event.field("deleted", &n.to_string()),
         Err(e) => event.error(e.code),
     };
-    let recorded = store.append(event).await;
-    let deleted = pruned?;
-    recorded.map(|_| deleted)
+    plumblog_syslog::record(store, event, report).await;
+    pruned
 }

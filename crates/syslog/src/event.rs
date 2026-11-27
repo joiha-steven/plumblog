@@ -104,7 +104,7 @@ impl Event {
     /// What it was about: a post slug, setting key, job or plugin name. Redacted and capped.
     #[must_use]
     pub fn subject(mut self, subject: &str) -> Self {
-        self.subject = redact::value("subject", subject);
+        self.subject = redact::subject(subject);
         self
     }
 

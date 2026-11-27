@@ -31,7 +31,8 @@ pub async fn run(env: &Env) {
         }
     };
     let now = worker::Date::now().as_millis();
-    match retention_job(&store, &scope, Retention::default(), now).await {
+    let report = |m: &str| console_error!("{m}");
+    match retention_job(&store, &scope, Retention::default(), now, report).await {
         Ok(deleted) => console_log!("{prefix} job.run {RETENTION_JOB} deleted={deleted}"),
         Err(e) => console_error!("{prefix} job.run {RETENTION_JOB} failed: {e}"),
     }

@@ -1,6 +1,6 @@
 use plumblog_model::{ErrorCode, RequestId, Result, UserId};
 use plumblog_store::{LogEntry, LogQuery, LogStore};
-use plumblog_syslog::{Event, EventKind, Logger};
+use plumblog_syslog::{Event, EventKind, LogSink};
 use worker::console_log;
 use worker::wasm_bindgen::JsValue;
 
@@ -96,8 +96,8 @@ impl LogStore for D1Store {
     }
 }
 
-impl Logger for D1Store {
-    async fn record(&self, event: Event) -> Result<()> {
+impl LogSink for D1Store {
+    async fn store_event(&self, event: Event) -> Result<()> {
         self.append(event).await.map(drop)
     }
 }

@@ -680,7 +680,7 @@ pub async fn log_retention_job<S: Store>(db: &S) -> Check {
         "deleted by age and by count",
         ok(
             "retention_job",
-            crate::retention_job(db, &scope, retention, now).await,
+            crate::retention_job(db, &scope, retention, now, |_| ()).await,
         )?,
         3,
     )?;
@@ -710,7 +710,7 @@ pub async fn log_retention_job<S: Store>(db: &S) -> Check {
 }
 
 /// A failure to record the job's own entry never undoes or stops the prune: the rows are
-/// gone and the error is the append's.
+/// gone, the job succeeds, and the failure is reported once with the job's request id.
 pub async fn log_retention_job_record_failure<S: Store>(db: &S) -> Check {
     ok(
         "append",
@@ -725,10 +725,23 @@ pub async fn log_retention_job_record_failure<S: Store>(db: &S) -> Check {
         max_age_days: 1,
         ..plumblog_syslog::Retention::default()
     };
-    fails(
-        "job entry with a missing actor",
-        crate::retention_job(db, &scope, retention, 10 * 24 * 60 * 60 * 1000).await,
-        ErrorCode::InvalidInput,
+    let mut reports = Vec::new();
+    eq!(
+        "the job still succeeds",
+        ok(
+            "retention_job",
+            crate::retention_job(db, &scope, retention, 10 * 24 * 60 * 60 * 1000, |m| {
+                reports.push(m.to_owned());
+            })
+            .await,
+        )?,
+        1,
+    )?;
+    eq!("one report", reports.len(), 1)?;
+    eq!(
+        "report names the request",
+        reports[0].starts_with("[req=job-2] syslog.record_failed kind=job.run"),
+        true,
     )?;
     eq!("pruned anyway", log_ids(db, log_query()).await?, Vec::new())
 }

@@ -1,5 +1,5 @@
 use plumblog_model::Result;
-use plumblog_syslog::{Event, Logger};
+use plumblog_syslog::{Event, LogSink};
 
 use super::{MemoryStore, count, invalid, next_rowid};
 use crate::{LogEntry, LogQuery, LogStore, page_len};
@@ -66,8 +66,8 @@ impl LogStore for MemoryStore {
     }
 }
 
-impl Logger for MemoryStore {
-    async fn record(&self, event: Event) -> Result<()> {
+impl LogSink for MemoryStore {
+    async fn store_event(&self, event: Event) -> Result<()> {
         self.append(event).await.map(drop)
     }
 }

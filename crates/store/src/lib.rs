@@ -61,6 +61,7 @@ pub trait Store:
     + SettingsStore
     + WebhookStore
     + LogStore
+    + plumblog_syslog::LogSink
 {
 }
 
@@ -79,6 +80,7 @@ impl<T> Store for T where
         + SettingsStore
         + WebhookStore
         + LogStore
+        + plumblog_syslog::LogSink
         + ?Sized
 {
 }
