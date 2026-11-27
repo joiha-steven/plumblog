@@ -19,8 +19,13 @@ const OPTION: &str = "/__option";
 /// this variable, which only tools/wrangler.dev.toml sets.
 const ENABLE_VAR: &str = "PLUMBLOG_CONTRACT_TESTS";
 
+/// Whether this Worker may serve test routes (`/__contract`, `/__webhooks/...`).
+pub fn enabled(env: &Env) -> bool {
+    env.var(ENABLE_VAR).map(|v| v.to_string()).ok().as_deref() == Some("wipe-db")
+}
+
 pub async fn handle(req: &Request, env: &Env) -> Result<Option<Response>> {
-    if env.var(ENABLE_VAR).map(|v| v.to_string()).ok().as_deref() != Some("wipe-db") {
+    if !enabled(env) {
         return Ok(None);
     }
     let path = req.path();

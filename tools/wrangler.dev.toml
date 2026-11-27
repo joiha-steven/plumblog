@@ -11,9 +11,11 @@ compatibility_date = "2026-11-01"
 directory = "../target/worker-dev/assets"
 
 # Binding names are provisional until the store adapters land; keep them in sync with crates/worker.
-# Daily system log retention (crates/worker jobs). Tests fire it through /__scheduled.
+# One cron, every 10 minutes (crates/worker jobs): publish due posts, send due webhook
+# deliveries; the 03:10 UTC run also prunes the system log and old deliveries. Tests fire it
+# through /__scheduled (pass &time= to pick the slot).
 [triggers]
-crons = ["17 3 * * *"]
+crons = ["*/10 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -25,6 +27,12 @@ migrations_dir = "../migrations"
 binding = "MEDIA"
 bucket_name = "plumblog-dev"
 
-# Lets a test build (feature contract-tests) serve /__contract, which empties the database.
+# Lets a test build (feature contract-tests) serve /__contract, which empties the database,
+# and /__webhooks/*.
 [vars]
 PLUMBLOG_CONTRACT_TESTS = "wipe-db"
+# Test builds only: webhooks may deliver to the local test receiver over http://127.0.0.1.
+PLUMBLOG_WEBHOOK_TEST_RECEIVER = "allow-loopback-http"
+# TEST-ONLY key (bytes 0..31), public on purpose. A real site gets a random one as a Worker
+# secret (`wrangler secret put WEBHOOK_KEY`), never a var.
+WEBHOOK_KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="

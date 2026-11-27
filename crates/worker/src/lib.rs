@@ -9,6 +9,7 @@ mod jobs;
 mod keys;
 mod pages;
 mod webcrypto;
+pub mod webhooks;
 
 use worker::{Context, Env, Request, Response, Result, ScheduleContext, ScheduledEvent, event};
 
@@ -19,6 +20,10 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     let mut req = req;
     #[cfg(feature = "contract-tests")]
     if let Some(res) = contract::handle(&req, &env).await? {
+        return Ok(res);
+    }
+    #[cfg(feature = "contract-tests")]
+    if let Some(res) = webhooks::test_routes::handle(&req, &env, &ctx).await? {
         return Ok(res);
     }
     #[cfg(feature = "contract-tests")]
@@ -38,8 +43,8 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     }
 }
 
-/// The cron trigger: daily, for system log retention (docs/ARCHITECTURE.md, System log).
+/// The one cron trigger, every 10 minutes; `jobs::run` picks the jobs by scheduled time.
 #[event(scheduled)]
-async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    jobs::run(&env).await;
+async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
+    jobs::run(&env, event.schedule()).await;
 }
