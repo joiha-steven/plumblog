@@ -88,6 +88,10 @@ CREATE TABLE invites (
 );
 -- Users page: list pending invites, newest first.
 CREATE INDEX invites_created ON invites (created_at);
+-- Deleting a user: cascade to the invites they created (FK action needs this index).
+CREATE INDEX invites_creator ON invites (created_by);
+-- Deleting a user: clear used_by on the invite they accepted (FK action needs this index).
+CREATE INDEX invites_used_by ON invites (used_by);
 
 -- Uploaded images. Bytes live in R2; this is the catalogue.
 CREATE TABLE media (
@@ -104,6 +108,8 @@ CREATE TABLE media (
 );
 -- Media library grid, newest first, paged by (created_at, id).
 CREATE INDEX media_created ON media (created_at, id);
+-- Deleting a user: clear uploaded_by on their media (FK action needs this index).
+CREATE INDEX media_uploader ON media (uploaded_by);
 
 CREATE TABLE series (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,6 +187,8 @@ CREATE TABLE revisions (
 );
 -- Revision list of a post, newest first.
 CREATE INDEX revisions_post ON revisions (post_id, created_at);
+-- Deleting a user: clear author_id on their revisions (FK action needs this index).
+CREATE INDEX revisions_author ON revisions (author_id);
 
 -- Old URL -> new URL, created automatically when a slug changes. Paths start with '/'.
 CREATE TABLE redirects (

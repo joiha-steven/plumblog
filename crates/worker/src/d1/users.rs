@@ -1,7 +1,9 @@
 use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 use plumblog_store::{NewUser, SiteStore, User, UserStore};
 
-use super::{D1Store, Row, bound, int, map_error, message, opt_int, opt_text, storage, text};
+use super::{
+    D1Store, Row, bound, bump_if, int, map_error, message, opt_int, opt_text, storage, text,
+};
 
 pub(super) const USER_COLS: &str =
     "id, login, slug, display_name, bio, role, password_hash, disabled_at, created_at, updated_at";
@@ -127,8 +129,14 @@ impl UserStore for D1Store {
                 bound(user.id.0),
             ],
         )?;
-        let r = self.exec(s).await?;
-        if Self::changes("update_user", &r)? == 0 {
+        // Bump only if the user exists; a conflict rolls back both.
+        let bump = bump_if(
+            self,
+            "EXISTS (SELECT 1 FROM users WHERE id = ?)",
+            &[bound(user.id.0)],
+        )?;
+        let results = self.batch("update_user", vec![bump, s]).await?;
+        if Self::changes("update_user", &results[1])? == 0 {
             return Err(user_not_found(user.id));
         }
         Ok(())

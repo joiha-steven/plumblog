@@ -17,9 +17,10 @@ pub trait RedirectStore {
     async fn find_redirect(&self, path: &str) -> Result<Option<String>>;
     /// `InvalidInput` if `from == to`. Upserts `from -> to` (`created_at = now`), rewrites
     /// every redirect that pointed to `from` to point to `to` (no chains) and deletes the
-    /// redirect from `to`, if any (no loops). One atomic write.
+    /// redirect from `to`, if any (no loops). One atomic write; bumps the content version
+    /// (reader responses depend on redirects).
     async fn put_redirect(&self, from: &str, to: &str, now: i64) -> Result<()>;
-    /// Absent path is Ok.
+    /// Absent path is Ok and does not bump; otherwise bumps the content version.
     async fn delete_redirect(&self, from: &str) -> Result<()>;
     /// Ordered by `from_path`.
     async fn list_redirects(&self) -> Result<Vec<Redirect>>;

@@ -55,7 +55,7 @@ pub trait MediaStore {
     /// `NotFound`.
     async fn get_media(&self, id: MediaId) -> Result<Media>;
     async fn list_media(&self, query: MediaQuery) -> Result<Vec<Media>>;
-    /// `NotFound`.
+    /// `NotFound`. Bumps the content version (alt text shows on reader pages).
     async fn set_media_alt(&self, id: MediaId, alt: &str) -> Result<()>;
     /// `NotFound`. Posts using it as cover get `cover_media_id = None`; bumps the content
     /// version if any of them is published.

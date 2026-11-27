@@ -78,6 +78,7 @@ impl MediaStore for MemoryStore {
                 .get_mut(&id)
                 .ok_or_else(|| not_found("media", id.0))?;
             alt.clone_into(&mut m.alt);
+            s.bump();
             Ok(())
         })
     }

@@ -98,6 +98,7 @@ impl UserStore for MemoryStore {
                     ..user.clone()
                 },
             );
+            s.bump();
             Ok(())
         })
     }

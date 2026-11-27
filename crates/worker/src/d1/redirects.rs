@@ -1,7 +1,7 @@
 use plumblog_model::Result;
 use plumblog_store::{Redirect, RedirectStore};
 
-use super::{D1Store, Stmt, int, invalid, text};
+use super::{D1Store, Stmt, bump, bump_if, int, invalid, text};
 
 /// The statements of `put_redirect`, for its own batch and for `save_post`'s.
 pub(super) fn put_redirect_stmts(
@@ -48,17 +48,26 @@ impl RedirectStore for D1Store {
     }
 
     async fn put_redirect(&self, from: &str, to: &str, now: i64) -> Result<()> {
-        let stmts = put_redirect_stmts(self, from, to, now)?;
+        // save_post shares the statements and bumps once itself, so the bump is added here.
+        let mut stmts = put_redirect_stmts(self, from, to, now)?;
+        stmts.push(bump(self)?);
         self.batch("put_redirect", stmts).await.map(drop)
     }
 
     async fn delete_redirect(&self, from: &str) -> Result<()> {
-        let s = self.stmt(
+        let bump = bump_if(
+            self,
+            "EXISTS (SELECT 1 FROM redirects WHERE from_path = ?)",
+            &[text(from)],
+        )?;
+        let del = self.stmt(
             "delete_redirect",
             "DELETE FROM redirects WHERE from_path = ?",
             &[text(from)],
         )?;
-        self.exec(s).await.map(drop)
+        self.batch("delete_redirect", vec![bump, del])
+            .await
+            .map(drop)
     }
 
     // 1 query.

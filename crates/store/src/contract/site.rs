@@ -602,3 +602,49 @@ pub async fn log_prune<S: Store>(db: &S) -> Check {
 pub async fn site_starts_at_version_1<S: Store>(db: &S) -> Check {
     version_is(db, "migration", 1).await
 }
+
+/// Author profiles, image alt text and redirects all show in reader responses, so writing
+/// them bumps the content version; failed writes and no-op deletes do not.
+pub async fn reader_metadata_versions<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let v = version(db).await?;
+    let mut profile = ok("get_user", db.get_user(u).await)?;
+    "New bio".clone_into(&mut profile.bio);
+    ok("update_user", db.update_user(&profile).await)?;
+    version_is(db, "update_user", v + 1).await?;
+    profile.id = plumblog_model::UserId(u.0 + 1000);
+    fails(
+        "update_user missing",
+        db.update_user(&profile).await,
+        ErrorCode::UserNotFound,
+    )?;
+    version_is(db, "failed update_user", v + 1).await?;
+
+    let m = ok(
+        "create_media",
+        db.create_media(super::kit::media("a.jpg", T0)).await,
+    )?;
+    version_is(db, "create_media", v + 1).await?;
+    ok("set_media_alt", db.set_media_alt(m, "A cat").await)?;
+    version_is(db, "set_media_alt", v + 2).await?;
+    let missing = plumblog_model::MediaId(m.0 + 1000);
+    fails(
+        "set_media_alt missing",
+        db.set_media_alt(missing, "x").await,
+        ErrorCode::NotFound,
+    )?;
+    version_is(db, "failed set_media_alt", v + 2).await?;
+
+    ok("put_redirect", db.put_redirect("/vi/a", "/vi/b", T0).await)?;
+    version_is(db, "put_redirect", v + 3).await?;
+    fails(
+        "put_redirect to itself",
+        db.put_redirect("/vi/c", "/vi/c", T0).await,
+        ErrorCode::InvalidInput,
+    )?;
+    version_is(db, "failed put_redirect", v + 3).await?;
+    ok("delete_redirect", db.delete_redirect("/vi/a").await)?;
+    version_is(db, "delete_redirect", v + 4).await?;
+    ok("delete_redirect absent", db.delete_redirect("/vi/a").await)?;
+    version_is(db, "delete_redirect of an absent path", v + 4).await
+}

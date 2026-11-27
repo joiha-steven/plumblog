@@ -84,8 +84,13 @@ impl MediaStore for D1Store {
             "UPDATE media SET alt = ? WHERE id = ?",
             &[text(alt), bound(id.0)],
         )?;
-        let r = self.exec(s).await?;
-        if Self::changes("set_media_alt", &r)? == 0 {
+        let bump = bump_if(
+            self,
+            "EXISTS (SELECT 1 FROM media WHERE id = ?)",
+            &[bound(id.0)],
+        )?;
+        let results = self.batch("set_media_alt", vec![bump, s]).await?;
+        if Self::changes("set_media_alt", &results[1])? == 0 {
             return Err(not_found("media", id.0));
         }
         Ok(())

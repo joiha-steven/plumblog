@@ -37,12 +37,19 @@ impl RedirectStore for MemoryStore {
     }
 
     async fn put_redirect(&self, from: &str, to: &str, now: i64) -> Result<()> {
-        self.write(|s| s.put_redirect(from, to, now))
+        // The shared helper does not bump: save_post bumps once for the whole save.
+        self.write(|s| {
+            s.put_redirect(from, to, now)?;
+            s.bump();
+            Ok(())
+        })
     }
 
     async fn delete_redirect(&self, from: &str) -> Result<()> {
         self.write(|s| {
-            s.redirects.remove(from);
+            if s.redirects.remove(from).is_some() {
+                s.bump();
+            }
             Ok(())
         })
     }

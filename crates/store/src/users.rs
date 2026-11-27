@@ -51,7 +51,8 @@ pub trait UserStore {
     /// Ordered by id.
     async fn list_users(&self) -> Result<Vec<User>>;
     /// Writes every field except `id` and `created_at`. `UserNotFound`; `Conflict` on a
-    /// login or slug held by another user.
+    /// login or slug held by another user. Bumps the content version (author name, bio and
+    /// slug show on reader pages).
     async fn update_user(&self, user: &User) -> Result<()>;
     /// `UserNotFound`; `Conflict` while they author any post (reassign first). Deletes their
     /// sessions, passkeys, tokens and the invites they created; clears `invites.used_by`,
