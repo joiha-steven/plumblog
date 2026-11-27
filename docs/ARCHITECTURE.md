@@ -215,6 +215,7 @@ Not built: offline reading, newsletter (later), reactions.
 - Focus mode, typewriter scrolling, word count, discreet "Saved", offline draft in IndexedDB.
 - Post settings in a collapsible side panel. Publish button always in the same place.
 - Admin in light and dark; English and Vietnamese UI.
+- Posts list (`web/admin/src/lists.ts`): All, Draft, Scheduled, Published, Trash, kept in `?status=` (no counts, no search). The API cannot leave a status out, so All asks without `status`, drops trashed rows and keeps loading pages until 20 rows show (at most 5 extra requests, then "Load more"). Above it, with All, a strip of up to 3 drafts that exist only in this browser (IndexedDB, not saved to the server yet). Pages: the same list with no filter.
 - Dashboard (drafts, recent posts, last backup time), media library, users/invites, settings, tokens, audit log, update notice from GitHub Releases.
 
 How the admin is built:

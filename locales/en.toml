@@ -63,6 +63,29 @@ empty_hint = "What you write shows up here."
 empty = "No pages yet"
 empty_hint = "Pages are for things that stay put, like About or Contact."
 
+[admin.list]
+filter = "Filter by status"
+all = "All"
+col_title = "Title"
+col_status = "Status"
+col_date = "Date"
+col_lang = "Language"
+empty_status = "No {status} posts yet"
+empty_scheduled_hint = "To schedule a post, choose \u201cSchedule\u201d in its settings while you write."
+empty_hint = "What you write shows up here."
+more = "Load more"
+loading_more = "Loading\u2026"
+edited = "Edited {when}"
+device_title = "On this device"
+device_kept = "Kept on this device, {when}"
+
+[admin.list.lc]
+# The status inside a sentence ("No {status} posts yet").
+draft = "draft"
+scheduled = "scheduled"
+published = "published"
+trashed = "trashed"
+
 [admin.media]
 empty = "No pictures yet"
 empty_hint = "Pictures you add to posts show up here."

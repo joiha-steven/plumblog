@@ -130,6 +130,51 @@ export async function countDrafts(user: number): Promise<number> {
   }
 }
 
+/** A kept draft as the posts list shows it. */
+export interface DraftEntry {
+  key: string;
+  title: string;
+  savedAt: number;
+  /** The post it edits, or the id of a post never saved (`newId`, in the editor's `?draft=`). */
+  post?: number;
+  newId?: string;
+}
+
+/**
+ * The entry for one stored draft of `user`, or undefined for a key that is not theirs or not
+ * ours, a stored value that is not a draft, or a draft with nothing written in it.
+ */
+export function toEntry(user: number, key: string, v: unknown): DraftEntry | undefined {
+  const m = /^(\d+):(?:post-(\d{1,15})|new-([a-z0-9]{12,32}))$/.exec(key);
+  if (!m || Number(m[1]) !== user || !isDraft(v) || (v.title.trim() === "" && v.body.trim() === "")) return undefined;
+  const entry: DraftEntry = { key, title: v.title, savedAt: v.savedAt };
+  if (m[2] !== undefined) entry.post = Number(m[2]);
+  else if (m[3] !== undefined) entry.newId = m[3];
+  return entry;
+}
+
+/** What `user` has written here and not saved to the server, newest first. Read-only; a
+ * storage failure is logged and reads as none. */
+export async function listDrafts(user: number): Promise<DraftEntry[]> {
+  try {
+    const all = await run<DraftEntry[]>("readonly", (s, done) => {
+      const found: DraftEntry[] = [];
+      const req = s.openCursor(IDBKeyRange.bound(`${user}:`, `${user}:\uffff`));
+      req.onsuccess = () => {
+        const c = req.result;
+        if (!c) return done(found);
+        const e = toEntry(user, String(c.key), c.value);
+        if (e) found.push(e);
+        c.continue();
+      };
+    });
+    return all.sort((a, b) => b.savedAt - a.savedAt);
+  } catch (e) {
+    console.error(`admin drafts: listing user ${user} failed`, e);
+    return [];
+  }
+}
+
 /** Removes every draft of `user`. Sign-out (part D) calls it, so a shared browser keeps none. */
 export async function clearDrafts(user: number): Promise<void> {
   try {

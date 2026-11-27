@@ -78,7 +78,8 @@ test("mock: list, get and create answer in the real shapes", async () => {
   const a = api();
   const page = ok(await a.posts({}));
   assert.deepEqual(check("post_page", page), []);
-  assert.equal(page.posts.length, fixtures.length);
+  // A first page holds at most 20 (the screens' page size); the fixtures need a second one.
+  assert.ok(fixtures.length > 20 && page.posts.length === 20 && page.next_cursor !== null, "the list pages");
   assert.deepEqual(check("post", ok(await a.post(1))), []);
   assert.ok(ok(await a.post(1)).markdown.length > 500, "the long post's body comes from post-1.txt");
   const made = ok(await a.createPost({ lang: "en", slug: "new-one", title: "New", markdown: "Hello $$ x" }));
