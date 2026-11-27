@@ -294,6 +294,8 @@ Node.js is a contributor-only tool (wrangler, Playwright, Lighthouse). Users nev
 | Admin CSS, gzip | <= 20 KB |
 | Lighthouse (mobile + desktop, sample content) | 100, CLS 0 |
 
+The editor chunk is near its line (110.7 of 110 KB after part C): new editor features load as their own lazy chunk, as the paste converter does, never into the editor chunk.
+
 ## Documentation
 
 Which Markdown files may exist, and how long each may be, is enforced by `scripts/check` (the list lives there, not here). `README.md` is for people; `AGENTS.md` and `guides/` are for AI agents. Generated references (CLI, API, theme variables, settings) come from code.
