@@ -56,6 +56,7 @@ crates/i18n       locale files, lookup, plural rules
 crates/auth       password scheme, passkey verification, sessions, roles; crypto behind a trait
 crates/syslog     system log event types and the logging interface
 crates/store      storage traits (posts, users, media, settings, log...) + in-memory impl for tests
+crates/webhook    outgoing webhooks: payloads, signing, secret sealing, URL guard, retries; no I/O
 crates/render     theme runtime: minijinja templates, template data, theme/plugin options
 crates/worker     wiring only: routes per feature (pages, api, mcp, media, cron), D1/R2/cache adapters
 crates/cli        the `blog` binary: setup, deploy, content and theme commands, guides

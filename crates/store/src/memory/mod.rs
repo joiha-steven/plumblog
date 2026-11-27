@@ -23,8 +23,8 @@ use plumblog_model::{
 use plumblog_syslog::Event;
 
 use crate::{
-    ApiToken, Comment, Invite, Media, Passkey, PluginState, Post, Redirect, Revision, Series,
-    Session, Tag, User, Webhook,
+    ApiToken, Comment, Delivery, Invite, Media, Passkey, PluginState, Post, Redirect, Revision,
+    Series, Session, Tag, User, Webhook,
 };
 
 /// In-memory store. `RefCell` because traits take `&self` like the D1 impl.
@@ -72,6 +72,8 @@ struct State {
     options: BTreeMap<(&'static str, String, String), (String, i64)>,
     plugins: BTreeMap<String, PluginState>,
     webhooks: BTreeMap<i64, Webhook>,
+    /// `webhook_deliveries`; removed with their webhook (ON DELETE CASCADE).
+    deliveries: BTreeMap<i64, Delivery>,
     log: BTreeMap<i64, Event>,
 }
 
@@ -99,6 +101,7 @@ impl Default for State {
             options: BTreeMap::new(),
             plugins: BTreeMap::new(),
             webhooks: BTreeMap::new(),
+            deliveries: BTreeMap::new(),
             log: BTreeMap::new(),
         }
     }

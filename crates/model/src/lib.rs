@@ -38,6 +38,10 @@ macro_rules! stable_codes {
 stable_codes! {
     /// Stable error codes. The string form is a public contract: it appears in API responses,
     /// the system log and locale keys (`error.<code>`), so a code is never renamed once shipped.
+    /// Webhooks: `key_invalid` = `WEBHOOK_KEY` missing or malformed; `url_blocked` = a URL
+    /// the guard refuses (not https, private address...); `secret_unreadable` = a stored
+    /// secret not sealed or not decrypting; `delivery_failed` = an attempt failed (the log
+    /// entry says why).
     pub enum ErrorCode {
         PostNotFound => "post.not_found",
         UserNotFound => "user.not_found",
@@ -49,6 +53,10 @@ stable_codes! {
         NotFound => "store.not_found",
         Conflict => "store.conflict",
         InviteInvalid => "invite.invalid",
+        WebhookKeyInvalid => "webhook.key_invalid",
+        WebhookUrlBlocked => "webhook.url_blocked",
+        WebhookSecretUnreadable => "webhook.secret_unreadable",
+        WebhookDeliveryFailed => "webhook.delivery_failed",
     }
 }
 
@@ -204,6 +212,13 @@ mod tests {
                 (ErrorCode::NotFound, "store.not_found"),
                 (ErrorCode::Conflict, "store.conflict"),
                 (ErrorCode::InviteInvalid, "invite.invalid"),
+                (ErrorCode::WebhookKeyInvalid, "webhook.key_invalid"),
+                (ErrorCode::WebhookUrlBlocked, "webhook.url_blocked"),
+                (
+                    ErrorCode::WebhookSecretUnreadable,
+                    "webhook.secret_unreadable"
+                ),
+                (ErrorCode::WebhookDeliveryFailed, "webhook.delivery_failed"),
             ]
         );
     }

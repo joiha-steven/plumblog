@@ -7,6 +7,7 @@ members = [
   "crates/auth",
   "crates/syslog",
   "crates/store",
+  "crates/webhook",
   "crates/render",
   "crates/worker",
   "crates/cli",
@@ -53,6 +54,7 @@ plumblog-i18n = { path = "crates/i18n" }
 plumblog-auth = { path = "crates/auth" }
 plumblog-syslog = { path = "crates/syslog" }
 plumblog-store = { path = "crates/store" }
+plumblog-webhook = { path = "crates/webhook" }
 plumblog-render = { path = "crates/render" }
 
 [workspace.lints.rust]

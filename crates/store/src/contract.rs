@@ -4,6 +4,7 @@
 //! times. A case returns `Err` instead of panicking: a panic in wasm aborts the Worker.
 
 mod accounts;
+mod deliveries;
 mod find;
 mod kit;
 mod library;
@@ -96,6 +97,10 @@ cases! {
     site::options_round_trip,
     site::plugins_round_trip,
     site::webhooks_round_trip,
+    deliveries::deliveries_round_trip,
+    deliveries::deliveries_claim_and_lease,
+    deliveries::deliveries_finish,
+    deliveries::deliveries_cascade_and_prune,
     site::log_query_and_cursor,
     site::log_prune,
     site::log_detail_redacted,

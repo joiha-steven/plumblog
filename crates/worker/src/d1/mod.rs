@@ -342,6 +342,7 @@ impl D1Store {
             "settings",
             "extension_options",
             "plugins",
+            "webhook_deliveries",
             "webhooks",
             "system_log",
             "users",
