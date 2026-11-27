@@ -77,6 +77,44 @@ impl LoginLimitStore for D1Store {
         }
     }
 
+    async fn count_capped(
+        &self,
+        key_hash: &str,
+        now: i64,
+        window_ms: i64,
+        cap: i64,
+    ) -> Result<Option<i64>> {
+        // The upsert of record_failure without its read-back: at the cap the WHERE leaves the
+        // row untouched, so the statement writes nothing and returns no row.
+        let s = self.stmt(
+            "count_capped",
+            &format!(
+                "INSERT INTO login_failures (key_hash, count, window_start) VALUES (?, 1, ?) \
+                 ON CONFLICT (key_hash) DO UPDATE SET \
+                 count = CASE WHEN {WINDOW_ENDED} THEN 1 ELSE count + 1 END, \
+                 window_start = CASE WHEN {WINDOW_ENDED} THEN excluded.window_start \
+                 ELSE window_start END \
+                 WHERE count < ? OR {WINDOW_ENDED} \
+                 RETURNING count"
+            ),
+            &[
+                text(key_hash),
+                int(now)?,
+                bound(window_ms),
+                bound(now),
+                bound(window_ms),
+                bound(now),
+                bound(cap),
+                bound(window_ms),
+                bound(now),
+            ],
+        )?;
+        match self.row(s).await? {
+            Some(mut r) => r.int().map(Some),
+            None => Ok(None),
+        }
+    }
+
     async fn delete_ended_failures(&self, now: i64, window_ms: i64, limit: u32) -> Result<u64> {
         // D1's SQLite has no DELETE ... LIMIT; the subquery bounds it the same way.
         let s = self.stmt(

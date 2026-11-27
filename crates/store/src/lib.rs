@@ -46,7 +46,9 @@ pub use signin::{
 };
 pub use taxonomy::{NewSeries, Series, Tag, TaxonomyStore};
 pub use users::{NewUser, ProfileUpdate, SiteStore, User, UserStore};
-pub use webhooks::{NewWebhook, Webhook, WebhookStore};
+pub use webhooks::{
+    AttemptResult, Delivery, DeliveryStore, NewDelivery, NewWebhook, Webhook, WebhookStore,
+};
 
 /// Largest page any list query returns, so one request cannot read a whole table.
 pub const MAX_PAGE: u32 = 100;
@@ -69,6 +71,7 @@ pub trait Store:
     + CommentStore
     + SettingsStore
     + WebhookStore
+    + DeliveryStore
     + LogStore
     + plumblog_syslog::LogSink
 {
@@ -91,6 +94,7 @@ impl<T> Store for T where
         + CommentStore
         + SettingsStore
         + WebhookStore
+        + DeliveryStore
         + LogStore
         + plumblog_syslog::LogSink
         + ?Sized

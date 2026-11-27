@@ -16,6 +16,21 @@ pub const TURNSTILE_AFTER: i64 = 5;
 /// From this many, sign-in is refused before the password is even checked.
 pub const LOCK_AFTER: i64 = 20;
 
+/// The site-wide `login_failures` key. Not a hash: other keys are 64 hex characters, so it
+/// can never collide with one.
+pub const GLOBAL_KEY: &str = "global";
+/// Most anonymous limited attempts (sign-in, codes, anonymous passkey options; not re-auth by
+/// a signed-in user) the whole site counts per [`WINDOW_MS`] before each one must carry a
+/// Turnstile token (or, without Turnstile, is refused with no write). Per-address keys alone
+/// let a /48 (65 536 /64s) spend D1's free 100 000 rows written a day. Worst case without
+/// Turnstile: an attempt writes at most 5 rows (global, address, subject, challenge, failure
+/// log) and later its sweep deletes up to 3: 50 x 96 windows a day x 8 = 38 400. Lock log rows
+/// come on top: one per key reaching [`TURNSTILE_AFTER`], each attempt counts two keys, so at
+/// most 2 x 50 / 5 = 20 a window, 1 920 a day: about 40 000 rows a day, leaving most of the
+/// budget for publishing. With Turnstile on, attempts past the cap are bounded by solved
+/// challenges, not by this constant.
+pub const GLOBAL_CAP: i64 = 50;
+
 /// One `login_failures` row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Failures {

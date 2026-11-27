@@ -82,6 +82,7 @@ markdown pulldown-cmark         # CommonMark + GFM parser
 markdown pulldown-latex         # LaTeX to MathML at save time
 i18n     toml                   # locale files are TOML
 store unicode-normalization  # in-memory search folds diacritics like FTS5 unicode61
+webhook serde_json            # payload JSON
 '
 meta=$(cargo metadata -q --format-version 1 --no-deps) || fail "cargo metadata failed"
 graph_errors=$(jq -r --arg order "$order" --arg allow "$external_allowlist" '

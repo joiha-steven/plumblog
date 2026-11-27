@@ -11,6 +11,7 @@ stable_codes! {
         SignIn => "auth.sign_in",
         SignInFailed => "auth.sign_in_failed",
         SignInLocked => "auth.sign_in_locked",
+        GlobalCap => "auth.global_cap",
         PasswordChanged => "auth.password_changed",
         SignOut => "auth.sign_out",
         PasskeyAdded => "auth.passkey_added",
@@ -62,7 +63,9 @@ impl EventKind {
             | Self::Migration
             | Self::ScheduledJob
             | Self::WebhookDelivery => Severity::Info,
-            Self::SignInFailed | Self::SignInLocked | Self::PluginDisabled => Severity::Warning,
+            Self::SignInFailed | Self::SignInLocked | Self::GlobalCap | Self::PluginDisabled => {
+                Severity::Warning
+            }
             Self::Error => Severity::Error,
         }
     }
@@ -267,6 +270,7 @@ mod tests {
                 (EventKind::SignIn, "auth.sign_in"),
                 (EventKind::SignInFailed, "auth.sign_in_failed"),
                 (EventKind::SignInLocked, "auth.sign_in_locked"),
+                (EventKind::GlobalCap, "auth.global_cap"),
                 (EventKind::PasswordChanged, "auth.password_changed"),
                 (EventKind::SignOut, "auth.sign_out"),
                 (EventKind::PasskeyAdded, "auth.passkey_added"),
@@ -324,6 +328,10 @@ mod tests {
         );
         assert_eq!(
             Event::new(EventKind::SignInLocked, rid(), 1).severity(),
+            Severity::Warning
+        );
+        assert_eq!(
+            Event::new(EventKind::GlobalCap, rid(), 1).severity(),
             Severity::Warning
         );
         assert_eq!(
