@@ -2,7 +2,7 @@
 //! breaks a page fails here before it reaches the Worker.
 
 use plumblog_markdown::Rendered;
-use plumblog_render::{Body, Link, PageInfo, Post, Site, Theme, ThemeFiles};
+use plumblog_render::{Alternate, Body, Image, Link, PageInfo, Post, Site, Theme, ThemeFiles};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -40,10 +40,15 @@ fn site() -> Site {
     Site {
         title: "Plum Notes".into(),
         description: "A test blog.".into(),
+        default_lang: "en".into(),
         home_url: "/".into(),
         search_url: None,
         feed_url: "/feed.xml".into(),
+        rss_url: "/rss.xml".into(),
+        json_feed_url: "/feed.json".into(),
         icon_url: "data:,".into(),
+        image_url: None,
+        author: None,
         footer: "Footer".into(),
         nav: vec![],
     }
@@ -69,6 +74,7 @@ fn post(slug: &str, title: &str, at: i64, pinned: bool) -> Post {
         }],
         cover: None,
         thumb: None,
+        translations: vec![],
     }
 }
 
@@ -76,6 +82,7 @@ fn page(lang: &str) -> PageInfo {
     PageInfo {
         lang: lang.into(),
         canonical: "https://example.com/".into(),
+        origin: "https://example.com".into(),
     }
 }
 
@@ -393,4 +400,114 @@ fn plural_messages_and_missing_keys_in_theme_locales() {
         "1 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{44c}|3 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{438}|5 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{435}\u{439}|21 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{44c}|test.gone"
     );
     assert_eq!(ru.1, [("ru".to_owned(), "test.gone".to_owned())]);
+}
+
+#[test]
+fn post_seo_uses_cover_translations_and_absolute_urls() {
+    let files = theme_files();
+    let theme = load(&files, &BTreeMap::new());
+    let mut p = post("hello", "Hello", 1_790_942_400, false);
+    p.cover = Some(Image {
+        src: "/media/cover.avif".into(),
+        srcset: None,
+        width: 1200,
+        height: 630,
+        alt: String::new(),
+    });
+    p.translations = vec![Alternate {
+        lang: "vi".into(),
+        url: "/vi/xin-chao".into(),
+    }];
+    let html = theme
+        .render(
+            &site(),
+            &page("en"),
+            &Body::Post {
+                post: &p,
+                prev: None,
+                next: None,
+            },
+        )
+        .unwrap();
+    assert!(html.contains("<meta property=\"og:type\" content=\"article\">"));
+    assert!(
+        html.contains(
+            "<meta property=\"og:image\" content=\"https://example.com/media/cover.avif\">"
+        )
+    );
+    assert!(html.contains("<meta name=\"twitter:card\" content=\"summary_large_image\">"));
+    assert!(
+        html.contains(
+            "<meta property=\"article:published_time\" content=\"2026-10-02T12:00:00Z\">"
+        )
+    );
+    // hreflang lists every version, this one included.
+    assert!(
+        html.contains(
+            "<link rel=\"alternate\" hreflang=\"en\" href=\"https://example.com/hello\">"
+        )
+    );
+    assert!(html.contains(
+        "<link rel=\"alternate\" hreflang=\"vi\" href=\"https://example.com/vi/xin-chao\">"
+    ));
+    // The default language's version is also the fallback for every other language.
+    assert!(html.contains(
+        "<link rel=\"alternate\" hreflang=\"x-default\" href=\"https://example.com/hello\">"
+    ));
+    assert!(html.contains("\"image\":[\"https://example.com/media/cover.avif\"]"));
+    assert!(html.contains("\"@type\":\"BlogPosting\""));
+    assert!(html.contains("<meta property=\"og:locale\" content=\"en_US\">"));
+    let br = theme
+        .render(
+            &site(),
+            &page("pt-br"),
+            &Body::Home {
+                posts: &[],
+                older_url: None,
+                newer_url: None,
+            },
+        )
+        .unwrap();
+    assert!(br.contains("<meta property=\"og:locale\" content=\"pt_BR\">"));
+    // No known territory: no tag rather than a wrong one.
+    let unknown = theme
+        .render(
+            &site(),
+            &page("tlh"),
+            &Body::Home {
+                posts: &[],
+                older_url: None,
+                newer_url: None,
+            },
+        )
+        .unwrap();
+    assert!(!unknown.contains("og:locale"));
+}
+
+#[test]
+fn json_ld_cannot_close_its_script_element() {
+    let files = theme_files();
+    let theme = load(&files, &BTreeMap::new());
+    let p = post("x", "</script><script>alert(1)</script>", 0, false);
+    let html = theme
+        .render(
+            &site(),
+            &page("en"),
+            &Body::Post {
+                post: &p,
+                prev: None,
+                next: None,
+            },
+        )
+        .unwrap();
+    let ld = html
+        .split("<script type=\"application/ld+json\">")
+        .nth(1)
+        .unwrap();
+    let ld = &ld[..ld.find("</script>").unwrap()];
+    assert!(
+        !ld.contains('<'),
+        "JSON-LD escapes < so the title cannot end the script: {ld}"
+    );
+    assert!(ld.contains("\\u003c/script\\u003e"));
 }

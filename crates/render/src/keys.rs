@@ -22,3 +22,9 @@ pub const MONTHS: [Key; 12] = [
     key!("date.month_11"),
     key!("date.month_12"),
 ];
+
+/// Visible title of a tag page; also its JSON-LD and Open Graph name.
+pub const TAG_TITLE: Key = key!("tag.title");
+
+/// Visible title of a yearly archive page; also its JSON-LD and Open Graph name.
+pub const ARCHIVE_TITLE: Key = key!("archive.title");

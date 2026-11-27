@@ -2,7 +2,7 @@
 
 use crate::data::{Body, EntryData, LinkData, PageInfo, Post, PostData, Site, civil, cut_words};
 use crate::keys;
-use crate::{PageKind, SLOTS, css};
+use crate::{PageKind, SLOTS, css, seo};
 use minijinja::value::{Kwargs, Serde, Value};
 use minijinja::{Environment, State};
 use plumblog_i18n::{Catalog, Key, MissingKeys};
@@ -385,6 +385,8 @@ impl Theme {
         if let Some(extra) = self.preload_by_lang.get(lang) {
             preload.extend(extra.iter().map(String::as_str));
         }
+        let list_title = self.list_title(lang, body);
+        let seo = seo::build(site, page, body, list_title.as_deref(), &description);
         let ctx = Context {
             site,
             page: PageData {
@@ -393,7 +395,7 @@ impl Theme {
                 dir: if is_rtl(lang) { "rtl" } else { "ltr" },
                 description: &description,
                 canonical: &page.canonical,
-                alternates: &[],
+                seo,
             },
             theme: ThemeData {
                 css: &self.css,
@@ -421,6 +423,19 @@ impl Theme {
         };
         let html = self.env.get_template(kind.template())?.render(ctx)?;
         Ok((html, missing.0.take()))
+    }
+
+    /// The visible title of a tag or archive page, for its social and JSON-LD name.
+    fn list_title(&self, lang: &str, body: &Body<'_>) -> Option<String> {
+        match body {
+            Body::Tag { tag, .. } => {
+                Some(self.text(lang, keys::TAG_TITLE, &[("name", tag.name.clone())]))
+            }
+            Body::Archive { year, .. } => {
+                Some(self.text(lang, keys::ARCHIVE_TITLE, &[("year", year.to_string())]))
+            }
+            _ => None,
+        }
     }
 
     fn entries<'a>(&self, posts: &[&'a Post]) -> Vec<EntryData<'a>> {
@@ -482,8 +497,8 @@ struct PageData<'a> {
     dir: &'static str,
     description: &'a str,
     canonical: &'a str,
-    /// Translations land with the translations issue; the template already loops over them.
-    alternates: &'a [crate::Link],
+    /// `page.seo.title`, `og_type`, `image`, `published`, `alternates`, `json_ld`.
+    seo: crate::seo::Seo,
 }
 
 #[derive(Serialize)]
