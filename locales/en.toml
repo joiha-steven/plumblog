@@ -6,6 +6,10 @@ title_fallback = "Untitled site"
 # Shown as plain text when the theme itself cannot render a page.
 page_failed = "This page cannot be shown right now. Please try again in a minute."
 
+[error.input]
+# A JSON body with more values in all than the API takes (4096).
+too_complex = "This request holds too many items. Send less at a time."
+
 [syslog]
 # Shown in the system log wherever a secret or personal value was removed.
 redacted = "[hidden]"
@@ -51,6 +55,7 @@ vi = "Tiếng Việt"
 
 [admin.posts]
 new = "New post"
+untitled = "Untitled"
 empty = "No posts yet"
 empty_hint = "What you write shows up here."
 
@@ -87,6 +92,7 @@ lang_help = "Language of messages (en, vi). Default: PLUMBLOG_LANG, then the sys
 lang_value = "LANG"
 
 [cli.guide]
+api_summary = "HTTP API v1 routes (generated from code)"
 about = "List guides, or print one by topic"
 topic_help = "Guide topic (file name without .md)"
 list_head = "Guides (run `blog guide <topic>`):"
@@ -317,3 +323,114 @@ env_token = "<the token>"
 env_account = "<account id, optional when the token sees one account>"
 step_check = "6. Check it:"
 never_share = "Never paste the token into a chat, an issue or a committed file. If it leaks, roll it on the API tokens page."
+
+[admin.status]
+draft = "Draft"
+scheduled = "Scheduled"
+published = "Published"
+
+[admin.common]
+cancel = "Cancel"
+
+[admin.editor]
+back = "Back to Posts"
+modes = "View"
+title_label = "Title"
+title_placeholder = "Title"
+body_label = "Post text"
+body_placeholder = "Start writing, or type / for headings, lists, code and more"
+toolbar = "Formatting"
+selection_bar = "Format selection"
+more_tools = "More tools"
+blocks = "Insert a block"
+saving = "Saving…"
+saved_here = "Saved on this device"
+not_saved = "Not saved"
+not_saved_hint = "This browser is not letting the admin keep drafts. Copy your text somewhere safe, then check the site's storage settings."
+words = { one = "{count} word · {minutes} min", other = "{count} words · {minutes} min" }
+words_none = "No words yet"
+link_placeholder = "https://"
+link_to = "Link to"
+link_apply = "Add link"
+link_text = "link"
+picture_no_alt = "No description yet: say what the picture shows"
+table_column = "Column {n}"
+focus = "Focus mode"
+focus_on = "Focus mode: press Esc to leave"
+typewriter = "Typewriter scrolling"
+typewriter_on = "Typewriter scrolling on"
+typewriter_off = "Typewriter scrolling off"
+preview_label = "Preview"
+preview_offline_title = "Preview needs a connection"
+preview_offline_hint = "Your writing is saved on this device. The preview comes back when you're online."
+preview_missing_title = "Preview is not available yet"
+preview_missing_hint = "It arrives with the posts API. Write mode shows the text close to how it will look."
+
+[admin.editor.upload]
+sending = "Uploading {name}…"
+failed = "{name} was not uploaded. Your text is unchanged."
+offline = "Pictures can be added when you are online. Your text is saved on this device."
+not_picture = "{name} is not a picture. JPEG, PNG, WebP, GIF and AVIF can be added."
+too_big = "{name} is larger than 20 MB. Save a smaller copy and add that."
+cancel = "Cancel"
+retry = "Try again"
+remove = "Remove"
+alt_label = "Describe this picture"
+alt_hint = "Say what it shows, for people who cannot see it and for search engines."
+alt_save = "Save description"
+alt_skip = "Later"
+
+[admin.editor.conflict]
+server_title = "This post changed since your draft on this device."
+server_hint = "Choose the text to keep; the other is replaced."
+keep_mine = "Keep my draft"
+use_saved = "Use the saved version"
+tab_title = "This draft was changed in another tab."
+tab_hint = "Saving here is paused so neither copy is lost."
+keep_this = "Keep this one"
+load_other = "Load that version"
+
+[admin.editor.mode]
+write = "Write"
+split = "Split"
+preview = "Preview"
+
+[admin.editor.tool]
+heading = "Heading"
+bold = "Bold"
+italic = "Italic"
+strike = "Strikethrough"
+code = "Code"
+link = "Link"
+quote = "Quote"
+picture = "Picture"
+list = "Bulleted list"
+numbered = "Numbered list"
+task = "Checklist"
+table = "Table"
+math = "Math"
+footnote = "Footnote"
+divider = "Divider"
+undo = "Undo"
+redo = "Redo"
+
+[admin.editor.heading]
+paragraph = "Paragraph"
+h1 = "Heading 1"
+h2 = "Heading 2"
+h3 = "Heading 3"
+
+[admin.editor.block]
+h2 = "Heading"
+h3 = "Subheading"
+list = "Bulleted list"
+numbered = "Numbered list"
+task = "Checklist"
+quote = "Quote"
+picture = "Picture"
+callout = "Note"
+code = "Code block"
+math = "Math"
+table = "Table"
+footnote = "Footnote"
+divider = "Divider"

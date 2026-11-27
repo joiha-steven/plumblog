@@ -537,7 +537,24 @@ fn text_literal(code: &[u8], i: usize) -> Option<String> {
     }
     let end = code[i + 1..].iter().position(|&c| c == q)? + i + 1;
     let s = String::from_utf8_lossy(&code[i + 1..end]).into_owned();
-    s.chars().any(char::is_alphabetic).then_some(s)
+    // Escapes (`\u00b7`, `\n`) are not words: drop them before looking for letters.
+    let mut plain = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            plain.push(c);
+            continue;
+        }
+        let skip = match chars.next() {
+            Some('u') => 4,
+            Some('x') => 2,
+            _ => 0,
+        };
+        for _ in 0..skip {
+            chars.next();
+        }
+    }
+    plain.chars().any(char::is_alphabetic).then_some(s)
 }
 
 /// Text in admin TypeScript that bypasses `t`: string literals with letters as `h()`
@@ -903,7 +920,7 @@ fn ts_scanner_rejects_text_that_bypasses_t() {
         h(\"a\", { \"aria-label\": \"Close\", title: 'Hi' }, icon(\"x\"));\n\
         const f = { placeholder: `Type`, alt: \"Pic\" };\n\
         h(\"p\", {},\n  t(\"ok.key\"),\n  \"Late\");\n\
-        h(\"span\", { class: \"k\" }, \"\u{b7}\", n, \"\");\n\
+        h(\"span\", { class: \"k\" }, \"\u{b7}\", n, \"\", \" \\u00b7 \\n\");\n\
         // h(\"b\", {}, \"in a comment\")\n\
         const s = \"h(\\\"b\\\", {}, \\\"in a string\\\")\";\n\
         h(\"i\", { title: t(\"k\"), \"aria-label\": label });\n\

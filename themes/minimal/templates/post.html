@@ -48,30 +48,46 @@
   <ol class="comment-list">
     {%- for c in comments.items %}
     <li class="comment{% if c.owner %} is-owner{% endif %}" id="c{{ c.id }}">
-      <p class="meta"><b>{{ c.author }}</b>{% if c.owner %}<span class="badge">{{ t("comments.owner") }}</span>{% endif %}<time datetime="{{ c.date_iso }}">{{ c.date_display }}</time></p>
+      <p class="meta"><b dir="auto">{{ c.author }}</b>{% if c.owner %}<span class="badge">{{ t("comments.owner") }}</span>{% endif %}<time datetime="{{ c.date_iso }}">{{ c.date_display }}</time></p>
       {#- Comment HTML is rendered from plain Markdown and sanitized by core. #}
-      <div class="comment-body">{{ c.html | safe }}</div>
+      <div class="comment-body" dir="auto">{{ c.html | safe }}</div>
     </li>
     {%- endfor %}
   </ol>
+  {%- if comments.more %}
+  <p class="comments-empty">{{ t("comments.latest_only", n=comments.items | length) }}</p>
+  {%- endif %}
   {%- else %}
   <p class="comments-empty">{{ t("comments.empty") }}</p>
   {%- endif %}
-  {%- if comments.notice %}
-  {#- i18n: comments.notice_pending comments.notice_error #}
-  <p class="notice is-{{ comments.notice }}" role="status">{{ t("comments.notice_" ~ comments.notice) }}</p>
-  {%- endif %}
+  {#- The form redirects back with ?comment=pending or ?comment=error&code=<code>. The page is
+      the cached one, so minimal.js shows the matching line (as text) from this whitelist;
+      an unknown code gets the generic error. #}
+  <template id="comment-notices">
+    <p data-code="pending">{{ t("comments.notice_pending") }}</p>
+    <p data-code="error">{{ t("comments.notice_error") }}</p>
+    <p data-code="comments.unavailable">{{ t("comments.error_unavailable") }}</p>
+    <p data-code="comments.closed">{{ t("comments.error_closed") }}</p>
+    <p data-code="comments.name_invalid">{{ t("comments.error_name", n=comments.name_max_length) }}</p>
+    <p data-code="comments.body_invalid">{{ t("comments.error_body", n=comments.max_length) }}</p>
+    <p data-code="comments.too_many_links">{{ t("comments.error_links", n=comments.max_links) }}</p>
+    <p data-code="comments.form_invalid">{{ t("comments.error_form") }}</p>
+    <p data-code="comments.check_failed">{{ t("comments.error_check") }}</p>
+    <p data-code="comments.rate_limited">{{ t("comments.error_rate") }}</p>
+  </template>
   {%- if comments.open %}
   <form class="comment-form" action="{{ comments.action_url }}" method="post" data-turnstile="{{ comments.turnstile_key }}" data-check-failed="{{ t("comments.check_failed") }}">
     <p class="form-row">
       <label for="c-name">{{ t("comments.name") }}</label>
-      <input class="field" id="c-name" name="name" required maxlength="60" autocomplete="name">
+      <input class="field" id="c-name" name="name" required maxlength="{{ comments.name_max_length }}" autocomplete="name">
     </p>
     <p class="form-row">
       <label for="c-body">{{ t("comments.body") }}</label>
       <textarea class="field" id="c-body" name="body" required rows="5" maxlength="{{ comments.max_length }}"></textarea>
     </p>
+    {#- Height reserved by CSS when a key is set, so the widget does not move the page. #}
     <div class="turnstile"></div>
+    <p class="hint nojs">{{ t("comments.needs_js") }}</p>
     <p class="form-foot">
       <button class="btn" type="submit">{{ t("comments.submit") }}</button>
       <span class="hint">{{ t("comments.moderated") }}</span>

@@ -7,7 +7,9 @@ use plumblog_auth::Crypto;
 use plumblog_auth::base64url;
 use plumblog_auth::ratelimit::{self, Decision, Failures, LOCK_AFTER, TURNSTILE_AFTER, WINDOW_MS};
 use plumblog_model::{Error, ErrorCode, Result, UserId};
-use plumblog_store::{LoginLimitStore, SettingsStore, TURNSTILE_SITE_KEY};
+use plumblog_store::{
+    ChallengePurpose, ChallengeStore, LoginLimitStore, SettingsStore, TURNSTILE_SITE_KEY,
+};
 use plumblog_syslog::EventKind;
 use worker::wasm_bindgen::JsValue;
 use worker::{Fetch, Headers, Method, RequestInit};
@@ -85,7 +87,7 @@ impl Keys {
 
 /// The Turnstile secret when Turnstile is set up: a site key in settings and the
 /// `TURNSTILE_SECRET` secret. Half a setup is logged and treated as off (so 5 failures lock).
-async fn turnstile_secret(ctx: &Ctx) -> Result<Option<String>> {
+pub async fn turnstile_secret(ctx: &Ctx) -> Result<Option<String>> {
     let site_key = ctx
         .store
         .get_setting(TURNSTILE_SITE_KEY)
@@ -147,19 +149,29 @@ fn internal(_ctx: &Ctx, what: &str, e: impl std::fmt::Display) -> Error {
 
 /// Asks Turnstile whether `token` is valid and was solved on this site: `success` and a
 /// `hostname` equal to the site host (a token solved on another site that uses the same
-/// widget keys must not count here). The client IP is not sent (privacy; optional).
-async fn turnstile_ok(ctx: &Ctx, secret: &str, token: &str) -> Result<bool> {
+/// widget keys must not count here). `remote_ip` is optional: sign-in leaves it out
+/// (privacy); comments send it, since Turnstile uses it to judge the solve.
+pub async fn turnstile_ok(
+    ctx: &Ctx,
+    secret: &str,
+    token: &str,
+    remote_ip: Option<&str>,
+) -> Result<bool> {
     // Before the network call: without a site origin no answer could be checked.
     let site = super::site::site(ctx).await?;
     let url = ctx
         .env
         .var("TURNSTILE_VERIFY_URL")
         .map_or_else(|_| DEFAULT_VERIFY_URL.to_owned(), |v| v.to_string());
-    let body = format!(
+    let mut body = format!(
         "secret={}&response={}",
         form_value(secret),
         form_value(token)
     );
+    if let Some(ip) = remote_ip {
+        body.push_str("&remoteip=");
+        body.push_str(&form_value(ip));
+    }
     let headers = Headers::new();
     headers
         .set("content-type", "application/x-www-form-urlencoded")
@@ -229,6 +241,8 @@ struct Gate {
     setup: Setup,
     /// A token was verified for this request: tokens are single use, so it is not sent twice.
     passed: bool,
+    /// The site-wide cap was passed by consuming a gated passkey challenge (see [`global`]).
+    took_gated: bool,
 }
 
 #[derive(Clone, Default)]
@@ -283,7 +297,18 @@ fn global_cap(_ctx: &Ctx) -> i64 {
 /// lets the attempt go on to the per-address and per-key limits; without one it is
 /// `TurnstileRequired`, and without Turnstile `Locked` until the window ends. Returns whether
 /// this attempt opened a new window.
-async fn global(ctx: &Ctx, gate: &mut Gate, token: Option<&str>) -> Result<bool> {
+///
+/// `gated`: the hash a passkey sign-in challenge has when its options request passed this
+/// gate at the cap (issue #63: tokens are single use, so options and sign-in cannot each
+/// verify one). At the cap with Turnstile set up, consuming that challenge, single use and
+/// atomic, passes the gate instead of a token; it is tried first, as a client may send the
+/// spent token again. Without Turnstile it is never taken.
+async fn global(
+    ctx: &Ctx,
+    gate: &mut Gate,
+    token: Option<&str>,
+    gated: Option<&str>,
+) -> Result<bool> {
     let cap = global_cap(ctx);
     if let Some(n) = ctx
         .store
@@ -313,11 +338,22 @@ async fn global(ctx: &Ctx, gate: &mut Gate, token: Option<&str>) -> Result<bool>
             format!("site-wide sign-in cap {cap} reached in this window; {why}"),
         )
     };
+    if let Some(hash) = gated
+        && ctx
+            .store
+            .take_challenge(hash, ChallengePurpose::Login, ctx.now)
+            .await?
+            .is_some()
+    {
+        gate.passed = true;
+        gate.took_gated = true;
+        return Ok(false);
+    }
     let (Some(secret), Some(token)) = (gate.secret(ctx).await?, token.filter(|t| !t.is_empty()))
     else {
         return Err(refuse("no token"));
     };
-    if !turnstile_ok(ctx, &secret, token).await? {
+    if !turnstile_ok(ctx, &secret, token, None).await? {
         return Err(refuse("token rejected"));
     }
     gate.passed = true;
@@ -368,12 +404,32 @@ async fn refuse_locked_address(ctx: &Ctx, gate: &mut Gate, ip: &str) -> Result<(
 /// `Locked`, `TurnstileRequired` (missing or rejected token), `OriginMissing` (Turnstile on
 /// without a site origin), storage or fetch errors.
 pub async fn check(ctx: &Ctx, keys: &Keys, turnstile_token: Option<&str>) -> Result<Attempt> {
+    check_passkey(ctx, keys, turnstile_token, None)
+        .await
+        .map(|(attempt, _)| attempt)
+}
+
+/// As [`check`], for anonymous passkey sign-in: `gated` is the gated hash of the presented
+/// challenge (see [`global`]). Also returns whether that challenge was consumed here, in which
+/// case the caller must not take it again.
+///
+/// # Errors
+///
+/// As [`check`].
+pub async fn check_passkey(
+    ctx: &Ctx,
+    keys: &Keys,
+    turnstile_token: Option<&str>,
+    gated: Option<&str>,
+) -> Result<(Attempt, bool)> {
     let mut gate = Gate::default();
     if let Some(ip) = &keys.ip {
         refuse_locked_address(ctx, &mut gate, ip).await?;
     }
-    let new_window = global(ctx, &mut gate, turnstile_token).await?;
-    count_keys(ctx, keys, turnstile_token, gate, new_window).await
+    let new_window = global(ctx, &mut gate, turnstile_token, gated).await?;
+    let took_gated = gate.took_gated;
+    let attempt = count_keys(ctx, keys, turnstile_token, gate, new_window).await?;
+    Ok((attempt, took_gated))
 }
 
 /// As [`check`], for re-authentication by a caller who already holds a session (current
@@ -436,7 +492,8 @@ async fn count_keys(
     match ratelimit::decide(&before, ctx.now, gate.on()) {
         Decision::Allow => Ok(Attempt { locks }),
         d @ Decision::Locked { .. } => Err(locked(d)),
-        // Already verified at the site-wide cap: the same token cannot be verified twice.
+        // Already verified at the site-wide cap: the same token cannot be verified twice, and
+        // a gated challenge stands for the token its options request verified.
         Decision::NeedTurnstile if gate.passed => Ok(Attempt { locks }),
         d @ Decision::NeedTurnstile => {
             let refuse = || {
@@ -452,7 +509,7 @@ async fn count_keys(
             else {
                 return Err(refuse());
             };
-            if turnstile_ok(ctx, &secret, token).await? {
+            if turnstile_ok(ctx, &secret, token, None).await? {
                 Ok(Attempt { locks })
             } else {
                 let mut e = refuse();
@@ -494,6 +551,27 @@ pub async fn succeeded(ctx: &Ctx, keys: &Keys) -> Result<()> {
     Ok(())
 }
 
+/// The hashed limiter key of this address under `scope`, or `None` (logged as `what`) when
+/// the address is missing or unusable: limiting everyone together would let one client lock
+/// the rest out.
+async fn address_key(ctx: &Ctx, scope: &str, what: &str) -> Result<Option<String>> {
+    let Some(ip) = ctx.ip.as_deref() else {
+        worker::console_error!(
+            "[{}] {what} not limited: no CF-Connecting-IP",
+            ctx.request_id.as_str()
+        );
+        return Ok(None);
+    };
+    let ip = match ratelimit::ip_key(ip) {
+        Ok(k) => k,
+        Err(e) => {
+            worker::console_error!("[{}] {what} not limited: {e}", ctx.request_id.as_str());
+            return Ok(None);
+        }
+    };
+    Ok(Some(hash_key(ctx, &format!("{scope}:{ip}")).await?))
+}
+
 /// Most anonymous passkey sign-in options per address in a window: each writes a challenge
 /// row, so the count bounds the table; far above what a person needs (one per sign-in). Kept
 /// below `GLOBAL_CAP` so one address alone cannot fill the site-wide window.
@@ -502,13 +580,14 @@ pub const OPTIONS_PER_WINDOW: i64 = 20;
 /// Counts one anonymous options request. An address at [`OPTIONS_PER_WINDOW`] is refused from
 /// one read, before the site-wide count (as in [`check`], so it never adds to it). Then the
 /// site-wide count (at the cap it needs a valid Turnstile token or is refused, writing nothing),
-/// then this address's, before anything is written for it.
+/// then this address's, before anything is written for it. Returns whether a Turnstile token
+/// passed the site-wide cap: the challenge is then stored gated (see [`global`]).
 ///
 /// # Errors
 ///
 /// `Locked` above [`OPTIONS_PER_WINDOW`] in the window or at the site-wide cap without
 /// Turnstile; `TurnstileRequired`; storage, fetch and crypto errors pass through.
-pub async fn options(ctx: &Ctx, turnstile_token: Option<&str>) -> Result<()> {
+pub async fn options(ctx: &Ctx, turnstile_token: Option<&str>) -> Result<bool> {
     let key = options_key(ctx).await?;
     if let Some(key) = &key {
         let (count, window_start) = ctx
@@ -523,12 +602,12 @@ pub async fn options(ctx: &Ctx, turnstile_token: Option<&str>) -> Result<()> {
         }
     }
     let mut gate = Gate::default();
-    let new_window = global(ctx, &mut gate, turnstile_token).await?;
+    let new_window = global(ctx, &mut gate, turnstile_token, None).await?;
     if new_window {
         sweep(ctx).await;
     }
     let Some(key) = key else {
-        return Ok(());
+        return Ok(gate.passed);
     };
     let r = ctx
         .store
@@ -537,7 +616,68 @@ pub async fn options(ctx: &Ctx, turnstile_token: Option<&str>) -> Result<()> {
     if !r.counted {
         return Err(options_locked(r.count, r.window_start));
     }
+    Ok(gate.passed)
+}
+
+/// Comments an address may send per [`COMMENTS_WINDOW_MS`]. A person writes a comment or
+/// two and retries a typo once or twice; 5 covers that while a bot stays well under a flood.
+/// Only attempts with a valid Turnstile token count (see [`comment_precheck`]), so each
+/// limiter row costs an attacker one solved challenge.
+pub const COMMENTS_PER_WINDOW: i64 = 5;
+/// The comment window: 10 minutes, long enough to blunt a script, short enough that an
+/// honest reader who hit the cap soon writes again.
+pub const COMMENTS_WINDOW_MS: i64 = 10 * 60 * 1000;
+
+fn comments_limited(count: i64, since: i64) -> Error {
+    Error::new(
+        ErrorCode::CommentRateLimited,
+        format!("{count} from this address since {since}, limit {COMMENTS_PER_WINDOW}"),
+    )
+}
+
+/// Before Turnstile is asked: refuses an address already at [`COMMENTS_PER_WINDOW`] from one
+/// read, so it costs no write and no siteverify call.
+///
+/// # Errors
+///
+/// `CommentRateLimited` at the cap; storage and crypto errors pass through.
+pub async fn comment_precheck(ctx: &Ctx) -> Result<()> {
+    let Some(key) = address_key(ctx, "comments", "comment attempt").await? else {
+        return Ok(());
+    };
+    let (count, since) = ctx
+        .store
+        .failures(&[&key], ctx.now, COMMENTS_WINDOW_MS)
+        .await?
+        .first()
+        .copied()
+        .unwrap_or((0, 0));
+    if count >= COMMENTS_PER_WINDOW {
+        return Err(comments_limited(count, since));
+    }
     Ok(())
+}
+
+/// After Turnstile passed: counts the attempt in one atomic upsert, so concurrent attempts
+/// cannot all slip under the cap that [`comment_precheck`] read.
+///
+/// # Errors
+///
+/// `CommentRateLimited` when the count would pass [`COMMENTS_PER_WINDOW`]; storage and crypto
+/// errors pass through.
+pub async fn comment_record(ctx: &Ctx) -> Result<()> {
+    let Some(key) = address_key(ctx, "comments", "comment attempt").await? else {
+        return Ok(());
+    };
+    let r = ctx
+        .store
+        .record_failure(&key, ctx.now, COMMENTS_WINDOW_MS, COMMENTS_PER_WINDOW)
+        .await?;
+    if r.counted {
+        Ok(())
+    } else {
+        Err(comments_limited(r.count, r.window_start))
+    }
 }
 
 fn options_locked(count: i64, window_start: i64) -> Error {

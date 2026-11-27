@@ -8,6 +8,7 @@ const MAX_SLUG: usize = 64;
 const MAX_DISPLAY_NAME: usize = 100;
 const MAX_BIO: usize = 2000;
 const MAX_PASSKEY_NAME: usize = 64;
+const MAX_TOKEN_NAME: usize = 64;
 
 fn invalid(field: &str, why: &str) -> Error {
     Error::new(ErrorCode::InvalidInput, format!("{field}: {why}"))
@@ -85,9 +86,22 @@ pub fn passkey_name(value: &str) -> Result<()> {
     plain_text("name", value, MAX_PASSKEY_NAME, false)
 }
 
+/// An API token's name: 1-64 characters, not blank, no control characters. It names the
+/// client in the system log, so it must be readable.
+///
+/// # Errors
+///
+/// `InvalidInput` naming the field.
+pub fn token_name(value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(invalid("name", "empty"));
+    }
+    plain_text("name", value, MAX_TOKEN_NAME, false)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{bio, display_name, login, passkey_name, slug};
+    use super::{bio, display_name, login, passkey_name, slug, token_name};
 
     #[test]
     fn accepts_and_refuses() {
@@ -108,6 +122,11 @@ mod tests {
         assert!(passkey_name("Phone").is_ok());
         for bad in ["", " ", "a\nb", &"x".repeat(65)] {
             assert!(passkey_name(bad).is_err(), "{bad:?}");
+        }
+        assert!(token_name("Claude \u{111}\u{1ecd}c").is_ok());
+        assert!(token_name(&"\u{1ecd}".repeat(64)).is_ok());
+        for bad in ["", "  ", "a\nb", "a\u{7f}", "a\tb", &"x".repeat(65)] {
+            assert!(token_name(bad).is_err(), "{bad:?}");
         }
     }
 }

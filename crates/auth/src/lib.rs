@@ -2,6 +2,7 @@
 //! implements it with `WebCrypto`, tests with a fake, so this crate never touches the runtime.
 //! Everything here is pure: no clock (callers pass `now`), no storage, no network.
 
+pub mod api_token;
 pub mod base64url;
 pub mod cbor;
 pub mod json;
@@ -13,7 +14,7 @@ pub mod sha256;
 mod testutil;
 pub mod webauthn;
 
-use plumblog_model::{Error, ErrorCode, Permission, Result, Role};
+use plumblog_model::{Error, ErrorCode, Permission, Result, Role, TokenScope};
 use webauthn::{Es256Key, PublicKey, Rs256Key};
 
 /// What auth needs from the platform. Async because `WebCrypto` is.
@@ -92,6 +93,26 @@ pub fn require(role: Role, permission: Permission) -> Result<()> {
     }
 }
 
+/// [`require`] for an API token: `scope` capped by the user's current `role` (a demoted
+/// owner's owner token acts as writer; a read token holds no permission).
+///
+/// # Errors
+///
+/// [`ErrorCode::Forbidden`] when the effective scope lacks `permission`.
+pub fn require_token(scope: TokenScope, role: Role, permission: Permission) -> Result<()> {
+    let effective = scope.effective(role);
+    if effective.can(permission) {
+        Ok(())
+    } else {
+        Err(Error::new(
+            ErrorCode::Forbidden,
+            format!(
+                "token scope {scope:?} (effective {effective:?} for a {role:?}) lacks {permission:?}"
+            ),
+        ))
+    }
+}
+
 /// Compares secrets without an early exit, so response timing does not leak how many
 /// leading bytes matched.
 #[must_use]
@@ -104,8 +125,27 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{constant_time_eq, require};
-    use plumblog_model::{ErrorCode, Permission, Role};
+    use super::{constant_time_eq, require, require_token};
+    use plumblog_model::{ErrorCode, Permission, Role, TokenScope};
+
+    #[test]
+    fn require_token_uses_the_effective_scope() {
+        let p = Permission::ManageSettings;
+        assert!(require_token(TokenScope::Owner, Role::Owner, p).is_ok());
+        let forbidden = |s, r, p| require_token(s, r, p).unwrap_err().code == ErrorCode::Forbidden;
+        assert!(
+            forbidden(TokenScope::Owner, Role::Writer, p),
+            "demoted owner"
+        );
+        assert!(forbidden(TokenScope::Writer, Role::Owner, p));
+        assert!(require_token(TokenScope::Owner, Role::Writer, Permission::WritePost).is_ok());
+        for perm in Permission::ALL {
+            assert!(
+                forbidden(TokenScope::Read, Role::Owner, *perm),
+                "read and {perm:?}"
+            );
+        }
+    }
 
     #[test]
     fn require_denies_writer_settings_with_stable_code() {

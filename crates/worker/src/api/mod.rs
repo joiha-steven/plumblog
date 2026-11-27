@@ -1,15 +1,18 @@
 //! The JSON API under `/api/`. Every request goes through the same gate, in order:
-//! CSRF (`Origin`), principal (who is asking), then the route, which checks its permission
-//! with [`Principal::require`]. Errors answer `{"error":"<stable code>"}` with a status and
+//! CSRF (`Origin`, skipped for `Authorization: Bearer`, which a browser never sends on its
+//! own), principal (who is asking), then the route, which checks its permission with
+//! [`Principal::require`]. `/api/auth/*` is session only. Errors answer `{"error":"<stable code>"}` with a status and
 //! log the detail with the request id; no user-facing text is produced here.
 
 mod auth;
-mod body;
+pub(crate) mod body;
 mod fields;
-mod limit;
+pub(crate) mod limit;
 mod passkey;
 mod principal;
-mod site;
+pub(crate) mod site;
+mod tokens;
+mod v1;
 
 use plumblog_auth::Crypto;
 use plumblog_auth::base64url;
@@ -98,14 +101,22 @@ impl Reply {
 /// HTTP status for each stable code. Exhaustive, so a new code must pick one.
 fn status(code: ErrorCode) -> u16 {
     match code {
-        ErrorCode::InvalidInput | ErrorCode::PasskeyInvalid | ErrorCode::WebhookUrlBlocked => 400,
+        ErrorCode::InvalidInput
+        | ErrorCode::PasskeyInvalid
+        | ErrorCode::WebhookUrlBlocked
+        | ErrorCode::CommentName
+        | ErrorCode::CommentBody
+        | ErrorCode::CommentLinks
+        | ErrorCode::CommentForm => 400,
         ErrorCode::Unauthenticated | ErrorCode::InvalidCredentials => 401,
         // A signed-in user must prove it again (adding or removing a passkey): not a dead
         // session, so not 401.
         ErrorCode::Forbidden
         | ErrorCode::SetupInvalid
         | ErrorCode::TurnstileRequired
-        | ErrorCode::ReauthRequired => 403,
+        | ErrorCode::ReauthRequired
+        | ErrorCode::CommentsClosed
+        | ErrorCode::CommentCheckFailed => 403,
         ErrorCode::PostNotFound
         | ErrorCode::UserNotFound
         | ErrorCode::NotFound
@@ -113,14 +124,17 @@ fn status(code: ErrorCode) -> u16 {
         ErrorCode::Conflict => 409,
         ErrorCode::InviteInvalid => 410,
         ErrorCode::LengthRequired => 411,
-        ErrorCode::BodyTooLarge => 413,
-        ErrorCode::Locked => 429,
+        // A size cap like the byte cap: the client must send less, not fix a field.
+        ErrorCode::BodyTooLarge | ErrorCode::TooComplex => 413,
+        ErrorCode::Locked | ErrorCode::CommentRateLimited => 429,
         ErrorCode::Storage | ErrorCode::Internal | ErrorCode::WebhookSecretUnreadable => 500,
         // The receiver failed, not this server.
         ErrorCode::WebhookDeliveryFailed => 502,
         // The site is not set up for this yet (no configured origin, no WEBHOOK_KEY): not the
         // client's fault.
-        ErrorCode::OriginMissing | ErrorCode::WebhookKeyInvalid => 503,
+        ErrorCode::OriginMissing
+        | ErrorCode::WebhookKeyInvalid
+        | ErrorCode::CommentsUnavailable => 503,
     }
 }
 
@@ -165,10 +179,11 @@ fn respond(reply: Reply) -> worker::Result<Response> {
 }
 
 fn error_reply(e: &Error) -> Reply {
-    Reply::json(
-        status(e.code),
-        body::object(&[("error", body::Out::Str(e.code.as_str().to_owned()))]),
-    )
+    let mut out = vec![("error", body::Out::Str(e.code.as_str().to_owned()))];
+    if let Some(f) = &e.field {
+        out.push(("field", body::Out::Str(f.clone())));
+    }
+    Reply::json(status(e.code), body::object(&out))
 }
 
 /// Non-GET requests must come from this site's own pages: `Origin` equal to the configured site
@@ -188,39 +203,49 @@ fn check_origin(req: &Request, method: &Method, want: &str) -> Result<()> {
     }
 }
 
-/// The request body, refused before it is read when `Content-Length` says it is over
-/// [`body::MAX_BODY`] (413), or when a body comes without one (chunked: its size is unknown
-/// until read, 411). The runtime frames the body by `Content-Length`, so it cannot be longer;
-/// the length is checked again after reading all the same.
-async fn read_body(req: &mut Request) -> Result<Vec<u8>> {
-    let too_large = |n: usize| {
-        Error::new(
-            ErrorCode::BodyTooLarge,
-            format!("body of {n} bytes > {}", body::MAX_BODY),
-        )
-    };
+/// Whether a body comes, refusing it unread when `Content-Length` is over `max` (413) or
+/// missing on a body (411).
+fn declared_length(req: &Request, max: usize) -> Result<bool> {
     match req.headers().get("content-length").ok().flatten() {
         Some(v) => {
             let n: usize = v.trim().parse().map_err(|_| {
                 Error::new(ErrorCode::InvalidInput, format!("Content-Length {v:?}"))
             })?;
-            if n > body::MAX_BODY {
-                return Err(too_large(n));
+            if n > max {
+                return Err(Error::new(
+                    ErrorCode::BodyTooLarge,
+                    format!("body of {n} bytes > {max}"),
+                ));
             }
+            Ok(true)
         }
-        None if req.inner().body().is_some() => {
-            return Err(Error::new(
-                ErrorCode::LengthRequired,
-                "body without Content-Length",
-            ));
-        }
-        None => return Ok(Vec::new()),
+        None if req.inner().body().is_some() => Err(Error::new(
+            ErrorCode::LengthRequired,
+            "body without Content-Length",
+        )),
+        None => Ok(false),
+    }
+}
+
+/// The request body, refused before it is read when `Content-Length` says it is over `max`
+/// (413), or when a body comes without one (chunked: its size is unknown until read, 411).
+/// The runtime frames the body by `Content-Length`, so it cannot be longer; the length is
+/// checked again after reading all the same.
+async fn read_body(req: &mut Request, max: usize) -> Result<Vec<u8>> {
+    let too_large = |n: usize| {
+        Error::new(
+            ErrorCode::BodyTooLarge,
+            format!("body of {n} bytes > {max}"),
+        )
+    };
+    if !declared_length(req, max)? {
+        return Ok(Vec::new());
     }
     let bytes = req
         .bytes()
         .await
         .map_err(|e| Error::new(ErrorCode::InvalidInput, format!("body: {e}")))?;
-    if bytes.len() > body::MAX_BODY {
+    if bytes.len() > max {
         return Err(too_large(bytes.len()));
     }
     Ok(bytes)
@@ -254,19 +279,39 @@ pub async fn handle(mut req: Request, env: &Env) -> worker::Result<Response> {
             ip: req.headers().get("cf-connecting-ip").ok().flatten(),
             request_origin,
         };
-        if !matches!(method, Method::Get | Method::Head) {
+        // A token request carries its credential explicitly, and with no CORS a cross-site
+        // page cannot send an `Authorization` header; it also never uses the cookie.
+        if !matches!(method, Method::Get | Method::Head) && !principal::has_authorization(&req) {
             let want = site::configured(&ctx)
                 .await?
                 .map_or_else(|| ctx.request_origin.clone(), |s| s.origin);
             check_origin(&req, &method, &want)?;
         }
+        let max = v1::max_body(&method, &path);
+        let raw = v1::raw_body(&method, &path);
         let body = if matches!(method, Method::Get | Method::Head) {
             Vec::new()
+        } else if raw {
+            declared_length(&req, max)?;
+            Vec::new()
         } else {
-            read_body(&mut req).await?
+            read_body(&mut req, max).await?
         };
         let (principal, cookie) = principal::resolve(&ctx, &req).await?;
         gate_cookie = cookie;
+        if path.starts_with(v1::PREFIX) {
+            let body = if raw {
+                v1::check_access(&principal, &method, &path)?;
+                read_body(&mut req, max).await?
+            } else {
+                body
+            };
+            let url = req
+                .url()
+                .map_err(|e| Error::new(ErrorCode::Internal, format!("request url: {e}")))?;
+            let query: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+            return v1::dispatch(&ctx, &principal, &method, &path, &query, body).await;
+        }
         route(&ctx, &principal, &method, &path, &body).await
     }
     .await;
@@ -297,6 +342,14 @@ async fn route(
     path: &str,
     body: &[u8],
 ) -> Result<Reply> {
+    if let Principal::Token { name, .. } = p
+        && path.starts_with(AUTH_PREFIX)
+    {
+        return Err(Error::new(
+            ErrorCode::Forbidden,
+            format!("API token {name:?} on {path}: /api/auth/ is session only"),
+        ));
+    }
     match (method, path) {
         (Method::Get, "/api/auth/params") => auth::params(ctx).await,
         (Method::Get, "/api/auth/me") => auth::me(ctx, p).await,
@@ -322,8 +375,27 @@ async fn route(
         (Method::Delete, _) if path.starts_with(passkey::ITEM_PREFIX) => {
             passkey::delete(ctx, p, &path[passkey::ITEM_PREFIX.len()..], body).await
         }
-        (Method::Get, PROBE) if probe_enabled(&ctx.env) => {
+        (Method::Get, tokens::COLLECTION) => tokens::list(ctx, p).await,
+        (Method::Post, tokens::COLLECTION) => tokens::create(ctx, p, body).await,
+        (Method::Delete, _) if path.starts_with(tokens::ITEM_PREFIX) => {
+            tokens::revoke(ctx, p, &path[tokens::ITEM_PREFIX.len()..]).await
+        }
+        (Method::Get, PROBE_OWNER) if probe_enabled(&ctx.env) => {
             p.require(plumblog_model::Permission::ManageSettings)?;
+            Ok(Reply::empty())
+        }
+        (Method::Get, PROBE_READ) if probe_enabled(&ctx.env) => {
+            let user = p.require_read()?;
+            Ok(Reply::json(
+                200,
+                body::object(&[("user", body::Out::Int(user.id.0))]),
+            ))
+        }
+        (Method::Post, PROBE_WRITER) if probe_enabled(&ctx.env) => {
+            p.require(plumblog_model::Permission::WritePost)?;
+            // Stands in for a content write, so tests can see how writes are attributed.
+            ctx.syslog(p.event(ctx, EventKind::ContentChanged).subject("probe"))
+                .await;
             Ok(Reply::empty())
         }
         _ => Err(Error::new(
@@ -333,9 +405,15 @@ async fn route(
     }
 }
 
-/// Test builds only: an owner-only route for permission tests. Same two locks as
-/// `/__contract`: the cargo feature and the variable only tools/wrangler.dev.toml sets.
-const PROBE: &str = "/api/__probe/owner";
+/// Session-only routes: account, sign-in and token management.
+const AUTH_PREFIX: &str = "/api/auth/";
+
+/// Test builds only: routes for permission tests (owner, any signed-in reader, writer write).
+/// Same two locks as `/__contract`: the cargo feature and the variable only
+/// tools/wrangler.dev.toml sets.
+const PROBE_OWNER: &str = "/api/__probe/owner";
+const PROBE_READ: &str = "/api/__probe/read";
+const PROBE_WRITER: &str = "/api/__probe/writer";
 
 #[cfg(feature = "contract-tests")]
 fn probe_enabled(env: &Env) -> bool {

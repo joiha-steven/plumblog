@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+pub mod api;
+pub mod image;
 pub mod ts;
 
 /// Engine version, taken from the workspace so it never drifts.
@@ -43,7 +45,8 @@ stable_codes! {
     /// Webhooks: `key_invalid` = `WEBHOOK_KEY` missing or malformed; `url_blocked` = a URL
     /// the guard refuses (not https, private address...); `secret_unreadable` = a stored
     /// secret not sealed or not decrypting; `delivery_failed` = an attempt failed (the log
-    /// entry says why).
+    /// entry says why). `too_complex` = a JSON body with more values in all than the reader
+    /// takes (`plumblog_auth::json::MAX_VALUES`): send less, not different.
     pub enum ErrorCode {
         PostNotFound => "post.not_found",
         UserNotFound => "user.not_found",
@@ -69,6 +72,17 @@ stable_codes! {
         WebhookUrlBlocked => "webhook.url_blocked",
         WebhookSecretUnreadable => "webhook.secret_unreadable",
         WebhookDeliveryFailed => "webhook.delivery_failed",
+        TooComplex => "input.too_complex",
+        // Reader comments (docs/ARCHITECTURE.md, Reader site): the form redirects with one
+        // of these, and the theme maps it to a message, so input is never echoed back.
+        CommentsUnavailable => "comments.unavailable",
+        CommentsClosed => "comments.closed",
+        CommentName => "comments.name_invalid",
+        CommentBody => "comments.body_invalid",
+        CommentLinks => "comments.too_many_links",
+        CommentForm => "comments.form_invalid",
+        CommentCheckFailed => "comments.check_failed",
+        CommentRateLimited => "comments.rate_limited",
     }
 }
 
@@ -78,6 +92,9 @@ stable_codes! {
 pub struct Error {
     pub code: ErrorCode,
     pub detail: String,
+    /// The request field at fault, for input errors: API answers name it so a client can
+    /// point at it.
+    pub field: Option<String>,
 }
 
 impl Error {
@@ -85,7 +102,17 @@ impl Error {
         Self {
             code,
             detail: detail.into(),
+            field: None,
         }
+    }
+
+    /// The same error, naming the request field at fault (the first one named wins).
+    #[must_use]
+    pub fn at(mut self, field: &str) -> Self {
+        if self.field.is_none() {
+            self.field = Some(field.to_owned());
+        }
+        self
     }
 }
 
@@ -147,7 +174,7 @@ pub struct CommentId(pub i64);
 pub struct RevisionId(pub i64);
 
 stable_codes! {
-    /// Codes are stored in D1 (`users.role`, `invites.role`, `api_tokens.scope`).
+    /// Codes are stored in D1 (`users.role`, `invites.role`); token scopes are [`TokenScope`].
     pub enum Role {
         Owner => "owner",
         Writer => "writer",
@@ -155,7 +182,7 @@ stable_codes! {
 }
 
 stable_codes! {
-    /// What a role may do. Codes double as API token scope names.
+    /// What a role (or a token scope, see [`TokenScope::can`]) may do.
     pub enum Permission {
         WritePost => "post.write",
         PublishPost => "post.publish",
@@ -185,12 +212,14 @@ impl Permission {
             | Self::EditAnyPost
             | Self::DeleteAnyPost
             | Self::UploadMedia
-            | Self::CreateOwnToken => BOTH,
+            | Self::CreateOwnToken
+            // Moderation is content work: writers already edit any post. The site-wide
+            // comments switch is a setting, so it stays with ManageSettings (owner).
+            | Self::ModerateComments => BOTH,
             Self::ManageSettings
             | Self::ManageThemes
             | Self::ManagePlugins
             | Self::ManageUsers
-            | Self::ModerateComments
             | Self::ViewSystemLog => OWNER,
         }
     }
@@ -200,6 +229,57 @@ impl Role {
     #[must_use]
     pub fn can(self, permission: Permission) -> bool {
         permission.roles().contains(&self)
+    }
+}
+
+stable_codes! {
+    /// What an API token may do, stored in `api_tokens.scope`. Ordered `Read < Writer <
+    /// Owner` (declaration order), so the effective scope is a plain `min`.
+    pub enum TokenScope {
+        Read => "read",
+        Writer => "writer",
+        Owner => "owner",
+    }
+}
+
+impl PartialOrd for TokenScope {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TokenScope {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (*self as u8).cmp(&(*other as u8))
+    }
+}
+
+impl From<Role> for TokenScope {
+    fn from(role: Role) -> Self {
+        match role {
+            Role::Owner => Self::Owner,
+            Role::Writer => Self::Writer,
+        }
+    }
+}
+
+impl TokenScope {
+    /// What a token acts as right now: never more than its user's current role, so a demoted
+    /// owner's owner token acts as writer without touching the token row.
+    #[must_use]
+    pub fn effective(self, role: Role) -> Self {
+        self.min(Self::from(role))
+    }
+
+    /// `Read` holds no permission at all (every [`Permission`] is a write or an owner
+    /// action); `Writer` and `Owner` hold exactly what the role of the same name holds.
+    #[must_use]
+    pub fn can(self, permission: Permission) -> bool {
+        match self {
+            Self::Read => false,
+            Self::Writer => Role::Writer.can(permission),
+            Self::Owner => Role::Owner.can(permission),
+        }
     }
 }
 
@@ -241,6 +321,15 @@ mod tests {
                     "webhook.secret_unreadable"
                 ),
                 (ErrorCode::WebhookDeliveryFailed, "webhook.delivery_failed"),
+                (ErrorCode::TooComplex, "input.too_complex"),
+                (ErrorCode::CommentsUnavailable, "comments.unavailable"),
+                (ErrorCode::CommentsClosed, "comments.closed"),
+                (ErrorCode::CommentName, "comments.name_invalid"),
+                (ErrorCode::CommentBody, "comments.body_invalid"),
+                (ErrorCode::CommentLinks, "comments.too_many_links"),
+                (ErrorCode::CommentForm, "comments.form_invalid"),
+                (ErrorCode::CommentCheckFailed, "comments.check_failed"),
+                (ErrorCode::CommentRateLimited, "comments.rate_limited"),
             ]
         );
     }
@@ -269,7 +358,6 @@ mod tests {
             Permission::ManageThemes,
             Permission::ManagePlugins,
             Permission::ManageUsers,
-            Permission::ModerateComments,
             Permission::ViewSystemLog,
         ];
         for p in Permission::ALL {
@@ -281,6 +369,46 @@ mod tests {
             );
         }
         assert_eq!(Permission::ALL.len(), 12);
+    }
+
+    /// Scope codes are stored in D1 rows; the order and the effective scope are the token
+    /// security model, so every pair is pinned.
+    #[test]
+    fn token_scopes_are_pinned_ordered_and_capped_by_role() {
+        use super::TokenScope::{self, Owner, Read, Writer};
+        let codes: Vec<_> = TokenScope::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(codes, ["read", "writer", "owner"]);
+        for s in TokenScope::ALL {
+            assert_eq!(TokenScope::parse(s.as_str()), Some(*s));
+        }
+        assert_eq!(TokenScope::parse("Read"), None);
+        assert!(Read < Writer && Writer < Owner && Read < Owner);
+        assert_eq!(TokenScope::from(Role::Owner), Owner);
+        assert_eq!(TokenScope::from(Role::Writer), Writer);
+        for (scope, role, want) in [
+            (Read, Role::Owner, Read),
+            (Read, Role::Writer, Read),
+            (Writer, Role::Owner, Writer),
+            (Writer, Role::Writer, Writer),
+            (Owner, Role::Owner, Owner),
+            (Owner, Role::Writer, Writer),
+        ] {
+            assert_eq!(scope.effective(role), want, "{scope:?} of a {role:?}");
+        }
+        for p in Permission::ALL {
+            assert!(!Read.can(*p), "read must not hold {p:?}");
+            assert_eq!(Writer.can(*p), Role::Writer.can(*p), "writer and {p:?}");
+            assert_eq!(Owner.can(*p), Role::Owner.can(*p), "owner and {p:?}");
+        }
+    }
+
+    /// Owner and writer moderate comments; only the owner turns comments on for the site.
+    #[test]
+    fn comment_moderation_is_content_work() {
+        assert!(Role::Owner.can(Permission::ModerateComments));
+        assert!(Role::Writer.can(Permission::ModerateComments));
+        assert!(Role::Owner.can(Permission::ManageSettings));
+        assert!(!Role::Writer.can(Permission::ManageSettings));
     }
 
     #[test]

@@ -11,13 +11,38 @@
     try { localStorage.setItem("theme", next); } catch (e) { /* private mode: choice lasts this page only */ }
   });
 
+  // Comment form result: the post redirects back with ?comment=pending or
+  // ?comment=error&code=<code>. The page is the cached one, so the line is shown here, as text,
+  // from the template's whitelist (unknown codes get the generic error); then the URL is cleaned.
+  const section = d.getElementById("comments"), notices = d.getElementById("comment-notices");
+  const params = new URLSearchParams(location.search), result = params.get("comment");
+  if (section && notices && params.has("comment")) {
+    const pick = (code) => [...notices.content.children].find((e) => e.dataset.code === code);
+    const code = params.get("code") || "";
+    // Error codes all start with "comments.", so a crafted link cannot show the success line.
+    const line = result === "pending" ? pick("pending")
+      : result === "error" ? (code.startsWith("comments.") && pick(code)) || pick("error") : null;
+    if (line) {
+      const p = d.createElement("p");
+      p.className = "notice is-" + result;
+      p.setAttribute("role", "status");
+      p.textContent = line.textContent;
+      const f = section.querySelector(".comment-form");
+      if (f) f.before(p); else section.append(p);
+    }
+    params.delete("comment");
+    params.delete("code");
+    const q = params.toString();
+    try { history.replaceState(history.state, "", location.pathname + (q ? "?" + q : "") + location.hash); } catch (e) { /* URL stays as it is */ }
+  }
+
   // Comments: Turnstile loads only when the reader starts writing, so reading costs no third-party
   // bytes. The draft is kept in sessionStorage so a failed send never loses the text.
   const form = d.querySelector(".comment-form");
   if (form) {
     const body = form.querySelector("textarea"), key = "draft:" + form.action;
     const store = (fn) => { try { return fn(sessionStorage); } catch (e) { return null; } };
-    if (d.querySelector(".notice.is-pending")) store((s) => s.removeItem(key));
+    if (result === "pending") store((s) => s.removeItem(key));
     else if (body && !body.value) body.value = store((s) => s.getItem(key)) || "";
     if (body) body.addEventListener("input", () => store((s) => s.setItem(key, body.value)));
     const sitekey = form.dataset.turnstile;

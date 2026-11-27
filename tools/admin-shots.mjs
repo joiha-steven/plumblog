@@ -4,6 +4,7 @@
 //
 //   node tools/admin-shots.mjs http://localhost:8790 OUT_DIR [LAYOUT_AUDIT_JS]
 //
+// ONLY=state,state and WIDTHS=375,1440 narrow a run while working on one screen.
 // LAYOUT_AUDIT_JS, when given, is evaluated on each page and must define
 // globalThis.doGiaoDien() returning { tong: {kind: count}, ... }; the counts go into
 // OUT_DIR/audit.json and the sheet. Serve the admin first: scripts/admin-dev.
@@ -28,40 +29,221 @@ const SIZES = [
   [884, 1104],
   [1440, 900],
 ];
+const EDITOR = ".cm-content";
+const settle = (page, sel) =>
+  page.waitForFunction((q) => [...document.querySelectorAll(q)].every((el) => el.getAnimations().every((a) => a.playState === "finished")), sel);
+// Pictures in the post must have loaded before the shot.
+const pictures = (page) => page.waitForFunction(() => [...document.querySelectorAll(".cm-img img")].every((i) => i.complete));
+// Each preview refresh loads into a new frame (pb-preview-N) that replaces the shown one.
+const previewIn = async (page, click) => {
+  const nav = page.waitForEvent("framenavigated", (f) => f.name().startsWith("pb-preview") && f.url() !== "about:blank");
+  await click();
+  const frame = await nav;
+  await frame.waitForSelector("h1");
+};
+// CodeMirror draws only the lines near the viewport: scroll the writing pane down until the
+// line is drawn, then centre it.
+const line = async (page, text) => {
+  await page.evaluate(async (t) => {
+    const pane = document.querySelector(".ed-write");
+    const find = () => [...document.querySelectorAll(".cm-line")].find((l) => l.textContent.includes(t));
+    for (let i = 0; i < 60 && !find(); i++) {
+      pane.scrollTop += pane.clientHeight / 2;
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    }
+    find()?.scrollIntoView({ block: "center" });
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  }, text);
+  return page.locator(".cm-line", { hasText: text }).first();
+};
+// [name, path, element to wait for, action before the shot, widths it applies to]
+// Pastes into the writing column what a clipboard would hold: a picture made on a canvas, or
+// HTML as Google Docs puts it there.
+const paste = (page, what) =>
+  page.evaluate(async (w) => {
+    const cm = document.querySelector(".cm-content");
+    cm.focus();
+    const dt = new DataTransfer();
+    if (w === "picture") {
+      const c = document.createElement("canvas");
+      c.width = 1200;
+      c.height = 800;
+      const g = c.getContext("2d");
+      const grad = g.createLinearGradient(0, 0, 1200, 800);
+      grad.addColorStop(0, "#c9b79c");
+      grad.addColorStop(1, "#4f6b5a");
+      g.fillStyle = grad;
+      g.fillRect(0, 0, 1200, 800);
+      const blob = await new Promise((r) => c.toBlob(r, "image/png"));
+      dt.items.add(new File([blob], "doi-thong-buoi-sang.png", { type: "image/png" }));
+    } else {
+      dt.setData("text/plain", "x");
+      dt.setData("text/html", w);
+    }
+    cm.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  }, what);
+const DOCS_HTML =
+  '<b style="font-weight:normal" id="docs-internal-guid-1"><h1><span style="font-weight:400">K\u1ebf ho\u1ea1ch chuy\u1ebfn \u0111i</span></h1>' +
+  '<p><span>Ch\u00fang t\u00f4i \u0111i l\u00fac </span><span style="font-weight:700">s\u00e1u gi\u1edd</span><span>, </span><span style="font-style:italic">tr\u01b0\u1edbc c\u01a1n m\u01b0a</span><span>. Xem </span>' +
+  '<a href="https://www.google.com/url?q=https://example.com/ban-do&amp;sa=D"><span>b\u1ea3n \u0111\u1ed3</span></a><span>.</span></p>' +
+  "<ul><li><p><span>Tr\u00e0 n\u00f3ng</span></p></li><li><p><span>\u00c1o m\u01b0a</span></p></li></ul>" +
+  "<table><tr><td><p>Ng\u00e0y</p></td><td><p>N\u01a1i</p></td></tr><tr><td><p>1</p></td><td><p>Ch\u1ee3 s\u1edbm</p></td></tr></table></b>";
+
 const STATES = [
   ["posts", "/admin/"],
+  ["empty", "/admin/?mock=empty"],
   ["loading", "/admin/?mock=loading"],
   ["error", "/admin/?mock=error"],
   ["offline", "/admin/?mock=offline"],
   ["no-permission", "/admin/settings?role=writer"],
   ["not-found", "/admin/nope"],
-  ["menu", "/admin/pages"],
+  [
+    "menu",
+    "/admin/pages",
+    null,
+    async (page) => {
+      await page.click("button.me");
+      await page.waitForSelector(".pop");
+      await settle(page, ".pop");
+    },
+  ],
+  ["editor", "/admin/posts/1", EDITOR, pictures],
+  [
+    "editor-blocks",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await line(page, "[!NOTE]");
+    },
+  ],
+  [
+    "bubble",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await pictures(page);
+      await (await line(page, "Ch\u1ee3 \u0110\u00e0 L\u1ea1t m\u1edf")).dblclick({ position: { x: 30, y: 10 } });
+      await page.waitForSelector(".bubble");
+      await settle(page, ".bubble");
+    },
+    // Touch screens have no bubble: the bottom bar acts on the selection.
+    (w) => w >= 768,
+  ],
+  [
+    "slash",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      const l = await line(page, "T\u00f4i ghi l\u1ea1i s\u1ed1 ch\u1eef");
+      await l.click({ position: { x: 5, y: 5 } });
+      await page.keyboard.press("Home");
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("ArrowUp");
+      await page.keyboard.type("/");
+      await page.waitForSelector(".slash");
+      await settle(page, ".pop");
+    },
+  ],
+  [
+    "focus",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      const l = await line(page, "T\u00f4i ghi l\u1ea1i s\u1ed1 ch\u1eef");
+      await l.click({ position: { x: 5, y: 5 } });
+      await page.click("[data-tool=more]");
+      await page.waitForSelector(".pop [data-tool=focus]");
+      await page.click(".pop [data-tool=focus]");
+      await page.evaluate(() => document.querySelector(".cm-line.cm-cur")?.scrollIntoView({ block: "center" }));
+      // The toast says focus mode is on, then leaves; the shot is of the writing.
+      await page.waitForFunction(() => !document.querySelector(".toast"), null, { timeout: 6000 });
+      await page.waitForTimeout(400);
+    },
+  ],
+  [
+    "split",
+    "/admin/posts/1",
+    EDITOR,
+    (page) => previewIn(page, () => page.click(".seg button:nth-child(2)")),
+    (w) => w >= 900,
+  ],
+  ["preview", "/admin/posts/1", EDITOR, (page) => previewIn(page, () => page.click(".seg button:last-child"))],
+  ["new", "/admin/posts/new", EDITOR],
+  [
+    "paste-docs",
+    "/admin/posts/new",
+    EDITOR,
+    async (page) => {
+      await paste(page, DOCS_HTML);
+      await page.waitForFunction(() => document.querySelector(".cm-content")?.textContent?.includes("Ch\u1ee3 s\u1edbm"));
+    },
+  ],
+  [
+    "upload",
+    "/admin/posts/3?upload=slow",
+    EDITOR,
+    async (page) => {
+      await paste(page, "picture");
+      await page.waitForFunction(() => document.querySelector(".up .bar i")?.style.transform.includes("0.1"));
+    },
+  ],
+  [
+    "upload-failed",
+    "/admin/posts/3?upload=fail",
+    EDITOR,
+    async (page) => {
+      await paste(page, "picture");
+      await page.waitForSelector(".up.fail");
+    },
+  ],
+  [
+    "upload-offline",
+    "/admin/posts/3",
+    EDITOR,
+    async (page) => {
+      await page.evaluate(() => Object.defineProperty(navigator, "onLine", { get: () => false }));
+      await paste(page, "picture");
+      await page.waitForSelector(".toast");
+      await settle(page, ".toast");
+    },
+  ],
+  [
+    "picture-alt",
+    "/admin/posts/3",
+    EDITOR,
+    async (page) => {
+      await paste(page, "picture");
+      await page.waitForSelector(".altpop");
+      await pictures(page);
+      await settle(page, ".pop");
+    },
+  ],
 ];
+
+const only = process.env.ONLY?.split(",");
+const widths = process.env.WIDTHS?.split(",").map(Number);
 
 const browser = await chromium.launch({ channel: "chrome", headless: true });
 const shots = [];
 try {
-  for (const [w, hgt] of SIZES) {
+  for (const [w, hgt] of SIZES.filter(([w]) => !widths || widths.includes(w))) {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const states = lang === "vi" ? STATES : STATES.filter(([s]) => s === "posts" || s === "no-permission");
-        const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768 });
+        const english = ["posts", "no-permission", "editor", "slash"];
+        const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
+        const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);
         await ctx.addInitScript((t) => localStorage.setItem("pb.theme", t), theme);
         const page = await ctx.newPage();
         const errors = [];
         page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
         page.on("pageerror", (e) => errors.push(String(e)));
-        for (const [state, path] of STATES.filter((s) => states.includes(s))) {
+        for (const [state, path, ready, act] of states) {
           await page.goto(base + path, { waitUntil: "networkidle" });
-          if (state !== "loading") await page.waitForSelector("main h1, main [role=alert]", { timeout: 5000 });
-          if (state === "menu") {
-            await page.click("button.me");
-            await page.waitForSelector(".pop");
-            // Popovers fade in; shoot once the animation is over.
-            await page.waitForFunction(() => document.querySelector(".pop").getAnimations().every((a) => a.playState === "finished"));
-          }
+          if (state !== "loading") await page.waitForSelector(ready ?? "main h1, main [role=alert]", { timeout: 5000 });
+          // Popovers and bubbles fade in: actions wait until their animations are over.
+          if (act) await act(page);
           const name = `${state}-${w}-${theme}-${lang}.png`;
           await page.screenshot({ path: join(out, name) });
           let counts = null;

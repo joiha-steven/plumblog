@@ -4,7 +4,7 @@
 mod cache;
 mod db;
 mod docs;
-mod routes;
+pub(crate) mod routes;
 mod search;
 pub mod source;
 
@@ -14,9 +14,11 @@ use db::{Db, ExtSource};
 use plumblog_i18n::{Catalog, Key};
 use plumblog_model::VERSION;
 use plumblog_render::{Body, Link, PageInfo, Plugin, Post, Site, Theme, ThemeError};
+use plumblog_store::{PostStore, SettingsStore, comment};
 use routes::Route;
 use search::SearchSource;
 use source::{Filter, ReaderSource, SampleSource, Settings, StoredPost};
+use std::cell::Cell;
 use std::sync::OnceLock;
 use worker::{Context, Env, Headers, Request, Response, Result, console_error};
 
@@ -137,7 +139,6 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
             .unwrap_or_default();
         return live(src, &db, &path, &query).await;
     }
-
     // From the store: option and plugin changes bump it too, so they reach cached pages.
     let version = match db.content_version().await {
         Ok(v) => v,
@@ -258,8 +259,9 @@ pub(crate) fn core_text(lang: &str, key: Key) -> String {
 /// Takes no request origin on purpose: the Host header is the client's to choose, so it must
 /// never reach a public URL (canonical, feed and entry ids, sitemap).
 ///
-/// `ext` gives the theme its stored options; `query` is the `q` parameter, read only by the
-/// search route, which `search` serves.
+/// `ext` gives the theme its stored options and post pages their comments; `query` is the
+/// `q` parameter, read only by the search route, which `search` serves. The comment form's
+/// `?comment=` result is shown by theme JS, so it never changes the page or its cache key.
 pub async fn render(
     src: &impl ReaderSource,
     ext: &impl ExtSource,
@@ -268,16 +270,99 @@ pub async fn render(
     query: &str,
 ) -> std::result::Result<Outcome, String> {
     let (theme, complete) = configured(ext).await?;
-    let mut out = route(src, theme, search, path, query).await?;
+    let mut out = route(src, theme, ext, search, path, query).await?;
     if let Outcome::Page { cacheable, .. } = &mut out {
         *cacheable &= complete;
     }
     Ok(out)
 }
 
+/// Store reads for pages, over D1, for routes outside this module (`crate::contract`).
+#[cfg_attr(not(feature = "contract-tests"), allow(dead_code))]
+pub(crate) fn db_source(store: &D1Store) -> Db<'_, D1Store> {
+    Db(store)
+}
+
+/// The page a draft would publish as, rendered with the site's theme and options: the admin
+/// preview. The real route lives with the posts API (#10); test builds serve it as
+/// `/__preview` (`crate::contract`) so the admin is built against the real renderer.
+///
+/// # Errors
+/// A storage or template failure, as a detail for the log.
+#[cfg_attr(not(feature = "contract-tests"), allow(dead_code))]
+pub async fn preview(
+    src: &impl ReaderSource,
+    ext: &impl ExtSource,
+    title: &str,
+    markdown: &str,
+    lang: &str,
+) -> std::result::Result<String, String> {
+    let (theme, _) = configured(ext).await?;
+    let settings = src.settings().await.map_err(err)?;
+    let origin = public_origin(&settings);
+    let p = Pages {
+        src,
+        theme,
+        site: site(&settings, &settings.lang),
+        info: PageInfo {
+            lang: settings.lang.clone(),
+            canonical: format!("{origin}/"),
+            origin: origin.to_owned(),
+        },
+        per: settings.per_page.max(1),
+        settings: &settings,
+        complete: Cell::new(true),
+    };
+    let post = Post {
+        url: "/".to_owned(),
+        title: title.to_owned(),
+        lang: if lang.is_empty() {
+            settings.lang.clone()
+        } else {
+            lang.to_owned()
+        },
+        published_at: settings.updated_at,
+        pinned: false,
+        excerpt: None,
+        body: plumblog_markdown::render(markdown, plumblog_markdown::Options::default()),
+        tags: Vec::new(),
+        cover: None,
+        thumb: None,
+        translations: Vec::new(),
+    };
+    // A draft has no comments yet; the preview shows the page as it publishes.
+    p.render(&Body::Post {
+        post: &post,
+        prev: None,
+        next: None,
+        comments: None,
+    })
+    .map(|html| without_scripts(&html))
+}
+
+/// The page with its `<script>` elements removed. The preview frame runs no scripts (it shares
+/// the admin's origin so theme fonts load), so they would only fill the console with blocked
+/// script errors; the page is complete without them.
+#[cfg_attr(not(feature = "contract-tests"), allow(dead_code))]
+fn without_scripts(html: &str) -> String {
+    // ASCII lowercasing keeps byte offsets, so indexes found in `lower` apply to `html`.
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut at = 0;
+    while let Some(i) = lower[at..].find("<script").map(|i| at + i) {
+        out.push_str(&html[at..i]);
+        at = lower[i..]
+            .find("</script>")
+            .map_or(html.len(), |j| i + j + "</script>".len());
+    }
+    out.push_str(&html[at..]);
+    out
+}
+
 async fn route(
     src: &impl ReaderSource,
     theme: Theme,
+    ext: &impl ExtSource,
     search: &impl SearchSource,
     path: &str,
     query: &str,
@@ -295,11 +380,12 @@ async fn route(
         },
         per: settings.per_page.max(1),
         settings: &settings,
+        complete: Cell::new(true),
     };
     let page = match routes::parse(path) {
         Route::Redirect(to) => return Ok(Outcome::Redirect(to)),
         Route::Home { page } => p.home(page).await?,
-        Route::Post { slug } => p.post(&slug).await?,
+        Route::Post { slug } => p.post(&slug, ext).await?,
         Route::Tag { slug, page } => p.tag(&slug, page).await?,
         Route::Archive { year, page } => p.archive(year, page).await?,
         Route::Search => p.search(search, query).await?,
@@ -314,10 +400,14 @@ async fn route(
         Route::Llms => return Ok(doc(docs::TEXT, p.llms(&settings).await?)),
         Route::NotFound => None,
     };
-    match page {
-        Some(html) => Ok(doc(HTML, html)),
-        None => p.not_found_page().await,
+    let mut out = match page {
+        Some(html) => doc(HTML, html),
+        None => p.not_found_page().await?,
+    };
+    if let Outcome::Page { cacheable, .. } = &mut out {
+        *cacheable &= p.complete.get();
     }
+    Ok(out)
 }
 
 const HTML: &str = "text/html; charset=utf-8";
@@ -385,6 +475,8 @@ struct Pages<'a, S> {
     info: PageInfo,
     per: usize,
     settings: &'a Settings,
+    /// Cleared when part of the page fell back after a failed store read (comments).
+    complete: Cell<bool>,
 }
 
 type PageResult = std::result::Result<Option<String>, String>;
@@ -439,17 +531,28 @@ impl<S: ReaderSource> Pages<'_, S> {
         })
     }
 
-    async fn post(&self, slug: &str) -> PageResult {
+    async fn post(&self, slug: &str, ext: &impl ExtSource) -> PageResult {
         let Some(n) = self.src.post(slug).await.map_err(err)? else {
             return Ok(None);
         };
         let post = to_render(&n.post);
         let older = n.older.as_ref().map(to_render);
         let newer = n.newer.as_ref().map(to_render);
+        // A failed read shows the post without its comments rather than failing the page;
+        // the page is then not cached (see `complete`).
+        let comments = match ext.comments(&n.post.lang, slug).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn(&format!("comments.read_failed slug={slug} detail={e}"));
+                self.complete.set(false);
+                None
+            }
+        };
         self.show(&Body::Post {
             post: &post,
             prev: older.as_ref(),
             next: newer.as_ref(),
+            comments: comments.as_ref(),
         })
     }
 
@@ -530,6 +633,25 @@ impl<S: ReaderSource> Pages<'_, S> {
             cacheable: true,
         })
     }
+}
+
+/// The stored post behind the reader page `/<slug>` and whether readers may comment on it
+/// now, for the comment route. The language comes from the reader source, as on the page.
+///
+/// # Errors
+/// A store read, as a detail for the log.
+pub(crate) async fn comment_target<S: PostStore + SettingsStore>(
+    store: &S,
+    slug: &str,
+) -> std::result::Result<Option<(plumblog_model::PostId, bool)>, String> {
+    let Some(page) = SampleSource::get().post(slug).await.map_err(err)? else {
+        return Ok(None);
+    };
+    let Some(post) = store.find_post(&page.post.lang, slug).await.map_err(err)? else {
+        return Ok(None);
+    };
+    let site = comment::site_enabled(store).await.map_err(err)?;
+    Ok(Some((post.id, comment::is_open(site, &post))))
 }
 
 /// Site facts for a page in `lang`: its feed links are that language's feeds.

@@ -18,7 +18,8 @@ serde.workspace = true
 serde_json.workspace = true
 plumblog-auth.workspace = true
 plumblog-store.workspace = true
-# The deploy and migration entries in the site's system log, built the way the Worker builds them.
+# `blog guide api` prints the route table; the deploy and migration entries in the site's system
+# log are built the way the Worker builds them.
 plumblog-model.workspace = true
 plumblog-syslog.workspace = true
 getrandom.workspace = true

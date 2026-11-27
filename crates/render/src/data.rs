@@ -99,6 +99,8 @@ pub enum Body<'a> {
         post: &'a Post,
         prev: Option<&'a Post>,
         next: Option<&'a Post>,
+        /// `None` when the site has comments off: the section is not rendered at all.
+        comments: Option<&'a Comments>,
     },
     Tag {
         tag: &'a Link,
@@ -123,6 +125,61 @@ pub enum Body<'a> {
         posts: &'a [&'a Post],
         more: bool,
     },
+}
+
+/// The comment section of a post page (docs/ARCHITECTURE.md, Themes: Comments).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Comments {
+    /// Readers may send a comment now; closed posts still list approved ones.
+    pub open: bool,
+    /// Approved comments, oldest first.
+    pub items: Vec<CommentItem>,
+    /// Where the form posts.
+    pub action_url: String,
+    /// Turnstile site key; empty until the site configures one.
+    pub turnstile_key: String,
+    /// Longest comment, in characters.
+    pub max_length: usize,
+    /// Longest display name, in characters.
+    pub name_max_length: usize,
+    /// Most links in one comment.
+    pub max_links: usize,
+    /// Older approved comments exist beyond `items` (the page shows only the newest).
+    pub more: bool,
+}
+
+/// One approved comment. `html` comes from `plumblog_markdown::render_comment`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommentItem {
+    pub id: i64,
+    pub author: String,
+    /// Written by the post's author (badge). Always false until authors can comment.
+    pub owner: bool,
+    /// Unix seconds, UTC.
+    pub created_at: i64,
+    pub html: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CommentsData<'a> {
+    pub open: bool,
+    pub items: Vec<CommentItemData<'a>>,
+    pub action_url: &'a str,
+    pub turnstile_key: &'a str,
+    pub max_length: usize,
+    pub name_max_length: usize,
+    pub max_links: usize,
+    pub more: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CommentItemData<'a> {
+    pub id: i64,
+    pub author: &'a str,
+    pub owner: bool,
+    pub date_iso: String,
+    pub date_display: String,
+    pub html: &'a str,
 }
 
 /// One post row (`entry.html`).
