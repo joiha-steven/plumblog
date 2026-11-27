@@ -7,6 +7,7 @@
 {%- endif %}
 {%- endblock %}
 {% block main %}
+{{ slot("before_post") }}
 <article>
   <header class="post-head">
     <p class="meta"><time datetime="{{ post.date_iso }}">{{ post.date_display }}</time><span>{{ t("post.reading_time", minutes=post.reading_minutes) }}</span></p>
@@ -40,4 +41,5 @@
     {%- endif %}
   </footer>
 </article>
+{{ slot("after_post") }}
 {% endblock %}

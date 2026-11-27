@@ -24,6 +24,8 @@ show_note = "Xem chú thích {n}"
 
 # Nhãn cho các tuỳ chọn của theme (theme.toml [options]).
 [options]
+group_look = "Giao diện"
+group_reading = "Đọc"
 style = "Kiểu"
 style_help = "Diện mạo của cả site. Kiểu nào cũng giữ cùng độ dễ đọc."
 style_writer = "Writer"

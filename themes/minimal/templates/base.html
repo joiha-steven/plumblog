@@ -26,9 +26,12 @@
 {%- endfor %}
 <script type="speculationrules">{"prerender":[{"where":{"and":[{"href_matches":"/*"},{"not":{"href_matches":"/admin/*"}}]},"eagerness":"moderate"}]}</script>
 {% block head %}{% endblock %}
+{#- Plugin slots: named empty points where enabled plugins add their partials. #}
+{{ slot("head") }}
 </head>
 <body>
 <a class="skip" href="#main">{{ t("nav.skip_to_content") }}</a>
+{{ slot("body_start") }}
 <header class="wrap site-head">
   <a class="site-name" href="{{ site.home_url }}">{{ site.title }}</a>
   <nav class="site-nav" aria-label="{{ t("nav.site") }}">
@@ -47,6 +50,8 @@
 <footer class="wrap site-foot">
   <a class="site-name" href="{{ site.home_url }}">{{ site.title }}</a>
   <p>{{ site.footer }} &middot; <a href="{{ site.feed_url }}">{{ t("nav.feed") }}</a></p>
+  {{ slot("footer") }}
 </footer>
+{{ slot("body_end") }}
 </body>
 </html>

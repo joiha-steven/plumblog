@@ -25,7 +25,7 @@ agent a Cloudflare API token, and the agent sets up, writes, translates, themes 
 6. **Heavy work happens off the Worker.** The browser (admin) or the user's machine (CLI) does expensive work; the Worker validates, stores and serves.
 7. **No hard-coded text.** Every user-facing string, English included, lives in a locale file (`locales/` for core and admin, the theme's own locale files for theme text). Code and templates only reference keys.
 8. **No hard-coded layout.** Core produces data and semantic content; every reader-facing page structure (what appears, where, in which order) is defined by the theme's templates. Core ships no reader HTML layout of its own beyond the default theme.
-9. **Small core, extensible edges.** Core contains only what a working blog needs. Anything else is added by themes or plugins through stable extension points. The plugin mechanism is still to be designed (constraint: one Worker bundle on the free plan, so no runtime loading of native code; likely candidates are declarative hooks, theme-level JS, and build-time plugins compiled into the Worker).
+9. **Small core, extensible edges.** Core contains only what a working blog needs. Themes and declarative plugins add the rest (see Plugins and options); complex needs use the API and webhooks from outside.
 
 ## Platform
 
@@ -121,7 +121,8 @@ Not built: PWA/offline, newsletter (later), reactions.
   assets/        images, fonts, JS
   locales/       the theme's own UI text, one TOML per language; templates call t("section.key", name=value)
   ```
-- Options: `theme.toml` declares `[options.<key>]` with `type` (`choice`, `bool`, `int`, `color`), `default`, limits, and locale keys for label and help. Admin renders the controls from this declaration; templates read `theme.options.<key>`; a `color` option overrides the token it names. A `choice` option may map each value to a CSS file (a **style**): only the selected file is shipped after `style.css`, so unused styles cost readers nothing. Values listed in `draft` are not offered to owners.
+- Options: `theme.toml` declares `[options.<key>]` in the shape of "Plugins and options": `type` is one of the admin field types (`short_text`, `long_text`, `number`, `toggle`, `choice`, `color`, `image`, `list`), plus `default`, limits, `group`, `icon` and locale keys for `label`/`help`. Templates read `theme.options.<key>`; a `color` option names the token it overrides. A `choice` option may map each value to a CSS file (a **style**): only the selected file ships after `style.css`. Values listed in `draft` are not offered to owners.
+- Slots: themes expose named empty points for plugin partials with `{{ slot("<name>") }}`: `head`, `body_start`, `body_end`, `before_post`, `after_post`, `footer`.
 - Themes may contain JS. Installing a theme not made locally shows a warning.
 - **minimal** is built first; literary and technical follow once it is approved.
 - Fonts: pick the most readable font for the theme's role that covers Latin (incl. Vietnamese), Cyrillic and Greek; modify (subset) it if needed, within its license. Loading rules:
@@ -144,6 +145,15 @@ Not built: PWA/offline, newsletter (later), reactions.
 - AI workflow: `blog theme new | dev | check | push | rollback`. `check` reports template errors, missing dark tokens, contrast failures and size, each with file:line and a fix. Last 5 versions kept for rollback.
 - The template variable reference is generated from Rust types, never written by hand.
 - Owner-only admin page for colors, fonts, logo.
+
+## Plugins and options
+
+- Themes and plugins declare options; they never ship admin UI. A declaration lists fields from a fixed set of types owned by the admin (short text, long text, number, toggle, single choice, color, image, list), with labels and help as locale keys, grouping, and icons by name from the admin icon set. The admin renders every field with its own components, so every theme and plugin tab follows the admin design language.
+- Settings: **Appearance** shows the active theme's options; **Plugins** lists plugins (enable/disable) with one tab per plugin, generated from its declaration.
+- Plugins are declarative only: settings, HTML partials for named slots that themes must expose (head, body end, before/after post, footer...), browser JS/CSS, locale files. No server code inside the blog. A disabled plugin costs zero bytes.
+- Complex needs are the user's own project: a separate Worker or service talking to plumblog through the API and outgoing webhooks (post published/updated/deleted). Core adds webhooks, nothing more.
+- Isolation: no theme or plugin HTML, CSS or JS ever runs in the admin. Theme CSS needed in the admin (editor typography, live preview) loads in an isolated frame. Admin has a strict CSP. `blog theme check` and `blog plugin check` reject unknown field types, hard-coded text and admin-targeted files.
+- A broken plugin is disabled automatically and named in the admin; the blog keeps working.
 
 ## Admin and editor
 
@@ -211,3 +221,4 @@ Each phase is one or more sessions; each ends with `scripts/check` green and evi
 - 2026-11-27 minimal: Inter weight axis 400-700 and text optical size only; dark mode softens text by color instead of a lighter weight; plum accent.
 - 2026-11-27 minimal v0.2 after owner review: Inter Display titles, syntax colors, drawn checkboxes, home with excerpts and year groups; color tokens via `light-dark()`.
 - 2026-11-27 Reversed 'no layout variants': themes may declare options incl. styles; minimal ships writer first, book and magazine later at the same standard.
+- 2026-11-27 Theme and plugin options are declarations rendered by the admin; plugins are declarative only; complex needs use API + webhooks; nothing from themes/plugins runs in the admin.

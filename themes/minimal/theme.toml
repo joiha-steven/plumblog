@@ -20,38 +20,57 @@ files = ["assets/minimal.js"]
 # Options the owner can change. The admin draws a control for each from this table: `type`
 # picks the control, `label` and `help` are keys in this theme's locales/, `default` is used until
 # the owner changes it. Templates read the chosen values as theme.options.<name>.
+# Options use only the admin's field types (docs/ARCHITECTURE.md, "Plugins and options"); the admin
+# renders them. Labels and help are locale keys; icons are names from the admin icon set.
+[groups.look]
+label = "options.group_look"
+icon = "palette"
+
+[groups.reading]
+label = "options.group_reading"
+icon = "book-open"
+
 [options.style]
 type = "choice"
+group = "look"
 label = "options.style"
 help = "options.style_help"
 default = "writer"
 # Each choice adds one stylesheet after style.css; readers get only the chosen one.
-choices = { writer = "styles/writer.css", book = "styles/book.css", magazine = "styles/magazine.css" }
 # Drafts stay out of the admin and the shipped CSS until they meet the writer standard.
-draft = ["book", "magazine"]
+choices = [
+  { value = "writer", label = "options.style_writer", css = "styles/writer.css" },
+  { value = "book", label = "options.style_book", css = "styles/book.css", draft = true },
+  { value = "magazine", label = "options.style_magazine", css = "styles/magazine.css", draft = true },
+]
 
 [options.accent]
 type = "color"
+group = "look"
 label = "options.accent"
 help = "options.accent_help"
 token = "accent" # overrides --c-accent; `blog theme check` rejects pairs below 4.5:1 contrast
 default = { light = "#8a2d6f", dark = "#e2a3d2" }
 
 [options.list_images]
-type = "bool"
+type = "toggle"
+group = "look"
 label = "options.list_images"
 default = false
 
 [options.excerpt_words]
-type = "int"
+type = "number"
+group = "reading"
 label = "options.excerpt_words"
 help = "options.excerpt_words_help"
 min = 0
 max = 120
+step = 5
 default = 55 # core cuts the auto excerpt at a word boundary; 0 hides excerpts
 
 [options.sidenotes]
-type = "bool"
+type = "toggle"
+group = "reading"
 label = "options.sidenotes"
 help = "options.sidenotes_help"
 default = true

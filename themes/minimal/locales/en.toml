@@ -26,6 +26,8 @@ show_note = "Show note {n}"
 
 # Labels for the owner's theme options (theme.toml [options]).
 [options]
+group_look = "Look"
+group_reading = "Reading"
 style = "Style"
 style_help = "How the whole site looks. Every style keeps the same reading comfort."
 style_writer = "Writer"
