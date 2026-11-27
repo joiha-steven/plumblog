@@ -10,7 +10,7 @@ Around sixty to seventy characters per line is easy to follow. Longer lines make
 
 ## Line height
 
-Body text wants more space between lines than headings do. Languages with stacked accents, like Vietnamese, need a little more again, or the marks collide with the line above.
+Body text wants more space between lines than headings do. Languages with stacked accents, like Vietnamese, need a little more again, or the marks collide with the line above. Phones make this worse, since the text is already small.[^zoom]
 
 | Setting | Body | Headings |
 |---|---|---|
@@ -20,8 +20,9 @@ Body text wants more space between lines than headings do. Languages with stacke
 
 ## Contrast
 
-Near-black on white reads better than pure black, and dark mode looks calmer with off-white text. The difference is small, but over a long article it adds up.
+Near-black on white reads better than pure black, and dark mode looks calmer with off-white text. The difference is small, but over a long article it adds up.[^contrast]
 
 > Typography exists to honor content.
 
 [^zoom]: Pinch to zoom is a sign the page was designed for a different screen.
+[^contrast]: Pure white on pure black also blooms on bright screens.

@@ -496,6 +496,10 @@ dependencies = [
 [[package]]
 name = "plumblog-i18n"
 version = "0.1.0"
+dependencies = [
+ "plumblog-model",
+ "toml",
+]
 
 [[package]]
 name = "plumblog-markdown"
@@ -541,6 +545,7 @@ dependencies = [
 name = "plumblog-worker"
 version = "0.1.0"
 dependencies = [
+ "plumblog-i18n",
  "plumblog-markdown",
  "plumblog-model",
  "plumblog-render",

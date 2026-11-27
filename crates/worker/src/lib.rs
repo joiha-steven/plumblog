@@ -1,6 +1,7 @@
 #[cfg(feature = "contract-tests")]
 mod contract;
 pub mod d1;
+mod keys;
 mod pages;
 
 use worker::{Context, Env, Request, Response, Result, event};
