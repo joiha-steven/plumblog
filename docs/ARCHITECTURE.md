@@ -80,7 +80,7 @@ Users do not need Rust: releases ship the built Worker and `blog` binaries for m
 ## Content
 
 - Posts and pages; drafts, scheduled, revisions (author recorded), trash with restore.
-- Tags and series; pinned posts; cover image; excerpt (written by the author, else cut from the text at a word boundary; the length is a site setting, default 160 characters); auto table of contents; reading time.
+- Tags and series; pinned posts; cover image; excerpt (written by the author, else cut from the text at a word boundary; the length is the theme option `excerpt_words`, default 55 words); auto table of contents; reading time.
 - Translations: one row per language, linked by a translation group. URLs `/<lang>/<slug>`. Missing translation shows the original with a notice. Translation itself is done by the user's AI.
 - Changing a slug creates a permanent redirect automatically.
 - Author pages.
@@ -121,6 +121,7 @@ Not built: PWA/offline, newsletter (later), reactions.
   assets/        images, fonts, JS
   locales/       the theme's own UI text, one TOML per language; templates call t("section.key", name=value)
   ```
+- Options: `theme.toml` declares `[options.<key>]` with `type` (`choice`, `bool`, `int`, `color`), `default`, limits, and locale keys for label and help. Admin renders the controls from this declaration; templates read `theme.options.<key>`; a `color` option overrides the token it names. A `choice` option may map each value to a CSS file (a **style**): only the selected file is shipped after `style.css`, so unused styles cost readers nothing. Values listed in `draft` are not offered to owners.
 - Themes may contain JS. Installing a theme not made locally shows a warning.
 - **minimal** is built first; literary and technical follow once it is approved.
 - Fonts: pick the most readable font for the theme's role that covers Latin (incl. Vietnamese), Cyrillic and Greek; modify (subset) it if needed, within its license. Loading rules:
@@ -134,7 +135,10 @@ Not built: PWA/offline, newsletter (later), reactions.
   - Typography values are CSS custom properties at the top of `style.css`; the editor's writing column reuses them.
   - Renderer contract: color tokens are emitted once as `--c-<key>: light-dark(<light>, <dark>)`, so `color-scheme` (system, toggle, print) switches the palette without a second block; footnotes as `<sup class="fnref"><a href="#fn-N">` plus `<section class="footnotes">` with `<li id="fn-N">` and `a.fnback`; code blocks as `<div class="code" data-lang="rust"><pre><code>` with `tok-keyword|string|number|constant|function|type|builtin|property|attr|tag|punct|operator|comment` spans; wide tables wrapped in `<div class="table">`; task-list items as `<li><label><input type="checkbox" disabled> text</label></li>`; a `wide` class on a figure lets it bleed to the screen edges on phones.
   - Titles use **Inter Display** (Inter's display optical size, one static weight, Latin scripts only; Cyrillic and Greek titles fall back to the text cut).
-  - Home: pinned posts as a feature (cover, title, excerpt), then posts grouped by year, each with title, excerpt (clamped to 3 lines), date and reading time, and a thumbnail if present. The year hangs in the left margin on wide screens.
+  - Styles: **writer** (default; text first like a writing app), **book** and **magazine** (drafts, offered once they reach the writer standard). Options: style, accent, list images (off), excerpt words (55), sidenotes (on).
+  - writer home: one row per post, pinned first, in a grid with a narrow mono date column that hangs in the left margin on wide screens and moves under the excerpt on phones; title, excerpt, optional small 4:3 picture. Rows are separated by space, not rules.
+  - Code and metadata use **JetBrains Mono** (OFL, one weight, no ligatures so readers see what is typed). No uppercase or small caps anywhere.
+  - Controls follow the admin design language: one state system (hover, pressed, selected, focus ring, disabled) shared by the toggle, copy button, checkboxes and footnote buttons.
   - Sidenotes move into the margin from 76rem (~1216px) wide; narrower screens, folded or unfolded foldables included, get the inline toggle.
 - Footnotes are sidenotes: in the margin beside the sentence on wide screens, an inline toggle under the sentence on narrow screens, classic bottom footnotes when JS is off. About 1 KB JS.
 - AI workflow: `blog theme new | dev | check | push | rollback`. `check` reports template errors, missing dark tokens, contrast failures and size, each with file:line and a fix. Last 5 versions kept for rollback.
@@ -206,3 +210,4 @@ Each phase is one or more sessions; each ends with `scripts/check` green and evi
 - 2026-11-27 No hard-coded text (all languages incl. English in locale files); no hard-coded layout (themes define page structure); small core, features via themes and plugins.
 - 2026-11-27 minimal: Inter weight axis 400-700 and text optical size only; dark mode softens text by color instead of a lighter weight; plum accent.
 - 2026-11-27 minimal v0.2 after owner review: Inter Display titles, syntax colors, drawn checkboxes, home with excerpts and year groups; color tokens via `light-dark()`.
+- 2026-11-27 Reversed 'no layout variants': themes may declare options incl. styles; minimal ships writer first, book and magazine later at the same standard.

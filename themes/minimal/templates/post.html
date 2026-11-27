@@ -9,7 +9,7 @@
 {% block main %}
 <article>
   <header class="post-head">
-    <p class="kicker"><time datetime="{{ post.date_iso }}">{{ post.date_display }}</time><span>{{ t("post.reading_time", minutes=post.reading_minutes) }}</span></p>
+    <p class="meta"><time datetime="{{ post.date_iso }}">{{ post.date_display }}</time><span>{{ t("post.reading_time", minutes=post.reading_minutes) }}</span></p>
     <h1>{{ post.title }}</h1>
     {%- if post.excerpt %}
     <p class="standfirst">{{ post.excerpt }}</p>
@@ -21,7 +21,7 @@
     {%- endif %}
   </header>
   {#- post.html is rendered from Markdown on save and sanitized by core; it is trusted here. #}
-  <div class="prose" data-note-label="{{ t("post.show_note") }}" data-copy="{{ t("post.copy_code") }}" data-copied="{{ t("post.copied") }}">
+  <div class="prose"{% if not theme.options.sidenotes %} data-sidenotes="off"{% endif %} data-note-label="{{ t("post.show_note") }}" data-copy="{{ t("post.copy_code") }}" data-copied="{{ t("post.copied") }}">
 {{ post.html | safe }}
   </div>
   <footer class="post-foot">

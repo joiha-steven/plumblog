@@ -1,47 +1,46 @@
 {% extends "base.html" %}
+{#- One markup for every post row; each style (theme option "style") lays it out its own way. #}
+{%- macro entry(post, eager) %}
+<li>
+  <a class="entry{% if post.pinned %} is-pinned{% endif %}" href="{{ post.url }}"{% if post.lang != page.lang %} hreflang="{{ post.lang }}" lang="{{ post.lang }}"{% endif %}>
+    <h3 class="entry-title">{{ post.title }}</h3>
+    {%- if post.excerpt %}
+    <p class="excerpt">{{ post.excerpt }}</p>
+    {%- endif %}
+    <p class="meta"><time datetime="{{ post.date_iso }}">{{ post.date_display }}</time>
+      {%- if post.pinned %}<span class="pin">{{ t("home.pinned") }}</span>{% endif %}
+      <span class="read">{{ t("post.reading_time", minutes=post.reading_minutes) }}</span></p>
+    {%- set img = (post.cover if post.pinned and post.cover else post.thumb) if theme.options.list_images else none %}
+    {%- if img %}
+    <span class="thumb"><img src="{{ img.src }}" width="{{ img.width }}" height="{{ img.height }}" alt="" loading="{{ 'eager' if eager else 'lazy' }}" decoding="async"></span>
+    {%- endif %}
+  </a>
+</li>
+{%- endmacro %}
 {% block main %}
 {%- if site.description %}
 <p class="intro">{{ site.description }}</p>
 {%- endif %}
-{#- Pinned posts lead as a feature; the rest are grouped by year. #}
-{%- for post in posts if post.pinned %}
-<article class="feature">
-  <a href="{{ post.url }}"{% if post.lang != page.lang %} hreflang="{{ post.lang }}" lang="{{ post.lang }}"{% endif %}>
-    {%- if post.cover %}
-    <img src="{{ post.cover.src }}"{% if post.cover.srcset %} srcset="{{ post.cover.srcset }}" sizes="(min-width: 40rem) 40rem, 100vw"{% endif %} width="{{ post.cover.width }}" height="{{ post.cover.height }}" alt="" fetchpriority="high" decoding="async">
-    {%- endif %}
-    <p class="kicker"><span class="pin">{{ t("home.pinned") }}</span><time datetime="{{ post.date_iso }}">{{ post.date_display }}</time></p>
-    <h2 class="feature-title">{{ post.title }}</h2>
-    {%- if post.excerpt %}
-    <p class="excerpt">{{ post.excerpt }}</p>
-    {%- endif %}
-  </a>
-</article>
-{%- endfor %}
-{%- for post in posts if not post.pinned %}
+{%- set pinned = posts | selectattr("pinned") | list %}
+{%- if pinned %}
+<ol class="posts pinned">
+  {%- for post in pinned %}{{ entry(post, true) }}{% endfor %}
+</ol>
+{%- endif %}
+{#- The rest are grouped by year; a style may show or hide the year heading. #}
+{%- for post in posts | rejectattr("pinned") %}
 {%- if loop.first or post.year != loop.previtem.year %}
 {%- if not loop.first %}
-  </ol>
+</ol>
 </section>
 {%- endif %}
 <section class="year" aria-labelledby="y{{ post.year }}">
-  <h2 class="year-label" id="y{{ post.year }}">{{ post.year }}</h2>
-  <ol class="posts">
+<h2 class="year-label" id="y{{ post.year }}">{{ post.year }}</h2>
+<ol class="posts">
 {%- endif %}
-    <li>
-      <a class="entry" href="{{ post.url }}"{% if post.lang != page.lang %} hreflang="{{ post.lang }}" lang="{{ post.lang }}"{% endif %}>
-        <h3 class="entry-title">{{ post.title }}</h3>
-        {%- if post.excerpt %}
-        <p class="excerpt">{{ post.excerpt }}</p>
-        {%- endif %}
-        <p class="kicker"><time datetime="{{ post.date_iso }}">{{ post.date_display }}</time><span>{{ t("post.reading_time", minutes=post.reading_minutes) }}</span></p>
-        {%- if post.thumb %}
-        <div class="thumb"><img src="{{ post.thumb.src }}" width="{{ post.thumb.width }}" height="{{ post.thumb.height }}" alt="" loading="{{ 'eager' if loop.index <= 4 else 'lazy' }}" decoding="async"></div>
-        {%- endif %}
-      </a>
-    </li>
+{{ entry(post, loop.index <= 4) }}
 {%- if loop.last %}
-  </ol>
+</ol>
 </section>
 {%- endif %}
 {%- endfor %}

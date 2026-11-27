@@ -21,3 +21,18 @@ next = "Bài sau"
 copy_code = "Chép"
 copied = "Đã chép"
 show_note = "Xem chú thích {n}"
+
+# Nhãn cho các tuỳ chọn của theme (theme.toml [options]).
+[options]
+style = "Kiểu"
+style_help = "Diện mạo của cả site. Kiểu nào cũng giữ cùng độ dễ đọc."
+style_writer = "Writer"
+style_book = "Sách"
+style_magazine = "Tạp chí"
+accent = "Màu nhấn"
+accent_help = "Dùng cho liên kết, viền khi chọn bằng bàn phím và vùng bôi chọn chữ."
+list_images = "Hiện ảnh trong danh sách bài"
+excerpt_words = "Độ dài đoạn trích (chữ)"
+excerpt_words_help = "Dùng khi bài chưa có đoạn trích riêng. 0 là ẩn đoạn trích."
+sidenotes = "Chú thích bên lề"
+sidenotes_help = "Tắt: chú thích nằm cuối bài."

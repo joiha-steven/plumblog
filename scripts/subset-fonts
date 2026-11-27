@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Build the minimal theme's Inter subsets. Dev-time only; output is committed.
+"""Build the minimal theme's font subsets (Inter for text, JetBrains Mono for code).
+Dev-time only; output is committed.
 
-Downloads Inter from its official GitHub release (pinned by sha256) into a cache outside the
+Downloads each font from its official GitHub release (pinned by sha256) into a cache outside the
 repo, trims the variable axes to what the theme uses, splits it into unicode-range subsets and
 writes woff2 files plus the generated @font-face CSS (with a metric-matched fallback so the
 font swap moves nothing).
@@ -22,13 +23,19 @@ from fontTools import subset
 from fontTools.ttLib import TTFont
 from fontTools.varLib import instancer
 
-VERSION = "4.1"
-URL = f"https://github.com/rsms/inter/releases/download/v{VERSION}/Inter-{VERSION}.zip"
-SHA256 = "9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e"
+# name: (release zip URL, sha256, license file in the zip, license file written next to the fonts)
+SOURCES = {
+    "inter": ("https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip",
+              "9883fdd4a49d4fb66bd8177ba6625ef9a64aa45899767dde3d36aa425756b11e",
+              "LICENSE.txt", "license-inter.txt"),
+    "jbmono": ("https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip",
+               "6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf",
+               "OFL.txt", "license-jetbrains-mono.txt"),
+}
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "themes/minimal/assets/fonts"
-CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "plumblog" / f"inter-{VERSION}"
+CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "plumblog" / "fonts"
 
 # Weights the theme's CSS uses: 400 body, 600 strong, 650-700 headings. Starting at the default (400)
 # instead of 350 saves ~20% per file; dark mode softens text with color instead of weight.
@@ -40,6 +47,8 @@ OPSZ = 14
 # Layout features kept. cv05 (l with tail) and cv08 (I with serifs) disambiguate I/l/1;
 # tnum aligns dates; case raises punctuation in all-caps labels.
 FEATURES = ["kern", "calt", "ccmp", "locl", "mark", "mkmk", "case", "tnum", "cv05", "cv08"]
+# Code: no ligatures (readers should see the characters that are typed), marks for Vietnamese.
+MONO_FEATURES = ["ccmp", "locl", "mark", "mkmk"]
 
 # Order matters: a code point goes to the first subset that claims it, so subsets never overlap
 # and a Vietnamese page fetches latin + vietnamese only, never latin-ext as well.
@@ -50,16 +59,19 @@ SUBSETS = [
     ("cyrillic", "0301 0400-045F 0460-052F 0490-0491 04B0-04B1 1C80-1C8A 20B4 2116 2DE0-2DFF A640-A69F FE2E-FE2F"),
     ("greek", "0370-0377 037A-037F 0384-038A 038C 038E-03A1 03A3-03FF 1F00-1FFF"),
 ]
-# (source file, CSS family, style, file stem, axis pins/ranges, subset names).
+# (source, file in zip, CSS family, style, file stem, axis pins/ranges, features, subset names).
 # Display: Inter's display optical size, used only for titles; Latin scripts only, other scripts
 # fall back to the text cut in the same font stack.
 BUILDS = [
-    ("InterVariable.ttf", "Inter", "normal", "inter", {"opsz": OPSZ, "wght": WGHT}, None),
+    ("inter", "InterVariable.ttf", "Inter", "normal", "inter", {"opsz": OPSZ, "wght": WGHT}, FEATURES, None),
     # Italic is for emphasis in running text: one static regular weight is half the size, and a
     # rare bold italic shows as regular italic rather than costing every reader the full axis.
-    ("InterVariable-Italic.ttf", "Inter", "italic", "inter-italic", {"opsz": OPSZ, "wght": 400}, None),
-    ("InterVariable.ttf", "Inter Display", "normal", "inter-display", {"opsz": 32, "wght": DISPLAY_WGHT},
-     ["latin", "vietnamese", "latin-ext"]),
+    ("inter", "InterVariable-Italic.ttf", "Inter", "italic", "inter-italic", {"opsz": OPSZ, "wght": 400}, FEATURES, None),
+    ("inter", "InterVariable.ttf", "Inter Display", "normal", "inter-display", {"opsz": 32, "wght": DISPLAY_WGHT},
+     FEATURES, ["latin", "vietnamese", "latin-ext"]),
+    # Code: one regular weight; comments are told apart by color, not italics, so no italic file.
+    ("jbmono", "fonts/variable/JetBrainsMono[wght].ttf", "JetBrains Mono", "normal", "mono", {"wght": 400},
+     MONO_FEATURES, None),
 ]
 
 # Letter frequencies used to weigh average glyph width for the fallback size-adjust (English-ish
@@ -96,17 +108,18 @@ def to_ranges(cps):
     return ",".join(out)
 
 
-def fetch():
+def fetch(name):
+    url, sha, _, _ = SOURCES[name]
     CACHE.mkdir(parents=True, exist_ok=True)
-    zpath = CACHE / f"Inter-{VERSION}.zip"
+    zpath = CACHE / url.rsplit("/", 1)[1]
     if not zpath.exists():
-        print(f"subset-fonts: downloading {URL}")
-        with urllib.request.urlopen(URL) as r:
+        print(f"subset-fonts: downloading {url}")
+        with urllib.request.urlopen(url) as r:
             data = r.read()
         zpath.write_bytes(data)
     digest = hashlib.sha256(zpath.read_bytes()).hexdigest()
-    if digest != SHA256:
-        die(f"{zpath} sha256 {digest} != pinned {SHA256}; delete it and rerun")
+    if digest != sha:
+        die(f"{zpath} sha256 {digest} != pinned {sha}; delete it and rerun")
     return zipfile.ZipFile(zpath)
 
 
@@ -117,16 +130,17 @@ def avg_width(font):
 
 
 def main():
-    zf = fetch()
+    zips = {name: fetch(name) for name in SOURCES}
     OUT.mkdir(parents=True, exist_ok=True)
-    for old in OUT.glob("inter-*.woff2"):
+    for old in OUT.glob("*.woff2"):
         old.unlink()
-    (OUT / "license-inter.txt").write_bytes(zf.read("LICENSE.txt"))
+    for name, (_, _, lic, lic_out) in SOURCES.items():
+        (OUT / lic_out).write_bytes(zips[name].read(lic))
 
     faces = []
     inter_metrics = None
-    for fname, family, style, stem, axes, only in BUILDS:
-        inst = instancer.instantiateVariableFont(TTFont(io.BytesIO(zf.read(fname))), axes)
+    for src, fname, family, style, stem, axes, features, only in BUILDS:
+        inst = instancer.instantiateVariableFont(TTFont(io.BytesIO(zips[src].read(fname))), axes)
         available = set(inst.getBestCmap())
         claimed = set()
         for name, spec in SUBSETS:
@@ -140,7 +154,7 @@ def main():
             font = TTFont(io.BytesIO(_save(inst)))
             opts = subset.Options()
             opts.flavor = "woff2"
-            opts.layout_features = FEATURES
+            opts.layout_features = features
             opts.name_IDs = [0, 1, 2, 3, 4, 5, 6]  # keep copyright/license-relevant names
             opts.notdef_outline = True
             opts.hinting = False  # variable Inter ships unhinted outlines anyway
@@ -171,7 +185,7 @@ def write_css(faces, inter):
     hhea = inter["hhea"]
     lines = [
         "/* GENERATED by scripts/subset-fonts. Do not edit; change the script and rerun. */",
-        f"/* Inter {VERSION}, SIL Open Font License 1.1 (see license-inter.txt). */",
+        "/* Inter 4.1 and JetBrains Mono 2.304, SIL Open Font License 1.1 (see license-*.txt). */",
     ]
     for family, style, weight, file, ranges in faces:
         lines.append(
