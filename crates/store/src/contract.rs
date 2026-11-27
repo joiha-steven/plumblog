@@ -59,6 +59,7 @@ cases! {
     library::media_in_use_cannot_be_deleted,
     library::tags_round_trip,
     library::tag_links_and_versions,
+    library::tag_delete_stales_editors,
     library::series_round_trip,
     library::series_links_and_versions,
     library::series_delete_stales_editors,

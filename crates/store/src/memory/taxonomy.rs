@@ -67,6 +67,7 @@ impl TaxonomyStore for MemoryStore {
             // post_tags.tag_id is ON DELETE CASCADE.
             for p in s.posts.values_mut().filter(|p| p.tag_ids.contains(&id)) {
                 p.tag_ids.retain(|t| *t != id);
+                p.version += 1;
                 published |= p.status == PostStatus::Published;
             }
             if published {

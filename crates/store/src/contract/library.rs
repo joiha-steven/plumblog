@@ -641,3 +641,36 @@ pub async fn series_delete_stales_editors<S: Store>(db: &S) -> Check {
         ErrorCode::Conflict,
     )
 }
+
+/// Deleting a tag changes its posts, so their version moves: an editor holding the old
+/// version gets `Conflict` instead of a confusing missing-tag error.
+pub async fn tag_delete_stales_editors<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let t = ok("ensure_tag", db.ensure_tag("t", "T").await)?;
+    let other = ok("ensure_tag", db.ensure_tag("o", "O").await)?;
+    let mut p = post(u, "vi", "in", PostStatus::Draft);
+    p.tag_ids = vec![t, other];
+    let id = save(db, p.clone()).await?;
+    let mut q = post(u, "vi", "out", PostStatus::Draft);
+    q.tag_ids = vec![other];
+    let out = save(db, q).await?;
+    let stale = update(db, id, p).await?;
+    let before = ok("get_post", db.get_post(id).await)?.version;
+    let out_before = ok("get_post", db.get_post(out).await)?.version;
+    ok("delete_tag", db.delete_tag(t).await)?;
+    eq!(
+        "post losing the tag gets a new version",
+        ok("get_post", db.get_post(id).await)?.version,
+        before + 1,
+    )?;
+    eq!(
+        "post without the tag keeps its version",
+        ok("get_post", db.get_post(out).await)?.version,
+        out_before,
+    )?;
+    fails(
+        "stale save after the tag was deleted",
+        db.save_post(stale).await,
+        ErrorCode::Conflict,
+    )
+}

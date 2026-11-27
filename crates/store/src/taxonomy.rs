@@ -38,8 +38,9 @@ pub trait TaxonomyStore {
     async fn find_tag(&self, slug: &str) -> Result<Option<Tag>>;
     /// Ordered by name, then id.
     async fn list_tags(&self) -> Result<Vec<Tag>>;
-    /// `NotFound`. Removes the tag from every post; bumps the content version if any of
-    /// those posts is published.
+    /// `NotFound`. Removes the tag from every post and bumps their `version` (an editor
+    /// holding the old version must reload); bumps the content version if any of those
+    /// posts is published.
     async fn delete_tag(&self, id: TagId) -> Result<()>;
 
     /// `Conflict` on a duplicate slug.

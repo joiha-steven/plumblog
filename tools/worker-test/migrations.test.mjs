@@ -1,10 +1,10 @@
 // Migrations on real local D1 (wrangler, no Worker needed):
 // (a) a fresh database gets exactly the tables and indexes the migration files create;
 // (b) for every sample in migration-samples/NNNN.sql (data valid right after migration NNNN),
-//     applying the later migrations loses no rows and, where the row count is unchanged,
-//     changes no value in any column present both before and after.
+//     applying the later migrations keeps every row: each row is found again by its key from
+//     before (rowid; primary key for WITHOUT ROWID tables) with the same value in every column
+//     present both before and after. New rows are allowed; row order is never relied on.
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -52,13 +52,19 @@ function expectedSchema() {
   return { tables, indexes, virtual };
 }
 
-/** Rows of every statement in `sql`, run on the local D1 in `dir`. */
-function query(dir, sql) {
-  const out = wrangler(["d1", "execute", "DB", "--local", "--persist-to", dir, "--json", "--command", sql]);
+/** Rows of each statement, in order, from ONE wrangler call: each call costs about a
+ *  second, so per-table calls would push the Worker tests past their time budget. */
+function queryEach(dir, sqls) {
+  const out = wrangler(["d1", "execute", "DB", "--local", "--persist-to", dir, "--json", "--command", sqls.join(";\n")]);
   const start = out.indexOf("[");
   assert.ok(start >= 0, `no JSON in wrangler output:\n${out}`);
-  return JSON.parse(out.slice(start)).flatMap((r) => r.results ?? []);
+  const results = JSON.parse(out.slice(start)).map((r) => r.results ?? []);
+  assert.equal(results.length, sqls.length, "one result per statement");
+  return results;
 }
+
+/** Rows of a single statement. */
+const query = (dir, sql) => queryEach(dir, [sql])[0];
 
 function executeFile(dir, path) {
   wrangler(["d1", "execute", "DB", "--local", "--persist-to", dir, "--file", path]);
@@ -85,55 +91,87 @@ function counts(dir, tables) {
 
 const q = (name) => `"${name}"`;
 
-const hash = (rowJson) => {
-  const sha = createHash("sha256");
-  for (const j of rowJson) sha.update(j).update("\n");
-  return sha.digest("hex");
-};
-
-/** Columns and primary key of a table; virtual (FTS5) tables compare rowid, title, body. */
-function tableShape(dir, table, isVirtual) {
-  if (isVirtual) return { cols: ["rowid", "title", "body"], pk: ["rowid"] };
-  const info = query(dir, `SELECT name, pk FROM pragma_table_info('${table}')`);
-  return {
-    cols: info.map((c) => c.name),
-    pk: info.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name),
-  };
+/** Per table: columns and the SQL that names a row: rowid, or the primary key for a
+ *  WITHOUT ROWID table (no rowid there). Virtual (FTS5) tables compare title and body. */
+function tableShapes(dir, tables, virtual) {
+  const real = [...tables].filter((t) => !virtual.has(t));
+  const res = queryEach(
+    dir,
+    real.flatMap((t) => [
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '${t}'`,
+      `SELECT name, pk FROM pragma_table_info('${t}')`,
+    ]),
+  );
+  const shapes = {};
+  for (const t of tables) if (virtual.has(t)) shapes[t] = { cols: ["title", "body"], key: ["rowid"] };
+  real.forEach((t, i) => {
+    const [{ sql }] = res[2 * i];
+    const info = res[2 * i + 1];
+    const pk = info.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => q(c.name));
+    shapes[t] = { cols: info.map((c) => c.name), key: /WITHOUT\s+ROWID/i.test(sql) ? pk : ["rowid"] };
+  });
+  return shapes;
 }
 
-/** Rows of `cols` in a deterministic order: primary key, else rowid. */
-function orderedRows(dir, table, cols, pk) {
-  const orderBy = (pk.length ? pk : ["rowid"]).map(q).join(", ");
-  return query(dir, `SELECT ${cols.map(q).join(", ")} FROM ${q(table)} ORDER BY ${orderBy}`);
-}
-
-/** Every table's shape and ordered rows, to be compared after the later migrations. */
-function contentBefore(dir, tables, virtual) {
+/** Per table: rows of `cols` by key (JSON of the `key` expressions). `want` maps table -> {cols, key}. */
+function keyedRowsAll(dir, want) {
+  const tables = Object.keys(want);
+  const res = queryEach(
+    dir,
+    tables.map((t) => {
+      const { cols, key } = want[t];
+      return `SELECT ${[...key.map((k, i) => `${k} AS "__k${i}"`), ...cols.map(q)].join(", ")} FROM ${q(t)}`;
+    }),
+  );
   const out = {};
-  for (const t of tables) {
-    const shape = tableShape(dir, t, virtual.has(t));
-    out[t] = { ...shape, rows: orderedRows(dir, t, shape.cols, shape.pk) };
-  }
+  tables.forEach((t, i) => {
+    const rows = new Map();
+    for (const r of res[i]) rows.set(JSON.stringify(want[t].key.map((_, j) => r[`__k${j}`])), r);
+    out[t] = rows;
+  });
   return out;
 }
 
-/** Problems found comparing each table, on the columns present both before and after. */
+/** Every table's shape and rows by key, to be compared after the later migrations. */
+function contentBefore(dir, tables, virtual) {
+  const shapes = tableShapes(dir, tables, virtual);
+  const rows = keyedRowsAll(dir, shapes);
+  return Object.fromEntries(Object.keys(shapes).map((t) => [t, { ...shapes[t], rows: rows[t] }]));
+}
+
+/** Old rows that are gone or whose surviving columns changed, found by their old key. */
 function contentProblems(dir, before, virtual) {
   const problems = [];
+  const nowShapes = tableShapes(dir, new Set(Object.keys(before)), virtual);
+  const want = {};
   for (const [t, was] of Object.entries(before)) {
-    const now = tableShape(dir, t, virtual.has(t));
+    const now = nowShapes[t];
     const cols = was.cols.filter((c) => now.cols.includes(c));
-    const pk = was.pk.filter((c) => cols.includes(c));
-    const key = (r) => JSON.stringify(cols.map((c) => r[c]));
-    const a = was.rows.map(key);
-    const b = orderedRows(dir, t, cols, pk).map(key);
-    if (b.length < a.length) {
-      problems.push(`${t}: rows ${a.length} -> ${b.length}`);
-    } else if (b.length === a.length && hash(a) !== hash(b)) {
-      const i = a.findIndex((j, k) => j !== b[k]);
+    const keyGone = was.key.filter((k) => k !== "rowid" && !now.cols.includes(k.slice(1, -1)));
+    if (keyGone.length) {
+      problems.push(`${t}: key column(s) ${keyGone.join(", ")} no longer exist; old rows cannot be matched`);
+      continue;
+    }
+    want[t] = { cols, key: was.key };
+  }
+  const afterAll = keyedRowsAll(dir, want);
+  for (const [t, was] of Object.entries(before)) {
+    if (!want[t]) continue;
+    const { cols } = want[t];
+    const after = afterAll[t];
+    const bad = [];
+    for (const [k, old] of was.rows) {
+      const row = after.get(k);
+      const values = (r) => JSON.stringify(cols.map((c) => r[c]));
+      if (!row) bad.push(`  key ${k}: row is gone\n    before: ${values(old)}`);
+      else if (values(row) !== values(old)) {
+        bad.push(`  key ${k}: values changed\n    before: ${values(old)}\n    after:  ${values(row)}`);
+      }
+    }
+    if (bad.length) {
       problems.push(
-        `${t}: content changed (${a.length} rows, columns [${cols.join(", ")}], checksum ${hash(a).slice(0, 12)} -> ${hash(b).slice(0, 12)})\n` +
-          `  first differing row #${i}\n  before: ${a[i]}\n  after:  ${b[i]}`,
+        `${t}: ${bad.length} of ${was.rows.size} old rows lost or changed (key [${was.key.join(", ")}], columns [${cols.join(", ")}])\n` +
+          bad.slice(0, 3).join("\n"),
       );
     }
   }

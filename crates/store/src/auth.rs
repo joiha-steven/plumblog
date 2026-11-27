@@ -115,10 +115,10 @@ pub trait PasskeyStore {
     async fn find_passkey(&self, credential_id: &str) -> Result<Option<Passkey>>;
     /// Ordered by id.
     async fn list_passkeys(&self, user: UserId) -> Result<Vec<Passkey>>;
-    /// Records a sign-in: `last_used_at = at`, `sign_count = max(stored, sign_count)` (the
-    /// counter never goes back). Returns whether the counter is acceptable: `sign_count`
-    /// above the stored one, or both 0 (authenticators without a counter always send 0).
-    /// `false` hints at a cloned authenticator; the caller must refuse the sign-in. `NotFound`.
+    /// Returns whether the counter is acceptable: `sign_count` above the stored one, or both
+    /// 0 (authenticators without a counter always send 0). If so, records the sign-in:
+    /// `sign_count` and `last_used_at = at`. If not, writes nothing (the counter never goes
+    /// back); `false` hints at a cloned authenticator and the caller must refuse. `NotFound`.
     async fn touch_passkey(&self, id: i64, sign_count: i64, at: i64) -> Result<bool>;
     /// `NotFound`.
     async fn delete_passkey(&self, id: i64) -> Result<()>;

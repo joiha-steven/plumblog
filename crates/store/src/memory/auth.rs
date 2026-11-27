@@ -140,8 +140,11 @@ impl PasskeyStore for MemoryStore {
                 .get_mut(&id)
                 .ok_or_else(|| not_found("passkey", id))?;
             let accepted = sign_count > p.sign_count || (sign_count == 0 && p.sign_count == 0);
-            p.sign_count = p.sign_count.max(sign_count);
-            p.last_used_at = Some(at);
+            // A refused sign-in is not a use, so nothing is recorded.
+            if accepted {
+                p.sign_count = sign_count;
+                p.last_used_at = Some(at);
+            }
             Ok(accepted)
         })
     }

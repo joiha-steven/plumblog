@@ -171,7 +171,8 @@ impl PasskeyStore for D1Store {
 
     async fn touch_passkey(&self, id: i64, sign_count: i64, at: i64) -> Result<bool> {
         // The read and the write share one transaction, so the counter compared is the one
-        // replaced even when two sign-ins with the same passkey race.
+        // replaced even when two sign-ins with the same passkey race. A refused sign-in
+        // writes nothing.
         let read = self.stmt(
             "touch_passkey_read",
             "SELECT sign_count FROM passkeys WHERE id = ?",
@@ -179,7 +180,8 @@ impl PasskeyStore for D1Store {
         )?;
         let write = self.stmt(
             "touch_passkey",
-            "UPDATE passkeys SET sign_count = MAX(sign_count, ?), last_used_at = ? WHERE id = ?",
+            "UPDATE passkeys SET sign_count = ?1, last_used_at = ?2 \
+             WHERE id = ?3 AND (?1 > sign_count OR (?1 = 0 AND sign_count = 0))",
             &[int(sign_count)?, int(at)?, bound(id)],
         )?;
         let results = self.batch("touch_passkey", vec![read, write]).await?;

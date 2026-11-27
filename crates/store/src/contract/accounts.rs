@@ -462,7 +462,8 @@ pub async fn passkeys<S: Store>(db: &S) -> Check {
     )
 }
 
-/// The counter never goes back; only a higher value, or 0 after 0, is accepted.
+/// The counter never goes back; only a higher value, or 0 after 0, is accepted, and only an
+/// accepted sign-in is recorded.
 pub async fn passkey_sign_count<S: Store>(db: &S) -> Check {
     let a = user(db, "alice").await?;
     let k = ok("add_passkey", db.add_passkey(passkey(a, "c")).await)?;
@@ -477,15 +478,15 @@ pub async fn passkey_sign_count<S: Store>(db: &S) -> Check {
     eq!("increase is stored", stored("c").await?, (5, Some(T0 + 1)))?;
     eq!("equal is refused", touch(k, 5, T0 + 2).await?, false)?;
     eq!(
-        "equal keeps the counter",
+        "refused equal writes nothing",
         stored("c").await?,
-        (5, Some(T0 + 2))
+        (5, Some(T0 + 1))
     )?;
     eq!("decrease is refused", touch(k, 3, T0 + 3).await?, false)?;
     eq!(
-        "decrease keeps the higher counter",
+        "refused decrease writes nothing",
         stored("c").await?,
-        (5, Some(T0 + 3))
+        (5, Some(T0 + 1))
     )?;
     eq!(
         "zero after a counter is refused",
@@ -493,9 +494,9 @@ pub async fn passkey_sign_count<S: Store>(db: &S) -> Check {
         false
     )?;
     eq!(
-        "zero keeps the counter",
+        "refused zero writes nothing",
         stored("c").await?,
-        (5, Some(T0 + 4))
+        (5, Some(T0 + 1))
     )?;
     eq!("zero-zero is accepted", touch(z, 0, T0 + 5).await?, true)?;
     eq!(

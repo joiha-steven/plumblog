@@ -83,15 +83,22 @@ impl TaxonomyStore for D1Store {
     }
 
     async fn delete_tag(&self, id: TagId) -> Result<()> {
-        // Bump while the links still exist; the FK cascade then removes them.
+        // Bump the site and post versions while the links still exist; the FK cascade then
+        // removes them. The post version makes an editor holding the old post reload.
         let bump = bump_if(self, TAG_IS_PUBLISHED, &[bound(id.0)])?;
+        let posts = self.stmt(
+            "delete_tag_post_versions",
+            "UPDATE posts SET version = version + 1 \
+             WHERE id IN (SELECT post_id FROM post_tags WHERE tag_id = ?)",
+            &[bound(id.0)],
+        )?;
         let del = self.stmt(
             "delete_tag",
             "DELETE FROM tags WHERE id = ?",
             &[bound(id.0)],
         )?;
-        let results = self.batch("delete_tag", vec![bump, del]).await?;
-        if Self::changes("delete_tag", &results[1])? == 0 {
+        let results = self.batch("delete_tag", vec![bump, posts, del]).await?;
+        if Self::changes("delete_tag", &results[2])? == 0 {
             return Err(not_found("tag", id.0));
         }
         Ok(())
