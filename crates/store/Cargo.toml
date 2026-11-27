@@ -10,6 +10,8 @@ plumblog-model.workspace = true
 plumblog-markdown.workspace = true
 plumblog-syslog.workspace = true
 unicode-normalization.workspace = true
+
+[dev-dependencies]
 unicode-properties.workspace = true
 
 [lints]

@@ -8,7 +8,6 @@ use plumblog_model::{
     CommentId, Error, ErrorCode, Permission, PostId, Result, Role, UserId, stable_codes,
 };
 use plumblog_syslog::{EventKind, LogSink, Scope, record};
-use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 stable_codes! {
     /// Stored in `comments.status`.
@@ -98,22 +97,57 @@ pub struct Checked {
 }
 
 /// Characters that draw nothing, so they could blank a display name or hide inside one
-/// ("Ann" + a tag character shows as "Ann"). The body keeps them (the theme isolates its
-/// direction).
-///
-/// Controls (Cc) and every format character (Cf: bidi controls, zero-width characters, soft
-/// hyphen, BOM, tags, the Arabic letter mark...) come from the Unicode tables. The rest are the
-/// `Default_Ignorable_Code_Point` code points that are not Cf (Unicode `DerivedCoreProperties.txt`):
-/// the combining grapheme joiner, Hangul and Khmer fillers, Mongolian free variation selectors,
-/// variation selectors, and the reserved ignorable ranges. U+2800 is not ignorable but renders
-/// as a blank cell, the usual way to fake an empty name.
+/// ("Ann" + a tag character shows as "Ann"): every format character (`General_Category` Cf:
+/// bidi controls, zero-width characters, soft hyphen, BOM, tags...), the other
+/// `Default_Ignorable_Code_Point` code points (fillers, variation selectors, the combining
+/// grapheme joiner, reserved ranges), and U+2800, which is not ignorable but renders as a blank
+/// cell. Sorted, merged ranges for Unicode 18.0; the `invisible_table_matches_unicode` test
+/// rebuilds the set from the Unicode tables (a dev-dependency) so it cannot drift: when the
+/// test crate moves to a new Unicode version, regenerate this from the test's failure message.
+const INVISIBLE: &[(char, char)] = &[
+    ('\u{ad}', '\u{ad}'),
+    ('\u{34f}', '\u{34f}'),
+    ('\u{600}', '\u{605}'),
+    ('\u{61c}', '\u{61c}'),
+    ('\u{6dd}', '\u{6dd}'),
+    ('\u{70f}', '\u{70f}'),
+    ('\u{890}', '\u{891}'),
+    ('\u{8e2}', '\u{8e2}'),
+    ('\u{115f}', '\u{1160}'),
+    ('\u{17b4}', '\u{17b5}'),
+    ('\u{180b}', '\u{180f}'),
+    ('\u{200b}', '\u{200f}'),
+    ('\u{202a}', '\u{202e}'),
+    ('\u{2060}', '\u{206f}'),
+    ('\u{2800}', '\u{2800}'),
+    ('\u{3164}', '\u{3164}'),
+    ('\u{fe00}', '\u{fe0f}'),
+    ('\u{feff}', '\u{feff}'),
+    ('\u{ffa0}', '\u{ffa0}'),
+    ('\u{fff0}', '\u{fffb}'),
+    ('\u{110bd}', '\u{110bd}'),
+    ('\u{110cd}', '\u{110cd}'),
+    ('\u{13430}', '\u{1343f}'),
+    ('\u{1bca0}', '\u{1bca3}'),
+    ('\u{1d173}', '\u{1d17a}'),
+    ('\u{e0000}', '\u{e0fff}'),
+];
+
+/// Whether `c` draws nothing: a control (Cc) or in [`INVISIBLE`]. The body keeps such
+/// characters (the theme isolates its direction).
 fn invisible(c: char) -> bool {
     c.is_control()
-        || c.general_category() == GeneralCategory::Format
-        || matches!(c, '\u{34f}' | '\u{115f}'..='\u{1160}' | '\u{17b4}'..='\u{17b5}'
-            | '\u{180b}'..='\u{180d}' | '\u{180f}' | '\u{2065}' | '\u{2800}' | '\u{3164}'
-            | '\u{fe00}'..='\u{fe0f}' | '\u{ffa0}' | '\u{fff0}'..='\u{fff8}'
-            | '\u{e0000}'..='\u{e0fff}')
+        || INVISIBLE
+            .binary_search_by(|&(lo, hi)| {
+                if hi < c {
+                    std::cmp::Ordering::Less
+                } else if lo > c {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
 }
 
 /// Checks the reader's form fields.
@@ -307,6 +341,56 @@ async fn log_moderation<S: LogSink>(
 
 #[cfg(test)]
 mod tests {
+    use super::{INVISIBLE, invisible};
+    use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+
+    /// `Default_Ignorable_Code_Point` code points that are not Cf, from Unicode
+    /// `DerivedCoreProperties.txt` (the Unicode tables crate does not expose the property).
+    const IGNORABLE_NOT_FORMAT: &[(u32, u32)] = &[
+        (0x34f, 0x34f),
+        (0x115f, 0x1160),
+        (0x17b4, 0x17b5),
+        (0x180b, 0x180d),
+        (0x180f, 0x180f),
+        (0x2065, 0x2065),
+        (0x3164, 0x3164),
+        (0xfe00, 0xfe0f),
+        (0xffa0, 0xffa0),
+        (0xfff0, 0xfff8),
+        (0xe0000, 0xe0fff),
+    ];
+
+    #[test]
+    fn invisible_table_matches_unicode() {
+        let sorted = INVISIBLE.windows(2).all(|w| w[0].1 < w[1].0);
+        assert!(sorted, "INVISIBLE must be sorted and not overlap");
+        let mut wrong = Vec::new();
+        for u in 0..=0x10_ffff_u32 {
+            let Some(c) = char::from_u32(u) else { continue };
+            let want = c.is_control()
+                || c.general_category() == GeneralCategory::Format
+                || IGNORABLE_NOT_FORMAT
+                    .iter()
+                    .any(|&(lo, hi)| (lo..=hi).contains(&u))
+                || u == 0x2800;
+            let have = invisible(c);
+            if want != have {
+                wrong.push(format!("U+{u:04X} want {want}"));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "INVISIBLE drifted from Unicode {:?}: {}",
+            unicode_properties::UNICODE_VERSION,
+            wrong
+                .iter()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
     use super::{Actor, BODY_MAX, LINKS_MAX, Moderation, NAME_MAX, check, moderate};
     use super::{set_site_enabled, site_enabled};
     use crate::memory::MemoryStore;

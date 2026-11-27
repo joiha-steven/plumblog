@@ -81,7 +81,7 @@ markdown pulldown-cmark         # CommonMark + GFM parser
 markdown pulldown-latex         # LaTeX to MathML at save time
 i18n     toml                   # locale files are TOML
 store unicode-normalization  # in-memory search folds diacritics like FTS5 unicode61
-store unicode-properties     # comment names drop format characters (General_Category Cf)
+store unicode-properties     # tests only: checks the comment-name invisible table against Unicode
 webhook serde_json            # payload JSON
 '
 meta=$(cargo metadata -q --format-version 1 --no-deps) || fail "cargo metadata failed"
