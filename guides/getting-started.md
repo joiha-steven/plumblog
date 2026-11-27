@@ -43,7 +43,9 @@ blog rollback --to <version-id>
 blog rollback --db <bookmark> --yes
 ```
 
-`blog rollback` returns to the version before the last deploy; `--to` picks a recent one.
+`blog rollback` returns to the version before the last deploy; `--to` picks a recent one. A
+version whose bundle lacked migrations the database has run, or that `blog` did not deploy from
+this folder, is refused (`rollback.older`) unless `--allow-older` is added.
 `--db` overwrites the whole database with its state at the bookmark and cancels running
 queries, so it needs `--yes`; it prints the bookmark that undoes it. After a failed migration
 every deploy refuses until `blog rollback --db` has run. `cf.network_write_uncertain` means the

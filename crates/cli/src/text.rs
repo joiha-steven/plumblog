@@ -79,6 +79,9 @@ codes! {
     BundleOlder => "deploy.bundle_older",
     CronFailed => "deploy.cron_failed",
     RollbackPlaceholder => "rollback.placeholder",
+    ScriptForeign => "setup.script_foreign",
+    MigrationUnrecorded => "setup.migration_unrecorded",
+    RollbackOlder => "rollback.older",
 }
 
 /// One language's `[cli]` text, English behind it.

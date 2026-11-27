@@ -555,6 +555,12 @@ impl Client {
                 .header("Authorization", &auth)
                 .header("Accept", "application/json")
                 .call(),
+            Method::Delete => self
+                .agent
+                .delete(url)
+                .header("Authorization", &auth)
+                .header("Accept", "application/json")
+                .call(),
             Method::Post | Method::Put => {
                 let req = if spec.method == Method::Post {
                     self.agent.post(url)

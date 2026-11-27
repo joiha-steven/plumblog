@@ -1012,3 +1012,222 @@ fn an_owner_created_during_setup_gets_no_code() {
         0
     );
 }
+
+/// A Worker `plumblog` someone else deployed: a version without our marker, workers.dev off.
+fn foreign_script(st: &mut State, marker: Option<&str>) {
+    let id = "11111111-0000-4000-8000-000000000001".to_string();
+    let mut bindings = vec![json!({"type": "plain_text", "name": "API_URL", "text": "x"})];
+    if let Some(m) = marker {
+        bindings.push(json!({"type": "plain_text", "name": "PLUMBLOG_SITE_ID", "text": m}));
+    }
+    st.versions.push(crate::fake_cf::Version {
+        id: id.clone(),
+        metadata: json!({"main_module": "app.js", "bindings": bindings}),
+        modules: vec!["app.js".into()],
+    });
+    let mut s = crate::fake_cf::Script::default();
+    s.secrets.insert("THEIR_KEY".into(), "theirs".into());
+    s.versions.push(id.clone());
+    s.deployments.push(id);
+    st.scripts.insert("plumblog".into(), s);
+}
+
+#[test]
+fn a_worker_blog_did_not_make_is_refused() {
+    // No marker; or another site's marker while this folder recorded its own.
+    for marker in [None, Some("their-marker")] {
+        let mut st = site(ALL);
+        foreign_script(&mut st, marker);
+        let fake = Fake::start(st);
+        let dir = TempDir::new();
+        if marker.is_some() {
+            state::save(
+                &dir.0,
+                &state::SiteState {
+                    script_marker: Some("my-marker".into()),
+                    ..state::SiteState::default()
+                },
+                &[],
+            )
+            .unwrap();
+        }
+        let r = run(&fake, &dir, &Options::default());
+        let e = r.result.unwrap_err();
+        assert_eq!(e.code, Code::ScriptForeign, "{}", e.message);
+        assert!(
+            e.message.contains("plumblog") && e.message.contains("--name"),
+            "{}",
+            e.message
+        );
+        assert_eq!(changes(&fake.requests()), Vec::<String>::new());
+        let st = fake.state();
+        let s = &st.scripts["plumblog"];
+        assert!(!s.workers_dev, "workers.dev untouched");
+        assert_eq!(s.uploads, 0, "no upload");
+        assert_eq!(s.secrets.len(), 1, "no secret added");
+        assert!(st.d1.is_empty() && st.r2.is_empty(), "nothing created");
+    }
+}
+
+#[test]
+fn our_script_resumes_and_an_older_setup_gets_its_marker() {
+    // Ours by marker, with a fresh folder (lost state): adopted, marker recorded.
+    let (fake, dir, _) = fresh();
+    let marker = state::load(&dir.0).unwrap().unwrap().script_marker.unwrap();
+    std::fs::remove_file(state::path(&dir.0)).unwrap();
+    ok(&run(&fake, &dir, &Options::default()));
+    let st = state::load(&dir.0).unwrap().unwrap();
+    assert_eq!(st.script_marker.as_deref(), Some(marker.as_str()));
+    assert_eq!(fake.state().scripts["plumblog"].uploads, 1);
+
+    // Made by an older setup (no marker), ours by its recorded placeholder: resumes and
+    // records a marker for the next deploy to add.
+    let mut st = site(ALL);
+    foreign_script(&mut st, None);
+    let fake = Fake::start(st);
+    let dir = TempDir::new();
+    state::save(
+        &dir.0,
+        &state::SiteState {
+            worker: Some("plumblog".into()),
+            placeholder_version: Some("11111111-0000-4000-8000-000000000001".into()),
+            ..state::SiteState::default()
+        },
+        &[],
+    )
+    .unwrap();
+    let r = run(&fake, &dir, &Options::default());
+    ok(&r);
+    assert!(r.out.contains("PLUMBLOG_SITE_ID"), "{}", r.out);
+    let st = state::load(&dir.0).unwrap().unwrap();
+    assert_eq!(st.script_marker.map(|m| m.len()), Some(32));
+    assert_eq!(fake.state().scripts["plumblog"].uploads, 0);
+    assert!(fake.state().scripts["plumblog"].workers_dev);
+}
+
+#[test]
+fn setup_waits_for_a_running_deploy() {
+    let fake = Fake::start(site(ALL));
+    let dir = TempDir::new();
+    std::fs::write(dir.0.join(plumblog_cli::deploy::LOCK_FILE), "123\n").unwrap();
+    let r = run(&fake, &dir, &Options::default());
+    assert_eq!(r.result.unwrap_err().code, Code::DeployLocked);
+    assert!(fake.requests().is_empty(), "nothing sent while locked");
+    assert!(!state::path(&dir.0).exists());
+    std::fs::remove_file(dir.0.join(plumblog_cli::deploy::LOCK_FILE)).unwrap();
+    ok(&run(&fake, &dir, &Options::default()));
+    assert!(!dir.0.join(plumblog_cli::deploy::LOCK_FILE).exists());
+}
+
+#[test]
+fn a_state_edit_between_two_steps_is_kept() {
+    let fake = Fake::start(site(ALL));
+    let dir = TempDir::new();
+    // Someone edits site.local.toml while setup runs (after the D1 step saved it).
+    let path = dir.0.clone();
+    fake.on_request("POST /accounts/acc1/r2/buckets", move || {
+        let mut st = state::load(&path).unwrap().unwrap();
+        st.rollbacks.push(state::RollbackRecord {
+            at: "2026-11-01T00:00:00Z".into(),
+            kind: "version".into(),
+            to: "edited-meanwhile".into(),
+            ..state::RollbackRecord::default()
+        });
+        state::save(&path, &st, &[]).unwrap();
+    });
+    ok(&run(&fake, &dir, &Options::default()));
+    let st = state::load(&dir.0).unwrap().unwrap();
+    assert_eq!(st.rollbacks.len(), 1, "the edit made meanwhile survives");
+    assert_eq!(st.rollbacks[0].to, "edited-meanwhile");
+    // And so does everything setup recorded after it.
+    assert!(st.r2.is_some() && st.turnstile_site_key.is_some() && st.placeholder_version.is_some());
+}
+
+#[test]
+fn no_turnstile_on_a_site_that_has_it_really_turns_it_off() {
+    let (fake, dir, _) = fresh();
+    let sitekey = state::load(&dir.0)
+        .unwrap()
+        .unwrap()
+        .turnstile_site_key
+        .unwrap();
+    assert_eq!(
+        setting(&fake, "turnstile_site_key"),
+        Some(format!("\"{sitekey}\""))
+    );
+    let version =
+        |f: &Fake| f.sql("db-1", "SELECT content_version FROM site")[0]["content_version"].clone();
+    let before = version(&fake);
+    let off = Options {
+        turnstile: Turnstile::Off,
+        ..Options::default()
+    };
+    let r = run(&fake, &dir, &off);
+    ok(&r);
+    assert_eq!(setting(&fake, "turnstile_site_key"), None);
+    assert_eq!(
+        version(&fake),
+        json!(before.as_i64().unwrap() + 1),
+        "cache keys move on"
+    );
+    assert_eq!(secret(&fake, "TURNSTILE_SECRET"), None);
+    assert!(secret(&fake, "WEBHOOK_KEY").is_some(), "other secrets stay");
+    assert_eq!(
+        state::load(&dir.0).unwrap().unwrap().turnstile_site_key,
+        None
+    );
+    assert_eq!(fake.state().widgets.len(), 1, "the widget is kept");
+    assert!(
+        r.out.contains("plumblog-plumblog") && r.out.contains("Turnstile is off"),
+        "{}",
+        r.out
+    );
+    // Again: already off, nothing deleted.
+    let n = fake.requests().len();
+    let again = run(&fake, &dir, &off);
+    ok(&again);
+    assert!(!again.out.contains("plumblog-plumblog"), "{}", again.out);
+    assert!(
+        fake.requests()[n..]
+            .iter()
+            .all(|q| q.method != "DELETE" && !q.body.contains("DELETE FROM settings"))
+    );
+}
+
+#[test]
+fn a_migration_whose_record_fails_is_unrecorded_and_blocks_the_next_run() {
+    let fake = Fake::start(site(ALL));
+    let dir = TempDir::new();
+    // 0001's SQL succeeds, then its d1_migrations row cannot be written.
+    fake.fail_body("INSERT INTO \\\"d1_migrations\\\"", Failure::Status(400));
+    let r = run(&fake, &dir, &Options::default());
+    let e = r.result.unwrap_err();
+    assert_eq!(e.code, Code::MigrationUnrecorded, "{}", e.message);
+    let first = migrations::bundled()[0].name.clone();
+    assert!(
+        e.message.contains(&first) && e.message.contains("bm-db-1-1"),
+        "{}",
+        e.message
+    );
+    assert_eq!(
+        fake.sql("db-1", "SELECT * FROM site").len(),
+        1,
+        "its SQL ran"
+    );
+    assert_eq!(fake.sql("db-1", "SELECT * FROM d1_migrations").len(), 0);
+    let st = state::load(&dir.0).unwrap().unwrap();
+    let failed = st.migrations.failed.clone().unwrap();
+    assert_eq!(
+        (failed.name.as_str(), failed.bookmark.as_str()),
+        (first.as_str(), "bm-db-1-1")
+    );
+    assert!(st.migrations.applied.is_empty());
+    assert!(fake.state().scripts.is_empty(), "no step after it ran");
+    let n = fake.requests().len();
+    let again = run(&fake, &dir, &Options::default());
+    assert_eq!(
+        again.result.unwrap_err().code,
+        Code::MigrationRestorePending
+    );
+    assert_eq!(changes(&fake.requests()[n..]), Vec::<String>::new());
+}
