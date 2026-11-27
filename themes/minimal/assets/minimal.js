@@ -15,7 +15,7 @@
   // screens and as a toggle under the sentence on narrow ones; the bottom list stays for print.
   const prose = d.querySelector(".prose");
   if (!prose || !prose.querySelector(".footnotes")) return;
-  const label = prose.dataset.noteLabel || "Note {n}";
+  const label = prose.dataset.noteLabel || "{n}"; // text comes from the theme locale
   for (const a of prose.querySelectorAll(".fnref > a[href^='#']")) {
     const li = d.getElementById(decodeURIComponent(a.hash.slice(1)));
     if (!li) continue;

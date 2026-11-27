@@ -1,0 +1,23 @@
+# Text of the minimal theme, English. Templates call t("section.key", name=value);
+# {name} placeholders are filled from those arguments.
+[nav]
+skip_to_content = "Skip to content"
+site = "Site"
+toggle_theme = "Switch light or dark"
+feed = "RSS"
+
+[home]
+pinned = "Pinned"
+pages = "Pages"
+older_posts = "Older posts"
+newer_posts = "Newer posts"
+
+[post]
+page_title = "{title} - {site}"
+reading_time = "{minutes} min read"
+tag = "#{name}"
+posts = "Posts"
+previous = "Previous"
+next = "Next"
+# {n} is filled in by the sidenote script, per note.
+show_note = "Show note {n}"

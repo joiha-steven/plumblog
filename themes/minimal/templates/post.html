@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block title %}{{ post.title }} - {{ site.title }}{% endblock %}
+{% block title %}{{ t("post.page_title", title=post.title, site=site.title) }}{% endblock %}
 {% block main %}
 <article>
   <header class="post-head">
     <h1>{{ post.title }}</h1>
     <p class="meta">
       <time datetime="{{ post.date_iso }}">{{ post.date_display }}</time>
-      &middot; {{ t.minutes_read | replace("{n}", post.reading_minutes) }}
+      &middot; {{ t("post.reading_time", minutes=post.reading_minutes) }}
     </p>
     {%- if post.cover %}
     <figure class="cover">
@@ -15,21 +15,21 @@
     {%- endif %}
   </header>
   {#- post.html is rendered from Markdown on save and sanitized by core; it is trusted here. #}
-  <div class="prose" data-note-label="{{ t.show_note }}">
+  <div class="prose" data-note-label="{{ t("post.show_note") }}">
 {{ post.html | safe }}
   </div>
   <footer class="post-foot">
     {%- if post.tags %}
     <ul class="tags">
       {%- for tag in post.tags %}
-      <li><a href="{{ tag.url }}" rel="tag">#{{ tag.name }}</a></li>
+      <li><a href="{{ tag.url }}" rel="tag">{{ t("post.tag", name=tag.name) }}</a></li>
       {%- endfor %}
     </ul>
     {%- endif %}
     {%- if post.prev or post.next %}
-    <nav class="pager" aria-label="Posts">
-      {%- if post.prev %}<a class="prev" href="{{ post.prev.url }}" rel="prev"><span>{{ t.previous_post }}</span>{{ post.prev.title }}</a>{% endif %}
-      {%- if post.next %}<a class="next" href="{{ post.next.url }}" rel="next"><span>{{ t.next_post }}</span>{{ post.next.title }}</a>{% endif %}
+    <nav class="pager" aria-label="{{ t("post.posts") }}">
+      {%- if post.prev %}<a class="prev" href="{{ post.prev.url }}" rel="prev"><span>{{ t("post.previous") }}</span>{{ post.prev.title }}</a>{% endif %}
+      {%- if post.next %}<a class="next" href="{{ post.next.url }}" rel="next"><span>{{ t("post.next") }}</span>{{ post.next.title }}</a>{% endif %}
     </nav>
     {%- endif %}
   </footer>

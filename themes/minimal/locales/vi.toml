@@ -1,0 +1,21 @@
+# Text of the minimal theme, Vietnamese.
+[nav]
+skip_to_content = "Bỏ qua, tới nội dung"
+site = "Trang"
+toggle_theme = "Đổi sáng hoặc tối"
+feed = "RSS"
+
+[home]
+pinned = "Ghim"
+pages = "Trang bài"
+older_posts = "Bài cũ hơn"
+newer_posts = "Bài mới hơn"
+
+[post]
+page_title = "{title} - {site}"
+reading_time = "{minutes} phút đọc"
+tag = "#{name}"
+posts = "Bài viết"
+previous = "Bài trước"
+next = "Bài sau"
+show_note = "Xem chú thích {n}"

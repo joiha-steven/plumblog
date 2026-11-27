@@ -119,6 +119,7 @@ Not built: PWA/offline, newsletter (later), reactions.
   style.css      uses tokens only, no hard-coded colors
   templates/     optional minijinja overrides; missing files fall back to the default theme
   assets/        images, fonts, JS
+  locales/       the theme's own UI text, one TOML per language; templates call t("section.key", name=value)
   ```
 - Themes may contain JS. Installing a theme not made locally shows a warning.
 - **minimal** is built first; literary and technical follow once it is approved.
