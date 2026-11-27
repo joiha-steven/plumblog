@@ -35,6 +35,10 @@ size=$(gzip -9 -c "$WASM_FILE" | wc -c | tr -d ' ')
 echo "check: worker.wasm gzip = $size bytes (budget $WASM_GZIP_BUDGET_BYTES)"
 [ "$size" -le "$WASM_GZIP_BUDGET_BYTES" ] || fail "worker wasm gzip $size > budget $WASM_GZIP_BUDGET_BYTES"
 
+# Own block: the real Worker over HTTP under local wrangler (about 5 s warm). Needs Node.
+step "worker integration (wrangler dev, local D1/R2)"
+scripts/worker-test || fail "worker integration tests (run scripts/worker-test for details)"
+
 # Files git would track: tracked + untracked, minus ignored, minus deleted.
 # Written to a file first so a git failure fails the check instead of vanishing in a pipe.
 list_file=$(mktemp)

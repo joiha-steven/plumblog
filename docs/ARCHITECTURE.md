@@ -285,3 +285,4 @@ Work is tracked as GitHub Issues grouped in one milestone per phase; this list o
 - 2026-11-27 Code highlighting on the reader page (deferred, <= 8 KB, only pages with code); nothing at save time.
 - 2026-11-27 Blog works on `*.workers.dev`; Cache API guaranteed only on custom domains (workers.dev to be measured). Cache invalidation by content version.
 - 2026-11-27 Owner-facing system log in Settings; Node.js is contributor-only.
+- 2026-11-27 Worker integration tests: Node tools pinned in `tools/` (keeps repo root Rust-only), real wasm via pinned worker-build under `wrangler dev` with a dev-only `tools/wrangler.dev.toml`; run by `scripts/worker-test`, part of `scripts/check`.
