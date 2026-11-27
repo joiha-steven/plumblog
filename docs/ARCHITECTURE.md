@@ -35,7 +35,7 @@ agent a Cloudflare API token, and the agent sets up, writes, translates, themes 
 | Posts, users, settings, sessions | D1 | FTS5 for search |
 | Images, theme bundles | R2 | |
 | Admin JS/CSS, default theme assets | Workers static assets | |
-| Rendered pages | Cache API | Cache keys include a site content version that every publish bumps, so no purge calls. Cache API only works on a custom domain: on `*.workers.dev` the blog works fully but every view is rendered (about 1-2 ms CPU, more D1 reads); a custom domain is recommended for real use |
+| Rendered pages | Cache API | Cache keys include a site content version that every publish bumps, so no purge calls. Cloudflare docs only promise working cache operations on custom domains; behaviour on `*.workers.dev` is unconfirmed and must be measured (issue #8). The blog works either way: without cache every view is rendered (about 1-2 ms CPU, more D1 reads). Free plan: cache calls share the 50-per-request subrequest budget |
 | Scheduled publishing | Cron Trigger | |
 | Spam protection | Turnstile | Login after failures, comments |
 | Analytics | Cloudflare Web Analytics | Not built into admin; an AI guide fetches numbers |
@@ -283,5 +283,5 @@ Work is tracked as GitHub Issues grouped in one milestone per phase; this list o
 - 2026-11-27 Reader site and admin are installable web apps with distinct manifests and icon colors; no offline reading.
 - 2026-11-27 One crate per module with an enforced dependency graph; logic is storage-agnostic behind store traits.
 - 2026-11-27 Code highlighting on the reader page (deferred, <= 8 KB, only pages with code); nothing at save time.
-- 2026-11-27 Blog works on `*.workers.dev` without cache; a custom domain adds the Cache API. Cache invalidation by content version.
+- 2026-11-27 Blog works on `*.workers.dev`; Cache API guaranteed only on custom domains (workers.dev to be measured). Cache invalidation by content version.
 - 2026-11-27 Owner-facing system log in Settings; Node.js is contributor-only.
