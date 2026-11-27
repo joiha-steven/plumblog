@@ -32,7 +32,12 @@ fi
 
 # Build once here: node --test runs each file in its own process, in parallel.
 # --no-opt: wasm-opt is for deploy size; tests want the fastest correct build.
-(cd crates/worker && "../../$wb" --release --no-opt --out-dir ../../target/worker-dev) \
+# Arguments after `--` go to cargo build. contract-tests adds the /__contract route, which
+# empties the database to run the store contract suite on D1. Its own target dir keeps that
+# wasm away from target/wasm32-unknown-unknown/release, the deploy and size-budget build.
+contract_target="$PWD/target/contract-tests"
+(cd crates/worker && "../../$wb" --release --no-opt --out-dir ../../target/worker-dev \
+  -- --features contract-tests --target-dir "$contract_target") \
   || fail "worker-build failed"
 
 # Static assets the Worker's pages link to (crates/worker/src/pages THEME_ASSETS_URL).
