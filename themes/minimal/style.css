@@ -222,6 +222,8 @@ td[align="right"], th[align="right"] { text-align: right; }
 @media (min-width: 76rem) {
   .has-sidenotes { --sn-w: min(15rem, calc((100vw - var(--measure) - 2 * var(--gutter)) / 2 - 3.5rem)); }
   .has-sidenotes .fnref button { pointer-events: none; }
+  /* A footnote cited again points at the note beside its first citation. */
+  .has-sidenotes .fnref button.again { pointer-events: auto; }
   .sidenote, .sidenote.open { display: block; float: right; clear: right; width: var(--sn-w); margin: .3em calc(-1 * (var(--sn-w) + 2.75rem)) .8em 0; padding: 0 0 0 .8em; border-left: 2px solid var(--c-rule); border-radius: 0; background: none; animation: none; font-size: calc(var(--fs) * .78); }
 }
 

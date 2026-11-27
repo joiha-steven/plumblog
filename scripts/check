@@ -93,6 +93,8 @@ if [ -n "$graph_errors" ]; then echo "$graph_errors"; fail "crate dependency gra
 # Own block: the real Worker over HTTP under local wrangler (about 5 s warm). Needs Node.
 step "worker integration (wrangler dev, local D1/R2)"
 scripts/worker-test || fail "worker integration tests (run scripts/worker-test for details)"
+step "theme script tests (node)"
+node --test "tools/theme-test/*.test.mjs" || fail "theme script tests (run: node --test 'tools/theme-test/*.test.mjs')"
 
 # Files git would track: tracked + untracked, minus ignored, minus deleted.
 # Written to a file first so a git failure fails the check instead of vanishing in a pipe.
