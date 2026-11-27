@@ -12,6 +12,7 @@ mod passkey;
 mod principal;
 mod site;
 mod tokens;
+mod v1;
 
 use plumblog_auth::Crypto;
 use plumblog_auth::base64url;
@@ -164,10 +165,11 @@ fn respond(reply: Reply) -> worker::Result<Response> {
 }
 
 fn error_reply(e: &Error) -> Reply {
-    Reply::json(
-        status(e.code),
-        body::object(&[("error", body::Out::Str(e.code.as_str().to_owned()))]),
-    )
+    let mut out = vec![("error", body::Out::Str(e.code.as_str().to_owned()))];
+    if let Some(f) = &e.field {
+        out.push(("field", body::Out::Str(f.clone())));
+    }
+    Reply::json(status(e.code), body::object(&out))
 }
 
 /// Non-GET requests must come from this site's own pages: `Origin` equal to the configured site
@@ -187,15 +189,15 @@ fn check_origin(req: &Request, method: &Method, want: &str) -> Result<()> {
     }
 }
 
-/// The request body, refused before it is read when `Content-Length` says it is over
-/// [`body::MAX_BODY`] (413), or when a body comes without one (chunked: its size is unknown
-/// until read, 411). The runtime frames the body by `Content-Length`, so it cannot be longer;
-/// the length is checked again after reading all the same.
-async fn read_body(req: &mut Request) -> Result<Vec<u8>> {
+/// The request body, refused before it is read when `Content-Length` says it is over `max`
+/// (413), or when a body comes without one (chunked: its size is unknown until read, 411).
+/// The runtime frames the body by `Content-Length`, so it cannot be longer; the length is
+/// checked again after reading all the same.
+async fn read_body(req: &mut Request, max: usize) -> Result<Vec<u8>> {
     let too_large = |n: usize| {
         Error::new(
             ErrorCode::BodyTooLarge,
-            format!("body of {n} bytes > {}", body::MAX_BODY),
+            format!("body of {n} bytes > {max}"),
         )
     };
     match req.headers().get("content-length").ok().flatten() {
@@ -203,7 +205,7 @@ async fn read_body(req: &mut Request) -> Result<Vec<u8>> {
             let n: usize = v.trim().parse().map_err(|_| {
                 Error::new(ErrorCode::InvalidInput, format!("Content-Length {v:?}"))
             })?;
-            if n > body::MAX_BODY {
+            if n > max {
                 return Err(too_large(n));
             }
         }
@@ -219,7 +221,7 @@ async fn read_body(req: &mut Request) -> Result<Vec<u8>> {
         .bytes()
         .await
         .map_err(|e| Error::new(ErrorCode::InvalidInput, format!("body: {e}")))?;
-    if bytes.len() > body::MAX_BODY {
+    if bytes.len() > max {
         return Err(too_large(bytes.len()));
     }
     Ok(bytes)
@@ -264,10 +266,17 @@ pub async fn handle(mut req: Request, env: &Env) -> worker::Result<Response> {
         let body = if matches!(method, Method::Get | Method::Head) {
             Vec::new()
         } else {
-            read_body(&mut req).await?
+            read_body(&mut req, v1::max_body(&method, &path)).await?
         };
         let (principal, cookie) = principal::resolve(&ctx, &req).await?;
         gate_cookie = cookie;
+        if path.starts_with(v1::PREFIX) {
+            let url = req
+                .url()
+                .map_err(|e| Error::new(ErrorCode::Internal, format!("request url: {e}")))?;
+            let query: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+            return v1::dispatch(&ctx, &principal, &method, &path, &query, &body).await;
+        }
         route(&ctx, &principal, &method, &path, &body).await
     }
     .await;

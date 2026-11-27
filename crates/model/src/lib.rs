@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+pub mod api;
 pub mod ts;
 
 /// Engine version, taken from the workspace so it never drifts.
@@ -70,6 +71,9 @@ stable_codes! {
 pub struct Error {
     pub code: ErrorCode,
     pub detail: String,
+    /// The request field at fault, for input errors: API answers name it so a client can
+    /// point at it.
+    pub field: Option<String>,
 }
 
 impl Error {
@@ -77,7 +81,17 @@ impl Error {
         Self {
             code,
             detail: detail.into(),
+            field: None,
         }
+    }
+
+    /// The same error, naming the request field at fault (the first one named wins).
+    #[must_use]
+    pub fn at(mut self, field: &str) -> Self {
+        if self.field.is_none() {
+            self.field = Some(field.to_owned());
+        }
+        self
     }
 }
 
