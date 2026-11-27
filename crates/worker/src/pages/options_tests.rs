@@ -83,6 +83,13 @@ impl ExtSource for Flaky {
     ) -> impl Future<Output = Result<Vec<(String, Vec<(String, String)>)>, String>> {
         std::future::ready(Err("d1 timeout".to_owned()))
     }
+    fn comments(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> impl Future<Output = Result<Option<plumblog_render::Comments>, String>> {
+        std::future::ready(Err("d1 timeout".to_owned()))
+    }
 }
 
 #[test]

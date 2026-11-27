@@ -1,6 +1,9 @@
 //! Loading a theme and rendering pages with it.
 
-use crate::data::{Body, EntryData, LinkData, PageInfo, Post, PostData, Site, civil, cut_words};
+use crate::data::{
+    Body, CommentItemData, Comments, CommentsData, EntryData, LinkData, PageInfo, Post, PostData,
+    Site, civil, cut_words,
+};
 use crate::keys;
 use crate::options::{self, FieldType, Group, OptionDecl, Owner, Schema};
 use crate::plugin::Plugin;
@@ -415,7 +418,12 @@ impl Theme {
                     newer_url: newer_url.as_deref(),
                 }),
             ),
-            Body::Post { post, prev, next } => {
+            Body::Post {
+                post,
+                prev,
+                next,
+                comments,
+            } => {
                 let entry = self.entry(post);
                 let description = entry.excerpt.clone();
                 let data = PostData {
@@ -428,7 +436,15 @@ impl Theme {
                     prev: link(*prev),
                     next: link(*next),
                 };
-                (PageKind::Post, description, ser(PostPage { post: data }))
+                let comments = comments.map(|c| self.comments(&post.lang, c));
+                (
+                    PageKind::Post,
+                    description,
+                    ser(PostPage {
+                        post: data,
+                        comments,
+                    }),
+                )
             }
             Body::Tag {
                 tag,
@@ -525,6 +541,48 @@ impl Theme {
         posts.iter().map(|p| self.entry(p)).collect()
     }
 
+    fn date_display(&self, lang: &str, (year, month, day): (i32, u32, u32)) -> String {
+        self.text(
+            lang,
+            keys::DATE_SHORT,
+            &[
+                ("day", day.to_string()),
+                (
+                    "month",
+                    self.text(lang, keys::MONTHS[month_index(month)], &[]),
+                ),
+                ("year", year.to_string()),
+            ],
+        )
+    }
+
+    fn comments<'a>(&self, lang: &str, c: &'a Comments) -> CommentsData<'a> {
+        CommentsData {
+            open: c.open,
+            items: c
+                .items
+                .iter()
+                .map(|i| {
+                    let (year, month, day) = civil(i.created_at);
+                    CommentItemData {
+                        id: i.id,
+                        author: &i.author,
+                        owner: i.owner,
+                        date_iso: format!("{year:04}-{month:02}-{day:02}"),
+                        date_display: self.date_display(lang, (year, month, day)),
+                        html: &i.html,
+                    }
+                })
+                .collect(),
+            action_url: &c.action_url,
+            turnstile_key: &c.turnstile_key,
+            max_length: c.max_length,
+            name_max_length: c.name_max_length,
+            max_links: c.max_links,
+            more: c.more,
+        }
+    }
+
     fn entry<'a>(&self, post: &'a Post) -> EntryData<'a> {
         let (year, month, day) = civil(post.published_at);
         let excerpt_words = self
@@ -539,18 +597,7 @@ impl Theme {
         };
         // Computed on save by the markdown crate; reading never counts words.
         let minutes = post.body.reading_minutes;
-        let date_display = self.text(
-            &post.lang,
-            keys::DATE_SHORT,
-            &[
-                ("day", day.to_string()),
-                (
-                    "month",
-                    self.text(&post.lang, keys::MONTHS[month_index(month)], &[]),
-                ),
-                ("year", year.to_string()),
-            ],
-        );
+        let date_display = self.date_display(&post.lang, (year, month, day));
         EntryData {
             title: &post.title,
             url: &post.url,
@@ -614,6 +661,9 @@ struct HomeData<'a> {
 #[derive(Serialize)]
 struct PostPage<'a> {
     post: PostData<'a>,
+    /// Absent (not null) when comments are off, so `{% if comments %}` reads naturally.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comments: Option<CommentsData<'a>>,
 }
 
 #[derive(Serialize)]

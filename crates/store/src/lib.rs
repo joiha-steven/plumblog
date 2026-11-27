@@ -29,7 +29,14 @@ pub use auth::{
     ApiToken, Invite, InviteStore, NewInvite, NewPasskey, NewSession, NewToken, Passkey,
     PasskeyStore, Session, SessionStore, TokenStore,
 };
-pub use comments::{Comment, CommentStatus, CommentStore, NewComment};
+pub use comments::{Actor, Checked, Comment, CommentStatus, CommentStore, Moderation, NewComment};
+/// Comment rules shared by every caller (limits, open, moderation).
+pub mod comment {
+    pub use crate::comments::{
+        BODY_MAX, LINKS_MAX, NAME_MAX, SETTING_ENABLED, check, is_open, moderate, set_site_enabled,
+        site_enabled, submit,
+    };
+}
 pub use log::{LogEntry, LogQuery, LogStore, RETENTION_JOB, retention_job};
 pub use media::{Media, MediaQuery, MediaStore, NewMedia};
 pub use posts::{

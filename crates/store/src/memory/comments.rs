@@ -40,12 +40,31 @@ impl CommentStore for MemoryStore {
                     parent_id: comment.parent_id,
                     author_name: comment.author_name,
                     body: comment.body,
+                    body_html: comment.body_html,
                     status: comment.status,
                     created_at: comment.created_at,
                 },
             );
             Ok(id)
         })
+    }
+
+    async fn get_comment(&self, id: CommentId) -> Result<Comment> {
+        self.read(|s| s.comments.get(&id).cloned())
+            .ok_or_else(|| not_found("comment", id.0))
+    }
+
+    async fn latest_comments(
+        &self,
+        post: PostId,
+        status: CommentStatus,
+        limit: u32,
+    ) -> Result<(Vec<Comment>, bool)> {
+        let mut rows = self.list_comments(post, status).await?;
+        let keep = page_len(limit);
+        let more = rows.len() > keep;
+        rows.drain(..rows.len().saturating_sub(keep));
+        Ok((rows, more))
     }
 
     async fn list_comments(&self, post: PostId, status: CommentStatus) -> Result<Vec<Comment>> {

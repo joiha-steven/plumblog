@@ -6,7 +6,7 @@
 //! The budget is only enforced in release builds (`scripts/check` runs this test with
 //! `--release`); debug builds are 10-30x slower and would only measure the compiler.
 
-use plumblog_markdown::{Options, render};
+use plumblog_markdown::{Options, render, render_comment};
 use std::fmt::Write;
 use std::time::{Duration, Instant};
 
@@ -66,4 +66,39 @@ fn long_post_renders_within_cpu_budget() {
         return;
     }
     assert!(best <= BUDGET, "render took {best:?}, budget {BUDGET:?}");
+}
+
+/// Comments render when a post page is built, once per content version (the page is
+/// cached). A 5,000-character hostile body (the emphasis bomb is the worst case, about
+/// 0.3 ms natively) must stay at a quarter of the post budget.
+const COMMENT_BUDGET: Duration = Duration::from_micros(500);
+
+#[test]
+fn hostile_comment_renders_within_cpu_budget() {
+    let unit = "*_[x](javascript:a) <b>t</b> https://a.example/ `c` > ";
+    let body: String = unit
+        .repeat(5000 / unit.len() + 1)
+        .chars()
+        .take(5000)
+        .collect();
+    let bomb: String = format!("{}x{}", "*_".repeat(1250), "_*".repeat(1250));
+    for src in [body, bomb, "[".repeat(5000)] {
+        let best = (0..20)
+            .map(|_| {
+                let t = Instant::now();
+                let r = render_comment(&src);
+                let d = t.elapsed();
+                assert!(!r.html.is_empty());
+                d
+            })
+            .min()
+            .unwrap();
+        eprintln!(
+            "comment: {} chars in {best:?} (budget {COMMENT_BUDGET:?})",
+            src.chars().count()
+        );
+        if !cfg!(debug_assertions) {
+            assert!(best <= COMMENT_BUDGET, "comment took {best:?}");
+        }
+    }
 }

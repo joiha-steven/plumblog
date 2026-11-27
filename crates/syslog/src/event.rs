@@ -20,6 +20,10 @@ stable_codes! {
         ScheduledJob => "job.run",
         WebhookDelivery => "webhook.delivery",
         Error => "error",
+        // A reader sent a comment (stored as pending). Ids only: never the name or text.
+        CommentCreated => "comment.created",
+        // Someone approved, spammed, trashed or deleted a comment.
+        CommentModerated => "comment.moderated",
     }
 }
 
@@ -46,7 +50,9 @@ impl EventKind {
             | Self::Deploy
             | Self::Migration
             | Self::ScheduledJob
-            | Self::WebhookDelivery => Severity::Info,
+            | Self::WebhookDelivery
+            | Self::CommentCreated
+            | Self::CommentModerated => Severity::Info,
             Self::SignInFailed | Self::PluginDisabled => Severity::Warning,
             Self::Error => Severity::Error,
         }
@@ -261,6 +267,8 @@ mod tests {
                 (EventKind::ScheduledJob, "job.run"),
                 (EventKind::WebhookDelivery, "webhook.delivery"),
                 (EventKind::Error, "error"),
+                (EventKind::CommentCreated, "comment.created"),
+                (EventKind::CommentModerated, "comment.moderated"),
             ]
         );
         for k in EventKind::ALL {
