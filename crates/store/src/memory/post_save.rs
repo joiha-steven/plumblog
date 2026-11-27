@@ -1,29 +1,50 @@
 //! `save_post`: validation first, then every row the save touches.
 
-use plumblog_model::{PostId, Result, RevisionId};
+use plumblog_model::{Error, PostId, Result, RevisionId};
 
 use super::{State, conflict, invalid, next_seq, post_not_found};
 use crate::{NewRevision, Post, PostStatus, Revision, SavePost, search};
+
+/// The `Conflict` of a save from a version that is no longer stored.
+pub(super) fn stale_version(id: PostId, current: i64, expected: Option<i64>) -> Error {
+    conflict(format!(
+        "post {} is at version {current}, not {}; reload it and edit again",
+        id.0,
+        expected.unwrap_or_default()
+    ))
+}
 
 /// Reader URL of a post; redirects are keyed by it.
 pub(super) fn post_path(lang: &str, slug: &str) -> String {
     format!("/{lang}/{slug}")
 }
 
+/// Checks that need no stored row; D1 makes them before any query.
+pub(super) fn check_post_shape(input: &SavePost) -> Result<()> {
+    if input.status == PostStatus::Trashed {
+        return Err(invalid("save_post cannot trash; use trash_post"));
+    }
+    if matches!(input.status, PostStatus::Scheduled | PostStatus::Published)
+        && input.published_at.is_none()
+    {
+        return Err(invalid(format!(
+            "a {} post needs published_at",
+            input.status.as_str()
+        )));
+    }
+    match (input.id, input.expected_version) {
+        (None, Some(_)) => Err(invalid("a new post has no version to expect")),
+        (Some(id), None) => Err(invalid(format!(
+            "updating post {} needs the version it edited",
+            id.0
+        ))),
+        _ => Ok(()),
+    }
+}
+
 impl State {
-    /// Every FK and CHECK the `posts`, `post_tags` and `revisions` inserts would hit.
-    fn check_post_input(&self, input: &SavePost) -> Result<()> {
-        if input.status == PostStatus::Trashed {
-            return Err(invalid("save_post cannot trash; use trash_post"));
-        }
-        if matches!(input.status, PostStatus::Scheduled | PostStatus::Published)
-            && input.published_at.is_none()
-        {
-            return Err(invalid(format!(
-                "a {} post needs published_at",
-                input.status.as_str()
-            )));
-        }
+    /// Every FK the `posts`, `post_tags`, `post_media` and `revisions` inserts would hit.
+    fn check_post_refs(&self, input: &SavePost) -> Result<()> {
         if !self.user_exists(input.author_id) {
             return Err(invalid(format!(
                 "author {} does not exist",
@@ -43,6 +64,9 @@ impl State {
         if let Some(t) = input.tag_ids.iter().find(|t| !self.tags.contains_key(t)) {
             return Err(invalid(format!("tag {} does not exist", t.0)));
         }
+        if let Some(m) = input.media_ids.iter().find(|m| !self.media.contains_key(m)) {
+            return Err(invalid(format!("media {} does not exist", m.0)));
+        }
         if let Some(u) = input.revision.and_then(|r| r.author_id)
             && !self.user_exists(u)
         {
@@ -52,7 +76,7 @@ impl State {
     }
 
     pub(super) fn save_post(&mut self, input: SavePost) -> Result<PostId> {
-        self.check_post_input(&input)?;
+        check_post_shape(&input)?;
         let old = match input.id {
             Some(id) => {
                 let old = self.posts.get(&id).ok_or_else(|| post_not_found(id))?;
@@ -62,10 +86,14 @@ impl State {
                         id.0
                     )));
                 }
+                if input.expected_version != Some(old.version) {
+                    return Err(stale_version(id, old.version, input.expected_version));
+                }
                 Some(old.clone())
             }
             None => None,
         };
+        self.check_post_refs(&input)?;
         if old.is_none()
             && let Some(g) = input.translation_group
             && !self.posts.values().any(|p| p.translation_group == g)
@@ -124,6 +152,7 @@ impl State {
             series_position: input.series_position,
             created_at: old.as_ref().map_or(input.now, |o| o.created_at),
             updated_at: input.now,
+            version: old.as_ref().map_or(1, |o| o.version + 1),
             tag_ids,
         };
         self.index_and_link(
@@ -134,6 +163,9 @@ impl State {
             input.now,
         )?;
         self.posts.insert(id, post);
+        self.post_media.retain(|(p, _)| *p != id);
+        self.post_media
+            .extend(input.media_ids.into_iter().map(|m| (id, m)));
         Ok(id)
     }
 

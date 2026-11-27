@@ -16,14 +16,14 @@ use super::{D1Store, Row, bound, bump_if, flag, int, invalid, limit, not_found, 
 pub(super) const POST_COLS: &str = "p.id, p.kind, p.translation_group, p.lang, p.slug, p.status, \
      p.trashed_from, p.published_at, p.author_id, p.title, p.markdown, p.html, p.toc_json, \
      p.excerpt, p.word_count, p.reading_minutes, p.pinned, p.comments_enabled, \
-     p.cover_media_id, p.series_id, p.series_position, p.created_at, p.updated_at, \
+     p.cover_media_id, p.series_id, p.series_position, p.created_at, p.updated_at, p.version, \
      (SELECT group_concat(tag_id) FROM post_tags WHERE post_id = p.id)";
 
 /// [`POST_COLS`] without the bodies: list pages never load them.
 const SUMMARY_COLS: &str = "p.id, p.kind, p.translation_group, p.lang, p.slug, p.status, \
      p.trashed_from, p.published_at, p.author_id, p.title, \
      p.excerpt, p.word_count, p.reading_minutes, p.pinned, p.comments_enabled, \
-     p.cover_media_id, p.series_id, p.series_position, p.created_at, p.updated_at, \
+     p.cover_media_id, p.series_id, p.series_position, p.created_at, p.updated_at, p.version, \
      (SELECT group_concat(tag_id) FROM post_tags WHERE post_id = p.id)";
 
 const REVISION_COLS: &str = "id, post_id, author_id, title, markdown, created_at";
@@ -74,6 +74,7 @@ pub(super) fn read_post(r: &mut Row) -> Result<Post> {
         series_position: r.opt_int()?,
         created_at: r.int()?,
         updated_at: r.int()?,
+        version: r.int()?,
         tag_ids: tag_ids(r)?,
     })
 }
@@ -100,6 +101,7 @@ fn read_summary(r: &mut Row) -> Result<PostSummary> {
         series_position: r.opt_int()?,
         created_at: r.int()?,
         updated_at: r.int()?,
+        version: r.int()?,
         tag_ids: tag_ids(r)?,
     })
 }
@@ -278,8 +280,8 @@ impl PostStore for D1Store {
         // SQLite evaluates every SET expression on the old row, so trashed_from = old status.
         let up = self.stmt(
             "trash_post",
-            "UPDATE posts SET trashed_from = status, status = 'trashed', updated_at = ? \
-             WHERE id = ? AND status <> 'trashed'",
+            "UPDATE posts SET trashed_from = status, status = 'trashed', updated_at = ?, \
+             version = version + 1 WHERE id = ? AND status <> 'trashed'",
             &[int(now)?, bound(id.0)],
         )?;
         let results = self.batch("trash_post", vec![bump, up]).await?;
@@ -299,8 +301,8 @@ impl PostStore for D1Store {
         )?;
         let up = self.stmt(
             "restore_post",
-            "UPDATE posts SET status = trashed_from, trashed_from = NULL, updated_at = ? \
-             WHERE id = ? AND status = 'trashed'",
+            "UPDATE posts SET status = trashed_from, trashed_from = NULL, updated_at = ?, \
+             version = version + 1 WHERE id = ? AND status = 'trashed'",
             &[int(now)?, bound(id.0)],
         )?;
         // Before the update, while the condition still holds: a post that goes back to
@@ -322,7 +324,8 @@ impl PostStore for D1Store {
 
     async fn delete_post(&self, id: PostId) -> Result<()> {
         // The search row goes only if the post goes: both carry the same condition, which
-        // the first statement does not change. FK cascades remove tags, revisions, comments.
+        // the first statement does not change. FK cascades remove tags, body media,
+        // revisions and comments.
         let fts = self.stmt(
             "delete_post_fts",
             "DELETE FROM posts_fts WHERE rowid = ? \
@@ -360,7 +363,10 @@ impl PostStore for D1Store {
         )?;
         let up = self.stmt(
             "publish_due",
-            &format!("UPDATE posts SET status = 'published' WHERE {due} RETURNING id"),
+            &format!(
+                "UPDATE posts SET status = 'published', version = version + 1 WHERE {due} \
+                 RETURNING id"
+            ),
             &[bound(now)],
         )?;
         let results = self.batch("publish_due", vec![redirects, bump, up]).await?;

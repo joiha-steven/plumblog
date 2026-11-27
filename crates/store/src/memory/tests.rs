@@ -37,6 +37,7 @@ fn user(s: &MemoryStore, login: &str) -> UserId {
 fn post(author: UserId, slug: &str, status: PostStatus) -> SavePost {
     SavePost {
         id: None,
+        expected_version: None,
         translation_group: None,
         kind: PostKind::Post,
         lang: "vi".into(),
@@ -57,6 +58,7 @@ fn post(author: UserId, slug: &str, status: PostStatus) -> SavePost {
         series_id: None,
         series_position: None,
         tag_ids: Vec::new(),
+        media_ids: Vec::new(),
         search_text: "Con \u{0111}\u{01B0}\u{1EDD}ng NG\u{01AF}\u{1EDC}I \u{0111}i".into(),
         revision: Some(NewRevision {
             author_id: Some(author),
@@ -116,6 +118,7 @@ fn publish_search_rename_and_failed_save() {
     // Renaming a published post leaves a redirect from the old path.
     let mut edit = post(a, "dalat", PostStatus::Published);
     edit.id = Some(id);
+    edit.expected_version = Some(1);
     edit.now = 6;
     run(s.save_post(edit)).unwrap();
     assert_eq!(

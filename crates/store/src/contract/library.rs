@@ -1,9 +1,9 @@
 //! Media, tags and series.
 
-use plumblog_model::{ErrorCode, MediaId, SeriesId, TagId};
+use plumblog_model::{ErrorCode, MediaId, PostId, SeriesId, TagId};
 
 use super::kit::{
-    Check, T0, asc, eq, fails, media, ok, post, save, that, update, user, version, version_is,
+    Check, Got, T0, asc, eq, fails, media, ok, post, save, that, update, user, version, version_is,
 };
 use crate::{MediaQuery, NewSeries, PostOrder, PostQuery, PostStatus, Series, Store, Tag};
 
@@ -11,6 +11,7 @@ fn page(before: Option<(i64, MediaId)>, missing_alt_only: bool, limit: u32) -> M
     MediaQuery {
         before,
         missing_alt_only,
+        unused_only: false,
         limit,
     }
 }
@@ -146,31 +147,179 @@ pub async fn media_paging<S: Store>(db: &S) -> Check {
     )
 }
 
-/// `delete_media` clears covers; bumps only when a published post used it.
-pub async fn media_delete_clears_cover<S: Store>(db: &S) -> Check {
+fn unused(limit: u32) -> MediaQuery {
+    MediaQuery {
+        unused_only: true,
+        ..page(None, false, limit)
+    }
+}
+
+async fn usage<S: Store>(db: &S, id: MediaId) -> Got<Vec<PostId>> {
+    ok("media_usage", db.media_usage(id).await)
+}
+
+/// Body media and covers both count as use; saves replace the body list; a save with
+/// unknown media writes nothing; a permanently deleted post frees its media.
+pub async fn media_usage_tracks_saves<S: Store>(db: &S) -> Check {
     let u = user(db, "alice").await?;
-    let m1 = ok("create_media", db.create_media(media("1.png", T0)).await)?;
-    let m2 = ok("create_media", db.create_media(media("2.png", T0)).await)?;
-    let mut d = post(u, "vi", "draft", PostStatus::Draft);
-    d.cover_media_id = Some(m1);
-    let d = save(db, d).await?;
-    let mut p = post(u, "vi", "live", PostStatus::Published);
-    p.cover_media_id = Some(m2);
-    let p = save(db, p).await?;
-    let v = version(db).await?;
-    ok("delete_media (draft cover)", db.delete_media(m1).await)?;
-    version_is(db, "delete_media used by a draft", v).await?;
+    let m1 = ok("create_media", db.create_media(media("1.png", 100)).await)?;
+    let m2 = ok("create_media", db.create_media(media("2.png", 200)).await)?;
+    let m3 = ok("create_media", db.create_media(media("3.png", 300)).await)?;
+    let m4 = ok("create_media", db.create_media(media("4.png", 400)).await)?;
+    let mut first = post(u, "vi", "a", PostStatus::Draft);
+    first.media_ids = vec![m2, m1, m1];
+    let a_id = save(db, first.clone()).await?;
+    let mut second = post(u, "vi", "b", PostStatus::Published);
+    second.cover_media_id = Some(m1);
+    second.media_ids = vec![m3, m1];
+    let b_id = save(db, second).await?;
     eq!(
-        "draft cover cleared",
-        ok("get_post", db.get_post(d).await)?.cover_media_id,
-        None,
+        "m1: body and cover, ascending, once",
+        usage(db, m1).await?,
+        asc(&[a_id, b_id])
     )?;
-    ok("delete_media (published cover)", db.delete_media(m2).await)?;
-    version_is(db, "delete_media used by a published post", v + 1).await?;
+    eq!("m2: body", usage(db, m2).await?, vec![a_id])?;
+    eq!("m3: body", usage(db, m3).await?, vec![b_id])?;
+    eq!("m4: unused", usage(db, m4).await?, Vec::new())?;
     eq!(
-        "published cover cleared",
-        ok("get_post", db.get_post(p).await)?.cover_media_id,
-        None,
+        "unknown media",
+        usage(db, MediaId(m4.0 + 1000)).await?,
+        Vec::new()
+    )?;
+    let ids = |rows: Vec<crate::Media>| rows.iter().map(|m| m.id).collect::<Vec<_>>();
+    eq!(
+        "unused_only",
+        ids(ok("list_media", db.list_media(unused(10)).await)?),
+        vec![m4]
+    )?;
+
+    let mut edit = update(db, a_id, first).await?;
+    edit.media_ids = vec![m2];
+    save(db, edit.clone()).await?;
+    eq!(
+        "save replaces the body list",
+        usage(db, m1).await?,
+        vec![b_id]
+    )?;
+
+    // Unknown media: nothing written, on update and on insert.
+    let before = ok("get_post", db.get_post(a_id).await)?;
+    let v = version(db).await?;
+    let mut bad = update(db, a_id, edit).await?;
+    bad.title = "Changed".into();
+    bad.media_ids = vec![m4, MediaId(m4.0 + 1000)];
+    fails(
+        "update with unknown media",
+        db.save_post(bad).await,
+        ErrorCode::InvalidInput,
+    )?;
+    eq!(
+        "post unchanged",
+        ok("get_post", db.get_post(a_id).await)?,
+        before
+    )?;
+    eq!("m4 still unused", usage(db, m4).await?, Vec::new())?;
+    let mut bad = post(u, "vi", "c", PostStatus::Published);
+    bad.media_ids = vec![m4, MediaId(m4.0 + 1000)];
+    fails(
+        "insert with unknown media",
+        db.save_post(bad).await,
+        ErrorCode::InvalidInput,
+    )?;
+    eq!(
+        "no post",
+        ok("find_post", db.find_post("vi", "c").await)?,
+        None
+    )?;
+    eq!(
+        "m4 still unused after insert",
+        usage(db, m4).await?,
+        Vec::new()
+    )?;
+    version_is(db, "saves with unknown media", v).await?;
+
+    ok("trash_post", db.trash_post(b_id, T0).await)?;
+    eq!(
+        "a trashed post still uses its media",
+        usage(db, m3).await?,
+        vec![b_id]
+    )?;
+    ok("delete_post", db.delete_post(b_id).await)?;
+    eq!(
+        "deleted post frees body media",
+        usage(db, m3).await?,
+        Vec::new()
+    )?;
+    eq!(
+        "deleted post frees its cover",
+        usage(db, m1).await?,
+        Vec::new()
+    )?;
+    eq!(
+        "unused_only, newest first",
+        ids(ok("list_media", db.list_media(unused(10)).await)?),
+        vec![m4, m3, m1],
+    )
+}
+
+/// Media in use (body or cover, any status) cannot be deleted: `Conflict` listing the
+/// posts, nothing deleted, no bump. Unused media deletes without a bump.
+pub async fn media_in_use_cannot_be_deleted<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let body = ok("create_media", db.create_media(media("1.png", T0)).await)?;
+    let cover = ok("create_media", db.create_media(media("2.png", T0)).await)?;
+    let free = ok("create_media", db.create_media(media("3.png", T0)).await)?;
+    let mut live = post(u, "vi", "live", PostStatus::Published);
+    live.media_ids = vec![body];
+    let live_id = save(db, live.clone()).await?;
+    let mut gone = post(u, "vi", "gone", PostStatus::Draft);
+    gone.media_ids = vec![body];
+    let gone_id = save(db, gone).await?;
+    ok("trash_post", db.trash_post(gone_id, T0).await)?;
+    let mut d = post(u, "vi", "draft", PostStatus::Draft);
+    d.cover_media_id = Some(cover);
+    let d_id = save(db, d.clone()).await?;
+    let v = version(db).await?;
+    for (what, id, users) in [
+        ("body media", body, asc(&[live_id, gone_id])),
+        ("cover media", cover, vec![d_id]),
+    ] {
+        match db.delete_media(id).await {
+            Err(e) if e.code == ErrorCode::Conflict => {
+                for p in &users {
+                    that(
+                        &format!("{what}: detail {:?} lists post {}", e.detail, p.0),
+                        e.detail.contains(&p.0.to_string()),
+                    )?;
+                }
+            }
+            other => return Err(format!("delete {what}: expected Conflict, got {other:?}")),
+        }
+        ok("media kept", db.get_media(id).await)?;
+        eq!("usage kept", usage(db, id).await?, users)?;
+    }
+    eq!(
+        "cover kept",
+        ok("get_post", db.get_post(d_id).await)?.cover_media_id,
+        Some(cover),
+    )?;
+    version_is(db, "refused deletes", v).await?;
+    ok("delete unused media", db.delete_media(free).await)?;
+    version_is(db, "delete unused media", v).await?;
+
+    let mut e = update(db, live_id, live).await?;
+    e.media_ids = Vec::new();
+    save(db, e).await?;
+    ok("delete_post", db.delete_post(gone_id).await)?;
+    let mut e = update(db, d_id, d).await?;
+    e.cover_media_id = None;
+    save(db, e).await?;
+    ok("delete freed body media", db.delete_media(body).await)?;
+    ok("delete freed cover", db.delete_media(cover).await)?;
+    fails(
+        "delete deleted media",
+        db.delete_media(cover).await,
+        ErrorCode::NotFound,
     )
 }
 
@@ -452,7 +601,7 @@ pub async fn series_links_and_versions<S: Store>(db: &S) -> Check {
     again.series_id = Some(sl);
     fails(
         "save_post with deleted series",
-        db.save_post(update(p, again)).await,
+        db.save_post(update(db, p, again).await?).await,
         ErrorCode::InvalidInput,
     )?;
     Ok(())

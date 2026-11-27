@@ -60,6 +60,7 @@ async fn guard_aborts_whole_batch(db: &D1Store) -> Result<(), String> {
 fn live_post(author: UserId, slug: &str) -> SavePost {
     SavePost {
         id: None,
+        expected_version: None,
         translation_group: None,
         kind: PostKind::Post,
         lang: "vi".to_owned(),
@@ -80,6 +81,7 @@ fn live_post(author: UserId, slug: &str) -> SavePost {
         series_id: None,
         series_position: None,
         tag_ids: Vec::new(),
+        media_ids: Vec::new(),
         search_text: String::new(),
         revision: None,
         now: 1_000,
@@ -104,12 +106,14 @@ async fn stale_save_writes_nothing(db: &D1Store) -> Result<(), String> {
     let v = db.content_version().await.map_err(e)?;
     // As if this request read the post before another request renamed it to /vi/now.
     let stale = Old {
+        version: 1,
         status: PostStatus::Published,
         lang: "vi".to_owned(),
         slug: "before".to_owned(),
     };
     let mut next = live_post(author, "after");
     next.id = Some(id);
+    next.expected_version = Some(1);
     let out = db.update_post(&next, id, &stale).await;
     check(
         "a stale read fires the guard",

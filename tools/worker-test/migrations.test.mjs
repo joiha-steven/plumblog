@@ -1,8 +1,10 @@
 // Migrations on real local D1 (wrangler, no Worker needed):
 // (a) a fresh database gets exactly the tables and indexes the migration files create;
 // (b) for every sample in migration-samples/NNNN.sql (data valid right after migration NNNN),
-//     applying the later migrations loses no rows in any table.
+//     applying the later migrations loses no rows and, where the row count is unchanged,
+//     changes no value in any column present both before and after.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -81,6 +83,63 @@ function counts(dir, tables) {
   return row;
 }
 
+const q = (name) => `"${name}"`;
+
+const hash = (rowJson) => {
+  const sha = createHash("sha256");
+  for (const j of rowJson) sha.update(j).update("\n");
+  return sha.digest("hex");
+};
+
+/** Columns and primary key of a table; virtual (FTS5) tables compare rowid, title, body. */
+function tableShape(dir, table, isVirtual) {
+  if (isVirtual) return { cols: ["rowid", "title", "body"], pk: ["rowid"] };
+  const info = query(dir, `SELECT name, pk FROM pragma_table_info('${table}')`);
+  return {
+    cols: info.map((c) => c.name),
+    pk: info.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name),
+  };
+}
+
+/** Rows of `cols` in a deterministic order: primary key, else rowid. */
+function orderedRows(dir, table, cols, pk) {
+  const orderBy = (pk.length ? pk : ["rowid"]).map(q).join(", ");
+  return query(dir, `SELECT ${cols.map(q).join(", ")} FROM ${q(table)} ORDER BY ${orderBy}`);
+}
+
+/** Every table's shape and ordered rows, to be compared after the later migrations. */
+function contentBefore(dir, tables, virtual) {
+  const out = {};
+  for (const t of tables) {
+    const shape = tableShape(dir, t, virtual.has(t));
+    out[t] = { ...shape, rows: orderedRows(dir, t, shape.cols, shape.pk) };
+  }
+  return out;
+}
+
+/** Problems found comparing each table, on the columns present both before and after. */
+function contentProblems(dir, before, virtual) {
+  const problems = [];
+  for (const [t, was] of Object.entries(before)) {
+    const now = tableShape(dir, t, virtual.has(t));
+    const cols = was.cols.filter((c) => now.cols.includes(c));
+    const pk = was.pk.filter((c) => cols.includes(c));
+    const key = (r) => JSON.stringify(cols.map((c) => r[c]));
+    const a = was.rows.map(key);
+    const b = orderedRows(dir, t, cols, pk).map(key);
+    if (b.length < a.length) {
+      problems.push(`${t}: rows ${a.length} -> ${b.length}`);
+    } else if (b.length === a.length && hash(a) !== hash(b)) {
+      const i = a.findIndex((j, k) => j !== b[k]);
+      problems.push(
+        `${t}: content changed (${a.length} rows, columns [${cols.join(", ")}], checksum ${hash(a).slice(0, 12)} -> ${hash(b).slice(0, 12)})\n` +
+          `  first differing row #${i}\n  before: ${a[i]}\n  after:  ${b[i]}`,
+      );
+    }
+  }
+  return problems;
+}
+
 const sorted = (set) => [...set].sort();
 
 test("fresh database has every table and index the migrations create", () => {
@@ -116,6 +175,7 @@ for (const sample of samples) {
       executeFile(db.dir, join(SAMPLES, sample));
       const { tables } = actualSchema(db.dir, virtual);
       const before = counts(db.dir, tables);
+      const content = contentBefore(db.dir, tables, virtual);
       const empty = Object.entries(before).filter(([, n]) => n === 0).map(([t]) => t);
       assert.deepEqual(empty, [], `the sample must put rows in every table`);
 
@@ -126,6 +186,7 @@ for (const sample of samples) {
       const after = counts(db.dir, tables);
       const lost = Object.keys(before).filter((t) => after[t] < before[t]).map((t) => `${t}: ${before[t]} -> ${after[t]}`);
       assert.deepEqual(lost, [], "tables that lost rows");
+      assert.deepEqual(contentProblems(db.dir, content, virtual), [], "tables whose content changed");
     } finally {
       db.remove();
     }

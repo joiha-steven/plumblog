@@ -50,6 +50,8 @@ pub struct Post {
     pub series_position: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Optimistic lock: 1 on insert, +1 on every save, trash, restore and scheduled publish.
+    pub version: i64,
     /// Ascending.
     pub tag_ids: Vec<TagId>,
 }
@@ -77,6 +79,7 @@ pub struct PostSummary {
     pub series_position: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub version: i64,
     pub tag_ids: Vec<TagId>,
 }
 
@@ -103,6 +106,7 @@ impl From<&Post> for PostSummary {
             series_position: p.series_position,
             created_at: p.created_at,
             updated_at: p.updated_at,
+            version: p.version,
             tag_ids: p.tag_ids.clone(),
         }
     }
@@ -131,6 +135,10 @@ pub struct Revision {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SavePost {
     pub id: Option<PostId>,
+    /// The `version` the editor started from: required on update, `None` on insert
+    /// (else `InvalidInput`). A stale version is `Conflict`, so a save never overwrites
+    /// changes it did not see.
+    pub expected_version: Option<i64>,
     /// Insert only: join this existing group (a translation); `None` starts a new group.
     /// Ignored on update: the group never changes.
     pub translation_group: Option<PostId>,
@@ -156,6 +164,9 @@ pub struct SavePost {
     pub series_position: Option<i64>,
     /// Replaces the post's tags; duplicates are ignored.
     pub tag_ids: Vec<TagId>,
+    /// Media used in the body, extracted by the caller from the rendered post (the store
+    /// never parses HTML). Replaces the post's media rows; duplicates are ignored.
+    pub media_ids: Vec<MediaId>,
     /// Plain text for search; indexed after `search::fold`.
     pub search_text: String,
     /// `Some` keeps a revision of the new title and Markdown.
@@ -233,18 +244,23 @@ impl PostQuery {
 // Workers are single-threaded, so futures need not be `Send` (see plumblog_auth::Crypto).
 #[allow(async_fn_in_trait)]
 pub trait PostStore {
-    /// One atomic write. Insert: `created_at = updated_at = now`; the group is the given one
-    /// (it must be the group of an existing post, else `InvalidInput`) or the new id.
-    /// Update: `PostNotFound` if absent; a trashed post is `InvalidInput` (restore first);
-    /// keeps `created_at` and the group; `updated_at = now`.
-    /// `InvalidInput`: status `Trashed`, scheduled/published without `published_at`, or a
-    /// missing author, cover, series, tag or revision author. `Conflict`: `(lang, slug)` or
-    /// `(group, lang)` taken by another post.
-    /// Also: replaces tags and the search row; adds the revision if asked; if the old row
-    /// was published and its `/<lang>/<slug>` changed, `put_redirect(old, new)`; if the new
-    /// status is published, deletes the redirect from the new path (a draft or scheduled
-    /// save keeps it, so the old URL works until the post is live); bumps the content
-    /// version if the old or new status is published.
+    /// One atomic write. Insert: `created_at = updated_at = now`, `version = 1`; the group is
+    /// the given one (it must be the group of an existing post, else `InvalidInput`) or the
+    /// new id.
+    /// Update, checked in this order: `PostNotFound` if absent; a trashed post is
+    /// `InvalidInput` (restore first), whatever the version; `expected_version` other than
+    /// the stored one is `Conflict`, with the stored version in the detail. Then keeps
+    /// `created_at` and the group; `updated_at = now`; `version + 1`.
+    /// `InvalidInput` (checked before the row is read): status `Trashed`,
+    /// scheduled/published without `published_at`, `expected_version` missing on update or
+    /// set on insert. `InvalidInput` (after): a missing author, cover, series, tag, body
+    /// media or revision author. `Conflict`: `(lang, slug)` or `(group, lang)` taken by
+    /// another post. A failed save writes nothing.
+    /// Also: replaces tags, body media and the search row; adds the revision if asked; if
+    /// the old row was published and its `/<lang>/<slug>` changed, `put_redirect(old, new)`;
+    /// if the new status is published, deletes the redirect from the new path (a draft or
+    /// scheduled save keeps it, so the old URL works until the post is live); bumps the
+    /// content version if the old or new status is published.
     async fn save_post(&self, post: SavePost) -> Result<PostId>;
     /// `PostNotFound`.
     async fn get_post(&self, id: PostId) -> Result<Post>;
@@ -254,19 +270,20 @@ pub trait PostStore {
     async fn list_translations(&self, group: PostId) -> Result<Vec<PostSummary>>;
     async fn list_posts(&self, query: &PostQuery) -> Result<Vec<PostSummary>>;
     /// `PostNotFound`; `InvalidInput` if already trashed. Keeps the old status in
-    /// `trashed_from`; `updated_at = now`; bumps if it was published.
+    /// `trashed_from`; `updated_at = now`; `version + 1`; bumps if it was published.
     async fn trash_post(&self, id: PostId, now: i64) -> Result<()>;
     /// `PostNotFound`; `InvalidInput` if not trashed. Back to `trashed_from`;
-    /// `updated_at = now`; if that is published, deletes the redirect from its path (it is
-    /// live again) and bumps.
+    /// `updated_at = now`; `version + 1`; if that is published, deletes the redirect from
+    /// its path (it is live again) and bumps.
     async fn restore_post(&self, id: PostId, now: i64) -> Result<()>;
-    /// Permanent. `PostNotFound`; `InvalidInput` unless trashed. Deletes its tags,
-    /// revisions, comments and search row; translations are untouched. Never bumps the
-    /// content version: a trashed post and its comments are not visible to readers.
+    /// Permanent. `PostNotFound`; `InvalidInput` unless trashed. Deletes its tags, body
+    /// media rows (freeing that media for deletion), revisions, comments and search row;
+    /// translations are untouched. Never bumps the content version: a trashed post and its
+    /// comments are not visible to readers.
     async fn delete_post(&self, id: PostId) -> Result<()>;
     /// Every scheduled post with `published_at <= now` becomes published, in one write;
     /// returns their ids ascending; deletes the redirect from each one's path (it is live
-    /// now); bumps once if any. `updated_at` is unchanged.
+    /// now); bumps once if any. `updated_at` is unchanged; each one's `version + 1`.
     async fn publish_due(&self, now: i64) -> Result<Vec<PostId>>;
     /// Newest first (`created_at` DESC, id DESC); empty for an unknown post.
     async fn list_revisions(&self, post: PostId) -> Result<Vec<Revision>>;

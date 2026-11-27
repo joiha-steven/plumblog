@@ -190,7 +190,7 @@ pub async fn user_delete_effects<S: Store>(db: &S) -> Check {
     )?;
     p.author_id = owner;
     p.revision = None;
-    save(db, update(pid, p)).await?;
+    save(db, update(db, pid, p).await?).await?;
     ok("delete_user", db.delete_user(v).await)?;
 
     sign_in_rows_gone(db, v).await?;

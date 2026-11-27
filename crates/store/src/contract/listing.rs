@@ -266,6 +266,7 @@ pub async fn limits_cap_at_max_page<S: Store>(db: &S) -> Check {
         db.list_media(MediaQuery {
             before: None,
             missing_alt_only: false,
+            unused_only: false,
             limit: 1000,
         })
         .await,

@@ -144,11 +144,12 @@ CREATE TABLE posts (
   reading_minutes   INTEGER NOT NULL DEFAULT 0,
   pinned            INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
   comments_enabled  INTEGER NOT NULL DEFAULT 1 CHECK (comments_enabled IN (0, 1)),
-  cover_media_id    INTEGER REFERENCES media (id) ON DELETE SET NULL,
+  cover_media_id    INTEGER REFERENCES media (id) ON DELETE RESTRICT, -- media in use cannot be deleted
   series_id         INTEGER REFERENCES series (id) ON DELETE SET NULL,
   series_position   INTEGER,
   created_at        INTEGER NOT NULL,
   updated_at        INTEGER NOT NULL,
+  version           INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1), -- optimistic lock: every save must name the version it edited
   CHECK ((status = 'trashed') = (trashed_from IS NOT NULL)),
   CHECK (status NOT IN ('scheduled', 'published') OR published_at IS NOT NULL)
 );
@@ -165,7 +166,7 @@ CREATE INDEX posts_author ON posts (author_id, status, published_at);
 CREATE INDEX posts_series ON posts (series_id, series_position);
 -- Admin post list: by status, most recently edited first.
 CREATE INDEX posts_admin ON posts (status, updated_at);
--- Deleting a media item: find posts that use it as cover (FK action needs this index).
+-- Deleting a media item: refuse while a post uses it as cover (FK check needs this index).
 CREATE INDEX posts_cover ON posts (cover_media_id);
 
 CREATE TABLE post_tags (
@@ -176,7 +177,17 @@ CREATE TABLE post_tags (
 -- Tag page and related posts: posts with a tag.
 CREATE INDEX post_tags_tag ON post_tags (tag_id, post_id);
 
--- Every save keeps the previous text, with who wrote it.
+-- Media used in a post body (images, galleries), written on every save from the rendered
+-- post. Media still used here or as a cover cannot be deleted.
+CREATE TABLE post_media (
+  post_id  INTEGER NOT NULL REFERENCES posts (id) ON DELETE CASCADE,
+  media_id INTEGER NOT NULL REFERENCES media (id) ON DELETE RESTRICT,
+  PRIMARY KEY (post_id, media_id)                       -- media of a post (replaced on save)
+) WITHOUT ROWID;
+-- Media details "used in" list, the unused filter, and the delete check.
+CREATE INDEX post_media_media ON post_media (media_id, post_id);
+
+-- Snapshot of the title and text as saved, with who saved it; the newest is the current text.
 CREATE TABLE revisions (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   post_id    INTEGER NOT NULL REFERENCES posts (id) ON DELETE CASCADE,
@@ -254,7 +265,7 @@ CREATE TABLE webhooks (
 
 -- Owner timeline. One row per event, never per view; pruned by age and count.
 CREATE TABLE system_log (
-  id         INTEGER PRIMARY KEY,
+  id         INTEGER PRIMARY KEY AUTOINCREMENT, -- monotonic, so the timeline cursor never revisits an id
   at_ms      INTEGER NOT NULL,
   request_id TEXT    NOT NULL,
   kind       TEXT    NOT NULL,                          -- syslog::EventKind code

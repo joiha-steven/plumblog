@@ -1,6 +1,6 @@
 //! The media catalogue (`media`). Bytes live in R2.
 
-use plumblog_model::{MediaId, Result, UserId};
+use plumblog_model::{MediaId, PostId, Result, UserId};
 
 /// A row of `media`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +44,8 @@ pub struct MediaQuery {
     pub before: Option<(i64, MediaId)>,
     /// Only items with `alt == ""`.
     pub missing_alt_only: bool,
+    /// Only items no post uses, in its body or as cover (see `MediaStore::media_usage`).
+    pub unused_only: bool,
     pub limit: u32,
 }
 
@@ -57,7 +59,11 @@ pub trait MediaStore {
     async fn list_media(&self, query: MediaQuery) -> Result<Vec<Media>>;
     /// `NotFound`. Bumps the content version (alt text shows on reader pages).
     async fn set_media_alt(&self, id: MediaId, alt: &str) -> Result<()>;
-    /// `NotFound`. Posts using it as cover get `cover_media_id = None`; bumps the content
-    /// version if any of them is published.
+    /// Posts that use the item in their body (`SavePost::media_ids`) or as cover, any
+    /// status including trashed; ascending, each once. Empty for unknown media.
+    async fn media_usage(&self, id: MediaId) -> Result<Vec<PostId>>;
+    /// `NotFound`. `Conflict` while any post uses it (see `media_usage`); the detail lists
+    /// those post ids and nothing is deleted. Never bumps the content version: unused media
+    /// is on no reader page.
     async fn delete_media(&self, id: MediaId) -> Result<()>;
 }

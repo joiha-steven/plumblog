@@ -49,6 +49,8 @@ INSERT INTO posts (id, kind, translation_group, lang, slug, status, trashed_from
 
 INSERT INTO post_tags (post_id, tag_id) VALUES (1, 1), (1, 2), (2, 1);
 
+INSERT INTO post_media (post_id, media_id) VALUES (1, 2), (2, 1);
+
 INSERT INTO revisions (id, post_id, author_id, title, markdown, created_at) VALUES
   (1, 1, 1, char(272) || char(224) || ' L' || char(7841) || 't', '# ' || char(272) || char(224) || ' L' || char(7841) || 't', 1700001900000),
   (2, 1, 2, char(272) || char(224) || ' L' || char(7841) || 't m' || char(249) || 'a m' || char(432) || 'a', '# ' || char(272) || char(224) || ' L' || char(7841) || 't', 1700002000000);

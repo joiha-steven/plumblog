@@ -56,6 +56,7 @@ impl PostStore for MemoryStore {
             p.trashed_from = Some(p.status);
             p.status = PostStatus::Trashed;
             p.updated_at = now;
+            p.version += 1;
             if was_published {
                 s.bump();
             }
@@ -72,6 +73,7 @@ impl PostStore for MemoryStore {
             p.status = to;
             p.trashed_from = None;
             p.updated_at = now;
+            p.version += 1;
             if to == PostStatus::Published {
                 // Live again: its path wins over a redirect away from it (see save_post).
                 let path = post_path(&p.lang, &p.slug);
@@ -93,7 +95,8 @@ impl PostStore for MemoryStore {
             }
             s.posts.remove(&id);
             s.fts.remove(&id);
-            // ON DELETE CASCADE: post_tags (inside the post), revisions, comments.
+            // ON DELETE CASCADE: post_tags (inside the post), post_media, revisions, comments.
+            s.post_media.retain(|(p, _)| *p != id);
             s.revisions.retain(|_, r| r.post_id != id);
             s.comments.retain(|_, c| c.post_id != id);
             Ok(())
@@ -107,6 +110,7 @@ impl PostStore for MemoryStore {
                 p.status == PostStatus::Scheduled && p.published_at.is_some_and(|t| t <= now)
             }) {
                 p.status = PostStatus::Published;
+                p.version += 1;
                 ids.push(p.id);
             }
             // Each newly live path takes over from any redirect away from it (see save_post).

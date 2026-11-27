@@ -1,9 +1,9 @@
 use std::cmp::Reverse;
 
-use plumblog_model::{MediaId, Result};
+use plumblog_model::{MediaId, PostId, Result};
 
-use super::{MemoryStore, conflict, invalid, next_seq, not_found};
-use crate::{Media, MediaQuery, MediaStore, NewMedia, PostStatus, page_len};
+use super::{MemoryStore, State, conflict, invalid, next_seq, not_found};
+use crate::{Media, MediaQuery, MediaStore, NewMedia, page_len};
 
 #[expect(
     clippy::unused_async_trait_impl,
@@ -61,6 +61,7 @@ impl MediaStore for MemoryStore {
                 .media
                 .values()
                 .filter(|m| !query.missing_alt_only || m.alt.is_empty())
+                .filter(|m| !query.unused_only || s.media_usage(m.id).is_empty())
                 .filter(|m| query.before.is_none_or(|b| (m.created_at, m.id) < b))
                 .collect();
             rows.sort_by_key(|m| Reverse((m.created_at, m.id)));
@@ -83,25 +84,53 @@ impl MediaStore for MemoryStore {
         })
     }
 
+    async fn media_usage(&self, id: MediaId) -> Result<Vec<PostId>> {
+        Ok(self.read(|s| s.media_usage(id)))
+    }
+
     async fn delete_media(&self, id: MediaId) -> Result<()> {
         self.write(|s| {
-            s.media
-                .remove(&id)
-                .ok_or_else(|| not_found("media", id.0))?;
-            let mut published = false;
-            // posts.cover_media_id is ON DELETE SET NULL.
-            for p in s
-                .posts
-                .values_mut()
-                .filter(|p| p.cover_media_id == Some(id))
-            {
-                p.cover_media_id = None;
-                published |= p.status == PostStatus::Published;
+            if !s.media.contains_key(&id) {
+                return Err(not_found("media", id.0));
             }
-            if published {
-                s.bump();
+            // post_media.media_id and posts.cover_media_id are ON DELETE RESTRICT.
+            let users = s.media_usage(id);
+            if !users.is_empty() {
+                return Err(media_in_use(id, &users));
             }
+            s.media.remove(&id);
             Ok(())
         })
     }
+}
+
+impl State {
+    /// Posts using `id` in their body or as cover, ascending, each once.
+    fn media_usage(&self, id: MediaId) -> Vec<PostId> {
+        let mut ids: Vec<PostId> = self
+            .post_media
+            .iter()
+            .filter(|(_, m)| *m == id)
+            .map(|(p, _)| *p)
+            .chain(
+                self.posts
+                    .values()
+                    .filter(|p| p.cover_media_id == Some(id))
+                    .map(|p| p.id),
+            )
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+}
+
+/// The `Conflict` of deleting media that posts still use.
+fn media_in_use(id: MediaId, users: &[PostId]) -> plumblog_model::Error {
+    let list: Vec<String> = users.iter().map(|p| p.0.to_string()).collect();
+    conflict(format!(
+        "media {} is used by posts {}; remove it from them first",
+        id.0,
+        list.join(", ")
+    ))
 }

@@ -326,6 +326,7 @@ impl D1Store {
     pub async fn wipe(&self) -> Result<()> {
         const TABLES: &[&str] = &[
             "post_tags",
+            "post_media",
             "revisions",
             "comments",
             "posts_fts",

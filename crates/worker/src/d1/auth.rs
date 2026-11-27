@@ -321,9 +321,10 @@ impl InviteStore for D1Store {
             "accept_invite_mark",
             &format!(
                 "UPDATE invites SET used_at = ?, \
-                 used_by = (SELECT seq FROM sqlite_sequence WHERE name = 'users') WHERE {usable}"
+                 used_by = (SELECT id FROM users WHERE login = ?) WHERE {usable}"
             ),
-            &[int(now)?, text(code_hash), bound(now)],
+            // The new user by its unique login: D1 does not promise `sqlite_sequence`.
+            &[int(now)?, text(&user.login), text(code_hash), bound(now)],
         )?;
         let results = self.batch("accept_invite", vec![insert, mark]).await?;
         if Self::changes("accept_invite_user", &results[0])? != 1 {

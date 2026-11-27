@@ -94,6 +94,7 @@ pub fn post(author: UserId, lang: &str, slug: &str, status: PostStatus) -> SaveP
     let live = matches!(status, PostStatus::Scheduled | PostStatus::Published);
     SavePost {
         id: None,
+        expected_version: None,
         translation_group: None,
         kind: PostKind::Post,
         lang: lang.to_owned(),
@@ -114,6 +115,7 @@ pub fn post(author: UserId, lang: &str, slug: &str, status: PostStatus) -> SaveP
         series_id: None,
         series_position: None,
         tag_ids: Vec::new(),
+        media_ids: Vec::new(),
         search_text: String::new(),
         revision: None,
         now: T0,
@@ -125,10 +127,17 @@ pub async fn save<S: Store>(db: &S, p: SavePost) -> Got<PostId> {
     ok(&what, db.save_post(p).await)
 }
 
-/// The same post as `p` with `id` set, for an update.
-pub fn update(id: PostId, mut p: SavePost) -> SavePost {
+/// The same post as `p` with `id` set, for an update from the post's current version
+/// (version 1 for a post that does not exist, so the save reaches `PostNotFound`).
+pub async fn update<S: Store>(db: &S, id: PostId, mut p: SavePost) -> Got<SavePost> {
+    let current = match db.get_post(id).await {
+        Ok(got) => got.version,
+        Err(e) if e.code == ErrorCode::PostNotFound => 1,
+        Err(e) => return Err(format!("get_post {} for update: {e}", id.0)),
+    };
     p.id = Some(id);
-    p
+    p.expected_version = Some(current);
+    Ok(p)
 }
 
 pub fn media(key: &str, created_at: i64) -> NewMedia {

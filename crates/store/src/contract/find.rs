@@ -110,7 +110,7 @@ pub async fn search_scope_and_order<S: Store>(db: &S) -> Check {
     let mut p = post(u, "vi", &got.slug, PostStatus::Published);
     p.published_at = got.published_at;
     p.search_text = "fresh".into();
-    save(db, update(first, p)).await?;
+    save(db, update(db, first, p).await?).await?;
     eq!(
         "new text found",
         hits(db, "vi", "fresh").await?,
@@ -237,7 +237,7 @@ pub async fn post_rename_redirects<S: Store>(db: &S) -> Check {
     let u = user(db, "alice").await?;
     let p = post(u, "vi", "one", PostStatus::Published);
     let id = save(db, p.clone()).await?;
-    let mut two = update(id, p.clone());
+    let mut two = update(db, id, p.clone()).await?;
     two.slug = "two".into();
     save(db, two.clone()).await?;
     eq!(
@@ -245,7 +245,7 @@ pub async fn post_rename_redirects<S: Store>(db: &S) -> Check {
         ok("find_redirect", db.find_redirect("/vi/one").await)?,
         Some("/vi/two".into()),
     )?;
-    let mut three = two.clone();
+    let mut three = update(db, id, two.clone()).await?;
     three.slug = "three".into();
     save(db, three.clone()).await?;
     eq!(
@@ -256,7 +256,7 @@ pub async fn post_rename_redirects<S: Store>(db: &S) -> Check {
         ),
         (Some("/vi/three".into()), Some("/vi/three".into())),
     )?;
-    let mut back = three;
+    let mut back = update(db, id, three).await?;
     back.slug = "one".into();
     save(db, back).await?;
     eq!(
@@ -271,7 +271,7 @@ pub async fn post_rename_redirects<S: Store>(db: &S) -> Check {
     )?;
     let d = post(u, "vi", "draft-a", PostStatus::Draft);
     let did = save(db, d.clone()).await?;
-    let mut moved = update(did, d);
+    let mut moved = update(db, did, d).await?;
     moved.slug = "draft-b".into();
     save(db, moved).await?;
     eq!(
@@ -295,7 +295,11 @@ pub async fn redirect_kept_until_live<S: Store>(db: &S) -> Check {
         ok("find_redirect", db.find_redirect("/vi/old").await)?,
         Some("/vi/elsewhere".into()),
     )?;
-    save(db, update(id, post(u, "vi", "old", PostStatus::Published))).await?;
+    save(
+        db,
+        update(db, id, post(u, "vi", "old", PostStatus::Published)).await?,
+    )
+    .await?;
     eq!(
         "published save removes it",
         ok("find_redirect", db.find_redirect("/vi/old").await)?,

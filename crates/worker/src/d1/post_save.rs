@@ -1,6 +1,6 @@
 //! `save_post`: one batch per save, with every row the save touches.
 
-use plumblog_model::{PostId, Result};
+use plumblog_model::{Error, ErrorCode, PostId, Result};
 use plumblog_store::{PostStatus, SavePost, search};
 use worker::wasm_bindgen::JsValue;
 
@@ -8,25 +8,42 @@ use super::posts::post_not_found;
 use super::redirects::put_redirect_stmts;
 use super::{
     D1Store, Failure, GUARD_RETRIES, Stmt, bound, bump, changed_concurrently, flag, guard, int,
-    invalid, opt_int, text,
+    invalid, opt_int, storage, text,
 };
+
+/// The `Conflict` of a save from a version that is no longer stored.
+fn stale_version(id: PostId, current: i64, expected: i64) -> Error {
+    Error::new(
+        ErrorCode::Conflict,
+        format!(
+            "post {} is at version {current}, not {expected}; reload it and edit again",
+            id.0
+        ),
+    )
+}
 
 /// Reader URL of a post; redirects are keyed by it.
 fn post_path(lang: &str, slug: &str) -> String {
     format!("/{lang}/{slug}")
 }
 
-/// The id a new post gets, computed the way SQLite's AUTOINCREMENT does (largest id ever
-/// handed out, or the largest present, plus one). Setting it explicitly lets one INSERT use
-/// it as the new group too.
-const NEXT_POST_ID: &str = "(SELECT MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'posts'), 0), \
-     COALESCE((SELECT MAX(id) FROM posts), 0)) + 1)";
+/// A new post's id for statements after its INSERT in the same batch, found by the unique
+/// `(lang, slug)` the caller gave; bind [`new_post_key`] after it. (`sqlite_sequence` is not
+/// read: D1 does not promise it.)
+const NEW_POST_ID: &str = "(SELECT id FROM posts WHERE lang = ? AND slug = ?)";
 
-/// The new post's id for statements after its INSERT in the same batch.
-const NEW_POST_ID: &str = "(SELECT seq FROM sqlite_sequence WHERE name = 'posts')";
+/// The parameters of [`NEW_POST_ID`].
+fn new_post_key(p: &SavePost) -> [JsValue; 2] {
+    [text(&p.lang), text(&p.slug)]
+}
+
+/// `translation_group` of a new post that starts its own group, until the same batch sets it
+/// to the new id. Ids start at 1, so no real group is 0.
+const NO_GROUP_YET: i64 = 0;
 
 /// What `save_post` must know about the row it replaces.
 pub(super) struct Old {
+    pub(super) version: i64,
     pub(super) status: PostStatus,
     pub(super) lang: String,
     pub(super) slug: String,
@@ -69,14 +86,26 @@ impl D1Store {
                 input.status.as_str()
             )));
         }
-        let Some(id) = input.id else {
-            return self.insert_post(&input).await;
+        let (id, expected) = match (input.id, input.expected_version) {
+            (None, None) => return self.insert_post(&input).await,
+            (None, Some(_)) => return Err(invalid("a new post has no version to expect")),
+            (Some(id), None) => {
+                return Err(invalid(format!(
+                    "updating post {} needs the version it edited",
+                    id.0
+                )));
+            }
+            (Some(id), Some(v)) => (id, v),
         };
-        // Read, then write with a guard that the row is still what was read; if another
-        // request changed it in between, read again so redirects and bumps follow the
-        // row that is really there.
+        // Read, then write with a guard that the row is still what was read. If another
+        // request changed it in between, its write moved the version, so the re-read
+        // returns `Conflict` (or the error the row now calls for): a version mismatch is
+        // never retried into success.
         for _ in 0..GUARD_RETRIES {
             let old = self.read_old(id).await?;
+            if old.version != expected {
+                return Err(stale_version(id, old.version, expected));
+            }
             match self.update_post(&input, id, &old).await {
                 Ok(()) => return Ok(id),
                 Err(Failure::Guard) => {}
@@ -90,11 +119,12 @@ impl D1Store {
     async fn read_old(&self, id: PostId) -> Result<Old> {
         let s = self.stmt(
             "save_post_old",
-            "SELECT status, lang, slug FROM posts WHERE id = ?",
+            "SELECT version, status, lang, slug FROM posts WHERE id = ?",
             &[bound(id.0)],
         )?;
         let mut r = self.row(s).await?.ok_or_else(|| post_not_found(id))?;
         let old = Old {
+            version: r.int()?,
             status: r.code("post status", PostStatus::parse)?,
             lang: r.text()?,
             slug: r.text()?,
@@ -120,27 +150,43 @@ impl D1Store {
             )?);
         }
         let insert_at = stmts.len();
-        let mut params = vec![opt_int(p.translation_group.map(|g| g.0))?];
+        let mut params = vec![
+            opt_int(p.translation_group.map(|g| g.0))?,
+            int(NO_GROUP_YET)?,
+        ];
         params.extend(post_values(p)?);
         params.extend([int(p.now)?, int(p.now)?]);
         stmts.push(self.stmt(
             "save_post_insert",
-            &format!(
-                "INSERT INTO posts (id, translation_group, kind, lang, slug, status, \
-                 trashed_from, published_at, author_id, title, markdown, html, toc_json, \
-                 excerpt, word_count, reading_minutes, pinned, comments_enabled, \
-                 cover_media_id, series_id, series_position, created_at, updated_at) \
-                 SELECT n, COALESCE(?, n), ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-                 ?, ?, ?, ?, ? FROM (SELECT {NEXT_POST_ID} AS n)"
-            ),
+            "INSERT INTO posts (translation_group, kind, lang, slug, status, trashed_from, \
+             published_at, author_id, title, markdown, html, toc_json, excerpt, word_count, \
+             reading_minutes, pinned, comments_enabled, cover_media_id, series_id, \
+             series_position, created_at, updated_at) \
+             VALUES (COALESCE(?, ?), ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+             ?, ?) RETURNING id",
             &params,
         )?);
-        self.linked_rows(&mut stmts, p, NEW_POST_ID, &[])?;
+        if p.translation_group.is_none() {
+            // A new group is the new post's own id, known only after the INSERT.
+            let mut params = vec![int(NO_GROUP_YET)?];
+            params.extend(new_post_key(p));
+            stmts.push(self.stmt(
+                "save_post_new_group",
+                "UPDATE posts SET translation_group = id \
+                 WHERE translation_group = ? AND lang = ? AND slug = ?",
+                &params,
+            )?);
+        }
+        self.linked_rows(&mut stmts, p, NEW_POST_ID, &new_post_key(p))?;
         if p.status == PostStatus::Published {
             stmts.push(bump(self)?);
         }
         match self.batch_guarded("save_post", stmts).await {
-            Ok(results) => Self::last_row_id("save_post_insert", &results[insert_at]).map(PostId),
+            Ok(results) => Self::batch_ints("save_post_insert", &results[insert_at])?
+                .first()
+                .and_then(|row| row.get("id").copied())
+                .map(PostId)
+                .ok_or_else(|| storage("save_post_insert", "RETURNING gave no id")),
             Err(Failure::Guard) => Err(invalid(format!(
                 "translation group {} does not exist",
                 p.translation_group.map_or(0, |g| g.0)
@@ -158,28 +204,35 @@ impl D1Store {
         let mut stmts = vec![guard(
             self,
             "save_post_unchanged",
-            "EXISTS (SELECT 1 FROM posts WHERE id = ? AND status = ? AND lang = ? AND slug = ?)",
+            "EXISTS (SELECT 1 FROM posts WHERE id = ? AND version = ? AND status = ? \
+             AND lang = ? AND slug = ?)",
             &[
                 bound(id.0),
+                bound(old.version),
                 text(old.status.as_str()),
                 text(&old.lang),
                 text(&old.slug),
             ],
         )?];
         let mut params = post_values(p)?;
-        params.extend([int(p.now)?, bound(id.0)]);
+        params.extend([int(p.now)?, bound(id.0), bound(old.version)]);
         stmts.push(self.stmt(
             "save_post_update",
             "UPDATE posts SET kind = ?, lang = ?, slug = ?, status = ?, trashed_from = NULL, \
              published_at = ?, author_id = ?, title = ?, markdown = ?, html = ?, toc_json = ?, \
              excerpt = ?, word_count = ?, reading_minutes = ?, pinned = ?, \
              comments_enabled = ?, cover_media_id = ?, series_id = ?, series_position = ?, \
-             updated_at = ? WHERE id = ?",
+             updated_at = ?, version = version + 1 WHERE id = ? AND version = ?",
             &params,
         )?);
         stmts.push(self.stmt(
             "save_post_untag",
             "DELETE FROM post_tags WHERE post_id = ?",
+            &[bound(id.0)],
+        )?);
+        stmts.push(self.stmt(
+            "save_post_unmedia",
+            "DELETE FROM post_media WHERE post_id = ?",
             &[bound(id.0)],
         )?);
         stmts.push(self.stmt(
@@ -200,8 +253,8 @@ impl D1Store {
         self.batch_guarded("save_post", stmts).await.map(drop)
     }
 
-    /// Tags, search row, revision and the redirect from the new path. `id_sql` is the
-    /// post id as SQL (a parameter or [`NEW_POST_ID`]) with its parameters.
+    /// Tags, body media, search row, revision and the redirect from the new path. `id_sql`
+    /// is the post id as SQL (a parameter or [`NEW_POST_ID`]) with its parameters.
     fn linked_rows(
         &self,
         stmts: &mut Vec<Stmt>,
@@ -219,6 +272,20 @@ impl D1Store {
                 "save_post_tags",
                 &format!(
                     "INSERT INTO post_tags (post_id, tag_id) \
+                     SELECT DISTINCT {id_sql}, value FROM json_each(?)"
+                ),
+                &params,
+            )?);
+        }
+        if !p.media_ids.is_empty() {
+            // Same shape as the tags; an unknown id fails the media FK (InvalidInput).
+            let list: Vec<String> = p.media_ids.iter().map(|m| m.0.to_string()).collect();
+            let mut params = id_params.to_vec();
+            params.push(text(&format!("[{}]", list.join(","))));
+            stmts.push(self.stmt(
+                "save_post_media",
+                &format!(
+                    "INSERT INTO post_media (post_id, media_id) \
                      SELECT DISTINCT {id_sql}, value FROM json_each(?)"
                 ),
                 &params,

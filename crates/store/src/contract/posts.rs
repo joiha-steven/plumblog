@@ -79,7 +79,7 @@ pub async fn post_insert_and_update<S: Store>(db: &S) -> Check {
         None,
     )?;
 
-    let mut edit = update(id, p);
+    let mut edit = update(db, id, p).await?;
     edit.status = PostStatus::Published;
     edit.published_at = Some(700);
     edit.title = "New".into();
@@ -160,13 +160,13 @@ pub async fn post_save_errors<S: Store>(db: &S) -> Check {
     )?;
     fails(
         "update missing post",
-        db.save_post(update(PostId(far), base())).await,
+        db.save_post(update(db, PostId(far), base()).await?).await,
         ErrorCode::PostNotFound,
     )?;
     ok("trash_post", db.trash_post(existing, T0).await)?;
     fails(
         "update a trashed post",
-        db.save_post(update(existing, post(u, "vi", "taken", PostStatus::Draft)))
+        db.save_post(update(db, existing, post(u, "vi", "taken", PostStatus::Draft)).await?)
             .await,
         ErrorCode::InvalidInput,
     )?;
@@ -230,7 +230,7 @@ pub async fn post_save_is_atomic<S: Store>(db: &S) -> Check {
     let id = save(db, live.clone()).await?;
     let before = ok("get_post", db.get_post(id).await)?;
     let v = version(db).await?;
-    let mut edit = update(id, live);
+    let mut edit = update(db, id, live).await?;
     edit.slug = "renamed".into();
     edit.search_text = "zebra".into();
     edit.title = "Changed".into();
@@ -275,19 +275,27 @@ pub async fn post_save_versions<S: Store>(db: &S) -> Check {
     let d = post(u, "vi", "d", PostStatus::Draft);
     let id = save(db, d.clone()).await?;
     version_is(db, "insert draft", v).await?;
-    save(db, update(id, d.clone())).await?;
+    save(db, update(db, id, d.clone()).await?).await?;
     version_is(db, "draft -> draft", v).await?;
-    let mut sch = update(id, post(u, "vi", "d", PostStatus::Scheduled));
+    let mut sch = update(db, id, post(u, "vi", "d", PostStatus::Scheduled)).await?;
     sch.published_at = Some(5000);
     save(db, sch).await?;
     version_is(db, "draft -> scheduled", v).await?;
-    save(db, update(id, post(u, "vi", "d", PostStatus::Published))).await?;
+    save(
+        db,
+        update(db, id, post(u, "vi", "d", PostStatus::Published)).await?,
+    )
+    .await?;
     v += 1;
     version_is(db, "scheduled -> published", v).await?;
-    save(db, update(id, post(u, "vi", "d", PostStatus::Published))).await?;
+    save(
+        db,
+        update(db, id, post(u, "vi", "d", PostStatus::Published)).await?,
+    )
+    .await?;
     v += 1;
     version_is(db, "published -> published", v).await?;
-    save(db, update(id, d)).await?;
+    save(db, update(db, id, d).await?).await?;
     v += 1;
     version_is(db, "published -> draft", v).await?;
     save(db, post(u, "vi", "p", PostStatus::Published)).await?;
@@ -540,7 +548,7 @@ pub async fn revisions<S: Store>(db: &S) -> Check {
         created_at: 100,
     });
     let id = save(db, p.clone()).await?;
-    let mut e = update(id, p.clone());
+    let mut e = update(db, id, p.clone()).await?;
     e.title = "Second".into();
     e.markdown = "two".into();
     e.revision = Some(NewRevision {
@@ -548,7 +556,7 @@ pub async fn revisions<S: Store>(db: &S) -> Check {
         created_at: 100,
     });
     save(db, e).await?;
-    let mut e = update(id, p);
+    let mut e = update(db, id, p).await?;
     e.title = "No snapshot".into();
     e.revision = None;
     save(db, e).await?;
@@ -626,7 +634,7 @@ pub async fn translations<S: Store>(db: &S) -> Check {
         ErrorCode::Conflict,
     )?;
     // Moving an existing post into a group is not possible: the group is fixed.
-    let mut moved = update(other, post(u, "en", "other", PostStatus::Draft));
+    let mut moved = update(db, other, post(u, "en", "other", PostStatus::Draft)).await?;
     moved.translation_group = Some(vi);
     save(db, moved).await?;
     eq!(
@@ -637,7 +645,7 @@ pub async fn translations<S: Store>(db: &S) -> Check {
     // Changing lang into a taken one of the same group conflicts.
     fails(
         "update into a taken (group, lang)",
-        db.save_post(update(en, post(u, "vi", "hello", PostStatus::Draft)))
+        db.save_post(update(db, en, post(u, "vi", "hello", PostStatus::Draft)).await?)
             .await,
         ErrorCode::Conflict,
     )?;
@@ -660,5 +668,175 @@ pub async fn translations<S: Store>(db: &S) -> Check {
         )?
         .len(),
         0,
+    )
+}
+
+/// The current `version` of a post.
+async fn row_version<S: Store>(db: &S, id: PostId) -> super::kit::Got<i64> {
+    Ok(ok("get_post", db.get_post(id).await)?.version)
+}
+
+/// A save names the version it edited: insert must not, update must.
+pub async fn post_version_rules<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let mut bad = post(u, "vi", "new", PostStatus::Draft);
+    bad.expected_version = Some(1);
+    fails(
+        "insert with expected_version",
+        db.save_post(bad).await,
+        ErrorCode::InvalidInput,
+    )?;
+    eq!(
+        "rejected insert adds no post",
+        ok("find_post", db.find_post("vi", "new").await)?,
+        None,
+    )?;
+    let id = save(db, post(u, "vi", "new", PostStatus::Draft)).await?;
+    eq!("insert starts at version 1", row_version(db, id).await?, 1)?;
+    let listed = ok(
+        "list_posts",
+        db.list_posts(&PostQuery::new(PostOrder::UpdatedDesc, 10))
+            .await,
+    )?;
+    eq!(
+        "summary carries the version",
+        listed.iter().map(|p| p.version).collect::<Vec<_>>(),
+        vec![1],
+    )?;
+    let mut blind = post(u, "vi", "new", PostStatus::Draft);
+    blind.id = Some(id);
+    blind.title = "Blind".into();
+    fails(
+        "update without expected_version",
+        db.save_post(blind).await,
+        ErrorCode::InvalidInput,
+    )?;
+    eq!(
+        "rejected update keeps version",
+        row_version(db, id).await?,
+        1
+    )?;
+    let mut e = update(db, id, post(u, "vi", "new", PostStatus::Draft)).await?;
+    e.title = "Second".into();
+    save(db, e.clone()).await?;
+    eq!("update adds 1", row_version(db, id).await?, 2)?;
+    e.expected_version = Some(2);
+    save(db, e).await?;
+    eq!("every update adds 1", row_version(db, id).await?, 3)
+}
+
+/// Two editors start from the same version: the first save wins, the second is a
+/// `Conflict` naming the current version and writes nothing at all.
+pub async fn post_version_conflict<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let t1 = ok("ensure_tag", db.ensure_tag("one", "One").await)?;
+    let t2 = ok("ensure_tag", db.ensure_tag("two", "Two").await)?;
+    let base = post(u, "vi", "live", PostStatus::Published);
+    let id = save(db, base.clone()).await?;
+    let start = update(db, id, base).await?;
+    let mut first = start.clone();
+    first.title = "First".into();
+    first.slug = "first".into();
+    first.tag_ids = vec![t1];
+    first.search_text = "alpha".into();
+    first.revision = Some(NewRevision {
+        author_id: Some(u),
+        created_at: T0,
+    });
+    let mut second = start;
+    second.title = "Second".into();
+    second.slug = "second".into();
+    second.tag_ids = vec![t2];
+    second.search_text = "bravo".into();
+    second.revision = Some(NewRevision {
+        author_id: Some(u),
+        created_at: T0,
+    });
+    save(db, first).await?;
+    let after_first = ok("get_post", db.get_post(id).await)?;
+    let v = version(db).await?;
+    match db.save_post(second).await {
+        Err(e) if e.code == ErrorCode::Conflict => that(
+            &format!("conflict detail names version 2: {:?}", e.detail),
+            e.detail.contains("version 2"),
+        )?,
+        other => return Err(format!("stale save: expected Conflict, got {other:?}")),
+    }
+    eq!(
+        "stored row is the first save",
+        ok("get_post", db.get_post(id).await)?,
+        after_first,
+    )?;
+    eq!(
+        "no revision from the stale save",
+        ok("list_revisions", db.list_revisions(id).await)?.len(),
+        1,
+    )?;
+    eq!(
+        "no search hit from the stale save",
+        ok("search", db.search("vi", "bravo", 10).await)?.len(),
+        0,
+    )?;
+    eq!(
+        "no redirect from the stale save",
+        ok("find_redirect", db.find_redirect("/vi/first").await)?,
+        None,
+    )?;
+    eq!(
+        "stale save does not take the slug",
+        ok("find_post", db.find_post("vi", "second").await)?,
+        None,
+    )?;
+    version_is(db, "stale save", v).await
+}
+
+/// Trash, restore and `publish_due` change the row, so they move the version too: an
+/// editor opened before them cannot overwrite them.
+pub async fn post_version_status_changes<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let d = post(u, "vi", "d", PostStatus::Draft);
+    let id = save(db, d.clone()).await?;
+    let stale = update(db, id, d.clone()).await?;
+    ok("trash_post", db.trash_post(id, T0).await)?;
+    eq!("trash adds 1", row_version(db, id).await?, 2)?;
+    // Trashed first, whatever the version: the editor must restore, not retry.
+    fails(
+        "stale save of a trashed post",
+        db.save_post(stale.clone()).await,
+        ErrorCode::InvalidInput,
+    )?;
+    let fresh = update(db, id, d.clone()).await?;
+    fails(
+        "current-version save of a trashed post",
+        db.save_post(fresh).await,
+        ErrorCode::InvalidInput,
+    )?;
+    ok("restore_post", db.restore_post(id, T0).await)?;
+    eq!("restore adds 1", row_version(db, id).await?, 3)?;
+    fails(
+        "save from before the trash",
+        db.save_post(stale).await,
+        ErrorCode::Conflict,
+    )?;
+    eq!(
+        "still restored as draft",
+        ok("get_post", db.get_post(id).await)?.status,
+        PostStatus::Draft,
+    )?;
+    let mut s = post(u, "vi", "s", PostStatus::Scheduled);
+    s.published_at = Some(100);
+    let sid = save(db, s.clone()).await?;
+    let before_publish = update(db, sid, s).await?;
+    ok("publish_due", db.publish_due(100).await)?;
+    eq!("publish_due adds 1", row_version(db, sid).await?, 2)?;
+    fails(
+        "save from before publish_due",
+        db.save_post(before_publish).await,
+        ErrorCode::Conflict,
+    )?;
+    eq!(
+        "stays published",
+        ok("get_post", db.get_post(sid).await)?.status,
+        PostStatus::Published,
     )
 }

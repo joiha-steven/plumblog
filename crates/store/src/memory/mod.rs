@@ -15,7 +15,7 @@ mod users;
 mod webhooks;
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use plumblog_model::{
     CommentId, Error, ErrorCode, MediaId, PostId, Result, RevisionId, SeriesId, TagId, UserId,
@@ -59,6 +59,8 @@ struct State {
     tags: BTreeMap<TagId, Tag>,
     series: BTreeMap<SeriesId, Series>,
     posts: BTreeMap<PostId, Post>,
+    /// `post_media`: media used in post bodies.
+    post_media: BTreeSet<(PostId, MediaId)>,
     /// `posts_fts`: folded `(title, body)` per post.
     fts: BTreeMap<PostId, (String, String)>,
     revisions: BTreeMap<RevisionId, Revision>,
@@ -88,6 +90,7 @@ impl Default for State {
             tags: BTreeMap::new(),
             series: BTreeMap::new(),
             posts: BTreeMap::new(),
+            post_media: BTreeSet::new(),
             fts: BTreeMap::new(),
             revisions: BTreeMap::new(),
             redirects: BTreeMap::new(),
