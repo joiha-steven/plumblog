@@ -1,0 +1,194 @@
+/* Design tokens: the ONLY place raw values live (scripts/check-admin-css enforces it).
+   Components and pages use var(--...) so one change here moves the whole admin.
+   Scales follow docs/ARCHITECTURE.md, Design language.
+
+   Usage: load tokens.css, then components.css, then the pages/*.css you need, in that order.
+   The writing column's reading styles (headings, quotes, code in the editor) come from the active
+   theme's stylesheet, not from here. The reading font named in --read is loaded by the page.
+   Need a new size or color? Add a token here. Need a variant of a shared piece? Add a modifier
+   class in components.css. Page files only lay out. scripts/check runs scripts/check-admin-css. */
+
+/* ---------- Scales that do not change with the color theme ---------- */
+:root {
+  /* Type: 11 / 12 / 13 / 14 / 16 / 20 px, weights 400 / 500 / 600 (650 for writing titles). */
+  --ui: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --read: "Inter", "Inter Fallback", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --fs-11: 11px; --fs-12: 12px; --fs-13: 13px; --fs-14: 14px; --fs-16: 16px; --fs-20: 20px;
+  --fw-regular: 400; --fw-medium: 500; --fw-semibold: 600; --fw-title: 650;
+  --lh-1: 1; --lh-tight: 1.2; --lh-snug: 1.35; --lh-ui: 1.45; --lh-body: 1.55;
+  --ls-title: -.01em;
+  --ls-display: -.018em; --ls-write-title: -.016em; --lh-read: 1.65;
+  --type-story: var(--read-weight) 17px/var(--lh-read) var(--read);
+  --type-story-title: var(--fw-title) 1.6em/var(--lh-tight) var(--read);
+  --type-write-title: var(--fw-title) 1.5em/1.25 var(--read);
+  /* Text roles: every piece of text uses one of these, never its own size. */
+  --type-display: var(--fw-semibold) var(--fs-20)/var(--lh-tight) var(--ui);
+  --type-page: var(--fw-semibold) var(--fs-16)/var(--lh-tight) var(--ui);
+  --type-section: var(--fw-semibold) var(--fs-14)/var(--lh-snug) var(--ui);
+  --type-body: var(--fw-regular) var(--fs-14)/var(--lh-ui) var(--ui);
+  --type-item: var(--fw-medium) var(--fs-14)/var(--lh-snug) var(--ui);
+  --type-item-strong: var(--fw-semibold) var(--fs-14)/var(--lh-snug) var(--ui);
+  --type-small: var(--fw-regular) var(--fs-13)/var(--lh-ui) var(--ui);
+  --type-label: var(--fw-medium) var(--fs-13)/var(--lh-snug) var(--ui);
+  --type-ctl: var(--fw-medium) var(--fs-13)/var(--lh-1) var(--ui);
+  --type-meta: var(--fw-regular) var(--fs-12)/var(--lh-snug) var(--ui);
+  --type-caption: var(--fw-semibold) var(--fs-12)/var(--lh-snug) var(--ui);
+  --type-micro: var(--fw-semibold) var(--fs-11)/var(--lh-1) var(--ui);
+  --type-bar: var(--fw-medium) var(--fs-11)/var(--lh-1) var(--ui);
+  --type-mono: var(--fw-regular) var(--fs-12)/var(--lh-snug) var(--mono);
+  --type-field: var(--fw-regular) var(--fs-14)/var(--lh-snug) var(--ui);
+
+  /* Space: 2 / 4 / 6 / 8 / 12 / 16 / 20 / 24 / 32 / 40 / 48 / 56 px. */
+  --sp-1: 1px; --sp-2: 2px; --sp-4: 4px; --sp-6: 6px; --sp-8: 8px; --sp-12: 12px; --sp-16: 16px;
+  --sp-20: 20px; --sp-24: 24px; --sp-32: 32px; --sp-40: 40px; --sp-48: 48px; --sp-56: 56px;
+  --gutter: var(--sp-24);               /* page side padding; 16 on phones */
+  --stack: var(--sp-24);                /* space between blocks of a page */
+
+  /* Sizes. */
+  --ctl: 32px;                          /* buttons, fields, nav and menu items; 44 on touch */
+  --ctl-in: 26px;                       /* a key inside a segmented track */
+  --ctl-tool: 36px;                     /* editor toolbar keys */
+  --ctl-chip: 24px;                     /* tags, chips */
+  --ctl-lg: 40px;                       /* sign-in fields and buttons */
+  --ctl-sub: 28px;                      /* sub-items under a sidebar entry */
+  --ctl-tall: 44px;                     /* two-line account entry */
+  --ctl-rail: 40px;                     /* icon rail items on tablets */
+  --area: 72px;                         /* textarea minimum */
+  --icon: 16px; --icon-sm: 12px; --icon-md: 14px; --icon-lg: 18px; --icon-xl: 20px;
+  --mark: 24px; --mark-lg: 36px;
+  --lamp: 6px;
+  --head-h: 60px;                       /* page header; its middle is level with the logo */
+  --side-w: 224px; --rail-w: 60px; --insp-w: 340px; --subnav-w: 224px; --drawer-w: 340px;
+  --row-h: 60px;
+  --sw-w: 36px; --sw-h: 20px; --knob: 16px; --tick: 18px;
+  --pot: 30px;
+  --thumb-w: 72px; --thumb-h: 48px; --thumb-min: 168px;
+  --measure: 560px; --measure-wide: 960px; --pop-w: 200px; --pop-w-lg: 340px;
+  --find-w: 420px; --msg-w: 400px; --kv-key: 88px; --caption-w: 60ch; --lb-side: 80px;
+  --col-status: 96px; --col-date: 150px; --col-lang: 72px;
+  --theme-min: 150px; --theme-h: 88px;
+  --bar-h: 60px; --bar-item: 52px; --bar-gap: 12px; --bar-max: 440px;
+  --toast-y: 20px; --kb: 0px;
+  --blur: 22px; --blur-sm: 12px; --blur-xs: 8px; --glass-sat: 1.8;
+  --chip-ib: 22px; --slash-w: 248px; --stbl-min: 640px;
+  --auth-w: 340px; --auth-side: 420px; --story-w: 32em; --story-gap: .7em; --story-p: 1em; --story-fade: 4em;
+  --col-w: 64ch; --scroll-pad: 96px; --write-tail: 40vh; --preview-tail: 30vh;
+
+  /* Radius: pills and circles for controls; 10 fields, 12 rows, 16 cards and popovers. */
+  --r-4: 4px; --r-6: 6px; --r-10: 10px; --r-12: 12px; --r-16: 16px; --r-22: 22px; --r-pill: 999px; --r-round: 50%;
+
+  /* Motion. */
+  --dur-1: .12s;                        /* state changes */
+  --dur-2: .18s;                        /* popovers, panels, viewer */
+  --dur-3: .3s;                         /* fades while typing */
+  --dur-4: .6s;                         /* "saved" settling */
+  --dur-off: .01ms;                     /* prefers-reduced-motion */
+  --ease: ease-out;
+  --lift: -1px; --sink: 1px; --squeeze: .92;
+
+  /* Stacking, lowest to highest. */
+  --z-sticky-in: 2; --z-sticky: 3; --z-tools: 5; --z-bar: 10; --z-editor: 20; --z-tools-phone: 25;
+  --z-bubble: 30; --z-scrim: 40; --z-drawer: 45; --z-safe: 50; --z-pop: 60; --z-viewer: 65; --z-toast: 70;
+
+  /* Overlay strengths for hover / press tints. */
+  --a-hover: .06; --a-press: .08; --a-faint: .14; --a-dim: .3; --a-off: .4; --a-quiet: .6;
+}
+/* Touch: every target at least 44 px. Phones: tighter gutter and a shorter header. */
+@media (pointer: coarse), (max-width: 599px) {
+  :root { --ctl: 44px; --ctl-in: 44px; --ctl-tool: 44px; --pot: 44px; --ctl-lg: 44px; --ctl-sub: 44px; --ctl-rail: 44px; --ctl-chip: 44px; --chip-ib: 44px;
+    --type-ctl: var(--fw-medium) var(--fs-14)/var(--lh-1) var(--ui);
+    --type-field: var(--fw-regular) var(--fs-16)/var(--lh-snug) var(--ui); }
+}
+@media (max-width: 599px) {
+  :root { --gutter: var(--sp-16); --head-h: 52px; --stack: var(--sp-16); --toast-y: calc(var(--bar-h) + var(--bar-gap) * 2); }
+}
+
+/* ---------- Color themes ---------- */
+:root, .t-light {
+  --bg: #f3f2ef; --surface: #ffffff; --field: #f7f6f3; --line: #e7e5e0; --line-strong: #d6d3cd; --line-ctl: #ccc8c1;
+  --text: #1f1e1c; --muted: #55524c; --faint: #6b6761;
+  --ink: #252421; --ink-fg: #fbfaf8; --ink-press: #0f0e0d; --tint: 37 36 33; --tint-inv: 251 250 248;
+  --key: #fdfcfa; --well: #f0eee9; --signal: #c4561f; --signal-edge: #a94816; --accent: #c4561f; --ring: rgb(196 86 31 / .45);
+  --st-draft: #6b6862; --st-draft-bg: #edebe7; --st-sched: #7d5f17; --st-sched-bg: #f3ead3; --st-pub: #46664c; --st-pub-bg: #e3ebe2; --st-err: #9a3a2c; --st-err-bg: #f5e1dc;
+  --paper: #ffffff; --ink-text: #1d1c1a; --ink-soft: #57544e; --mark: #76726c; --code-bg: #f3f2ef; --sel: rgb(196 86 31 / .16);
+  --glass: rgb(251 250 248 / .7); --glass-sel: rgb(0 0 0 / .06);
+  --rim: rgb(0 0 0 / .16); --on-color: #ffffff; --scrim: rgb(0 0 0 / .25); --hl: rgb(255 255 255 / .75); --contact: rgb(0 0 0 / .07);
+  --sh-rest: inset 0 1px 0 rgb(255 255 255 / .9), 0 1px 2px rgb(0 0 0 / .06), 0 1px 1px rgb(0 0 0 / .03);
+  --sh-hover: inset 0 1px 0 rgb(255 255 255 / .9), 0 2px 6px rgb(0 0 0 / .08), 0 1px 2px rgb(0 0 0 / .04);
+  --sh-press: inset 0 1px 2px rgb(0 0 0 / .1); --sh-latch: inset 0 1px 2px rgb(0 0 0 / .08); --sh-well: inset 0 1px 1px rgb(0 0 0 / .04);
+  --sh-knob: 0 1px 2px rgb(0 0 0 / .18), 0 0 0 .5px rgb(0 0 0 / .06);
+  --sh-rest-ink: inset 0 1px 0 rgb(255 255 255 / .12), 0 1px 2px rgb(0 0 0 / .14); --sh-hover-ink: inset 0 1px 0 rgb(255 255 255 / .12), 0 2px 6px rgb(0 0 0 / .16);
+  --sh-press-ink: inset 0 1px 2px rgb(0 0 0 / .3); --sh-on: inset 0 1px 2px rgb(0 0 0 / .25);
+  --sh-pop: 0 4px 16px rgb(0 0 0 / .12); --sh-lift: 0 4px 12px rgb(0 0 0 / .08); --sh-img: 0 1px 3px rgb(0 0 0 / .14);
+  --sh-glass: 0 0 0 .5px rgb(0 0 0 / .1), inset 0 1px 0 rgb(255 255 255 / .8), 0 10px 30px rgb(0 0 0 / .12);
+  --sh-float: inset 0 1px 0 rgb(255 255 255 / .75), 0 1px 2px rgb(0 0 0 / .07), 0 8px 22px rgb(0 0 0 / .08);
+  --check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' fill='none' stroke='%23fbfaf8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M5 6.5l3 3 3-3' fill='none' stroke='%236b6761' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  --read-size: clamp(16px, 15.2px + .2vw, 17px); --read-weight: 400;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #1a1918; --surface: #222120; --field: #1d1c1b; --line: #312f2d; --line-strong: #3e3c39; --line-ctl: #4a4743;
+  --text: #ebe9e5; --muted: #bdb9b2; --faint: #9e9a93;
+  --ink: #ebe9e5; --ink-fg: #1a1918; --ink-press: #cfccc6; --tint: 235 233 229; --tint-inv: 26 25 24;
+  --key: #353330; --well: #1b1a19; --signal: #e0804b; --signal-edge: #c8693a; --accent: #e0804b; --ring: rgb(224 128 75 / .5);
+  --st-draft: #b0aba3; --st-draft-bg: #2e2c2a; --st-sched: #d4b26a; --st-sched-bg: #383020; --st-pub: #9bbb9e; --st-pub-bg: #25302a; --st-err: #e39a8c; --st-err-bg: #3c2522;
+  --paper: #222120; --ink-text: #e7e4df; --ink-soft: #b0aba3; --mark: #8f8b84; --code-bg: #2a2927; --sel: rgb(224 128 75 / .24);
+  --glass: rgb(40 38 36 / .72); --glass-sel: rgb(255 255 255 / .1);
+  --rim: rgb(255 255 255 / .14); --on-color: #ffffff; --scrim: rgb(0 0 0 / .45); --hl: rgb(255 255 255 / .06); --contact: rgb(0 0 0 / .5);
+  --sh-rest: inset 0 1px 0 rgb(255 255 255 / .06), 0 1px 2px rgb(0 0 0 / .35);
+  --sh-hover: inset 0 1px 0 rgb(255 255 255 / .07), 0 2px 8px rgb(0 0 0 / .35);
+  --sh-press: inset 0 1px 3px rgb(0 0 0 / .4); --sh-latch: inset 0 1px 2px rgb(0 0 0 / .35); --sh-well: inset 0 1px 2px rgb(0 0 0 / .25);
+  --sh-knob: 0 1px 2px rgb(0 0 0 / .45);
+  --sh-rest-ink: inset 0 1px 0 rgb(255 255 255 / .5), 0 1px 2px rgb(0 0 0 / .35); --sh-hover-ink: inset 0 1px 0 rgb(255 255 255 / .5), 0 2px 8px rgb(0 0 0 / .35);
+  --sh-press-ink: inset 0 1px 2px rgb(0 0 0 / .3); --sh-on: inset 0 1px 2px rgb(0 0 0 / .35);
+  --sh-pop: 0 6px 20px rgb(0 0 0 / .5); --sh-lift: 0 4px 12px rgb(0 0 0 / .4); --sh-img: 0 1px 3px rgb(0 0 0 / .4);
+  --sh-glass: 0 0 0 .5px rgb(255 255 255 / .12), inset 0 1px 0 rgb(255 255 255 / .08), 0 10px 30px rgb(0 0 0 / .5);
+  --sh-float: inset 0 1px 0 rgb(255 255 255 / .06), 0 1px 2px rgb(0 0 0 / .5), 0 8px 22px rgb(0 0 0 / .35);
+  --check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' fill='none' stroke='%231a1918' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M5 6.5l3 3 3-3' fill='none' stroke='%239e9a93' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  --read-weight: 380;
+  color-scheme: dark;
+} }
+:root[data-theme="dark"], .t-dark {
+  --bg: #1a1918; --surface: #222120; --field: #1d1c1b; --line: #312f2d; --line-strong: #3e3c39; --line-ctl: #4a4743;
+  --text: #ebe9e5; --muted: #bdb9b2; --faint: #9e9a93;
+  --ink: #ebe9e5; --ink-fg: #1a1918; --ink-press: #cfccc6; --tint: 235 233 229; --tint-inv: 26 25 24;
+  --key: #353330; --well: #1b1a19; --signal: #e0804b; --signal-edge: #c8693a; --accent: #e0804b; --ring: rgb(224 128 75 / .5);
+  --st-draft: #b0aba3; --st-draft-bg: #2e2c2a; --st-sched: #d4b26a; --st-sched-bg: #383020; --st-pub: #9bbb9e; --st-pub-bg: #25302a; --st-err: #e39a8c; --st-err-bg: #3c2522;
+  --paper: #222120; --ink-text: #e7e4df; --ink-soft: #b0aba3; --mark: #8f8b84; --code-bg: #2a2927; --sel: rgb(224 128 75 / .24);
+  --glass: rgb(40 38 36 / .72); --glass-sel: rgb(255 255 255 / .1);
+  --rim: rgb(255 255 255 / .14); --on-color: #ffffff; --scrim: rgb(0 0 0 / .45); --hl: rgb(255 255 255 / .06); --contact: rgb(0 0 0 / .5);
+  --sh-rest: inset 0 1px 0 rgb(255 255 255 / .06), 0 1px 2px rgb(0 0 0 / .35);
+  --sh-hover: inset 0 1px 0 rgb(255 255 255 / .07), 0 2px 8px rgb(0 0 0 / .35);
+  --sh-press: inset 0 1px 3px rgb(0 0 0 / .4); --sh-latch: inset 0 1px 2px rgb(0 0 0 / .35); --sh-well: inset 0 1px 2px rgb(0 0 0 / .25);
+  --sh-knob: 0 1px 2px rgb(0 0 0 / .45);
+  --sh-rest-ink: inset 0 1px 0 rgb(255 255 255 / .5), 0 1px 2px rgb(0 0 0 / .35); --sh-hover-ink: inset 0 1px 0 rgb(255 255 255 / .5), 0 2px 8px rgb(0 0 0 / .35);
+  --sh-press-ink: inset 0 1px 2px rgb(0 0 0 / .3); --sh-on: inset 0 1px 2px rgb(0 0 0 / .35);
+  --sh-pop: 0 6px 20px rgb(0 0 0 / .5); --sh-lift: 0 4px 12px rgb(0 0 0 / .4); --sh-img: 0 1px 3px rgb(0 0 0 / .4);
+  --sh-glass: 0 0 0 .5px rgb(255 255 255 / .12), inset 0 1px 0 rgb(255 255 255 / .08), 0 10px 30px rgb(0 0 0 / .5);
+  --sh-float: inset 0 1px 0 rgb(255 255 255 / .06), 0 1px 2px rgb(0 0 0 / .5), 0 8px 22px rgb(0 0 0 / .35);
+  --check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8.5l2.5 2.5L12 5.5' fill='none' stroke='%231a1918' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M5 6.5l3 3 3-3' fill='none' stroke='%239e9a93' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  --read-weight: 380;
+  color-scheme: dark;
+}
+/* The viewer is dark in both themes so pictures read true. */
+:root { --lb-bg: rgb(14 13 12 / .94); --lb-fg: #f3f1ec; --lb-muted: rgb(243 241 236 / .7); --lb-glass: rgb(255 255 255 / .12); --lb-glass-h: rgb(255 255 255 / .2); --lb-rim: rgb(255 255 255 / .14); --sh-viewer-img: 0 20px 60px rgb(0 0 0 / .5); }
+
+/* Composites that mix theme colors: defined on every theme root so a .t-dark block inside a light page gets its own. */
+:root, .t-light, .t-dark {
+  --sh-none: 0 0 #0000;
+  --sh-lamp: 0 0 4px var(--signal);
+  --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--ring);
+  --sh-sel: 0 0 0 1px var(--line-ctl), var(--sh-rest);
+  --sel-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--ink);
+  --hover-ring: 0 0 0 2px var(--surface), 0 0 0 3px var(--line-strong);
+  --line-ring: 0 0 0 1px var(--line);
+  --line-ring-strong: 0 0 0 1px var(--line-strong);
+  --rim-ring: inset 0 0 0 1px var(--rim);
+  --ctl-ring: inset 0 0 0 1px var(--line-ctl);
+  --signal-ring: inset 0 0 0 1px var(--signal);
+  --glass-ring: inset 0 0 0 1px var(--lb-rim);
+}
