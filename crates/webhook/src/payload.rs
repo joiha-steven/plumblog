@@ -19,6 +19,9 @@ pub struct PostInfo {
     pub status: PostStatus,
     pub published_at: Option<i64>,
     pub updated_at: i64,
+    /// The URL before a slug change, sent as `previous_url` in `post.updated` so receivers
+    /// can move what they keyed by the old one. Set by [`crate::event_for`].
+    pub previous_url: Option<String>,
 }
 
 impl PostInfo {
@@ -33,12 +36,14 @@ impl PostInfo {
             status: post.status,
             published_at: post.published_at,
             updated_at: post.updated_at,
+            previous_url: None,
         }
     }
 }
 
 /// The body for `event` about `post`, as the exact bytes to store and sign. `post.deleted`
 /// carries only `post_id`, `slug` and `lang`: the post is gone, so nothing else is true.
+/// `previous_url` is present only when `post.previous_url` is set (absent, not null).
 #[must_use]
 pub fn build(msg_id: &str, event: WebhookEvent, post: &PostInfo, now_ms: i64) -> String {
     let data = match event {
@@ -47,16 +52,22 @@ pub fn build(msg_id: &str, event: WebhookEvent, post: &PostInfo, now_ms: i64) ->
             "slug": post.slug,
             "lang": post.lang,
         }),
-        WebhookEvent::PostPublished | WebhookEvent::PostUpdated => json!({
-            "post_id": post.post_id.0,
-            "slug": post.slug,
-            "lang": post.lang,
-            "title": post.title,
-            "url": post.url,
-            "status": post.status.as_str(),
-            "published_at": post.published_at.map_or(Value::Null, |t| Value::from(rfc3339(t))),
-            "updated_at": rfc3339(post.updated_at),
-        }),
+        WebhookEvent::PostPublished | WebhookEvent::PostUpdated => {
+            let mut data = json!({
+                "post_id": post.post_id.0,
+                "slug": post.slug,
+                "lang": post.lang,
+                "title": post.title,
+                "url": post.url,
+                "status": post.status.as_str(),
+                "published_at": post.published_at.map_or(Value::Null, |t| Value::from(rfc3339(t))),
+                "updated_at": rfc3339(post.updated_at),
+            });
+            if let (Some(prev), Some(map)) = (&post.previous_url, data.as_object_mut()) {
+                map.insert("previous_url".to_owned(), Value::from(prev.as_str()));
+            }
+            data
+        }
     };
     json!({
         "id": msg_id,
@@ -115,6 +126,7 @@ mod tests {
             status: PostStatus::Published,
             published_at: Some(1_764_230_400_000),
             updated_at: 1_764_230_401_500,
+            previous_url: None,
         }
     }
 
@@ -174,6 +186,18 @@ mod tests {
         assert_eq!(v["type"], "post.updated");
         assert_eq!(v["data"]["published_at"], Value::Null);
         assert_eq!(v["data"]["status"], "draft");
+    }
+
+    #[test]
+    fn previous_url_only_when_set() {
+        let v: Value =
+            serde_json::from_str(&build("m", WebhookEvent::PostUpdated, &info(), 0)).unwrap();
+        assert!(v["data"].get("previous_url").is_none(), "absent, not null");
+        let mut p = info();
+        p.previous_url = Some("https://blog.example/vi/old".into());
+        let v: Value = serde_json::from_str(&build("m", WebhookEvent::PostUpdated, &p, 0)).unwrap();
+        assert_eq!(v["data"]["previous_url"], "https://blog.example/vi/old");
+        assert_eq!(v["data"]["url"], "https://blog.example/vi/hello");
     }
 
     #[test]

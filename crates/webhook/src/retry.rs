@@ -72,6 +72,9 @@ impl Failure {
 pub enum HttpError {
     Timeout,
     Network,
+    /// A redirect the platform hides (an opaque redirect: status 0, no location). Never
+    /// followed, same as a 3xx.
+    Redirect,
 }
 
 /// One attempt's result.
@@ -107,6 +110,10 @@ pub fn classify(result: Result<u16, HttpError>) -> Outcome {
         Err(HttpError::Network) => Outcome::Failed {
             status: None,
             failure: Failure::Network,
+        },
+        Err(HttpError::Redirect) => Outcome::Failed {
+            status: None,
+            failure: Failure::Redirect,
         },
     }
 }
@@ -146,6 +153,7 @@ mod tests {
             (Ok(100), Some(100), Failure::Status),
             (Err(HttpError::Timeout), None, Failure::Timeout),
             (Err(HttpError::Network), None, Failure::Network),
+            (Err(HttpError::Redirect), None, Failure::Redirect),
         ] {
             assert_eq!(
                 classify(got),

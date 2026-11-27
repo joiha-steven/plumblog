@@ -10,8 +10,9 @@ crate-type = ["cdylib"]
 
 [features]
 # Test builds only (scripts/worker-test): the /__contract route runs the store contract suite
-# against real D1. Never enabled for deploy, so release wasm has no such route.
-contract-tests = ["plumblog-store/contract"]
+# against real D1, and /__webhooks/* may deliver to a local http receiver. Never enabled for
+# deploy, so release wasm has no such route and no loopback policy.
+contract-tests = ["plumblog-store/contract", "plumblog-webhook/test-receiver"]
 
 [dependencies]
 worker.workspace = true
@@ -21,6 +22,7 @@ plumblog-render.workspace = true
 plumblog-i18n.workspace = true
 plumblog-store.workspace = true
 plumblog-syslog.workspace = true
+plumblog-webhook.workspace = true
 
 [dev-dependencies]
 roxmltree.workspace = true

@@ -74,6 +74,7 @@ cases! {
     posts::trash_restore_delete,
     posts::post_delete_cascades,
     posts::publish_due,
+    posts::publish_due_limit,
     posts::revisions,
     posts::translations,
     listing::post_paging_published_desc,

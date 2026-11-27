@@ -5,6 +5,14 @@ import { after, before, test } from "node:test";
 import { startWorker, wrangler } from "./harness.mjs";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+// The one cron runs every 10 minutes; the run scheduled 03:10 UTC also does the daily jobs
+// (crates/worker/src/jobs.rs). Miniflare's trigger route takes the scheduled `time`
+// (wrangler's /__scheduled does not); the jobs still read the clock.
+const daily = () => {
+  const t = new Date();
+  t.setUTCHours(3, 10, 0, 0);
+  return `/cdn-cgi/local/scheduled?cron=${encodeURIComponent("*/10 * * * *")}&time=${t.getTime()}`;
+};
 
 let worker;
 before(async () => {
@@ -21,7 +29,12 @@ function sql(command) {
   return JSON.parse(out.slice(start)).at(-1).results ?? [];
 }
 
-const rows = () => sql("SELECT request_id, kind, actor_id, error_code, detail FROM system_log ORDER BY at_ms, id");
+// The daily run also records the webhook delivery prune; this file is about the log's own.
+const rows = () =>
+  sql(
+    "SELECT request_id, kind, actor_id, error_code, detail FROM system_log " +
+      "WHERE detail NOT LIKE 'webhook_deliveries.%' ORDER BY at_ms, id",
+  );
 
 test("page views write nothing; the daily job prunes and records itself", async () => {
   const now = Date.now();
@@ -34,7 +47,7 @@ test("page views write nothing; the daily job prunes and records itself", async 
   for (const path of ["/healthz", "/", "/no-such-page"]) await fetch(`${worker.url}${path}`);
   assert.deepEqual(rows().map((r) => r.request_id), ["seed-old", "seed-new"], "views must not write");
 
-  const res = await fetch(`${worker.url}/__scheduled?cron=${encodeURIComponent("17 3 * * *")}`);
+  const res = await fetch(`${worker.url}${daily()}`);
   assert.equal(res.status, 200, await res.text());
 
   const after = rows();
@@ -78,7 +91,7 @@ test("a backlog drains in bounded runs (Retention::per_run)", async () => {
   const runs = [];
   for (const want of [2000, 500]) {
     const from = worker.log().length;
-    const res = await fetch(`${worker.url}/__scheduled?cron=${encodeURIComponent("17 3 * * *")}`);
+    const res = await fetch(`${worker.url}${daily()}`);
     assert.equal(res.status, 200);
     const line = await logLine(from, /prune_log deleted=/);
     console.log("Worker log line:", line);

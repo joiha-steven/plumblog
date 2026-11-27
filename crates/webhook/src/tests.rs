@@ -164,6 +164,7 @@ fn post() -> PostInfo {
         status: PostStatus::Published,
         published_at: Some(T),
         updated_at: T,
+        previous_url: None,
     }
 }
 

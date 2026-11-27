@@ -282,10 +282,11 @@ pub trait PostStore {
     /// translations are untouched. Never bumps the content version: a trashed post and its
     /// comments are not visible to readers.
     async fn delete_post(&self, id: PostId) -> Result<()>;
-    /// Every scheduled post with `published_at <= now` becomes published, in one write;
-    /// returns their ids ascending; deletes the redirect from each one's path (it is live
+    /// At most `limit` scheduled posts with `published_at <= now`, earliest due first
+    /// (`published_at`, id), become published in one write (the rest stay due for the next
+    /// run, so a caller can bound the work that follows); returns their ids ascending; deletes the redirect from each one's path (it is live
     /// now); bumps once if any. `updated_at` is unchanged; each one's `version + 1`.
-    async fn publish_due(&self, now: i64) -> Result<Vec<PostId>>;
+    async fn publish_due(&self, now: i64, limit: u32) -> Result<Vec<PostId>>;
     /// Newest first (`created_at` DESC, id DESC); empty for an unknown post.
     async fn list_revisions(&self, post: PostId) -> Result<Vec<Revision>>;
     /// `NotFound`.

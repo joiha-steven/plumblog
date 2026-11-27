@@ -13,6 +13,7 @@ mod sign;
 pub mod ssrf;
 #[cfg(test)]
 mod tests;
+mod transition;
 
 pub use deliver::{
     Created, DELIVERY_JOB, PRUNE_JOB, Run, Sender, create_webhook, enqueue, prune_job,
@@ -27,6 +28,7 @@ pub use retry::{
 pub use secret::{KEY_LEN, SECRET_PREFIX, SealKey, Secret, open, seal};
 pub use sign::{headers, signature_header, signed_content};
 pub use ssrf::{Blocked, Policy, Target};
+pub use transition::event_for;
 
 use plumblog_model::Result;
 
