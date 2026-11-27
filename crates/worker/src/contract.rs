@@ -4,7 +4,8 @@
 //! runs one case. Cases share one database, so the caller runs them one at a time.
 //! D1-only cases (`d1::selftest`) are listed and run the same way. `POST /__seed` empties the
 //! database and saves the sample posts (search tests, local previews); `POST /__option`
-//! stores one option value (options tests).
+//! stores one option value (options tests). `POST /__preview` renders a draft (form fields
+//! `title`, `body`, `lang`) as the page it would publish as, for the admin mock.
 
 use plumblog_store::{OptionOwner, SettingsStore, contract};
 use worker::{Env, Request, Response, Result};
@@ -14,6 +15,7 @@ use crate::d1::{D1Store, selftest};
 const PREFIX: &str = "/__contract";
 const SEED: &str = "/__seed";
 const OPTION: &str = "/__option";
+const PREVIEW: &str = "/__preview";
 
 /// Second lock besides the cargo feature: the route empties the database, so it also needs
 /// this variable, which only tools/wrangler.dev.toml sets.
@@ -55,6 +57,9 @@ pub async fn handle(req: &Request, env: &Env) -> Result<Option<Response>> {
             Err(e) => Response::error(format!("put_option failed: {e}"), 500).map(Some),
         };
     }
+    if path == PREVIEW && method == "POST" {
+        return preview(req, env).await.map(Some);
+    }
     if path == SEED && method == "POST" {
         let store = D1Store::new(env.d1("DB")?);
         if let Err(e) = store.wipe().await {
@@ -90,5 +95,33 @@ pub async fn handle(req: &Request, env: &Env) -> Result<Option<Response>> {
     match out {
         Ok(()) => Response::ok("ok").map(Some),
         Err(msg) => Response::error(msg, 500).map(Some),
+    }
+}
+
+/// `POST /__preview`: the draft in the form (`title`, `body`, `lang`) as the page it would
+/// publish as.
+async fn preview(req: &Request, env: &Env) -> Result<Response> {
+    let mut req = req.clone()?;
+    let form = req.form_data().await?;
+    let field = |k: &str| match form.get(k) {
+        Some(worker::FormEntry::Field(v)) => v,
+        _ => String::new(),
+    };
+    let store = D1Store::new(env.d1("DB")?);
+    let db = crate::pages::db_source(&store);
+    let src = crate::pages::source::SampleSource::get();
+    let started = worker::Date::now().as_millis();
+    match crate::pages::preview(src, &db, &field("title"), &field("body"), &field("lang")).await {
+        Ok(html) => {
+            let h = worker::Headers::new();
+            h.set("content-type", "text/html; charset=utf-8")?;
+            h.set("cache-control", "no-store")?;
+            h.set("x-robots-tag", "noindex")?;
+            // As on reader pages: the render cost of a long draft, for local measurement.
+            let ms = worker::Date::now().as_millis().saturating_sub(started);
+            h.set("server-timing", &format!("render;dur={ms}"))?;
+            Ok(Response::ok(html)?.with_headers(h))
+        }
+        Err(e) => Response::error(format!("preview failed: {e}"), 500),
     }
 }

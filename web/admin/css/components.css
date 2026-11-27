@@ -340,7 +340,7 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 .panel-head h2 { flex: 1; }
 .panel-body { padding: 0 max(var(--gutter), env(safe-area-inset-right, 0px)) max(var(--sp-32), env(safe-area-inset-bottom, 0px)) var(--gutter); }
 /* Floating toolbar (editor) and selection bubble: a contained pill, never edge to edge. */
-.tools-wrap { position: sticky; top: 0; z-index: var(--z-tools); display: flex; justify-content: center; padding: var(--sp-12) var(--gutter) var(--sp-6); pointer-events: none; }
+.tools-wrap { position: sticky; top: 0; z-index: var(--z-tools); display: flex; justify-content: center; padding: var(--sp-12) var(--gutter) var(--sp-6); pointer-events: none; background: linear-gradient(var(--paper) 55%, transparent); }
 .tools, .bubble { pointer-events: auto; display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-4) var(--sp-8); border-radius: var(--r-pill); background: var(--surface); border: 1px solid var(--line-strong); box-shadow: var(--sh-float); font: var(--type-body); transition: opacity var(--dur-3) var(--ease); }
 .bubble { position: fixed; z-index: var(--z-bubble); padding: var(--sp-4); box-shadow: var(--sh-pop); animation: rise var(--dur-1) var(--ease); }
 .tools .ib { width: var(--ctl-tool); height: var(--ctl-tool); }

@@ -74,6 +74,11 @@
   --chip-ib: 22px; --slash-w: 248px; --stbl-min: 640px;
   --auth-w: 340px; --auth-side: 420px; --story-w: 32em; --story-gap: .7em; --story-p: 1em; --story-fade: 4em;
   --col-w: 64ch; --scroll-pad: 96px; --write-tail: 40vh; --preview-tail: 30vh;
+  /* Writing column: the text styled as it will publish, in em so it follows the column size. */
+  --w-h1: 1.4em; --w-h2: 1.2em; --w-h3: 1.05em; --w-ls-h1: -.014em; --w-ls-h2: -.01em;
+  --w-space-h1: .8em; --w-space-h2: 1em; --w-indent: 1em; --w-block-pad: .5em;
+  --w-code: .84em; --w-small: .88em; --w-source: .78em; --w-url: .9em; --w-caption: .8em;
+  --w-chip: .1em .3em; --w-pic-space: .5em 0 1em; --w-pic-h: clamp(12rem, 45vw, 20rem); --lh-code: 1.6;
 
   /* Radius: pills and circles for controls; 10 fields, 12 rows, 16 cards and popovers. */
   --r-4: 4px; --r-6: 6px; --r-10: 10px; --r-12: 12px; --r-16: 16px; --r-22: 22px; --r-pill: 999px; --r-round: 50%;

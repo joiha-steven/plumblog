@@ -25,11 +25,13 @@ bin=tools/node_modules/.bin
 "$bin/tsc" -p web/admin/tsconfig.json || fail "type errors in web/admin/src (above)"
 "$bin/tsc" -p web/admin/tsconfig.sw.json || fail "type errors in web/admin/src/sw.ts (above)"
 
+# Packages live in tools/node_modules (the repo root stays free of Node files).
+export NODE_PATH="$PWD/tools/node_modules"
 if $mock; then out=target/admin-dev; else out=target/admin; fi
 meta="$out.meta.json" # beside the output, not in it: it is not served
 rm -rf "$out" "$meta"
 mkdir -p "$out"
-common=(--bundle --minify --target=es2022 --legal-comments=none --log-level=warning --charset=utf8)
+common=(--bundle --minify --target=es2022 --legal-comments=none --log-level=warning --charset=utf8 --loader:.txt=text)
 "$bin/esbuild" web/admin/src/main.ts "${common[@]}" --format=esm --splitting \
   --outdir="$out" --entry-names=app --chunk-names='chunks/[name]-[hash]' --define:MOCK="$mock" \
   --metafile="$meta" || fail "esbuild: admin script"
@@ -39,6 +41,9 @@ common=(--bundle --minify --target=es2022 --legal-comments=none --log-level=warn
 # admin, not the Worker, so it never counts against the wasm budget.
 cargo run -q -p plumblog-i18n --example admin_locales -- locales "$out/i18n" \
   || fail "UI text modules (locales/*.toml, above)"
+
+# The mock's pictures, at the paths web/admin/fixtures/post-1.txt uses.
+if $mock; then cp -R web/admin/fixtures/media "$out/mock"; fi
 
 # The service worker precaches exactly this build's files, in a cache named after their hash:
 # a new deploy gets a new cache and the old one (with its old chunks) is deleted.

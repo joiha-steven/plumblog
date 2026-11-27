@@ -22,7 +22,11 @@ test("every admin path gets the same shell, with a strict CSP and no caching", a
     assert.match(res.headers.get("content-type"), /^text\/html/);
     const csp = res.headers.get("content-security-policy");
     assert.match(csp, /script-src 'self';/);
-    assert.match(csp, /style-src 'self';/);
+    // The nonce admits only the editor's own <style> (CodeMirror); fresh on every response.
+    const nonce = /style-src 'self' 'nonce-([0-9a-f]{32})';/.exec(csp)?.[1];
+    assert.ok(nonce, csp);
+    const again = (await fetch(res.url)).headers.get("content-security-policy");
+    assert.ok(!again.includes(nonce), "a new nonce per response");
     assert.match(csp, /frame-ancestors 'none'/);
     assert.equal(res.headers.get("cache-control"), "no-cache");
     assert.equal(res.headers.get("x-robots-tag"), "noindex");
@@ -93,6 +97,16 @@ test("each language's UI text is a static module with English behind it", async 
   assert.equal(vi.messages["admin.nav.posts"], "B\u00e0i vi\u1ebft");
 });
 
+test("hashed chunks (the editor) are cached for a year", async () => {
+  const app = await (await fetch(`${worker.url}/admin/app.js`)).text();
+  const chunk = /chunks\/editor-[\w-]+\.js/.exec(app)?.[0];
+  assert.ok(chunk, "app.js loads the editor chunk");
+  const res = await fetch(`${worker.url}/admin/${chunk}`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type"), /javascript/);
+  assert.equal(res.headers.get("cache-control"), "public, max-age=31536000, immutable");
+});
+
 test("a missing admin file is a 404, never the shell under a script URL", async () => {
   // An open tab after a deploy still asks for the old chunk; HTML here would break it.
   for (const path of ["/admin/chunks/editor-OLDHASH.js", "/admin/app.js.map", "/admin/old.css"]) {
@@ -125,4 +139,21 @@ test("the client runs under the CSP and shows the shell with a plain error while
   } finally {
     await browser.close();
   }
+});
+
+test("a draft previews as the published page, with no script for the frame to block", async () => {
+  const body = "## Ch\u01b0\u01a1ng m\u1ed9t\n\nC\u00f3 $x^2$ v\u00e0 <b>raw</b>.\n\n```rust\nfn main() {}\n```\n";
+  const res = await fetch(`${worker.url}/__preview`, {
+    method: "POST",
+    body: new URLSearchParams({ title: "B\u00e0i <m\u1edbi>", body, lang: "vi" }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.equal(res.headers.get("x-robots-tag"), "noindex");
+  assert.match(res.headers.get("server-timing"), /^render;dur=\d+$/);
+  const html = await res.text();
+  assert.match(html, /B\u00e0i &lt;m\u1edbi&gt;/);
+  assert.match(html, /<math/);
+  assert.doesNotMatch(html, /<b>raw/);
+  assert.doesNotMatch(html, /<script/i);
 });

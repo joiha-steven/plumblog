@@ -5,8 +5,9 @@
 .crumb { display: flex; align-items: center; gap: var(--sp-8); flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; font: var(--type-small); color: var(--faint); }
 .ed-mid { display: flex; justify-content: center; }
 .ed-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-8); flex: 1; }
-.saved { font: var(--type-meta); color: var(--faint); white-space: nowrap; transition: opacity var(--dur-4) var(--ease); }
-.saved.settled { opacity: var(--a-quiet); }
+.saved { font: var(--type-meta); color: var(--muted); white-space: nowrap; transition: color var(--dur-4) var(--ease); }
+/* Settles to the faint text color, never below 4.5:1 (an opacity fade fell to 2.5:1). */
+.saved.settled { color: var(--faint); }
 .wc { font: var(--type-meta); color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; transition: opacity var(--dur-3) var(--ease); }
 .ed.typing .wc { opacity: 0; }
 .ed-body { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; }
@@ -46,9 +47,41 @@
 .phone-status { display: none; justify-content: space-between; gap: var(--sp-12); padding-top: var(--sp-16); font: var(--type-meta); color: var(--faint); }
 @media (max-width: 899px) { .ed-top .saved { display: none; } }
 @media (max-width: 599px) {
-  .ed-top { gap: var(--sp-4); }
+  /* The mode switch (44 px keys in a track) is taller than the phone header: grow, keep air. */
+  .ed-top { gap: var(--sp-4); height: auto; min-height: var(--head-h); padding-block: var(--sp-4); }
   .crumb { display: none; }
   .ed-mid { flex: 1; justify-content: flex-start; }
   .ed-actions { flex: none; gap: var(--sp-2); }
   .phone-status { display: flex; }
 }
+/* Writing column: Markdown marks stay visible but dimmed; the text looks as it will publish. */
+.cm-line.cm-h1 { font-size: var(--w-h1); line-height: var(--lh-tight); font-weight: var(--fw-title); letter-spacing: var(--w-ls-h1); padding-top: var(--w-space-h1) !important; }
+.cm-line.cm-h2 { font-size: var(--w-h2); line-height: var(--lh-snug); font-weight: var(--fw-title); letter-spacing: var(--w-ls-h2); padding-top: var(--w-space-h2) !important; }
+.cm-line.cm-h3 { font-size: var(--w-h3); line-height: var(--lh-ui); font-weight: var(--fw-title); padding-top: var(--w-space-h1) !important; }
+.cm-line.cm-quote { border-left: 2px solid var(--line-strong); padding-left: var(--w-indent) !important; color: var(--ink-soft); }
+.cm-line.cm-callout { background: var(--code-bg); border-left: 2px solid var(--accent); padding-left: var(--w-indent) !important; }
+.cm-line.cm-code, .cm-line.cm-math { font-family: var(--mono); font-size: var(--w-code); line-height: var(--lh-code); background: var(--code-bg); padding: 0 var(--w-indent) !important; }
+.cm-line.cm-code-first { border-radius: var(--r-4) var(--r-4) 0 0; padding-top: var(--w-block-pad) !important; }
+.cm-line.cm-code-last { border-radius: 0 0 var(--r-4) var(--r-4); padding-bottom: var(--w-block-pad) !important; }
+.cm-line.cm-hr { color: var(--mark); }
+.cm-line.cm-fn { font-size: var(--w-small); color: var(--ink-soft); }
+.cm-line.cm-imgsrc { font-size: var(--w-source); color: var(--mark); }
+.cm-imgsrc .cm-link, .cm-imgsrc .cm-url, .cm-imgsrc .cm-mk { color: var(--mark) !important; text-decoration: none; font-size: inherit; }
+.cm-mk { color: var(--mark) !important; font-weight: var(--fw-regular) !important; font-style: normal !important; }
+.cm-em { font-style: italic; }
+.cm-strong { font-weight: var(--fw-title); }
+.cm-strike { text-decoration: line-through; text-decoration-color: var(--mark); }
+.cm-link { color: var(--accent); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: var(--sp-4); }
+.cm-url { color: var(--mark); font-size: var(--w-url); }
+.cm-ic { font-family: var(--mono); font-size: var(--w-code); background: var(--code-bg); border-radius: var(--r-4); padding: var(--w-chip); }
+.cm-fnref { color: var(--accent); font-size: var(--w-source); vertical-align: super; line-height: 0; }
+/* Padding, never margin: CodeMirror measures a widget without its margins, and a wrong height
+   sends arrow keys and clicks to the wrong line below it. */
+.cm-img { padding: var(--w-pic-space); display: grid; gap: var(--sp-6); }
+/* A fixed frame, not the picture's own height: known before it loads, so nothing below moves. */
+.cm-img img { width: 100%; height: var(--w-pic-h); object-fit: contain; background: var(--well); border-radius: var(--r-4); display: block; }
+.cm-img .cm-cap { font-size: var(--w-caption); color: var(--ink-soft); text-align: center; }
+.cm-img .cm-cap.miss { color: var(--st-sched); }
+/* Preview: the Worker's page for the draft, in a sandboxed frame. */
+.pv-frame { display: block; width: 100%; height: 100%; border: 0; background: var(--paper); }
+.ed-preview { overflow: hidden; }

@@ -18,12 +18,33 @@ pub const PREFIX: &str = "/admin";
 /// Cookie the language menu sets; it wins over `Accept-Language`.
 const LANG_COOKIE: &str = "pb_lang";
 /// Scripts and styles from this origin only. Inline `style` attributes are blocked too; the
-/// client sets styles through the CSSOM (`el.style`), which CSP allows. `img-src blob:` is for
-/// image previews before upload.
-pub const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; \
+/// client sets styles through the CSSOM (`el.style`), which CSP allows. The one `<style>`
+/// element allowed is the editor's (`CodeMirror` adds its base theme that way, see
+/// `EditorView.cspNonce`), and only with this response's nonce. `img-src blob:` is for image
+/// previews before upload.
+fn csp(nonce: &str) -> String {
+    format!(
+        "default-src 'self'; script-src 'self'; style-src 'self' 'nonce-{nonce}'; \
     img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; worker-src 'self'; \
     manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; \
-    frame-ancestors 'none'";
+    frame-ancestors 'none'"
+    )
+}
+
+/// 16 bytes from the platform's cryptographic RNG, hex. A nonce must not be guessable, so
+/// there is no fallback to a weaker source.
+fn nonce() -> std::result::Result<String, String> {
+    use plumblog_auth::Crypto;
+    use std::fmt::Write;
+    let mut buf = [0u8; 16];
+    crate::webcrypto::WebCrypto::new()
+        .and_then(|c| c.random_bytes(&mut buf))
+        .map_err(|e| e.to_string())?;
+    Ok(buf.iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    }))
+}
 
 /// Browser chrome color behind the installed app, matching `--bg` in web/admin/css/tokens.css.
 const BG_LIGHT: &str = "#f3f2ef";
@@ -71,20 +92,30 @@ pub async fn serve(req: &Request) -> Result<Response> {
                 .with_headers(h),
         );
     }
+    let nonce = match nonce() {
+        Ok(n) => n,
+        Err(e) => {
+            worker::console_error!("admin: no random nonce: {e}");
+            return Response::error(core_text("en", keys::PAGE_FAILED), 500);
+        }
+    };
     let (body, content_type) = match path.as_str() {
         "/admin/manifest.webmanifest" => (
             manifest(&lang, &site.title),
             "application/manifest+json; charset=utf-8",
         ),
         "/admin/icon.svg" => (icon(&site.title), "image/svg+xml; charset=utf-8"),
-        _ => (shell(&lang, &site.title), "text/html; charset=utf-8"),
+        _ => (
+            shell(&lang, &site.title, &nonce),
+            "text/html; charset=utf-8",
+        ),
     };
     let h = Headers::new();
     h.set("content-type", content_type)?;
     // Small and language-dependent: revalidate every time rather than serve a stale shell.
     h.set("cache-control", "no-cache")?;
     h.set("vary", "cookie, accept-language")?;
-    h.set("content-security-policy", CSP)?;
+    h.set("content-security-policy", &csp(&nonce))?;
     h.set("x-content-type-options", "nosniff")?;
     h.set("referrer-policy", "same-origin")?;
     h.set("x-robots-tag", "noindex")?;
@@ -135,15 +166,16 @@ fn pick_lang(cookie: Option<&str>, accept: Option<&str>, site_lang: &str) -> Str
 }
 
 /// What the client needs before its first paint besides its text: the language, the
-/// languages on offer and the site name. The UI text is the admin bundle's own
-/// (`/admin/i18n/<lang>.js`, built by scripts/admin-build), preloaded by the shell.
-fn boot_json(lang: &str, site: &str) -> String {
+/// languages on offer, the site name and the style nonce. The UI text is the admin bundle's
+/// own (`/admin/i18n/<lang>.js`, built by scripts/admin-build), preloaded by the shell.
+fn boot_json(lang: &str, site: &str, nonce: &str) -> String {
     let langs: Vec<String> = langs().map(quote).collect();
     format!(
-        "{{\"lang\":{},\"langs\":[{}],\"site\":{}}}",
+        "{{\"lang\":{},\"langs\":[{}],\"site\":{},\"nonce\":{}}}",
         quote(lang),
         langs.join(","),
         quote(site),
+        quote(nonce),
     )
 }
 
@@ -167,9 +199,9 @@ fn text(lang: &str, key: Key, site: &str) -> String {
 }
 
 /// The page every client route loads. Nothing in it depends on the route.
-fn shell(lang: &str, site: &str) -> String {
+fn shell(lang: &str, site: &str, nonce: &str) -> String {
     // `<` escaped so the JSON cannot close its script element.
-    let boot = boot_json(lang, site).replace('<', "\\u003c");
+    let boot = boot_json(lang, site, nonce).replace('<', "\\u003c");
     format!(
         "<!doctype html>\n<html lang=\"{lang}\" dir=\"ltr\">\n<head>\n<meta charset=\"utf-8\">\n\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">\n\
@@ -272,7 +304,7 @@ mod tests {
 
     #[test]
     fn the_shell_is_one_page_whose_json_cannot_break_out() {
-        let html = shell("vi", "</script><b>\"x\"");
+        let html = shell("vi", "</script><b>\"x\"", "n0");
         assert!(html.starts_with("<!doctype html>\n<html lang=\"vi\""));
         assert!(
             !html.contains("</script><b>"),
@@ -287,13 +319,14 @@ mod tests {
 
     #[test]
     fn boot_json_has_the_language_but_no_text() {
-        let vi = boot_json("vi", "S");
+        let vi = boot_json("vi", "S", "n0");
         assert_eq!(
             vi,
-            "{\"lang\":\"vi\",\"langs\":[\"en\",\"vi\"],\"site\":\"S\"}"
+            "{\"lang\":\"vi\",\"langs\":[\"en\",\"vi\"],\"site\":\"S\",\"nonce\":\"n0\"}"
         );
         assert!(
-            shell("vi", "S").contains("<link rel=\"modulepreload\" href=\"/admin/i18n/vi.js\">")
+            shell("vi", "S", "n0")
+                .contains("<link rel=\"modulepreload\" href=\"/admin/i18n/vi.js\">")
         );
     }
 

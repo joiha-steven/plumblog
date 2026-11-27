@@ -3,6 +3,8 @@
 # Why: the admin must look like one product. Raw values (colors, font sizes, spacing, radii, shadows, durations,
 # z-index) live only in tokens.css; every shared piece is defined once in components.css; page files only lay
 # out and compose. A page that restyles a component, or invents its own size or color, is how screens drift apart.
+# Also: no margin on CodeMirror parts (.cm-*). CodeMirror measures lines and widgets without their margins, so
+# a margin there makes arrow keys and clicks land on the wrong line; use padding.
 set -euo pipefail
 dir="${1:?usage: scripts/check-admin-css DIR}"
 [ -d "$dir" ] || exit 0
@@ -26,6 +28,7 @@ function lengths(v, units,   s, n) {
 function decl(d,   i, p, v, vv) {
   d = trim(d); i = index(d, ":"); if (i == 0) return
   p = tolower(trim(substr(d, 1, i - 1))); v = trim(substr(d, i + 1))
+  if (p ~ /^margin/ && sel ~ /\.cm-/) report("margin on CodeMirror part in '" sel "' (use padding: CodeMirror cannot measure margins)")
   if (raw_ok) return
   vv = v
   gsub(/var\(--[A-Za-z0-9_-]+\)/, "", vv); gsub(/env\([^)]*\)/, "", vv); gsub(/url\([^)]*\)/, "", vv)
@@ -76,7 +79,7 @@ END {
     if (ch == "{") {
       pre = trim(buf); buf = ""
       if (pre ~ /^@/ && pre !~ /^@(font-face|page)/) continue
-      inrule = 1; if (pre !~ /^@/) subjects(pre)
+      inrule = 1; sel = pre; if (pre !~ /^@/) subjects(pre)
       continue
     }
     if (ch == ";") { if (inrule && mode == "check") decl(buf); buf = ""; continue }

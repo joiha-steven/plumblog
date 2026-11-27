@@ -15,7 +15,7 @@ export function shell(root: HTMLElement, screen: Screen, site: string, me: Me | 
   const link = (to: keyof typeof HREF, ic: IconName, label: string) =>
     h(
       "a",
-      { href: HREF[to], "aria-current": screen === to || (to === "posts" && screen === "new") ? "page" : null },
+      { href: HREF[to], "aria-current": screen === to || (to === "posts" && (screen === "new" || screen === "edit")) ? "page" : null },
       icon(ic),
       h("span", { class: "lbl" }, label),
     );
