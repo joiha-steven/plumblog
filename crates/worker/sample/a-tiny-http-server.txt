@@ -1,0 +1,21 @@
+title: A tiny HTTP handler in Rust
+date: 2026-08-14
+tags: rust, code
+excerpt: Routing does not need a framework when there are five routes.
+
+When a service has a handful of routes, a `match` on the method and path is easier to read than any router. Here is the shape I keep coming back to:
+
+```rust
+fn route(method: &str, path: &str) -> (u16, &str) {
+    match (method, path) {
+        ("GET", "/healthz") => (200, "ok"),
+        _ => (404, "not found"),
+    }
+}
+```
+
+A plain function like this can be tested without starting anything. The runtime only calls it and turns the result into a response.
+
+## When to stop
+
+Once routes need shared middleware, or paths carry several parameters, a small router earns its place. Until then the match statement is the whole story.

@@ -35,7 +35,7 @@ agent a Cloudflare API token, and the agent sets up, writes, translates, themes 
 | Posts, users, settings, sessions | D1 | FTS5 for search |
 | Images, theme bundles | R2 | |
 | Admin JS/CSS, default theme assets | Workers static assets | |
-| Rendered pages | Cache API | Cache keys include a site content version that every publish bumps, so no purge calls. Cloudflare docs only promise working cache operations on custom domains; behaviour on `*.workers.dev` is unconfirmed and must be measured (issue #8). The blog works either way: without cache every view is rendered (about 1-2 ms CPU, more D1 reads). Free plan: cache calls share the 50-per-request subrequest budget |
+| Rendered pages | Cache API | Cache keys include a site content version that every publish bumps, so no purge calls. Cloudflare docs only promise working cache operations on custom domains; behaviour on `*.workers.dev` is unconfirmed and must be measured (issue #8). The blog works either way: without cache every view is rendered (measured locally in workerd: about 0.06 ms wasm CPU per page with sample content; a cache hit costs about the same, so the cache mainly saves D1 reads). Each response says `x-plumblog-cache: hit|miss|bypass`; a failing cache is bypassed, never an error. Free plan: cache calls share the 50-per-request subrequest budget |
 | Scheduled publishing | Cron Trigger | |
 | Spam protection | Turnstile | Login after failures, comments |
 | Analytics | Cloudflare Web Analytics | Not built into admin; an AI guide fetches numbers |
@@ -119,6 +119,8 @@ Code highlighting runs on the reader page: a small deferred script (<= 8 KB gzip
 Home, pagination, tag/author/series pages, yearly archive, search (accent-insensitive; Vietnamese `d-stroke (U+0111)` normalised to `d`), related posts by tag, RSS/Atom/JSON Feed per language, sitemap, `robots.txt`, `llms.txt`, full SEO (meta, JSON-LD, hreflang, canonical), friendly 404 with suggestions, light/dark toggle.
 
 Navigation feels instant without JS frameworks: Speculation Rules prefetch, cross-document View Transitions.
+
+URLs: `/` and `/page/N` (home), `/<slug>` (post), `/tag/<slug>` and `/tag/<slug>/page/N`, `/archive/<year>`. One URL per page: trailing slashes and `/page/1` redirect (301). `page`, `tag`, `archive`, `theme`, `admin` and `api` are not valid slugs. Pages carry an `ETag` of content version plus engine version, so a returning reader gets a 304; 404 pages are never cached.
 
 Comments: own system, off by default, Turnstile, moderation queue (owner).
 

@@ -55,6 +55,9 @@ external_allowlist='
 worker   worker                 # the Cloudflare runtime; the only crate that does I/O
 cli      clap                   # argument parsing for the `blog` binary
 markdown unicode-normalization  # NFC before heading ids (pure Rust, no I/O)
+render   minijinja              # theme templates (pure Rust, no I/O)
+render   toml                   # theme.toml and theme locales (pure Rust, no I/O)
+render   serde                  # typed theme.toml and template data
 markdown pulldown-cmark         # CommonMark + GFM parser
 markdown pulldown-latex         # LaTeX to MathML at save time
 '
