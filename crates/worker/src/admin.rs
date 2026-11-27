@@ -11,17 +11,12 @@ use crate::keys;
 use crate::pages::core_text;
 use crate::pages::source::{CORE_LOCALES, ReaderSource, SampleSource};
 use plumblog_i18n::{Catalog, Key};
-use std::collections::BTreeMap;
-use std::fmt::Write;
 use worker::{Headers, Request, Response, Result};
 
 /// Path prefix of every admin URL.
 pub const PREFIX: &str = "/admin";
 /// Cookie the language menu sets; it wins over `Accept-Language`.
 const LANG_COOKIE: &str = "pb_lang";
-/// Locale sections the admin uses: its own text and the error codes the API answers with.
-const SECTIONS: &[&str] = &["admin.", "error."];
-
 /// Scripts and styles from this origin only. Inline `style` attributes are blocked too; the
 /// client sets styles through the CSSOM (`el.style`), which CSP allows. `img-src blob:` is for
 /// image previews before upload.
@@ -139,75 +134,33 @@ fn pick_lang(cookie: Option<&str>, accept: Option<&str>, site_lang: &str) -> Str
         .unwrap_or_else(|| "en".to_owned())
 }
 
-fn strings(lang: &str) -> BTreeMap<String, String> {
-    CORE_LOCALES
-        .iter()
-        .find(|(l, _)| *l == lang)
-        .and_then(|(_, src)| match plumblog_i18n::parse(src) {
-            Ok(m) => Some(m),
-            Err(e) => {
-                worker::console_error!("admin: locales/{lang}.toml: {e}");
-                None
-            }
-        })
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(k, _)| SECTIONS.iter().any(|s| k.starts_with(s)))
-        .collect()
-}
-
-/// What the client needs before its first paint: the language, the languages on offer, the
-/// site name and the UI text. English sits behind the chosen language for keys it lacks.
+/// What the client needs before its first paint besides its text: the language, the
+/// languages on offer and the site name. The UI text is the admin bundle's own
+/// (`/admin/i18n/<lang>.js`, built by scripts/admin-build), preloaded by the shell.
 fn boot_json(lang: &str, site: &str) -> String {
-    let own = strings(lang);
-    let fallback: BTreeMap<String, String> = if lang == "en" {
-        BTreeMap::new()
-    } else {
-        strings("en")
-            .into_iter()
-            .filter(|(k, _)| !has_base(&own, k))
-            .collect()
-    };
-    let map = |m: &BTreeMap<String, String>| {
-        let items: Vec<String> = m
-            .iter()
-            .map(|(k, v)| format!("{}:{}", quote(k), quote(v)))
-            .collect();
-        format!("{{{}}}", items.join(","))
-    };
     let langs: Vec<String> = langs().map(quote).collect();
     format!(
-        "{{\"lang\":{},\"langs\":[{}],\"site\":{},\"messages\":{},\"fallback\":{}}}",
+        "{{\"lang\":{},\"langs\":[{}],\"site\":{}}}",
         quote(lang),
         langs.join(","),
         quote(site),
-        map(&own),
-        map(&fallback)
     )
 }
 
-/// Whether `own` has `key`, counting a plural message in any of its forms (`a.n.one` vs
-/// `a.n.other`), so a language with fewer forms does not get English forms mixed in.
-fn has_base(own: &BTreeMap<String, String>, key: &str) -> bool {
-    if own.contains_key(key) {
-        return true;
-    }
-    match key.rsplit_once('.') {
-        Some((base, form)) if is_plural_form(form) => own.keys().any(|k| {
-            k.strip_prefix(base)
-                .and_then(|r| r.strip_prefix('.'))
-                .is_some_and(is_plural_form)
-        }),
-        _ => false,
-    }
-}
-
-fn is_plural_form(s: &str) -> bool {
-    matches!(s, "zero" | "one" | "two" | "few" | "many" | "other")
-}
-
 fn text(lang: &str, key: Key, site: &str) -> String {
-    let all = |l: &str| strings(l).into_iter().collect();
+    let all = |l: &str| {
+        CORE_LOCALES
+            .iter()
+            .find(|(name, _)| *name == l)
+            .and_then(|(_, src)| match plumblog_i18n::parse(src) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    worker::console_error!("admin: locales/{l}.toml: {e}");
+                    None
+                }
+            })
+            .unwrap_or_default()
+    };
     Catalog::new(all(lang), all("en"))
         .with_lang(lang)
         .t(key, &[("site", site.to_owned())])
@@ -228,6 +181,7 @@ fn shell(lang: &str, site: &str) -> String {
 <link rel=\"icon\" href=\"/admin/icon.svg\" type=\"image/svg+xml\">\n\
 <link rel=\"stylesheet\" href=\"/admin/app.css\">\n\
 <script type=\"module\" src=\"/admin/app.js\"></script>\n\
+<link rel=\"modulepreload\" href=\"/admin/i18n/{lang}.js\">\n\
 <script id=\"boot\" type=\"application/json\">{boot}</script>\n\
 </head>\n<body>\n<div id=\"app\"></div>\n<noscript>{noscript}</noscript>\n</body>\n</html>\n",
         title = escape(&text(lang, keys::ADMIN_TITLE, site)),
@@ -267,26 +221,7 @@ font-size=\"170\" font-weight=\"600\" fill=\"{PLATE}\">{}</text></svg>",
 
 /// A JSON string literal.
 fn quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if u32::from(c) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", u32::from(c));
-            }
-            // Line and paragraph separators end a JS line in older engines.
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    plumblog_i18n::admin::json_string(s)
 }
 
 fn escape(s: &str) -> String {
@@ -298,7 +233,7 @@ fn escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{boot_json, icon, is_file, manifest, pick_lang, quote, shell};
+    use super::{boot_json, icon, is_file, manifest, pick_lang, shell};
 
     #[test]
     fn files_are_told_apart_from_client_routes() {
@@ -351,17 +286,15 @@ mod tests {
     }
 
     #[test]
-    fn boot_json_has_admin_text_with_english_behind_it() {
-        let en = boot_json("en", "S");
-        assert!(en.contains("\"admin.nav.posts\":\"Posts\""), "{en}");
-        assert!(en.contains("\"fallback\":{}"));
-        assert!(
-            !en.contains("\"site.title_fallback\""),
-            "only admin and error sections"
-        );
+    fn boot_json_has_the_language_but_no_text() {
         let vi = boot_json("vi", "S");
-        assert!(vi.contains("\"lang\":\"vi\""));
-        assert!(vi.contains("\"langs\":[\"en\",\"vi\"]"));
+        assert_eq!(
+            vi,
+            "{\"lang\":\"vi\",\"langs\":[\"en\",\"vi\"],\"site\":\"S\"}"
+        );
+        assert!(
+            shell("vi", "S").contains("<link rel=\"modulepreload\" href=\"/admin/i18n/vi.js\">")
+        );
     }
 
     #[test]
@@ -372,13 +305,5 @@ mod tests {
         assert!(icon("plum").contains(">P</text>"));
         assert!(icon("<").contains(">&lt;</text>"));
         assert!(icon("").contains("></text>"));
-    }
-
-    #[test]
-    fn json_strings_escape_controls_and_separators() {
-        assert_eq!(
-            quote("a\"b\\c\n\u{1}\u{2028}"),
-            "\"a\\\"b\\\\c\\n\\u0001\\u2028\""
-        );
     }
 }

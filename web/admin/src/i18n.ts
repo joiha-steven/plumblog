@@ -1,14 +1,16 @@
-import type { Boot } from "./boot";
+import type { Boot, Text } from "./boot";
 
 export type Args = Record<string, string | number>;
 
-let boot: Boot = { lang: "en", langs: ["en"], site: "", messages: {}, fallback: {} };
+let boot: Boot = { lang: "en", langs: ["en"], site: "" };
+let strings: Text = { messages: {}, fallback: {} };
 let rules = new Intl.PluralRules("en");
 const english = new Intl.PluralRules("en");
 const warned = new Set<string>();
 
-export function initI18n(b: Boot): void {
+export function initI18n(b: Boot, tx: Text): void {
   boot = b;
+  strings = tx;
   rules = new Intl.PluralRules(b.lang);
 }
 
@@ -36,8 +38,8 @@ export function t(key: string, args: Args = {}): string {
 }
 
 function lookup(key: string, count: string | number | undefined): string | undefined {
-  const own = boot.messages;
-  const fb = boot.fallback;
+  const own = strings.messages;
+  const fb = strings.fallback;
   const direct = own[key] ?? fb[key];
   if (direct !== undefined || typeof count !== "number") return direct;
   return (

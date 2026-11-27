@@ -28,7 +28,10 @@ test("every admin path gets the same shell, with a strict CSP and no caching", a
     assert.equal(res.headers.get("x-robots-tag"), "noindex");
     const html = await res.text();
     assert.match(html, /<script type="module" src="\/admin\/app.js"><\/script>/);
-    assert.equal(boot(html).messages["admin.nav.posts"], "Posts");
+    // The UI text is the admin bundle's, preloaded; the shell carries only the language.
+    assert.equal(boot(html).lang, "en");
+    assert.equal(boot(html).messages, undefined);
+    assert.match(html, /<link rel="modulepreload" href="\/admin\/i18n\/en.js">/);
   }
 });
 
@@ -41,7 +44,8 @@ test("/admin redirects to /admin/", async () => {
 test("the language comes from the cookie, then Accept-Language", async () => {
   const vi = await (await fetch(`${worker.url}/admin/`, { headers: { cookie: "pb_lang=vi" } })).text();
   assert.match(vi, /<html lang="vi"/);
-  assert.equal(boot(vi).messages["admin.nav.posts"], "B\u00e0i vi\u1ebft");
+  assert.equal(boot(vi).lang, "vi");
+  assert.match(vi, /href="\/admin\/i18n\/vi.js"/);
   const header = await (await fetch(`${worker.url}/admin/`, { headers: { "accept-language": "vi-VN,en;q=0.5" } })).text();
   assert.match(header, /<html lang="vi"/);
 });
@@ -71,6 +75,22 @@ test("the built client, its stylesheet and service worker are static assets", as
     // Not hashed: revalidated on every load, so a deploy is picked up (_headers from admin-build).
     assert.equal(res.headers.get("cache-control"), "no-cache", path);
   }
+});
+
+test("each language's UI text is a static module with English behind it", async () => {
+  const mod = async (l) => {
+    const res = await fetch(`${worker.url}/admin/i18n/${l}.js`);
+    assert.equal(res.status, 200, l);
+    assert.match(res.headers.get("content-type"), /javascript/, l);
+    assert.equal(res.headers.get("cache-control"), "no-cache", l);
+    const src = await res.text();
+    return JSON.parse(src.replace(/^export default /, "").replace(/;\s*$/, ""));
+  };
+  const en = await mod("en");
+  assert.equal(en.messages["admin.nav.posts"], "Posts");
+  assert.deepEqual(en.fallback, {});
+  const vi = await mod("vi");
+  assert.equal(vi.messages["admin.nav.posts"], "B\u00e0i vi\u1ebft");
 });
 
 test("a missing admin file is a 404, never the shell under a script URL", async () => {

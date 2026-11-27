@@ -16,7 +16,10 @@
 //! a template string (`` t(`a.${x}`) ``) with `// i18n: <every key>` on the line above. Text
 //! must not bypass `t`: no string with letters as an `h()` child or as an `aria-label`,
 //! `title`, `placeholder` or `alt` value, and `t` may not be imported under another name.
+//! The admin's per-language text modules (`plumblog_i18n::admin`, built by admin-build) are
+//! checked too: every English admin key exactly once, plurals in the language's own forms.
 
+use plumblog_i18n::admin::admin_text;
 use plumblog_i18n::{categories, parse};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -672,6 +675,96 @@ fn locale_keys_are_complete_and_consistent() {
         problems.is_empty(),
         "locale problems:\n  {}",
         problems.join("\n  ")
+    );
+}
+
+/// Problems in the admin text module for `lang`: a key of English missing or extra, a plural
+/// message without exactly the language's forms, or English forms mixed into it.
+fn admin_module_problems(lang: &str, own_src: &str, en_src: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let (own, fallback) = match admin_text(own_src, en_src, lang == "en") {
+        Ok(t) => t,
+        Err(e) => return vec![format!("{lang}: {e}")],
+    };
+    let forms = ["zero", "one", "two", "few", "many", "other"];
+    let base = |k: &str| match k.rsplit_once('.') {
+        Some((b, f)) if forms.contains(&f) => (b.to_owned(), Some(f.to_owned())),
+        _ => (k.to_owned(), None),
+    };
+    let bases = |m: &BTreeMap<String, String>| -> BTreeMap<String, BTreeSet<String>> {
+        let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for k in m.keys() {
+            let (b, f) = base(k);
+            out.entry(b).or_default().extend(f);
+        }
+        out
+    };
+    let (en, _) = admin_text(en_src, en_src, true).unwrap_or_default();
+    let want = bases(&en);
+    let mine = bases(&own);
+    let theirs = bases(&fallback);
+    for (b, en_forms) in &want {
+        match (mine.get(b), theirs.get(b)) {
+            (None, None) => problems.push(format!("{lang}: {b} missing from the admin text")),
+            (Some(_), Some(_)) => problems.push(format!(
+                "{lang}: {b} in both the language and its English fallback"
+            )),
+            (Some(f), None) if !en_forms.is_empty() => {
+                let need: BTreeSet<String> = categories(lang)
+                    .iter()
+                    .map(|c| c.name().to_owned())
+                    .collect();
+                if *f != need {
+                    problems.push(format!(
+                        "{lang}: {b} has forms {f:?}, the language needs {need:?}"
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    for b in mine.keys().chain(theirs.keys()) {
+        if !want.contains_key(b) {
+            problems.push(format!("{lang}: {b} is not an English admin key"));
+        }
+    }
+    problems
+}
+
+#[test]
+fn admin_text_modules_have_every_key_once_in_the_right_forms() {
+    let dir = root().join("locales");
+    let en = fs::read_to_string(dir.join("en.toml")).unwrap();
+    let mut problems = Vec::new();
+    for file in files(&dir, "toml") {
+        let lang = file.file_stem().unwrap().to_string_lossy().into_owned();
+        problems.extend(admin_module_problems(
+            &lang,
+            &fs::read_to_string(&file).unwrap(),
+            &en,
+        ));
+    }
+    assert!(
+        problems.is_empty(),
+        "admin text modules:\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+#[test]
+fn admin_text_check_catches_missing_extra_and_wrong_forms() {
+    let en = "[admin.a]\nx = \"X\"\nn = { one = \"1\", other = \"N\" }\n";
+    // Vietnamese: `n` in English forms, an extra key; `x` comes from English, as it should.
+    let vi = "[admin.a]\nn = { one = \"1\", other = \"N\" }\nz = \"Z\"\n";
+    let got = admin_module_problems("vi", vi, en);
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(got[0].contains("admin.a.n has forms"), "{got:?}");
+    assert!(
+        got[1].contains("admin.a.z is not an English admin key"),
+        "{got:?}"
+    );
+    assert!(
+        admin_module_problems("vi", "[admin.a]\nx = \"X\"\nn = { other = \"N\" }\n", en).is_empty()
     );
 }
 

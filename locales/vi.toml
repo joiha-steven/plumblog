@@ -14,6 +14,7 @@ posts = "Bài viết"
 [admin]
 title = "Quản trị {site}"
 noscript = "Trang quản trị cần JavaScript. Hãy bật JavaScript cho trang này rồi tải lại."
+file_not_found = "Không tìm thấy"
 
 [admin.nav]
 main = "Chính"

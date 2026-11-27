@@ -35,6 +35,10 @@ common=(--bundle --minify --target=es2022 --legal-comments=none --log-level=warn
   --metafile="$meta" || fail "esbuild: admin script"
 "$bin/esbuild" web/admin/src/app.css "${common[@]}" --outfile="$out/app.css" \
   || fail "esbuild: admin stylesheet"
+# UI text, one module per language from locales/*.toml (crates/i18n `admin`): part of the
+# admin, not the Worker, so it never counts against the wasm budget.
+cargo run -q -p plumblog-i18n --example admin_locales -- locales "$out/i18n" \
+  || fail "UI text modules (locales/*.toml, above)"
 
 # The service worker precaches exactly this build's files, in a cache named after their hash:
 # a new deploy gets a new cache and the old one (with its old chunks) is deleted.
@@ -54,6 +58,8 @@ cat > "$out/_headers" <<'HEADERS'
 /admin/app.css
   Cache-Control: no-cache
 /admin/sw.js
+  Cache-Control: no-cache
+/admin/i18n/*
   Cache-Control: no-cache
 HEADERS
 
@@ -78,7 +84,11 @@ shell_files=$(node -e '
 ' "$PWD/$meta" "$out/app.js") || fail "reading $meta"
 shell_size=0
 for f in $shell_files; do shell_size=$((shell_size + $(gz "$f"))); done
-echo "admin-build: shell ($(echo $shell_files | wc -w | tr -d ' ') files) gzip = $shell_size bytes (budget $SHELL_JS_BUDGET)"
+# Plus one language's text, which every page loads too: the largest.
+text_size=0
+for f in "$out"/i18n/*.js; do s=$(gz "$f"); [ "$s" -le "$text_size" ] || text_size=$s; done
+shell_size=$((shell_size + text_size))
+echo "admin-build: shell ($(echo $shell_files | wc -w | tr -d ' ') files + text $text_size) gzip = $shell_size bytes (budget $SHELL_JS_BUDGET)"
 [ "$shell_size" -le "$SHELL_JS_BUDGET" ] || over+="shell $shell_size > $SHELL_JS_BUDGET; "
 for f in "$out"/chunks/*.js; do
   [ -e "$f" ] || continue

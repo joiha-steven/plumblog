@@ -2,7 +2,7 @@
 
 import { type Api, type Me, type Result, httpApi } from "./api/client";
 import { mockApi } from "./api/mock";
-import { readBoot } from "./boot";
+import { loadText, readBoot } from "./boot";
 import { h } from "./dom";
 import { initI18n } from "./i18n";
 import { current, start } from "./router";
@@ -12,7 +12,7 @@ import { applyTheme, storedTheme } from "./theme";
 import { closePop, failed, loadingRows, offlineBanner } from "./ui";
 
 const boot = readBoot();
-initI18n(boot);
+initI18n(boot, await loadText(boot.lang));
 applyTheme(storedTheme());
 
 const params = new URLSearchParams(location.search);

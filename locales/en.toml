@@ -18,6 +18,8 @@ posts = "Posts"
 # Browser tab and installed app name.
 title = "{site} admin"
 noscript = "The admin needs JavaScript. Turn it on for this site, then reload."
+# A missing admin file (an old script after a deploy): plain-text 404.
+file_not_found = "Not found"
 
 [admin.nav]
 main = "Main"
