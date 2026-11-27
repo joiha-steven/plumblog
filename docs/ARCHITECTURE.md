@@ -35,7 +35,7 @@ agent a Cloudflare API token, and the agent sets up, writes, translates, themes 
 | Posts, users, settings, sessions | D1 | FTS5 for search |
 | Images, theme bundles | R2 | |
 | Admin JS/CSS, default theme assets | Workers static assets | |
-| Rendered pages | Cache API | Cache keys include a site content version that every publish bumps, so no purge calls. Cache API needs a custom domain: production blogs must use one; `*.workers.dev` is for trying only |
+| Rendered pages | Cache API | Cache keys include a site content version that every publish bumps, so no purge calls. Cache API only works on a custom domain: on `*.workers.dev` the blog works fully but every view is rendered (about 1-2 ms CPU, more D1 reads); a custom domain is recommended for real use |
 | Scheduled publishing | Cron Trigger | |
 | Spam protection | Turnstile | Login after failures, comments |
 | Analytics | Cloudflare Web Analytics | Not built into admin; an AI guide fetches numbers |
@@ -63,6 +63,8 @@ guides/           AI guides, embedded into `blog guide` and exposed over MCP
 locales/          core and admin UI strings, one TOML file per language
 migrations/       D1 SQL, forward-only, numbered
 themes/           default themes
+plugins/          default plugins (declarative, see Plugins and options)
+.claude/skills/   agent skills for workflows repeated 3+ times
 web/admin         admin frontend
 scripts/check     the one check; pre-commit hook and CI run it
 ```
@@ -281,5 +283,5 @@ Work is tracked as GitHub Issues grouped in one milestone per phase; this list o
 - 2026-11-27 Reader site and admin are installable web apps with distinct manifests and icon colors; no offline reading.
 - 2026-11-27 One crate per module with an enforced dependency graph; logic is storage-agnostic behind store traits.
 - 2026-11-27 Code highlighting on the reader page (deferred, <= 8 KB, only pages with code); nothing at save time.
-- 2026-11-27 Production needs a custom domain (Cache API); cache invalidation by content version.
+- 2026-11-27 Blog works on `*.workers.dev` without cache; a custom domain adds the Cache API. Cache invalidation by content version.
 - 2026-11-27 Owner-facing system log in Settings; Node.js is contributor-only.

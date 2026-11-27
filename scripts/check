@@ -51,10 +51,13 @@ for f in "${files[@]}"; do
     README.md|AGENTS.md|CLAUDE.md|CHANGELOG.md|docs/ARCHITECTURE.md) ;;
     guides/*/*) case "$f" in *.md) bad+="$f "; echo "  guides must be top level: $f" ;; esac ;;
     guides/*.md) ;;
+    # Repeated workflows (3+ times) become skills; one SKILL.md per skill folder, nothing else.
+    .claude/skills/*/*/*) case "$f" in *.md) bad+="$f "; echo "  skills are one folder deep: $f" ;; esac ;;
+    .claude/skills/*/SKILL.md) ;;
     *.md) bad+="$f "; echo "  not allowed: $f" ;;
   esac
 done
-[ -z "$bad" ] || fail "markdown outside allowlist (only the fixed files and top-level guides/*.md): $bad"
+[ -z "$bad" ] || fail "markdown outside allowlist (fixed files, top-level guides/*.md, .claude/skills/<name>/SKILL.md): $bad"
 
 step "english-only paths"
 bad=""
@@ -64,7 +67,7 @@ for f in "${files[@]}"; do
   esac
   case "$f" in *$'\n'*) bad+="newline-in-path "; echo "  bad path (newline): ${f//$'\n'/\\n}"; continue ;; esac
   rc=0
-  printf '%s' "$f" | LC_ALL=C grep -Eq '^([a-z0-9._-]+/)*[a-z0-9._-]+$|^crates/[a-z0-9_-]+/Cargo\.toml$' || rc=$?
+  printf '%s' "$f" | LC_ALL=C grep -Eq '^([a-z0-9._-]+/)*[a-z0-9._-]+$|^crates/[a-z0-9_-]+/Cargo\.toml$|^\.claude/skills/[a-z0-9-]+/SKILL\.md$' || rc=$?
   [ "$rc" -le 1 ] || fail "grep error while checking path $f"
   # Cargo.toml only passes as the exact crate manifest; any other uppercase fails the first regex.
   if [ "$rc" -eq 1 ]; then bad+="$f "; echo "  bad path: $f"; fi
@@ -105,6 +108,7 @@ bad=""
 limit_for() {
   case "$1" in
     AGENTS.md|guides/*.md) echo 60 ;;
+    .claude/skills/*/SKILL.md) echo 120 ;;
     README.md) echo 80 ;;
     CLAUDE.md) echo 1 ;;
     *) echo "" ;;

@@ -24,6 +24,7 @@ Never bypass or weaken `scripts/check`. If a rule is wrong, change it in the sam
 - Generate references from code; never hand-write them.
 - Small, scoped changes. No renames or refactors outside the task.
 - Errors are never silent: a plain message for the user, enough in the log for the next agent.
+- A workflow done 3+ times becomes a skill: `.claude/skills/<name>/SKILL.md`, English, <= 120 lines. Update an existing skill instead of adding a near-duplicate.
 
 ## Where things go
 
@@ -35,6 +36,8 @@ Never bypass or weaken `scripts/check`. If a rule is wrong, change it in the sam
 | Instructions for an AI running a blog | `guides/<topic>.md` |
 | UI text | `locales/<lang>.toml` |
 | Schema change | new numbered file in `migrations/` |
+| A default plugin | `plugins/<name>/` |
+| A repeated workflow for agents | `.claude/skills/<name>/SKILL.md` |
 
 ## Writing docs
 
