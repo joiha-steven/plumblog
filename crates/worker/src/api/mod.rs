@@ -100,13 +100,20 @@ fn status(code: ErrorCode) -> u16 {
     match code {
         ErrorCode::InvalidInput | ErrorCode::PasskeyInvalid => 400,
         ErrorCode::Unauthenticated | ErrorCode::InvalidCredentials => 401,
-        ErrorCode::Forbidden | ErrorCode::SetupInvalid | ErrorCode::TurnstileRequired => 403,
+        // A signed-in user must prove it again (adding or removing a passkey): not a dead
+        // session, so not 401.
+        ErrorCode::Forbidden
+        | ErrorCode::SetupInvalid
+        | ErrorCode::TurnstileRequired
+        | ErrorCode::ReauthRequired => 403,
         ErrorCode::PostNotFound
         | ErrorCode::UserNotFound
         | ErrorCode::NotFound
         | ErrorCode::RouteNotFound => 404,
         ErrorCode::Conflict => 409,
         ErrorCode::InviteInvalid => 410,
+        ErrorCode::LengthRequired => 411,
+        ErrorCode::BodyTooLarge => 413,
         ErrorCode::Locked => 429,
         ErrorCode::Storage | ErrorCode::Internal => 500,
         // The site is not set up for this yet (no configured origin): not the client's fault.
@@ -178,6 +185,44 @@ fn check_origin(req: &Request, method: &Method, want: &str) -> Result<()> {
     }
 }
 
+/// The request body, refused before it is read when `Content-Length` says it is over
+/// [`body::MAX_BODY`] (413), or when a body comes without one (chunked: its size is unknown
+/// until read, 411). The runtime frames the body by `Content-Length`, so it cannot be longer;
+/// the length is checked again after reading all the same.
+async fn read_body(req: &mut Request) -> Result<Vec<u8>> {
+    let too_large = |n: usize| {
+        Error::new(
+            ErrorCode::BodyTooLarge,
+            format!("body of {n} bytes > {}", body::MAX_BODY),
+        )
+    };
+    match req.headers().get("content-length").ok().flatten() {
+        Some(v) => {
+            let n: usize = v.trim().parse().map_err(|_| {
+                Error::new(ErrorCode::InvalidInput, format!("Content-Length {v:?}"))
+            })?;
+            if n > body::MAX_BODY {
+                return Err(too_large(n));
+            }
+        }
+        None if req.inner().body().is_some() => {
+            return Err(Error::new(
+                ErrorCode::LengthRequired,
+                "body without Content-Length",
+            ));
+        }
+        None => return Ok(Vec::new()),
+    }
+    let bytes = req
+        .bytes()
+        .await
+        .map_err(|e| Error::new(ErrorCode::InvalidInput, format!("body: {e}")))?;
+    if bytes.len() > body::MAX_BODY {
+        return Err(too_large(bytes.len()));
+    }
+    Ok(bytes)
+}
+
 /// Handles one `/api/` request. Never returns a non-JSON error for a failure of ours.
 pub async fn handle(mut req: Request, env: &Env) -> worker::Result<Response> {
     let crypto = WebCrypto::new();
@@ -215,9 +260,7 @@ pub async fn handle(mut req: Request, env: &Env) -> worker::Result<Response> {
         let body = if matches!(method, Method::Get | Method::Head) {
             Vec::new()
         } else {
-            req.bytes()
-                .await
-                .map_err(|e| Error::new(ErrorCode::InvalidInput, format!("body: {e}")))?
+            read_body(&mut req).await?
         };
         let (principal, cookie) = principal::resolve(&ctx, &req).await?;
         gate_cookie = cookie;
@@ -253,7 +296,7 @@ async fn route(
 ) -> Result<Reply> {
     match (method, path) {
         (Method::Get, "/api/auth/params") => auth::params(ctx).await,
-        (Method::Get, "/api/auth/me") => auth::me(p),
+        (Method::Get, "/api/auth/me") => auth::me(ctx, p).await,
         (Method::Patch, "/api/auth/me") => auth::update_me(ctx, p, body).await,
         (Method::Post, "/api/auth/setup") => auth::setup(ctx, p, body).await,
         (Method::Post, "/api/auth/login") => auth::login(ctx, p, body).await,
@@ -274,7 +317,7 @@ async fn route(
         }
         (Method::Get, "/api/auth/passkey") => passkey::list(ctx, p).await,
         (Method::Delete, _) if path.starts_with(passkey::ITEM_PREFIX) => {
-            passkey::delete(ctx, p, &path[passkey::ITEM_PREFIX.len()..]).await
+            passkey::delete(ctx, p, &path[passkey::ITEM_PREFIX.len()..], body).await
         }
         (Method::Get, PROBE) if probe_enabled(&ctx.env) => {
             p.require(plumblog_model::Permission::ManageSettings)?;

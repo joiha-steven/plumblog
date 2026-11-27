@@ -35,6 +35,20 @@ pub const ASSERTION_FIELDS: &[&str] = &[
     "signature",
     "user_handle",
 ];
+/// Re-authentication before adding or removing a passkey: `current_password`, or an assertion
+/// by one of the user's own passkeys under the `reauth_` prefix (registration already uses
+/// `client_data_json`).
+const REAUTH_FIELDS: &[&str] = &[
+    "current_password",
+    "reauth_credential_id",
+    "reauth_client_data_json",
+    "reauth_authenticator_data",
+    "reauth_signature",
+    "reauth_user_handle",
+    "turnstile_token",
+];
+/// Prefix of the assertion fields in [`REAUTH_FIELDS`].
+const REAUTH: &str = "reauth_";
 
 fn invalid(detail: impl Into<String>) -> Error {
     Error::new(ErrorCode::PasskeyInvalid, detail)
@@ -52,8 +66,10 @@ fn no_fields(body: &[u8]) -> Result<()> {
     Fields::parse(body, &[]).map(|_| ())
 }
 
-fn b64(f: &Fields, key: &str) -> Result<Vec<u8>> {
-    base64url::decode(f.req(key)?).ok_or_else(|| invalid(format!("{key} is not base64url")))
+/// The base64url field `prefix` + `key`.
+fn b64(f: &Fields, prefix: &str, key: &str) -> Result<Vec<u8>> {
+    let key = format!("{prefix}{key}");
+    base64url::decode(f.req(&key)?).ok_or_else(|| invalid(format!("{key} is not base64url")))
 }
 
 async fn challenge_hash(ctx: &Ctx, raw: &[u8]) -> Result<String> {
@@ -168,16 +184,44 @@ pub async fn register_options(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<R
     ))
 }
 
+/// Adding or removing a passkey needs the current password or an assertion by one of the
+/// user's own passkeys, rate limited and counted like sign-in.
+///
+/// # Errors
+///
+/// `ReauthRequired` without either, `InvalidInput` with both, else as the check used.
+async fn reauthenticate(ctx: &Ctx, user: &User, f: &Fields, how: &str) -> Result<()> {
+    let password = f.opt("current_password")?.is_some();
+    let assertion = f.opt("reauth_credential_id")?.is_some();
+    match (password, assertion) {
+        (true, true) => Err(Error::new(
+            ErrorCode::InvalidInput,
+            "current_password and a passkey assertion: send one",
+        )),
+        (true, false) => auth::check_current(ctx, user, f).await,
+        (false, true) => verify(ctx, f, REAUTH, Some(user.id), how).await.map(drop),
+        (false, false) => Err(Error::new(
+            ErrorCode::ReauthRequired,
+            format!("{how}: no current_password or passkey assertion"),
+        )),
+    }
+}
+
 /// `POST /api/auth/passkey/register/verify`.
 pub async fn register_verify(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
     let user = p.user()?;
     // Before the challenge is consumed: a site without an origin refuses, nothing spent.
     let site = site::site(ctx).await?;
-    let f = Fields::parse(body, &["name", "client_data_json", "attestation_object"])?;
+    let mut allowed = vec!["name", "client_data_json", "attestation_object"];
+    allowed.extend_from_slice(REAUTH_FIELDS);
+    let f = Fields::parse(body, &allowed)?;
     let name = f.req("name")?;
     fields::passkey_name(name)?;
-    let client_data_json = b64(&f, "client_data_json")?;
-    let attestation_object = b64(&f, "attestation_object")?;
+    let client_data_json = b64(&f, "", "client_data_json")?;
+    let attestation_object = b64(&f, "", "attestation_object")?;
+    // Before the challenge: a stolen session cookie alone must not add a key that outlives a
+    // password change.
+    reauthenticate(ctx, user, &f, "passkey add").await?;
     let (challenge, issued_to) =
         take_challenge(ctx, &client_data_json, ChallengePurpose::Register).await?;
     if issued_to != Some(user.id) {
@@ -268,6 +312,7 @@ fn refused(actor: Option<UserId>, reason: &'static str, detail: impl Into<String
 async fn check_assertion(
     ctx: &Ctx,
     f: &Fields,
+    prefix: &str,
     credential_id: &str,
     want_user: Option<UserId>,
     site: &site::Site,
@@ -279,9 +324,9 @@ async fn check_assertion(
             Err(e)
         }
     };
-    let client_data_json = b64(f, "client_data_json").map_err(ours)?;
-    let authenticator_data = b64(f, "authenticator_data").map_err(ours)?;
-    let signature = b64(f, "signature").map_err(ours)?;
+    let client_data_json = b64(f, prefix, "client_data_json").map_err(ours)?;
+    let authenticator_data = b64(f, prefix, "authenticator_data").map_err(ours)?;
+    let signature = b64(f, prefix, "signature").map_err(ours)?;
     let (challenge, _) = take_challenge(ctx, &client_data_json, ChallengePurpose::Login)
         .await
         .map_err(ours)?;
@@ -348,16 +393,23 @@ async fn check_assertion(
 }
 
 /// Verifies a passkey assertion end to end and returns its user, rate limited per credential
-/// id and per address like password sign-in. `want_user`: the assertion must be theirs
-/// (re-authentication). `how` names the attempt in the system log.
+/// id and per address like password sign-in. `prefix` is put before every assertion field
+/// name. `want_user`: the assertion must be theirs (re-authentication). `how` names the
+/// attempt in the system log.
 ///
 /// # Errors
 ///
 /// `auth.passkey_invalid` for every refused assertion (counted and logged), `Locked` /
 /// `TurnstileRequired` from the limiter, `InvalidInput` for a body without a usable
 /// credential id; storage and crypto errors pass through.
-pub async fn verify(ctx: &Ctx, f: &Fields, want_user: Option<UserId>, how: &str) -> Result<User> {
-    let credential_id = f.req("credential_id")?;
+pub async fn verify(
+    ctx: &Ctx,
+    f: &Fields,
+    prefix: &str,
+    want_user: Option<UserId>,
+    how: &str,
+) -> Result<User> {
+    let credential_id = f.req(&format!("{prefix}credential_id"))?;
     if credential_id.is_empty() || credential_id.len() > MAX_CREDENTIAL_ID_TEXT {
         return Err(Error::new(
             ErrorCode::InvalidInput,
@@ -368,14 +420,14 @@ pub async fn verify(ctx: &Ctx, f: &Fields, want_user: Option<UserId>, how: &str)
     let site = site::site(ctx).await?;
     let keys = Keys::passkey(ctx, credential_id).await?;
     let attempt = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
-    match check_assertion(ctx, f, credential_id, want_user, &site).await {
+    match check_assertion(ctx, f, prefix, credential_id, want_user, &site).await {
         Ok(user) => {
             limit::succeeded(ctx, &keys).await?;
             Ok(user)
         }
         Err(Err(e)) => Err(e),
         Err(Ok(r)) => {
-            limit::failed(ctx, &attempt, r.actor, how).await?;
+            limit::failed(ctx, &attempt, r.actor, how).await;
             ctx.syslog(
                 ctx.event(EventKind::SignInFailed, r.actor)
                     .subject(how)
@@ -392,30 +444,40 @@ pub async fn login_verify(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply
     let mut allowed = ASSERTION_FIELDS.to_vec();
     allowed.push("turnstile_token");
     let f = Fields::parse(body, &allowed)?;
-    let user = verify(ctx, &f, None, "passkey").await?;
+    let user = verify(ctx, &f, "", None, "passkey").await?;
     auth::sign_in(ctx, p, &user, 200, "passkey").await
+}
+
+/// The user's passkeys as a JSON array (no credential ids or keys).
+///
+/// # Errors
+///
+/// Storage errors pass through.
+pub async fn list_json(ctx: &Ctx, user: UserId) -> Result<String> {
+    let keys: Vec<String> = ctx
+        .store
+        .list_passkeys(user)
+        .await?
+        .iter()
+        .map(passkey_json)
+        .collect();
+    Ok(array(&keys))
 }
 
 /// `GET /api/auth/passkey`: the signed-in user's own passkeys.
 pub async fn list(ctx: &Ctx, p: &Principal) -> Result<Reply> {
     let user = p.user()?;
-    let keys: Vec<String> = ctx
-        .store
-        .list_passkeys(user.id)
-        .await?
-        .iter()
-        .map(passkey_json)
-        .collect();
     Ok(Reply::json(
         200,
-        object(&[("passkeys", Out::Raw(array(&keys)))]),
+        object(&[("passkeys", Out::Raw(list_json(ctx, user.id).await?))]),
     ))
 }
 
-/// `DELETE /api/auth/passkey/<id>`: removes one of the signed-in user's own passkeys. Another
-/// user's id answers like a missing one. The last passkey of an account without a password
-/// stays: removing it would lock the account out.
-pub async fn delete(ctx: &Ctx, p: &Principal, id: &str) -> Result<Reply> {
+/// `DELETE /api/auth/passkey/<id>`: removes one of the signed-in user's own passkeys, after
+/// re-authentication (body: [`REAUTH_FIELDS`]). Another user's id answers like a missing one,
+/// before anything is counted. The last passkey of an account without a password stays:
+/// removing it would lock the account out.
+pub async fn delete(ctx: &Ctx, p: &Principal, id: &str, body: &[u8]) -> Result<Reply> {
     let user = p.user()?;
     let not_found = || {
         Error::new(
@@ -435,6 +497,12 @@ pub async fn delete(ctx: &Ctx, p: &Principal, id: &str) -> Result<Reply> {
         .find(|k| k.id == id)
         .map(|k| k.name)
         .ok_or_else(not_found)?;
+    let f = if body.iter().all(u8::is_ascii_whitespace) {
+        Fields::parse(b"{}", &[])?
+    } else {
+        Fields::parse(body, REAUTH_FIELDS)?
+    };
+    reauthenticate(ctx, user, &f, "passkey remove").await?;
     // The store refuses another user's id (NotFound) and, inside the same write, the last
     // passkey of an account without a password (Conflict).
     ctx.store.delete_own_passkey(user.id, id).await?;

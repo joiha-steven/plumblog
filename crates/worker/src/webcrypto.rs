@@ -1,11 +1,12 @@
 //! `plumblog_auth::Crypto` over the runtime's `WebCrypto` (`crypto` and `crypto.subtle`).
 //! Calls go through `js_sys::Reflect` because the `web-sys` build that `worker` re-exports
 //! has no `SubtleCrypto` bindings, and adding them would be a new dependency.
-//! Every failure is an `Internal` error naming the operation; nothing here panics.
+//! Every failure is an `Internal` error naming the operation, except a passkey key the runtime
+//! refuses to import (`PasskeyInvalid`); nothing here panics.
 
 use plumblog_auth::Crypto;
 use plumblog_auth::base64url;
-use plumblog_auth::webauthn::{Es256Key, Rs256Key};
+use plumblog_auth::webauthn::{Es256Key, PublicKey, Rs256Key};
 use plumblog_model::{Error, ErrorCode, Result};
 use worker::js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use worker::wasm_bindgen::{JsCast, JsValue};
@@ -137,6 +138,58 @@ fn name(n: &str) -> JsValue {
     JsValue::from_str(n)
 }
 
+/// A passkey key that `importKey` refuses is the key's fault, not ours: `PasskeyInvalid`, so
+/// the route answers 400 and counts the attempt like any refused passkey.
+fn key_refused(e: Error) -> Error {
+    let Error { detail, .. } = e;
+    Error::new(
+        ErrorCode::PasskeyInvalid,
+        format!("key import refused: {detail}"),
+    )
+}
+
+impl WebCrypto {
+    async fn es256_key(&self, key: &Es256Key) -> Result<JsValue> {
+        let alg = object(
+            &[("name", name("ECDSA")), ("namedCurve", name("P-256"))],
+            "es256",
+        )?;
+        self.import_key("raw", bytes(&key.uncompressed_point()), alg, "verify")
+            .await
+            .map_err(key_refused)
+    }
+
+    async fn rs256_key(&self, key: &Rs256Key) -> Result<JsValue> {
+        let op = "rs256";
+        let jwk = object(
+            &[
+                ("kty", name("RSA")),
+                ("n", JsValue::from_str(&base64url::encode(&key.n))),
+                ("e", JsValue::from_str(&base64url::encode(&key.e))),
+                ("alg", name("RS256")),
+                ("ext", JsValue::TRUE),
+            ],
+            op,
+        )?;
+        let alg = object(
+            &[
+                ("name", name("RSASSA-PKCS1-v1_5")),
+                ("hash", name("SHA-256")),
+            ],
+            op,
+        )?;
+        self.import_key("jwk", jwk, alg, "verify")
+            .await
+            .map_err(key_refused)
+    }
+
+    async fn ed25519_key(&self, key: &[u8; 32]) -> Result<JsValue> {
+        self.import_key("raw", bytes(key), name("Ed25519"), "verify")
+            .await
+            .map_err(key_refused)
+    }
+}
+
 impl Crypto for WebCrypto {
     async fn pbkdf2_sha256(
         &self,
@@ -195,38 +248,16 @@ impl Crypto for WebCrypto {
         message: &[u8],
         signature: &[u8; 64],
     ) -> Result<bool> {
-        let op = "es256";
-        let alg = object(
-            &[("name", name("ECDSA")), ("namedCurve", name("P-256"))],
-            op,
+        let k = self.es256_key(key).await?;
+        let params = object(
+            &[("name", name("ECDSA")), ("hash", name("SHA-256"))],
+            "es256",
         )?;
-        let k = self
-            .import_key("raw", bytes(&key.uncompressed_point()), alg, "verify")
-            .await?;
-        let params = object(&[("name", name("ECDSA")), ("hash", name("SHA-256"))], op)?;
         self.verify(params, k, signature, message).await
     }
 
     async fn verify_rs256(&self, key: &Rs256Key, message: &[u8], signature: &[u8]) -> Result<bool> {
-        let op = "rs256";
-        let jwk = object(
-            &[
-                ("kty", name("RSA")),
-                ("n", JsValue::from_str(&base64url::encode(&key.n))),
-                ("e", JsValue::from_str(&base64url::encode(&key.e))),
-                ("alg", name("RS256")),
-                ("ext", JsValue::TRUE),
-            ],
-            op,
-        )?;
-        let alg = object(
-            &[
-                ("name", name("RSASSA-PKCS1-v1_5")),
-                ("hash", name("SHA-256")),
-            ],
-            op,
-        )?;
-        let k = self.import_key("jwk", jwk, alg, "verify").await?;
+        let k = self.rs256_key(key).await?;
         self.verify(name("RSASSA-PKCS1-v1_5"), k, signature, message)
             .await
     }
@@ -237,9 +268,15 @@ impl Crypto for WebCrypto {
         message: &[u8],
         signature: &[u8; 64],
     ) -> Result<bool> {
-        let k = self
-            .import_key("raw", bytes(key), name("Ed25519"), "verify")
-            .await?;
+        let k = self.ed25519_key(key).await?;
         self.verify(name("Ed25519"), k, signature, message).await
+    }
+
+    async fn validate_public_key(&self, key: &PublicKey) -> Result<()> {
+        match key {
+            PublicKey::Es256(k) => self.es256_key(k).await.map(drop),
+            PublicKey::Rs256(k) => self.rs256_key(k).await.map(drop),
+            PublicKey::Ed25519(k) => self.ed25519_key(k).await.map(drop),
+        }
     }
 }

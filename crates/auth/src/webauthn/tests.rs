@@ -633,3 +633,28 @@ fn truncations_and_mutations_never_panic() {
     }
     assert!(cases > 20_000, "{cases}");
 }
+
+#[test]
+fn a_key_the_platform_refuses_is_passkey_invalid_at_registration_and_sign_in() {
+    let crypto = FakeCrypto::new();
+    crypto.key_ok.set(false);
+    let att = good_attestation(&cose_es256(&[7; 32], &[9; 32]));
+    let err = block_on(verify_registration(
+        &crypto,
+        &att,
+        &client_data("webauthn.create"),
+        &expected(),
+    ))
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PasskeyInvalid, "{err}");
+
+    let stored = PublicKey::Es256(Es256Key {
+        x: [7; 32],
+        y: [9; 32],
+    })
+    .to_stored();
+    let auth = auth_data(FLAG_UP | FLAG_UV, 1, None, &[]);
+    let err = assert_with(&crypto, &stored, &auth, &raw_to_der(&[0x11; 64])).unwrap_err();
+    assert_eq!(err.code, ErrorCode::PasskeyInvalid, "{err}");
+    assert!(crypto.calls.borrow().is_empty());
+}

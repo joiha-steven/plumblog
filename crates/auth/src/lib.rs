@@ -13,7 +13,7 @@ mod testutil;
 pub mod webauthn;
 
 use plumblog_model::{Error, ErrorCode, Permission, Result, Role};
-use webauthn::{Es256Key, Rs256Key};
+use webauthn::{Es256Key, PublicKey, Rs256Key};
 
 /// What auth needs from the platform. Async because `WebCrypto` is.
 // Workers run one request per isolate thread, so futures need not be `Send`; requiring it
@@ -39,8 +39,9 @@ pub trait Crypto {
     ///
     /// # Errors
     ///
-    /// Only for platform failures, including a key the platform refuses to import. A signature
-    /// that does not verify is `Ok(false)`.
+    /// [`ErrorCode::PasskeyInvalid`] when the platform refuses to import the key (e.g. a point
+    /// not on the curve, stored before keys were checked); otherwise only platform failures. A
+    /// signature that does not verify is `Ok(false)`.
     async fn verify_es256(
         &self,
         key: &Es256Key,
@@ -65,6 +66,13 @@ pub trait Crypto {
         message: &[u8],
         signature: &[u8; 64],
     ) -> Result<bool>;
+    /// Imports `key` the way the matching `verify_*` does, so a key that could never verify
+    /// (an ES256 point off the curve, say) is refused at registration, not at every sign-in.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorCode::PasskeyInvalid`] when the platform refuses the key; platform failures.
+    async fn validate_public_key(&self, key: &PublicKey) -> Result<()>;
 }
 
 /// Role check that returns the stable error, so every route denies the same way.

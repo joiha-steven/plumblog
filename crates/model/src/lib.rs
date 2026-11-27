@@ -56,6 +56,9 @@ stable_codes! {
         SetupInvalid => "setup.invalid",
         RouteNotFound => "api.not_found",
         OriginMissing => "settings.origin_missing",
+        ReauthRequired => "auth.reauth_required",
+        BodyTooLarge => "api.body_too_large",
+        LengthRequired => "api.length_required",
     }
 }
 
@@ -218,6 +221,9 @@ mod tests {
                 (ErrorCode::SetupInvalid, "setup.invalid"),
                 (ErrorCode::RouteNotFound, "api.not_found"),
                 (ErrorCode::OriginMissing, "settings.origin_missing"),
+                (ErrorCode::ReauthRequired, "auth.reauth_required"),
+                (ErrorCode::BodyTooLarge, "api.body_too_large"),
+                (ErrorCode::LengthRequired, "api.length_required"),
             ]
         );
     }

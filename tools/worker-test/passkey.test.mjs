@@ -6,8 +6,9 @@
 //   configured: settings `origin` = https://blog.test, unlike the host requests arrive on.
 // A site without an origin is covered in auth.test.mjs (fresh site).
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, pbkdf2, pbkdf2Sync, randomBytes, sign } from "node:crypto";
 import { after, before, describe, test } from "node:test";
+import { promisify } from "node:util";
 
 import { startWorker } from "./harness.mjs";
 
@@ -18,6 +19,16 @@ const sha256 = (b) => createHash("sha256").update(b).digest();
 const sha256hex = (b) => createHash("sha256").update(b).digest("hex");
 const b64u = (buf) => Buffer.from(buf).toString("base64url");
 const sq = (s) => `'${String(s).replaceAll("'", "''")}'`;
+const pbkdf2Async = promisify(pbkdf2);
+/** The browser's stretch (web/admin/js/stretch.js); auth.test.mjs pins it. */
+const stretch = (site, login, password) =>
+  pbkdf2Async(password, `plumblog:${site}:${login.toLowerCase()}`, 600000, 32, "sha256").then(b64u);
+/** Stored form of crates/auth hash_password, for seeded users. */
+function serverHash(stretched) {
+  const salt = randomBytes(16);
+  const h = pbkdf2Sync(Buffer.from(stretched, "base64url"), salt, 1000, 32, "sha256");
+  return `p1$1000$${b64u(salt)}$${b64u(h)}`;
+}
 const tokenOf = (setCookie) => setCookie?.match(/^__Host-plumblog_session=([A-Za-z0-9_-]*);/)?.[1];
 
 const REG_OPT = "/api/auth/passkey/register/options";
@@ -136,8 +147,11 @@ async function register(w, cookie, a, o = {}) {
     cose: o.cose ?? a.cose(),
   });
   const att = o.att ?? cbor(new Map([["fmt", o.fmt ?? "none"], ["attStmt", new Map()], ["authData", ad]]));
-  const body = { name: o.name ?? `${a.alg} key`, client_data_json: b64u(cd), attestation_object: b64u(att) };
-  const r = await api(w, "POST", REG_VERIFY, { cookie: o.verifyCookie ?? cookie, body });
+  const verifyCookie = o.verifyCookie ?? cookie;
+  // Re-authentication: the signed-in user's password by default; `reauth: null` sends none.
+  const reauth = o.reauth === undefined ? { current_password: PW.get(verifyCookie) } : o.reauth;
+  const body = { name: o.name ?? `${a.alg} key`, client_data_json: b64u(cd), attestation_object: b64u(att), ...reauth };
+  const r = await api(w, "POST", REG_VERIFY, { cookie: verifyCookie, body });
   return Object.assign(r, { options: pk, body });
 }
 
@@ -166,20 +180,50 @@ async function login(w, a, o = {}) {
   return Object.assign(r, { body });
 }
 
+/** Re-authentication fields from a fresh assertion by `a` (adding or removing a passkey). */
+async function reauthWith(w, a) {
+  const opt = await api(w, "POST", LOGIN_OPT, {});
+  assert.equal(opt.status, 200, opt.text);
+  const { challenge, rpId } = opt.json.publicKey;
+  const cd = clientData("webauthn.get", challenge, w.site);
+  const ad = authData(rpId, UP | UV, ++a.count);
+  return {
+    reauth_credential_id: a.id,
+    reauth_client_data_json: b64u(cd),
+    reauth_authenticator_data: b64u(ad),
+    reauth_signature: b64u(a.sign(Buffer.concat([ad, sha256(cd)]))),
+  };
+}
+
 // --- workers -------------------------------------------------------------------------------
 
 const tok = () => b64u(randomBytes(32));
 const S = { olga: tok(), pat: tok(), wes: tok(), dis: tok(), cara: tok() };
-const SEEDED = { olga: new Authenticator("ES256"), dis: new Authenticator("Ed25519") };
+const SEEDED = {
+  olga: new Authenticator("ES256"),
+  dis: new Authenticator("Ed25519"),
+  pat: new Authenticator("Ed25519"),
+  // Stored with a key that is not a P-256 point (x = 7..., y = 9...), as an old row might be.
+  bad: new Authenticator("ES256"),
+};
+const OFF_CURVE = `es256:${b64u(Buffer.concat([Buffer.alloc(32, 7), Buffer.alloc(32, 9)]))}`;
+/** Session token -> stretched password, for re-authentication. */
+const PW = new Map();
 const EXPIRED = randomBytes(32);
 let plain, configured;
 
 before(async () => {
+  const [olgaPw, wesPw, caraPw] = await Promise.all([
+    stretch("site-pk", "olga", "olga pass"),
+    stretch("site-pk", "wes", "wes pass"),
+    stretch("site-cfg", "cara", "cara pass"),
+  ]);
+  PW.set(S.olga, olgaPw).set(S.wes, wesPw).set(S.cara, caraPw);
   const users = `INSERT INTO users (id, login, slug, display_name, role, password_hash, disabled_at, created_at, updated_at) VALUES
-    (1, 'olga', 'olga', 'Olga', 'owner', 'p1$1000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', NULL, ${T}, ${T}),
+    (1, 'olga', 'olga', 'Olga', 'owner', ${sq(serverHash(olgaPw))}, NULL, ${T}, ${T}),
     (2, 'pat', 'pat', 'Pat', 'writer', NULL, NULL, ${T}, ${T}),
     (3, 'dis', 'dis', 'Dis', 'writer', NULL, ${T - 1000}, ${T}, ${T}),
-    (4, 'wes', 'wes', 'Wes', 'writer', 'p1$1000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', NULL, ${T}, ${T});`;
+    (4, 'wes', 'wes', 'Wes', 'writer', ${sq(serverHash(wesPw))}, NULL, ${T}, ${T});`;
   const sessions = (pairs) =>
     `INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES ${pairs
       .map(([t, u]) => `(${sq(sha256hex(t))}, ${u}, ${T}, ${T + 29 * DAY})`)
@@ -191,7 +235,9 @@ before(async () => {
     sessions([[S.olga, 1], [S.pat, 2], [S.dis, 3], [S.wes, 4]]),
     `INSERT INTO passkeys (user_id, credential_id, public_key, sign_count, name, created_at) VALUES
       (1, ${sq(SEEDED.olga.id)}, ${sq(SEEDED.olga.stored())}, 100, 'seeded', ${T}),
-      (3, ${sq(SEEDED.dis.id)}, ${sq(SEEDED.dis.stored())}, 0, 'disabled', ${T});`,
+      (3, ${sq(SEEDED.dis.id)}, ${sq(SEEDED.dis.stored())}, 0, 'disabled', ${T}),
+      (2, ${sq(SEEDED.pat.id)}, ${sq(SEEDED.pat.stored())}, 0, 'pat phone', ${T}),
+      (4, ${sq(SEEDED.bad.id)}, ${sq(OFF_CURVE)}, 0, 'off curve', ${T});`,
     `INSERT INTO auth_challenges (challenge_hash, purpose, user_id, expires_at) VALUES
       (${sq(sha256hex(EXPIRED))}, 'login', NULL, ${T - 1});`,
   ].join("\n");
@@ -199,7 +245,7 @@ before(async () => {
     `INSERT INTO settings (key, value_json, updated_at) VALUES ('site_id', '"site-cfg"', ${T}),
       ('origin', '"https://blog.test"', ${T});`,
     `INSERT INTO users (id, login, slug, display_name, role, password_hash, disabled_at, created_at, updated_at) VALUES
-      (1, 'cara', 'cara', 'Cara', 'owner', NULL, NULL, ${T}, ${T});`,
+      (1, 'cara', 'cara', 'Cara', 'owner', ${sq(serverHash(caraPw))}, NULL, ${T}, ${T});`,
     sessions([[S.cara, 1]]),
   ].join("\n");
   [plain, configured] = await Promise.all([startWorker({ seedSql: seedPlain }), startWorker({ seedSql: seedConfigured })]);
@@ -447,6 +493,15 @@ describe("passkeys, no configured origin", () => {
     assertError(await login(plain, a, { ip }), 429, "auth.locked");
     // The credential key is locked from any address too.
     assertError(await login(plain, a), 429, "auth.locked");
+    // A locked address spends nothing: no challenge taken, no row written for a new key.
+    const b = new Authenticator("ES256");
+    assert.equal((await register(plain, S.wes, b)).status, 201);
+    const { challenge } = (await api(plain, "POST", LOGIN_OPT)).json.publicKey;
+    const snap = () => plain.query("SELECT key_hash, count, window_start FROM login_failures ORDER BY key_hash");
+    const before = snap();
+    assertError(await login(plain, b, { ip, challenge }), 429, "auth.locked");
+    assert.deepEqual(snap(), before);
+    assert.equal(count(plain, `SELECT COUNT(*) AS n FROM auth_challenges WHERE challenge_hash = ${sq(sha256hex(Buffer.from(challenge, "base64url")))}`), 1);
     assert.ok(count(plain, "SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.sign_in_locked' AND detail = 'passkey'") >= 1);
     // Bad request shapes are refused before counting.
     assertError(await api(plain, "POST", LOGIN_VERIFY, { body: { credential_id: "" } }), 400, "input.invalid");
@@ -465,7 +520,7 @@ describe("passkeys, no configured origin", () => {
       assertError(await api(plain, "DELETE", `/api/auth/passkey/${bad}`, { cookie: S.olga }), 404, "store.not_found");
     }
     assert.equal(count(plain, `SELECT COUNT(*) AS n FROM passkeys WHERE id = ${id}`), 1);
-    const r = await api(plain, "DELETE", `/api/auth/passkey/${id}`, { cookie: S.olga });
+    const r = await api(plain, "DELETE", `/api/auth/passkey/${id}`, { cookie: S.olga, body: { current_password: PW.get(S.olga) } });
     assert.equal(r.status, 204, r.text);
     assert.equal(count(plain, `SELECT COUNT(*) AS n FROM passkeys WHERE id = ${id}`), 0);
     assert.equal(count(plain, "SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.passkey_removed' AND actor_id = 1"), 1);
@@ -474,10 +529,11 @@ describe("passkeys, no configured origin", () => {
   });
 
   test("passkey-only account: last passkey stays; login change re-authenticates with a passkey", async () => {
-    const a = new Authenticator("Ed25519");
-    assert.equal((await register(plain, S.pat, a, { name: "pat phone" })).status, 201);
+    const a = SEEDED.pat;
     const [key] = (await api(plain, "GET", "/api/auth/passkey", { cookie: S.pat })).json.passkeys;
-    assertError(await api(plain, "DELETE", `/api/auth/passkey/${key.id}`, { cookie: S.pat }), 409, "store.conflict");
+    assert.equal(key.name, "pat phone");
+    const body = await reauthWith(plain, a);
+    assertError(await api(plain, "DELETE", `/api/auth/passkey/${key.id}`, { cookie: S.pat, body }), 409, "store.conflict");
 
     const patch = (o) => login(plain, a, { method: "PATCH", path: "/api/auth/me", cookie: S.pat, ...o });
     // No assertion, a password instead, or another user's passkey: refused, nothing changed.
@@ -508,6 +564,75 @@ describe("passkeys, no configured origin", () => {
       400,
       "input.invalid",
     );
+  });
+
+  test("adding or removing a passkey re-authenticates: none 403, wrong password 401 and counted, password or own passkey ok", async () => {
+    const wesKey = sq(sha256hex("login:wes"));
+    const failures = () => plain.query(`SELECT count FROM login_failures WHERE key_hash = ${wesKey}`)[0]?.count ?? 0;
+    const passkeys = () => count(plain, "SELECT COUNT(*) AS n FROM passkeys WHERE user_id = 4");
+    const before = passkeys();
+    const a = new Authenticator("ES256");
+    assertError(await register(plain, S.wes, a, { reauth: null }), 403, "auth.reauth_required");
+    const counted = failures();
+    assertError(await register(plain, S.wes, a, { reauth: { current_password: b64u(randomBytes(32)) } }), 401, "auth.invalid_credentials");
+    assert.equal(failures(), counted + 1);
+    // Both at once is a malformed request, refused before counting.
+    const both = { current_password: PW.get(S.wes), ...(await reauthWith(plain, SEEDED.olga)) };
+    assertError(await register(plain, S.wes, a, { reauth: both }), 400, "input.invalid");
+    // Another user's passkey does not re-authenticate this one.
+    const olgaKey = new Authenticator("Ed25519");
+    assert.equal((await register(plain, S.olga, olgaKey)).status, 201);
+    refused(await register(plain, S.wes, a, { reauth: await reauthWith(plain, olgaKey) }));
+    assert.equal(passkeys(), before);
+
+    // With the password; then a second key with an assertion from the first.
+    const viaPassword = await register(plain, S.wes, a);
+    assert.equal(viaPassword.status, 201, viaPassword.text);
+    const b = new Authenticator("Ed25519");
+    const viaKey = await register(plain, S.wes, b, { reauth: await reauthWith(plain, a) });
+    assert.equal(viaKey.status, 201, viaKey.text);
+
+    // `me` lists the user's passkeys with when they were added and last used.
+    const me = await api(plain, "GET", "/api/auth/me", { cookie: S.wes });
+    assert.equal(me.status, 200, me.text);
+    assert.equal(me.json.user.login, "wes");
+    const listed = me.json.passkeys.find((k) => k.id === viaKey.json.passkey.id);
+    assert.deepEqual(Object.keys(listed).sort(), ["created_at", "id", "last_used_at", "name"]);
+    assert.ok(listed.created_at >= T);
+    assert.equal(listed.last_used_at, null);
+    assert.ok(!JSON.stringify(me.json).includes(a.id), "no credential ids or keys in me");
+
+    // Removing: none, wrong password, then the other key's assertion and the password.
+    const del = (id, body) => api(plain, "DELETE", `/api/auth/passkey/${id}`, { cookie: S.wes, body });
+    const aId = viaPassword.json.passkey.id;
+    const bId = viaKey.json.passkey.id;
+    assertError(await del(bId), 403, "auth.reauth_required");
+    assertError(await del(bId, {}), 403, "auth.reauth_required");
+    const c2 = failures();
+    assertError(await del(bId, { current_password: b64u(randomBytes(32)) }), 401, "auth.invalid_credentials");
+    assert.equal(failures(), c2 + 1);
+    refused(await del(bId, await reauthWith(plain, olgaKey)));
+    assert.equal(count(plain, `SELECT COUNT(*) AS n FROM passkeys WHERE id = ${bId}`), 1);
+    const removed = count(plain, "SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.passkey_removed' AND actor_id = 4");
+    assert.equal((await del(bId, await reauthWith(plain, a))).status, 204);
+    assert.equal((await del(aId, { current_password: PW.get(S.wes) })).status, 204);
+    assert.equal(count(plain, `SELECT COUNT(*) AS n FROM passkeys WHERE id IN (${aId}, ${bId})`), 0);
+    assert.equal(count(plain, "SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.passkey_removed' AND actor_id = 4"), removed + 2);
+    assert.equal(passkeys(), before);
+  });
+
+  test("an ES256 key off the curve: registration refused; a stored one fails sign-in as passkey_invalid, counted", async () => {
+    const failed = () => count(plain, "SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.sign_in_failed' AND actor_id = 4");
+    const logged = failed();
+    const r = await login(plain, SEEDED.bad);
+    refused(r);
+    const key = sq(sha256hex(`passkey:${SEEDED.bad.id}`));
+    assert.equal(count(plain, `SELECT count AS n FROM login_failures WHERE key_hash = ${key}`), 1);
+    assert.equal(failed(), logged + 1);
+    const a = new Authenticator("ES256");
+    const cose = new Map([[1, 2], [3, -7], [-1, 1], [-2, Buffer.alloc(32, 7)], [-3, Buffer.alloc(32, 9)]]);
+    refused(await register(plain, S.wes, a, { cose }));
+    assert.equal(count(plain, `SELECT COUNT(*) AS n FROM passkeys WHERE credential_id = ${sq(a.id)}`), 0);
   });
 
   test("system log: passkey events, no challenges, keys or addresses", async () => {

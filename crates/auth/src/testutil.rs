@@ -3,7 +3,7 @@
 //! message they were given. Real signatures are tested end to end in the Worker.
 
 use crate::Crypto;
-use crate::webauthn::{Es256Key, Rs256Key};
+use crate::webauthn::{Es256Key, PublicKey, Rs256Key};
 use plumblog_model::{Error, ErrorCode, Result};
 use std::cell::{Cell, RefCell};
 use std::future::Future;
@@ -194,16 +194,31 @@ pub struct FakeCrypto {
     rng: RefCell<Prng>,
     pub rng_fails: Cell<bool>,
     pub signature_ok: Cell<bool>,
+    /// Whether the platform accepts keys; false stands for an import refused (off the curve).
+    pub key_ok: Cell<bool>,
     pub calls: RefCell<Vec<Verified>>,
     pub pbkdf2_calls: RefCell<Vec<Pbkdf2Call>>,
 }
 
 impl FakeCrypto {
+    /// The import step of every key use, like `WebCrypto`'s `importKey`.
+    fn import(&self) -> Result<()> {
+        if self.key_ok.get() {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorCode::PasskeyInvalid,
+                "fake key import refused",
+            ))
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             rng: RefCell::new(Prng(0x9e37_79b9_7f4a_7c15)),
             rng_fails: Cell::new(false),
             signature_ok: Cell::new(true),
+            key_ok: Cell::new(true),
             calls: RefCell::new(Vec::new()),
             pbkdf2_calls: RefCell::new(Vec::new()),
         }
@@ -254,6 +269,7 @@ impl Crypto for FakeCrypto {
         message: &[u8],
         signature: &[u8; 64],
     ) -> Result<bool> {
+        self.import()?;
         self.calls.borrow_mut().push(Verified::Es256 {
             key: key.clone(),
             message: message.to_vec(),
@@ -263,6 +279,7 @@ impl Crypto for FakeCrypto {
     }
 
     async fn verify_rs256(&self, key: &Rs256Key, message: &[u8], signature: &[u8]) -> Result<bool> {
+        self.import()?;
         self.calls.borrow_mut().push(Verified::Rs256 {
             key: key.clone(),
             message: message.to_vec(),
@@ -277,12 +294,17 @@ impl Crypto for FakeCrypto {
         message: &[u8],
         signature: &[u8; 64],
     ) -> Result<bool> {
+        self.import()?;
         self.calls.borrow_mut().push(Verified::Ed25519 {
             key: *key,
             message: message.to_vec(),
             signature: *signature,
         });
         Ok(self.signature_ok.get())
+    }
+
+    async fn validate_public_key(&self, _key: &PublicKey) -> Result<()> {
+        self.import()
     }
 }
 

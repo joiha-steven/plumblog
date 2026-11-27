@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 use plumblog_store::{
-    ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewUser,
+    ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewUser, Recorded,
     SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore, setup_hash_json,
 };
 
@@ -10,10 +12,18 @@ use super::{D1Store, Failure, bound, guard, int, invalid, opt_int, opt_text, sto
 const WINDOW_ENDED: &str = "window_start + ? <= ?";
 
 impl LoginLimitStore for D1Store {
-    async fn record_failure(&self, key_hash: &str, now: i64, window_ms: i64) -> Result<(i64, i64)> {
-        // One statement, so two failures racing for one key both count. SET expressions
-        // read the old row, so both CASEs see the same old window_start.
-        let s = self.stmt(
+    async fn record_failure(
+        &self,
+        key_hash: &str,
+        now: i64,
+        window_ms: i64,
+        cap: i64,
+    ) -> Result<Recorded> {
+        // One statement, so two attempts racing for one key both count. SET expressions
+        // read the old row, so both CASEs see the same old window_start. The WHERE leaves a
+        // key that reached `cap` in its open window untouched (no row written, none
+        // returned); the read in the same transaction then gives the row as it is.
+        let upsert = self.stmt(
             "record_failure",
             &format!(
                 "INSERT INTO login_failures (key_hash, count, window_start) VALUES (?, 1, ?) \
@@ -21,7 +31,8 @@ impl LoginLimitStore for D1Store {
                  count = CASE WHEN {WINDOW_ENDED} THEN 1 ELSE count + 1 END, \
                  window_start = CASE WHEN {WINDOW_ENDED} THEN excluded.window_start \
                  ELSE window_start END \
-                 RETURNING count, window_start"
+                 WHERE count < ? OR {WINDOW_ENDED} \
+                 RETURNING count"
             ),
             &[
                 text(key_hash),
@@ -30,13 +41,54 @@ impl LoginLimitStore for D1Store {
                 bound(now),
                 bound(window_ms),
                 bound(now),
+                bound(cap),
+                bound(window_ms),
+                bound(now),
             ],
         )?;
-        let mut row = self
-            .row(s)
-            .await?
-            .ok_or_else(|| storage("record_failure", "RETURNING gave no row"))?;
-        Ok((row.int()?, row.int()?))
+        let read = self.stmt(
+            "record_failure_read",
+            "SELECT count AS c, window_start AS w FROM login_failures WHERE key_hash = ?",
+            &[text(key_hash)],
+        )?;
+        let results = self.batch("record_failure", vec![upsert, read]).await?;
+        let rows = |i: usize| -> Result<Vec<HashMap<String, i64>>> {
+            results
+                .get(i)
+                .ok_or_else(|| storage("record_failure", "batch result missing"))?
+                .results()
+                .map_err(|e| storage("record_failure", &format!("{e}")))
+        };
+        let counted = !rows(0)?.is_empty();
+        let row = rows(1)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| storage("record_failure", "row missing after upsert"))?;
+        match (row.get("c"), row.get("w")) {
+            (Some(&count), Some(&window_start)) => Ok(Recorded {
+                count,
+                window_start,
+                counted,
+            }),
+            _ => Err(storage(
+                "record_failure",
+                "row without count or window_start",
+            )),
+        }
+    }
+
+    async fn delete_ended_failures(&self, now: i64, window_ms: i64, limit: u32) -> Result<u64> {
+        // D1's SQLite has no DELETE ... LIMIT; the subquery bounds it the same way.
+        let s = self.stmt(
+            "delete_ended_failures",
+            &format!(
+                "DELETE FROM login_failures WHERE key_hash IN \
+                 (SELECT key_hash FROM login_failures WHERE {WINDOW_ENDED} LIMIT ?)"
+            ),
+            &[bound(window_ms), bound(now), bound(i64::from(limit))],
+        )?;
+        let r = self.exec(s).await?;
+        Self::changes("delete_ended_failures", &r)
     }
 
     // 1 query (0 for no keys).
@@ -177,7 +229,7 @@ impl SetupStore for D1Store {
             &[text(SITE_ID_KEY)],
         )?;
         let results = self.batch("ensure_site_id", vec![insert, read]).await?;
-        let rows: Vec<std::collections::HashMap<String, String>> = results
+        let rows: Vec<HashMap<String, String>> = results
             .get(1)
             .ok_or_else(|| storage("ensure_site_id", "batch returned no read result"))?
             .results()

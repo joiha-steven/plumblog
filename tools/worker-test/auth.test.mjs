@@ -18,6 +18,7 @@ import { stretch as stretchJs } from "../../web/admin/js/stretch.js";
 const ITER = 600000; // crates/auth STRETCH_ITERATIONS; stretch.test.mjs pins it.
 const COOKIE = "__Host-plumblog_session";
 const DAY = 86_400_000;
+const WINDOW = 900_000; // crates/auth ratelimit::WINDOW_MS
 const sha256hex = (s) => createHash("sha256").update(s).digest("hex");
 const b64u = (buf) => Buffer.from(buf).toString("base64url");
 const pbkdf2Async = promisify(pbkdf2);
@@ -135,7 +136,9 @@ before(async () => {
     ('setup_code_expires_at', '${T + DAY}', ${T});`;
   const seedC = `INSERT INTO settings (key, value_json, updated_at) VALUES
     ('setup_code_hash', ${sq(JSON.stringify(sha256hex(SETUP_CODE)))}, ${T}),
-    ('setup_code_expires_at', '${T - 1}', ${T});`;
+    ('setup_code_expires_at', '${T - 1}', ${T});
+    INSERT INTO login_failures (key_hash, count, window_start) VALUES
+    ('ended-1', 3, ${T - 2 * WINDOW}), ('ended-2', 20, ${T - WINDOW}), ('open-1', 2, ${T});`;
 
   [fresh, seeded, blank] = await Promise.all([
     startWorker({ seedSql: seedA }),
@@ -277,6 +280,44 @@ describe("fresh site", () => {
     // Another address still signs in: the lock is per key.
     assert.equal((await login(fresh, SITE_A, "owner", OWNER.password, { ip: "198.51.100.8" })).status, 200);
     assert.equal(fresh.query("SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.sign_in_locked' AND detail = 'password'")[0].n, 1);
+  });
+
+  test("a locked address writes nothing more: no rows for new logins, its own count stays", async () => {
+    const ip = "198.51.100.90";
+    for (let i = 0; i < 5; i++) {
+      const r = await api(fresh, "POST", "/api/auth/login", { body: { login: `random${i}`, password: wrong() }, ip });
+      assertError(r, 401, "auth.invalid_credentials");
+    }
+    const snap = () => fresh.query("SELECT key_hash, count, window_start FROM login_failures ORDER BY key_hash");
+    const before = snap();
+    for (let i = 0; i < 10; i++) {
+      const r = await api(fresh, "POST", "/api/auth/login", { body: { login: `later${i}`, password: wrong() }, ip });
+      assertError(r, 429, "auth.locked");
+    }
+    assert.deepEqual(snap(), before);
+  });
+
+  test("bodies: over 8 KiB by Content-Length is 413 before reading; no Content-Length (chunked) is 411", async () => {
+    const ip = "198.51.100.91";
+    const big = JSON.stringify({ login: "x", password: "a".repeat(9000) });
+    assertError(await api(fresh, "POST", "/api/auth/login", { body: big, ip }), 413, "api.body_too_large");
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('{"login":"x","password":"'));
+        c.enqueue(new TextEncoder().encode(`${wrong()}"}`));
+        c.close();
+      },
+    });
+    const res = await fetch(`${fresh.url}/api/auth/login`, {
+      method: "POST",
+      body: stream,
+      duplex: "half",
+      headers: { origin: fresh.url, "content-type": "application/json", "cf-connecting-ip": ip },
+    });
+    assert.equal(res.status, 411, await res.clone().text());
+    assert.deepEqual(await res.json(), { error: "api.length_required" });
+    // Neither was counted: refused before the route ran.
+    assert.equal(fresh.query(`SELECT COUNT(*) AS n FROM login_failures WHERE key_hash = ${sq(sha256hex("ip:" + ip))}`)[0].n, 0);
   });
 
   test("no configured origin: passkeys refuse with settings.origin_missing; passwords still work", async () => {
@@ -443,7 +484,8 @@ describe("seeded site", () => {
     const failedAfter = seeded.query("SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.sign_in_failed' AND detail = 'password'")[0].n;
     assert.equal(failedAfter - failedBefore, checked);
     const row = seeded.query(`SELECT count FROM login_failures WHERE key_hash = ${sq(sha256hex("login:racer"))}`);
-    assert.ok(row[0].count >= 30, `counted ${row[0]?.count}`);
+    // Counted up to the lock (20 with Turnstile on), then a locked key costs no more writes.
+    assert.equal(row[0].count, 20);
   });
 
   test("20 failures lock even with a valid Turnstile token", async () => {
@@ -573,6 +615,15 @@ describe("blank site", () => {
     const body = { ...OWNER, code: SETUP_CODE, password: wrong() };
     assertError(await api(blank, "POST", "/api/auth/setup", { body }), 403, "setup.invalid");
     assert.deepEqual(blank.query("SELECT COUNT(*) AS n FROM users"), [{ n: 0 }]);
+  });
+
+  test("ended rate-limit rows are swept lazily, a bounded batch at a time; open ones stay", async () => {
+    // A first failure from a new address starts its window and sweeps ended rows.
+    const body = { ...OWNER, code: SETUP_CODE, password: wrong() };
+    assertError(await api(blank, "POST", "/api/auth/setup", { body, ip: "198.51.100.200" }), 403, "setup.invalid");
+    const keys = blank.query("SELECT key_hash FROM login_failures ORDER BY key_hash").map((r) => r.key_hash);
+    assert.ok(!keys.includes("ended-1") && !keys.includes("ended-2"), keys.join());
+    assert.ok(keys.includes("open-1"));
   });
 
   test("Rust stretch in the Worker equals stretch.js on a fixed Unicode vector", async () => {

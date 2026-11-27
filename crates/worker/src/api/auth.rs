@@ -85,9 +85,19 @@ pub async fn params(ctx: &Ctx) -> Result<Reply> {
     ))
 }
 
-/// `GET /api/auth/me`.
-pub fn me(p: &Principal) -> Result<Reply> {
-    Ok(user_reply(200, p.user()?))
+/// `GET /api/auth/me`: the signed-in user and their passkeys (when added and last used).
+pub async fn me(ctx: &Ctx, p: &Principal) -> Result<Reply> {
+    let user = p.user()?;
+    Ok(Reply::json(
+        200,
+        object(&[
+            ("user", Out::Raw(user_json(user))),
+            (
+                "passkeys",
+                Out::Raw(passkey::list_json(ctx, user.id).await?),
+            ),
+        ]),
+    ))
 }
 
 async fn new_session(ctx: &Ctx, user: UserId) -> Result<(NewSession, String)> {
@@ -174,7 +184,7 @@ const NEW_ACCOUNT_FIELDS: &[&str] = &[
 /// One-time codes are guessable only by trying: wrong codes count per address like failed
 /// sign-ins (same thresholds, Turnstile, lock), and are logged.
 async fn code_failed(ctx: &Ctx, attempt: &limit::Attempt, how: &str) -> Result<()> {
-    limit::failed(ctx, attempt, None, how).await?;
+    limit::failed(ctx, attempt, None, how).await;
     ctx.syslog(ctx.event(EventKind::SignInFailed, None).subject(how))
         .await;
     Ok(())
@@ -264,7 +274,7 @@ pub async fn login(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
         Some(u) if matched && u.disabled_at.is_none() => u,
         other => {
             let actor = other.as_ref().map(|u| u.id);
-            limit::failed(ctx, &attempt, actor, "password").await?;
+            limit::failed(ctx, &attempt, actor, "password").await;
             ctx.syslog(
                 ctx.event(EventKind::SignInFailed, actor)
                     .subject("password"),
@@ -300,14 +310,14 @@ pub async fn logout(ctx: &Ctx, p: &Principal) -> Result<Reply> {
 
 /// Checks the signed-in user's current password, rate limited like sign-in (a stolen session
 /// must not become a password oracle).
-async fn check_current(ctx: &Ctx, user: &User, f: &Fields) -> Result<()> {
+pub(super) async fn check_current(ctx: &Ctx, user: &User, f: &Fields) -> Result<()> {
     let current = password::parse_stretched(f.req("current_password")?)?;
     let keys = Keys::new(ctx, &user.login).await?;
     let attempt = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
     if password_matches(ctx, Some(user), &current).await? {
         limit::succeeded(ctx, &keys).await
     } else {
-        limit::failed(ctx, &attempt, Some(user.id), "current password").await?;
+        limit::failed(ctx, &attempt, Some(user.id), "current password").await;
         ctx.syslog(
             ctx.event(EventKind::SignInFailed, Some(user.id))
                 .subject("current password"),
@@ -403,7 +413,7 @@ pub async fn update_me(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
                 "passkey-only account: re-authenticate with a passkey, not a password",
             ));
         }
-        passkey::verify(ctx, &f, Some(user.id), "passkey re-auth").await?;
+        passkey::verify(ctx, &f, "", Some(user.id), "passkey re-auth").await?;
         let (session, cookie) = new_session(ctx, user.id).await?;
         // Conflict if a password was set meanwhile (its stretch salt holds the old login).
         ctx.store

@@ -61,14 +61,47 @@ pub fn setup_hash_json(code_hash: &str) -> String {
     format!("\"{code_hash}\"")
 }
 
+/// What [`LoginLimitStore::record_failure`] found or wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Recorded {
+    /// The count after this attempt, or the stored one when it was not counted.
+    pub count: i64,
+    pub window_start: i64,
+    /// Whether this attempt was counted (a write happened).
+    pub counted: bool,
+}
+
+impl Recorded {
+    /// Attempts before this one: what the rate-limit decision reads.
+    #[must_use]
+    pub fn before(&self) -> i64 {
+        if self.counted {
+            self.count.saturating_sub(1)
+        } else {
+            self.count
+        }
+    }
+}
+
 // Workers are single-threaded, so futures need not be `Send` (see plumblog_auth::Crypto).
 #[allow(async_fn_in_trait)]
 pub trait LoginLimitStore {
-    /// Counts one failed sign-in for `key_hash`, in one atomic upsert, and returns
-    /// `(count, window_start)` after it. A window covers `[window_start, window_start +
-    /// window_ms)`: a failure at or after its end restarts it at count 1 with
-    /// `window_start = now`; otherwise the count goes up by one.
-    async fn record_failure(&self, key_hash: &str, now: i64, window_ms: i64) -> Result<(i64, i64)>;
+    /// Counts one attempt for `key_hash` in one atomic upsert. A window covers
+    /// `[window_start, window_start + window_ms)`: an attempt at or after its end restarts it
+    /// at count 1 with `window_start = now`; otherwise the count goes up by one, unless it
+    /// already reached `cap` in the open window: then nothing is written (a locked key costs
+    /// no write) and the row comes back as it is, with `counted: false`.
+    async fn record_failure(
+        &self,
+        key_hash: &str,
+        now: i64,
+        window_ms: i64,
+        cap: i64,
+    ) -> Result<Recorded>;
+    /// Deletes at most `limit` rows whose window ended (`window_start + window_ms <= now`)
+    /// and returns how many went. Rows for random logins and credential ids would otherwise
+    /// stay forever; the caller sweeps a bounded batch now and then.
+    async fn delete_ended_failures(&self, now: i64, window_ms: i64, limit: u32) -> Result<u64>;
     /// `(count, window_start)` per key, in the order given, in one query. A missing key or
     /// one whose window ended (`window_start + window_ms <= now`) reads as `(0, 0)`.
     /// `InvalidInput` for more than [`MAX_FAILURE_KEYS`] keys. Never writes.

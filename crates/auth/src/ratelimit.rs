@@ -1,6 +1,8 @@
 //! Sign-in rate limiting policy. The Worker keeps one `login_failures` row per key (the SHA-256
-//! hex of [`login_key`] or [`ip_key`], never the raw login or IP), writes only on a failed
-//! attempt ([`record_failure`]) and asks [`decide`] before checking a password. Times are UTC
+//! hex of [`login_key`] or [`ip_key`], never the raw login or IP). Every attempt is counted
+//! before the secret is checked, the address first, in one atomic upsert per key that writes
+//! nothing once the key reached its lock; [`decide`] reads the attempts before this one. A
+//! success takes its attempt back. Ended rows are swept in bounded batches. Times are UTC
 //! milliseconds.
 
 use plumblog_model::{Error, ErrorCode, Result};

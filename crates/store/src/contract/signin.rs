@@ -4,22 +4,34 @@ use plumblog_model::{ErrorCode, Role};
 
 use super::kit::{Check, T0, eq, fails, new_user, ok, user, version_is};
 use crate::{
-    ChallengePurpose, MAX_FAILURE_KEYS, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, Store,
+    ChallengePurpose, MAX_FAILURE_KEYS, Recorded, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY,
+    Store,
 };
 
 const WINDOW: i64 = 900_000;
+/// A cap no test reaches, for cases about counting alone.
+const NO_CAP: i64 = i64::MAX;
+
+fn pair(r: Recorded) -> (i64, i64) {
+    (r.count, r.window_start)
+}
 
 pub async fn login_failures_count_and_restart<S: Store>(db: &S) -> Check {
     eq!(
         "first failure",
-        ok("record_failure", db.record_failure("k", T0, WINDOW).await)?,
+        ok(
+            "record_failure",
+            db.record_failure("k", T0, WINDOW, NO_CAP).await.map(pair)
+        )?,
         (1, T0),
     )?;
     eq!(
         "second failure",
         ok(
             "record_failure",
-            db.record_failure("k", T0 + 10, WINDOW).await
+            db.record_failure("k", T0 + 10, WINDOW, NO_CAP)
+                .await
+                .map(pair)
         )?,
         (2, T0),
     )?;
@@ -27,7 +39,9 @@ pub async fn login_failures_count_and_restart<S: Store>(db: &S) -> Check {
         "failure 1 ms before the window ends counts in it",
         ok(
             "record_failure",
-            db.record_failure("k", T0 + WINDOW - 1, WINDOW).await
+            db.record_failure("k", T0 + WINDOW - 1, WINDOW, NO_CAP)
+                .await
+                .map(pair)
         )?,
         (3, T0),
     )?;
@@ -35,7 +49,9 @@ pub async fn login_failures_count_and_restart<S: Store>(db: &S) -> Check {
         "failure at exactly the window end restarts it",
         ok(
             "record_failure",
-            db.record_failure("k", T0 + WINDOW, WINDOW).await
+            db.record_failure("k", T0 + WINDOW, WINDOW, NO_CAP)
+                .await
+                .map(pair)
         )?,
         (1, T0 + WINDOW),
     )?;
@@ -43,7 +59,9 @@ pub async fn login_failures_count_and_restart<S: Store>(db: &S) -> Check {
         "restarted window counts on",
         ok(
             "record_failure",
-            db.record_failure("k", T0 + WINDOW + 1, WINDOW).await
+            db.record_failure("k", T0 + WINDOW + 1, WINDOW, NO_CAP)
+                .await
+                .map(pair)
         )?,
         (2, T0 + WINDOW),
     )?;
@@ -73,7 +91,9 @@ pub async fn login_failures_count_and_restart<S: Store>(db: &S) -> Check {
         "after clearing a failure starts at 1",
         ok(
             "record_failure",
-            db.record_failure("k", T0 + WINDOW + 2, WINDOW).await
+            db.record_failure("k", T0 + WINDOW + 2, WINDOW, NO_CAP)
+                .await
+                .map(pair)
         )?,
         (1, T0 + WINDOW + 2),
     )?;
@@ -82,11 +102,16 @@ pub async fn login_failures_count_and_restart<S: Store>(db: &S) -> Check {
 
 pub async fn login_failures_multi_key_read<S: Store>(db: &S) -> Check {
     for _ in 0..3 {
-        ok("record_failure a", db.record_failure("a", T0, WINDOW).await)?;
+        ok(
+            "record_failure a",
+            db.record_failure("a", T0, WINDOW, NO_CAP).await.map(pair),
+        )?;
     }
     ok(
         "record_failure b",
-        db.record_failure("b", T0 + 5, WINDOW).await,
+        db.record_failure("b", T0 + 5, WINDOW, NO_CAP)
+            .await
+            .map(pair),
     )?;
     eq!(
         "in the order given; missing reads as 0",
@@ -126,10 +151,130 @@ pub async fn login_failures_multi_key_read<S: Store>(db: &S) -> Check {
         "reading never resets an ended window",
         ok(
             "record_failure a",
-            db.record_failure("a", T0 + 1, WINDOW).await
+            db.record_failure("a", T0 + 1, WINDOW, NO_CAP)
+                .await
+                .map(pair)
         )?,
         (4, T0),
     )
+}
+
+pub async fn login_failures_stop_at_the_cap<S: Store>(db: &S) -> Check {
+    let rec = |now: i64| db.record_failure("k", now, WINDOW, 3);
+    for (count, now) in [(1, T0), (2, T0 + 1), (3, T0 + 2)] {
+        eq!(
+            "counted below the cap",
+            ok("record_failure", rec(now).await)?,
+            Recorded {
+                count,
+                window_start: T0,
+                counted: true,
+            },
+        )?;
+    }
+    let locked = Recorded {
+        count: 3,
+        window_start: T0,
+        counted: false,
+    };
+    eq!(
+        "at the cap: not counted, row as it is",
+        ok("record_failure", rec(T0 + 3).await)?,
+        locked,
+    )?;
+    eq!("before() reads the stored count", locked.before(), 3)?;
+    eq!(
+        "still not counted 1 ms before the window ends",
+        ok("record_failure", rec(T0 + WINDOW - 1).await)?,
+        locked,
+    )?;
+    eq!(
+        "unchanged",
+        ok("failures", db.failures(&["k"], T0 + 4, WINDOW).await)?,
+        vec![(3, T0)],
+    )?;
+    eq!(
+        "a lower cap leaves a fuller row alone too",
+        ok(
+            "record_failure",
+            db.record_failure("k", T0 + 5, WINDOW, 2).await
+        )?,
+        locked,
+    )?;
+    eq!(
+        "the window's end restarts it, counted",
+        ok("record_failure", rec(T0 + WINDOW).await)?,
+        Recorded {
+            count: 1,
+            window_start: T0 + WINDOW,
+            counted: true,
+        },
+    )?;
+    eq!(
+        "a new key under cap 1 is counted once",
+        ok(
+            "record_failure",
+            db.record_failure("one", T0, WINDOW, 1).await
+        )?
+        .counted,
+        true,
+    )?;
+    eq!(
+        "then not",
+        ok(
+            "record_failure",
+            db.record_failure("one", T0, WINDOW, 1).await
+        )?
+        .counted,
+        false,
+    )?;
+    version_is(db, "capped failures", 1).await
+}
+
+pub async fn login_failures_sweep_is_bounded<S: Store>(db: &S) -> Check {
+    for k in ["e1", "e2", "e3"] {
+        ok(
+            "record ended",
+            db.record_failure(k, T0, WINDOW, NO_CAP).await,
+        )?;
+    }
+    ok(
+        "record open",
+        db.record_failure("open", T0 + WINDOW, WINDOW, NO_CAP).await,
+    )?;
+    let now = T0 + WINDOW;
+    eq!(
+        "at most the limit",
+        ok("sweep", db.delete_ended_failures(now, WINDOW, 2).await)?,
+        2,
+    )?;
+    eq!(
+        "the rest next time",
+        ok("sweep", db.delete_ended_failures(now, WINDOW, 2).await)?,
+        1,
+    )?;
+    eq!(
+        "nothing left to sweep",
+        ok("sweep", db.delete_ended_failures(now, WINDOW, 2).await)?,
+        0,
+    )?;
+    eq!(
+        "open window kept",
+        ok(
+            "failures",
+            db.failures(&["open", "e1", "e2", "e3"], now, WINDOW).await
+        )?,
+        vec![(1, T0 + WINDOW), (0, 0), (0, 0), (0, 0)],
+    )?;
+    eq!(
+        "limit 0 deletes nothing",
+        ok(
+            "sweep",
+            db.delete_ended_failures(T0 + 3 * WINDOW, WINDOW, 0).await
+        )?,
+        0,
+    )?;
+    version_is(db, "sweep", 1).await
 }
 
 pub async fn challenges_are_single_use<S: Store>(db: &S) -> Check {

@@ -160,8 +160,8 @@ async fn check_rp_and_flags(
 ///
 /// # Errors
 ///
-/// [`ErrorCode::PasskeyInvalid`] for any failed check or malformed input; a [`Crypto`] error
-/// (platform failure) passes through.
+/// [`ErrorCode::PasskeyInvalid`] for any failed check, malformed input or a key the platform
+/// refuses to import; a [`Crypto`] error (platform failure) passes through.
 pub async fn verify_registration(
     crypto: &impl Crypto,
     attestation_object: &[u8],
@@ -198,6 +198,8 @@ pub async fn verify_registration(
     let cred = auth
         .attested
         .ok_or_else(|| invalid("no attested credential data"))?;
+    // A key the platform cannot import would register, then fail every sign-in.
+    crypto.validate_public_key(&cred.public_key).await?;
     Ok(NewCredential {
         credential_id: base64url::encode(cred.credential_id),
         public_key: cred.public_key.to_stored(),
@@ -210,9 +212,9 @@ pub async fn verify_registration(
 ///
 /// # Errors
 ///
-/// [`ErrorCode::PasskeyInvalid`] for any failed check, malformed input or a signature that does
-/// not verify; [`ErrorCode::Internal`] when the stored key is corrupt; a [`Crypto`] error passes
-/// through.
+/// [`ErrorCode::PasskeyInvalid`] for any failed check, malformed input, a stored key the
+/// platform refuses to import or a signature that does not verify; [`ErrorCode::Internal`] when
+/// the stored key is corrupt; a [`Crypto`] error passes through.
 pub async fn verify_assertion(
     crypto: &impl Crypto,
     stored_public_key: &str,

@@ -2,7 +2,7 @@ use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 
 use super::{MemoryStore, conflict, count, invalid};
 use crate::{
-    ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewUser,
+    ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewUser, Recorded,
     SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore, setup_hash_json,
 };
 
@@ -16,8 +16,24 @@ fn window_ended(window_start: i64, now: i64, window_ms: i64) -> bool {
     reason = "in-memory stand-in for async D1 storage"
 )]
 impl LoginLimitStore for MemoryStore {
-    async fn record_failure(&self, key_hash: &str, now: i64, window_ms: i64) -> Result<(i64, i64)> {
+    async fn record_failure(
+        &self,
+        key_hash: &str,
+        now: i64,
+        window_ms: i64,
+        cap: i64,
+    ) -> Result<Recorded> {
         self.write(|s| {
+            if let Some(&(n, start)) = s.login_failures.get(key_hash)
+                && n >= cap
+                && !window_ended(start, now, window_ms)
+            {
+                return Ok(Recorded {
+                    count: n,
+                    window_start: start,
+                    counted: false,
+                });
+            }
             let row = s
                 .login_failures
                 .entry(key_hash.to_owned())
@@ -27,7 +43,27 @@ impl LoginLimitStore for MemoryStore {
             } else {
                 (row.0 + 1, row.1)
             };
-            Ok(*row)
+            Ok(Recorded {
+                count: row.0,
+                window_start: row.1,
+                counted: true,
+            })
+        })
+    }
+
+    async fn delete_ended_failures(&self, now: i64, window_ms: i64, limit: u32) -> Result<u64> {
+        self.write(|s| {
+            let ended: Vec<String> = s
+                .login_failures
+                .iter()
+                .filter(|(_, (_, start))| window_ended(*start, now, window_ms))
+                .map(|(k, _)| k.clone())
+                .take(usize::try_from(limit).unwrap_or(usize::MAX))
+                .collect();
+            for k in &ended {
+                s.login_failures.remove(k);
+            }
+            Ok(ended.len() as u64)
         })
     }
 
