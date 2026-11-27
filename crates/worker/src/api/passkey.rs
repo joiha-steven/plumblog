@@ -273,10 +273,17 @@ pub async fn register_verify(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Re
 /// `POST /api/auth/passkey/login/options`: anyone. The credential is discoverable, so the
 /// browser picks it; the server names no user (nothing to enumerate).
 pub async fn login_options(ctx: &Ctx, body: &[u8]) -> Result<Reply> {
-    no_fields(body)?;
+    let token = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        Fields::parse(body, &["turnstile_token"])?
+            .opt("turnstile_token")?
+            .map(str::to_owned)
+    };
     let site = site::site(ctx).await?;
-    // Anonymous and each call writes a row: counted per address before the write.
-    limit::options(ctx).await?;
+    // Anonymous and each call writes a row: counted site-wide and per address before the
+    // write.
+    limit::options(ctx, token.as_deref()).await?;
     let challenge = new_challenge(ctx, ChallengePurpose::Login, None).await?;
     let public_key = object(&[
         ("challenge", Out::Str(challenge)),
@@ -419,7 +426,13 @@ pub async fn verify(
     // First: without a configured origin nothing is counted or consumed.
     let site = site::site(ctx).await?;
     let keys = Keys::passkey(ctx, credential_id).await?;
-    let attempt = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
+    // Re-auth (`want_user`) comes from a signed-in user: outside the site-wide cap.
+    let token = f.opt("turnstile_token")?;
+    let attempt = if want_user.is_some() {
+        limit::check_signed_in(ctx, &keys, token).await?
+    } else {
+        limit::check(ctx, &keys, token).await?
+    };
     match check_assertion(ctx, f, prefix, credential_id, want_user, &site).await {
         Ok(user) => {
             limit::succeeded(ctx, &keys).await?;

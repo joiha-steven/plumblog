@@ -248,7 +248,12 @@ before(async () => {
       (1, 'cara', 'cara', 'Cara', 'owner', ${sq(serverHash(caraPw))}, NULL, ${T}, ${T});`,
     sessions([[S.cara, 1]]),
   ].join("\n");
-  [plain, configured] = await Promise.all([startWorker({ seedSql: seedPlain }), startWorker({ seedSql: seedConfigured })]);
+  // `plain` makes more limited attempts in one window than the site-wide cap allows; that cap
+  // has its own test (globalcap.test.mjs), so it is raised out of the way here.
+  [plain, configured] = await Promise.all([
+    startWorker({ seedSql: seedPlain, vars: { PLUMBLOG_TEST_GLOBAL_CAP: "100000" } }),
+    startWorker({ seedSql: seedConfigured }),
+  ]);
   plain.site = plain.url;
   plain.host = "127.0.0.1";
   configured.site = "https://blog.test";
@@ -291,9 +296,9 @@ describe("passkeys, no configured origin", () => {
     assert.ok(!JSON.stringify(rows).includes(pk.challenge));
   });
 
-  test("anonymous sign-in options: 60 per address per window, then locked before any write", async () => {
+  test("anonymous sign-in options: 20 per address per window, then locked before any write", async () => {
     const ip = "192.0.2.150";
-    const ok = await Promise.all(Array.from({ length: 60 }, () => api(plain, "POST", LOGIN_OPT, { ip })));
+    const ok = await Promise.all(Array.from({ length: 20 }, () => api(plain, "POST", LOGIN_OPT, { ip })));
     assert.deepEqual([...new Set(ok.map((r) => r.status))], [200]);
     const rows = count(plain, "SELECT COUNT(*) AS n FROM auth_challenges");
     assertError(await api(plain, "POST", LOGIN_OPT, { ip }), 429, "auth.locked");
@@ -493,14 +498,18 @@ describe("passkeys, no configured origin", () => {
     assertError(await login(plain, a, { ip }), 429, "auth.locked");
     // The credential key is locked from any address too.
     assertError(await login(plain, a), 429, "auth.locked");
-    // A locked address spends nothing: no challenge taken, no row written for a new key.
+    // A locked address spends nothing: no site-wide count, no challenge taken, no row written
+    // for a new key.
     const b = new Authenticator("ES256");
     assert.equal((await register(plain, S.wes, b)).status, 201);
     const { challenge } = (await api(plain, "POST", LOGIN_OPT)).json.publicKey;
-    const snap = () => plain.query("SELECT key_hash, count, window_start FROM login_failures ORDER BY key_hash");
+    const snap = () => plain.query("SELECT key_hash, count, window_start FROM login_failures WHERE key_hash <> 'global' ORDER BY key_hash");
+    const global = () => count(plain, "SELECT count AS n FROM login_failures WHERE key_hash = 'global'");
     const before = snap();
+    const globalBefore = global();
     assertError(await login(plain, b, { ip, challenge }), 429, "auth.locked");
     assert.deepEqual(snap(), before);
+    assert.equal(global(), globalBefore, "a locked address moved the site-wide count");
     assert.equal(count(plain, `SELECT COUNT(*) AS n FROM auth_challenges WHERE challenge_hash = ${sq(sha256hex(Buffer.from(challenge, "base64url")))}`), 1);
     assert.ok(count(plain, "SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.sign_in_locked' AND detail = 'passkey'") >= 1);
     // Bad request shapes are refused before counting.

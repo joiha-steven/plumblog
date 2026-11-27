@@ -231,6 +231,59 @@ pub async fn login_failures_stop_at_the_cap<S: Store>(db: &S) -> Check {
     version_is(db, "capped failures", 1).await
 }
 
+pub async fn login_failures_count_capped<S: Store>(db: &S) -> Check {
+    let count = |now: i64| db.count_capped("g", now, WINDOW, 2);
+    eq!(
+        "first counts 1",
+        ok("count_capped", count(T0).await)?,
+        Some(1)
+    )?;
+    eq!("then 2", ok("count_capped", count(T0 + 1).await)?, Some(2))?;
+    eq!(
+        "at the cap: not counted",
+        ok("count_capped", count(T0 + 2).await)?,
+        None
+    )?;
+    eq!(
+        "still not, 1 ms before the window ends",
+        ok("count_capped", count(T0 + WINDOW - 1).await)?,
+        None,
+    )?;
+    eq!(
+        "the row is left as it is",
+        ok("failures", db.failures(&["g"], T0 + 3, WINDOW).await)?,
+        vec![(2, T0)],
+    )?;
+    eq!(
+        "the window's end restarts it",
+        ok("count_capped", count(T0 + WINDOW).await)?,
+        Some(1),
+    )?;
+    eq!(
+        "restarted at now",
+        ok("failures", db.failures(&["g"], T0 + WINDOW, WINDOW).await)?,
+        vec![(1, T0 + WINDOW)],
+    )?;
+    eq!(
+        "shares rows with record_failure",
+        ok(
+            "record_failure",
+            db.record_failure("g", T0 + WINDOW, WINDOW, 2).await
+        )?,
+        Recorded {
+            count: 2,
+            window_start: T0 + WINDOW,
+            counted: true,
+        },
+    )?;
+    eq!(
+        "so a capped row stops it too",
+        ok("count_capped", count(T0 + WINDOW + 1).await)?,
+        None,
+    )?;
+    version_is(db, "count_capped", 1).await
+}
+
 pub async fn login_failures_sweep_is_bounded<S: Store>(db: &S) -> Check {
     for k in ["e1", "e2", "e3"] {
         ok(
