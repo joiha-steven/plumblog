@@ -26,6 +26,17 @@ const LOCAL_HOSTS: &[&str] = &["localhost", "127.0.0.1", "[::1]"];
 /// nothing after it but an optional `/`. The text must already be in canonical form, so what
 /// is stored is exactly what browsers report as `origin`.
 fn parse(text: &str) -> std::result::Result<Site, String> {
+    // The `url` crate here has no Unicode IDNA tables (workspace `Cargo.toml`, idna_adapter), so
+    // say what to do instead of its bare "invalid international domain name".
+    let authority = text.split_once("://").map_or("", |(_, r)| {
+        r.split(['/', '?', '#']).next().unwrap_or_default()
+    });
+    if !authority.is_ascii() {
+        return Err(
+            "has a non-ASCII host; write it in its punycode form (xn--..., e.g. xn--bcher-kva.example)"
+                .to_owned(),
+        );
+    }
     let url = worker::Url::parse(text).map_err(|e| e.to_string())?;
     let host = url.host_str().unwrap_or_default().to_owned();
     match url.scheme() {
@@ -160,5 +171,34 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
+    }
+    #[test]
+    fn non_ascii_host_is_refused_asking_for_punycode() {
+        for bad in [
+            "https://b\u{fc}cher.example",
+            "https://b\u{fc}cher.example/",
+            "https://\u{4f8b}\u{3048}.example:8443",
+            "http://l\u{f6}calhost",
+        ] {
+            let why = parse(bad)
+                .err()
+                .unwrap_or_else(|| panic!("{bad:?} accepted"));
+            assert!(why.contains("xn--"), "{bad:?}: unclear error {why:?}");
+        }
+    }
+
+    #[test]
+    fn punycode_host_is_accepted_unchanged() {
+        let s = parse("https://xn--bcher-kva.example").unwrap();
+        assert_eq!(s.origin, "https://xn--bcher-kva.example");
+        assert_eq!(s.host, "xn--bcher-kva.example");
+    }
+
+    /// The `url` crate is built with the ASCII-only `idna_adapter` 1.0.0 (workspace
+    /// `Cargo.toml`): it must refuse Unicode hosts, never map them to punycode on its own.
+    #[test]
+    fn url_crate_does_not_do_unicode_idna() {
+        assert!(worker::Url::parse("https://b\u{fc}cher.example").is_err());
+        assert!(worker::Url::parse("https://xn--bcher-kva.example").is_ok());
     }
 }
