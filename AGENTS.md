@@ -9,6 +9,7 @@ you are touching. The owner does not read code: report with evidence (output, sc
 scripts/check                      # the only check; also runs on commit and in CI
 cargo test -p plumblog-<crate>     # fast loop
 scripts/worker-test                # real Worker over HTTP (wrangler dev, local D1/R2); tests in tools/worker-test/
+scripts/perf                       # real CPU budgets as a table; never gates (--strict does, on a quiet machine)
 cargo run -p plumblog-cli -- guide # the `blog` CLI
 ```
 
