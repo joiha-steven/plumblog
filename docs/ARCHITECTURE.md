@@ -136,13 +136,28 @@ Not built: PWA/offline, newsletter (later), reactions.
 ## Admin and editor
 
 - Markdown source editor (CodeMirror 6) with live styling: syntax marks dimmed, headings and emphasis styled as typed. Modes: Write / Split / Preview (tabs on mobile).
-- The writing column uses the published post's typography, so writing looks like the result.
+- The writing column uses the active theme's font and line-height, so writing looks like the result, at a calmer size (see Design language).
 - Toolbar that fades while typing; selection bubble (bold, italic, link); `/` menu for blocks.
 - Paste or drop images: placeholder with progress, encode, insert, ask for alt text. Paste from Word/Google Docs converts to Markdown. Pasting a URL over a selection makes a link.
 - Focus mode, typewriter scrolling, word count, discreet "Saved", offline draft in IndexedDB.
 - Post settings in a collapsible side panel. Publish button always in the same place.
 - Admin in light and dark; English and Vietnamese UI.
 - Dashboard (drafts, recent posts, last backup time), media library, users/invites, settings, tokens, audit log, update notice from GitHub Releases.
+
+### Design language
+
+Models: Bear and iA Writer. Everything serves writing; the chrome is quiet, flat and practical. Controls get a little physical depth so they read as things you can press.
+
+- **Type.** UI: system font. Scale 11 / 12 / 13 / 14 / 16 / 20 px, weights 400 / 500 / 600 only. Labels and metadata 12-13 px; uppercase only for section labels (11 px, +0.06em). Numbers, sizes and dates use tabular figures; file names use the mono font at 12 px. Writing column: the active theme's font and line-height, at a calmer size than the reader page (16 px phone, 17 px desktop, line-height 1.65, max 64ch); title 1.5em, weight 650.
+- **Space.** 4 / 8 / 12 / 16 / 24 / 32 / 48 px. Rows are dense (list row 56-64 px); whitespace goes around the writing column, not inside controls.
+- **Color.** Neutral greys with a faint warm bias, never pure grey. Ink (near-black, or near-white in dark) is the primary action color. One accent (muted plum) only for caret, selection, links and the focus ring. Status colors are muted, Pantone-like: draft = warm grey, scheduled = ochre, published = sage, error = brick. Each has a light and a dark value; text on a status tint keeps 4.5:1.
+- **Radius.** 6 px for controls, 8 px for popovers and sheets, 0 for list rows and panels. No large rounded cards.
+- **Depth.** Raised control (button, segment thumb, switch knob): 1 px border one step darker than the surface, top inner highlight `inset 0 1px 0 rgb(255 255 255 / .7)` and contact shadow `0 1px 1px rgb(0 0 0 / .06)`; dark: highlight `/ .06`, shadow `rgb(0 0 0 / .5)`. Inset control (text field, select, switch track, segmented track): field background one step below the surface, 1 px border, `inset 0 1px 2px rgb(0 0 0 / .06)` (dark `/ .35`). Popovers: `0 4px 16px rgb(0 0 0 / .12)` plus a 1 px border; nothing else casts a shadow. No gradients that make a control look curved.
+- **States, one system for every control.** States are drawn by a flat tint laid over the control's own background, so every component reacts the same way:
+  rest = as designed; hover = ink tint 5%; pressed = ink tint 10%, outer shadow removed, content moves down 1 px; selected = ink tint 8% plus ink text (segment thumb and toggles use the raised recipe instead); focus-visible = 2 px accent ring outside a 1 px surface-colored gap, never removed; disabled = 45% opacity, no shadow, no hover. Image tiles show hover and selection as a ring around the picture (1 px line, 2 px ink) instead of a tint. Transitions 120 ms ease-out on background, border and shadow only.
+- **Icons.** One line set, 1.5 px stroke, round caps and joins, 16 px in lists and sidebars, 18 px in the editor toolbar; icon-only buttons are 32 px (44 px on touch) with a tooltip and an accessible label.
+- **Motion.** 120 ms for states, 180 ms for panels and popovers (opacity + 4 px translate), nothing while typing except the toolbar fade. Off under `prefers-reduced-motion`.
+- **Never:** big rounded cards; soft drop shadows on everything; purple or blue gradients; glassmorphism; emoji or filled cartoon icons; everything centered; oversized hero text; colored icon tiles; pill buttons; decorative illustrations; more than one accent; status shown by color alone.
 
 ## AI surface
 
@@ -196,3 +211,4 @@ Each phase is one or more sessions; each ends with `scripts/check` green and evi
 - 2026-11-27 Reading and writing first; book-like typography tuned per font; foldables first-class.
 - 2026-11-27 minimal theme first, font Inter with unicode-range subsets; footnotes as sidenotes.
 - 2026-11-27 No hard-coded text (all languages incl. English in locale files); no hard-coded layout (themes define page structure); small core, features via themes and plugins.
+- 2026-11-27 Admin design language: Bear / iA Writer as models, flat with slight depth on controls, one state system, muted status palette.
