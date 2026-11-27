@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Real CPU budgets, measured. scripts/check gates on work and scaling only (wall time on a
+# shared runner is too noisy to gate on); this prints the numbers against the budgets in
+# docs/ARCHITECTURE.md (Budgets). CI runs it for the log and never fails on it.
+#   scripts/perf            print the table, exit 0
+#   scripts/perf --strict   fail when a budget is exceeded: use on a machine that is not shared
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+strict=false
+case "${1:-}" in
+  "") ;;
+  --strict) strict=true; export PLUMBLOG_PERF_STRICT=1 ;;
+  *) echo "perf: unknown argument $1" >&2; exit 2 ;;
+esac
+
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+rc=0
+# One test thread: the numbers are for reading, so no two timed loops share a core.
+cargo test -q --release -p plumblog-markdown --test perf -- --nocapture --test-threads=1 >> "$log" 2>&1 || rc=1
+cargo test -q --release -p plumblog-auth --test perf -- --nocapture --test-threads=1 >> "$log" 2>&1 || rc=1
+cargo test -q --release -p plumblog-worker every_page_renders -- --nocapture --test-threads=1 >> "$log" 2>&1 || rc=1
+
+sed -n 's/^\.*\(perf .*\)$/\1/p' "$log"
+echo "perf: the server-side PBKDF2 cost in workerd is printed by scripts/worker-test (auth tests)"
+if [ "$rc" -ne 0 ]; then
+  grep -nE 'panicked|over budget|far above' "$log" | head -20
+  echo "perf: a budget or a backstop was exceeded"
+  $strict && exit 1
+fi
+exit 0

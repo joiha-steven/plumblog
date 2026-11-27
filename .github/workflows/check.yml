@@ -35,3 +35,9 @@ jobs:
           key: cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/worker-test') }}
           restore-keys: cargo-
       - run: scripts/check
+      # The real CPU budgets, for the log. Never gates: wall time on a shared runner is noisy;
+      # scripts/check gates on work and scaling instead (docs/ARCHITECTURE.md, Budgets).
+      - name: Perf report (not gating)
+        if: always()
+        continue-on-error: true
+        run: scripts/perf

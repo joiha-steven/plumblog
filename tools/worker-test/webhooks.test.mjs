@@ -202,7 +202,9 @@ test("timeout: a receiver that never answers ends as timeout after about 10 s", 
   console.log("timeout row:", JSON.stringify(row), `after ${took} ms`);
   assert.equal(row.last_error, "timeout");
   assert.equal(row.last_status, null);
-  assert.ok(took >= 9_500 && took < 20_000, `took ${took} ms`);
+  // The timeout is 10 s. No upper bound: wall time under load is not the product's timeout,
+  // and `until` above already fails the test if the row is not there after 25 s.
+  assert.ok(took >= 9_500, `took ${took} ms`);
 });
 
 test("SSRF: refused URLs save nothing; a tampered row is checked again before sending", async () => {

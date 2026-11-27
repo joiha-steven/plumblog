@@ -37,11 +37,13 @@ cargo test -q -p plumblog-i18n --test locale_keys \
   || fail "locale keys (missing, extra or wrong plural forms; list above)"
 # --- end locale keys ---
 
-# --- markdown CPU budget (issue #4) ---
-step "markdown render and strict JSON parse CPU budgets (release)"
-# Debug builds measure the compiler, not the renderer; the budget is in tests/perf.rs.
-cargo test -q --release -p plumblog-markdown --test perf || fail "markdown render over its CPU budget"
-cargo test -q --release -p plumblog-auth --test perf || fail "strict JSON parse over its CPU budget"
+# --- markdown CPU budget (issue #4; gates on scaling, not wall time: issue #57) ---
+step "markdown render and strict JSON parse: linear scaling (release; budgets: scripts/perf)"
+# Debug builds measure the compiler, not the renderer. Wall time on a shared runner is too
+# noisy to gate on: these tests gate on scaling and a far-above-normal backstop; scripts/perf
+# prints the real budgets.
+cargo test -q --release -p plumblog-markdown --test perf || fail "markdown render not linear in its input, or far above normal (tests/perf.rs)"
+cargo test -q --release -p plumblog-auth --test perf || fail "strict JSON parse not linear in its input, or far above normal (tests/perf.rs)"
 # --- end markdown CPU budget ---
 
 step "worker wasm build + size budget (what a deploy ships)"

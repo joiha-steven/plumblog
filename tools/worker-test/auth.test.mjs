@@ -695,7 +695,11 @@ describe("blank site", () => {
     }
     const per = (Math.min(...load) - Math.min(...base)) / N;
     console.log(`server PBKDF2-SHA256 x1000 in wrangler dev: ${per.toFixed(3)} ms per hash (best of 3, ${N} hashes per request)`);
-    // The 10 ms free-plan CPU budget holds a sign-in only if one hash is far below it.
+    // The 10 ms free-plan CPU budget holds a sign-in only if one hash is far below it. Wall time
+    // on a shared runner is a poor clock, so this is a backstop about 50x above normal
+    // (0.1 ms), not the budget. The cost itself is a count: workerd runs PBKDF2 natively, so
+    // it is SERVER_ITERATIONS (1,000) times a fixed step, and a stored hash may not ask for
+    // more than MAX_SERVER_ITERATIONS (a Rust test in crates/auth).
     assert.ok(per < 5, `${per} ms per server-side hash`);
   });
 });

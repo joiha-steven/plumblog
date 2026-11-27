@@ -306,6 +306,8 @@ Node.js is a contributor-only tool (wrangler, Playwright, Lighthouse). Users nev
 | API request body: media upload (the original image, raw bytes) | <= 20 MiB |
 | API request body: every other route | <= 8 KiB |
 
+CPU budgets (10 ms per request on the Worker free plan; wasm runs 1.5-3x slower than native, so natively: a 5,000-word post renders in under 2 ms, a 160 KiB JSON body parses in under 1 ms, a reader page renders in under 2 ms, one server-side PBKDF2 hash costs far less than 10 ms). Wall time on a shared CI runner is a poor clock, so `scripts/check` never gates on those numbers. It gates on work and scaling: counted regex calls for the theme highlighter (the admin paste converter's scaling test is handled in #73), and for Rust (no `unsafe`, so no counting allocator) the best time of a 4x larger input staying under 10x (linear is 4x, quadratic 16x), plus absolute bounds 10-50x above normal that only a blowup reaches. The real budgets are measured by `scripts/perf` (a table; CI prints it in a non-gating step; `scripts/perf --strict` enforces them on a machine that is not shared) and, in workerd, by the PBKDF2 line of `scripts/worker-test`. The budgets themselves are unchanged.
+
 The editor chunk is near its line (110.7 of 110 KB after part C): new editor features load as their own lazy chunk, as the paste converter does, never into the editor chunk.
 
 ## Documentation
@@ -373,3 +375,4 @@ Work is tracked as GitHub Issues grouped in one milestone per phase; this list o
 - 2026-11-28 API v1 media and site settings: the upload body is the original bytes (20 MiB cap, read only after the access check), magic bytes and header size checked, R2 written before D1 and removed after it; redirects, settings and options are owner routes, internal settings and `site_id` never writable; word counts use the renderer's counter.
 - 2026-11-28 API v1 hardening: duplicate JSON keys found by sorting keyed hashes (not quadratic) and at most 4096 values per document, so any 160 KiB body parses in under 1 ms natively; `origin` and `turnstile_site_key` settable and clearable by a session only; plugin options readable by owners only.
 - 2026-11-28 Passkey sign-in at the site-wide cap: the Turnstile token verified by options is carried to the sign-in by its challenge, stored under a domain-separated hash, so one token suffices (issue #63). No schema change.
+- 2026-11-28 Timing checks gate on work and scaling, never on a wall-clock budget (issue #57): counted regex calls (highlighter), 4x-input ratios and 10-50x backstops for the Rust perf tests; the real CPU budgets move to `scripts/perf` (non-gating in CI, `--strict` locally). Product budgets unchanged.
