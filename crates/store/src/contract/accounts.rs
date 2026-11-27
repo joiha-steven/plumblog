@@ -7,7 +7,8 @@ use super::kit::{
     Check, T0, eq, event, fails, media, new_user, ok, post, save, that, update, user,
 };
 use crate::{
-    LogQuery, NewInvite, NewPasskey, NewRevision, NewSession, NewToken, PostStatus, Store,
+    LogQuery, NewInvite, NewPasskey, NewRevision, NewSession, NewToken, PostStatus, ProfileUpdate,
+    Store,
 };
 
 pub async fn users_round_trip<S: Store>(db: &S) -> Check {
@@ -46,27 +47,38 @@ pub async fn users_round_trip<S: Store>(db: &S) -> Check {
         .collect();
     eq!("list_users by id", ids, super::kit::asc(&[a, b]))?;
 
-    let mut changed = got.clone();
-    changed.login = "alice2".into();
-    changed.slug = "alice-2".into();
-    changed.display_name = "Alice Two".into();
-    changed.bio = "new".into();
-    changed.role = Role::Writer;
-    changed.password_hash = None;
-    changed.disabled_at = Some(T0 + 5);
-    changed.updated_at = T0 + 5;
-    changed.created_at = T0 + 99;
-    ok("update_user", db.update_user(&changed).await)?;
+    ok(
+        "update_profile",
+        db.update_profile(a, profile("alice2", "alice-2", "new"), T0 + 5)
+            .await,
+    )?;
     let after = ok("get_user", db.get_user(a).await)?;
-    changed.created_at = T0;
+    let mut want = got.clone();
+    "alice2".clone_into(&mut want.login);
+    "alice-2".clone_into(&mut want.slug);
+    "alice2 shown".clone_into(&mut want.display_name);
+    "new".clone_into(&mut want.bio);
+    want.updated_at = T0 + 5;
     eq!(
-        "update_user writes all but created_at",
+        "update_profile writes only the profile and updated_at",
         after,
-        changed.clone(),
+        want,
     )?;
     // Same login with other case, held by the same user, is not a conflict.
-    changed.login = "ALICE2".into();
-    ok("update_user own login", db.update_user(&changed).await)
+    ok(
+        "update_profile own login",
+        db.update_profile(a, profile("ALICE2", "alice-2", "new"), T0 + 6)
+            .await,
+    )
+}
+
+fn profile(login: &str, slug: &str, bio: &str) -> ProfileUpdate {
+    ProfileUpdate {
+        login: login.into(),
+        slug: slug.into(),
+        display_name: format!("{login} shown"),
+        bio: bio.into(),
+    }
 }
 
 pub async fn user_errors<S: Store>(db: &S) -> Check {
@@ -90,11 +102,35 @@ pub async fn user_errors<S: Store>(db: &S) -> Check {
         db.get_user(missing).await,
         ErrorCode::UserNotFound,
     )?;
-    let mut ghost = ok("get_user", db.get_user(a).await)?;
-    ghost.id = missing;
     fails(
-        "update_user missing",
-        db.update_user(&ghost).await,
+        "update_profile missing",
+        db.update_profile(missing, profile("ghost", "ghost", ""), T0)
+            .await,
+        ErrorCode::UserNotFound,
+    )?;
+    fails(
+        "set_password missing",
+        db.set_password(missing, None, T0).await,
+        ErrorCode::UserNotFound,
+    )?;
+    fails(
+        "set_role missing",
+        db.set_role(missing, Role::Writer, T0).await,
+        ErrorCode::UserNotFound,
+    )?;
+    fails(
+        "set_role owner missing",
+        db.set_role(missing, Role::Owner, T0).await,
+        ErrorCode::UserNotFound,
+    )?;
+    fails(
+        "set_disabled missing",
+        db.set_disabled(missing, Some(T0), T0).await,
+        ErrorCode::UserNotFound,
+    )?;
+    fails(
+        "set_disabled none missing",
+        db.set_disabled(missing, None, T0).await,
         ErrorCode::UserNotFound,
     )?;
     fails(
@@ -102,19 +138,20 @@ pub async fn user_errors<S: Store>(db: &S) -> Check {
         db.delete_user(missing).await,
         ErrorCode::UserNotFound,
     )?;
-    let mut bob = ok("get_user", db.get_user(b).await)?;
-    bob.login = "Alice".into();
     fails(
-        "update_user to taken login",
-        db.update_user(&bob).await,
+        "update_profile to taken login",
+        db.update_profile(b, profile("Alice", "bob", ""), T0).await,
         ErrorCode::Conflict,
     )?;
-    bob.login = "bob".into();
-    bob.slug = "alice".into();
     fails(
-        "update_user to taken slug",
-        db.update_user(&bob).await,
+        "update_profile to taken slug",
+        db.update_profile(b, profile("bob", "alice", ""), T0).await,
         ErrorCode::Conflict,
+    )?;
+    eq!(
+        "failed update_profile keeps the row",
+        ok("get_user", db.get_user(b).await)?.login.as_str(),
+        "bob",
     )?;
     let users = ok("list_users", db.list_users().await)?;
     eq!("failed writes add no user", users.len(), 2)
@@ -399,7 +436,11 @@ pub async fn passkeys<S: Store>(db: &S) -> Check {
         .map(|p| p.id)
         .collect();
     eq!("list_passkeys by id", ids, super::kit::asc(&[k1, k2]))?;
-    ok("touch_passkey", db.touch_passkey(k1, 7, T0 + 1).await)?;
+    eq!(
+        "touch_passkey accepts a higher counter",
+        ok("touch_passkey", db.touch_passkey(k1, 7, T0 + 1).await)?,
+        true,
+    )?;
     let t = ok("find_passkey", db.find_passkey("c1").await)?.ok_or("c1 gone")?;
     eq!("touched", (t.sign_count, t.last_used_at), (7, Some(T0 + 1)))?;
     let gone = k1.max(k2) + 1000;
@@ -418,6 +459,55 @@ pub async fn passkeys<S: Store>(db: &S) -> Check {
         "list after delete",
         ok("list_passkeys", db.list_passkeys(a).await)?.len(),
         1,
+    )
+}
+
+/// The counter never goes back; only a higher value, or 0 after 0, is accepted.
+pub async fn passkey_sign_count<S: Store>(db: &S) -> Check {
+    let a = user(db, "alice").await?;
+    let k = ok("add_passkey", db.add_passkey(passkey(a, "c")).await)?;
+    let z = ok("add_passkey", db.add_passkey(passkey(a, "z")).await)?;
+    let stored = |cred: &'static str| async move {
+        ok("find_passkey", db.find_passkey(cred).await)?
+            .map(|p| (p.sign_count, p.last_used_at))
+            .ok_or_else(|| format!("passkey {cred} gone"))
+    };
+    let touch = |id, n, at| async move { ok("touch_passkey", db.touch_passkey(id, n, at).await) };
+    eq!("increase is accepted", touch(k, 5, T0 + 1).await?, true)?;
+    eq!("increase is stored", stored("c").await?, (5, Some(T0 + 1)))?;
+    eq!("equal is refused", touch(k, 5, T0 + 2).await?, false)?;
+    eq!(
+        "equal keeps the counter",
+        stored("c").await?,
+        (5, Some(T0 + 2))
+    )?;
+    eq!("decrease is refused", touch(k, 3, T0 + 3).await?, false)?;
+    eq!(
+        "decrease keeps the higher counter",
+        stored("c").await?,
+        (5, Some(T0 + 3))
+    )?;
+    eq!(
+        "zero after a counter is refused",
+        touch(k, 0, T0 + 4).await?,
+        false
+    )?;
+    eq!(
+        "zero keeps the counter",
+        stored("c").await?,
+        (5, Some(T0 + 4))
+    )?;
+    eq!("zero-zero is accepted", touch(z, 0, T0 + 5).await?, true)?;
+    eq!(
+        "zero-zero again is accepted",
+        touch(z, 0, T0 + 6).await?,
+        true
+    )?;
+    eq!("zero-zero is stored", stored("z").await?, (0, Some(T0 + 6)))?;
+    fails(
+        "touch_passkey missing",
+        db.touch_passkey(k.max(z) + 1000, 9, T0).await,
+        ErrorCode::NotFound,
     )
 }
 

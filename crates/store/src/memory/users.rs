@@ -1,7 +1,7 @@
-use plumblog_model::{Result, UserId};
+use plumblog_model::{Result, Role, UserId};
 
 use super::{MemoryStore, State, conflict, next_seq, user_not_found};
-use crate::{NewUser, SiteStore, User, UserStore};
+use crate::{NewUser, ProfileUpdate, SiteStore, User, UserStore};
 
 impl State {
     /// `users.login` is `NOCASE` (ASCII only) and `users.slug` is unique.
@@ -15,6 +15,26 @@ impl State {
             }
         }
         Ok(())
+    }
+
+    /// `Conflict` if `id` is an active owner and no other active owner exists, so a demote,
+    /// disable or delete of `id` would leave the site without one.
+    fn check_not_last_owner(&self, id: UserId) -> Result<()> {
+        let active_owner = |u: &User| u.role == Role::Owner && u.disabled_at.is_none();
+        let target = self.users.get(&id).is_some_and(active_owner);
+        if target && !self.users.values().any(|u| u.id != id && active_owner(u)) {
+            return Err(last_owner(id));
+        }
+        Ok(())
+    }
+
+    /// Exists and is not disabled.
+    pub(super) fn user_active(&self, id: UserId) -> bool {
+        self.users.get(&id).is_some_and(|u| u.disabled_at.is_none())
+    }
+
+    fn user_mut(&mut self, id: UserId) -> Result<&mut User> {
+        self.users.get_mut(&id).ok_or_else(|| user_not_found(id))
     }
 
     pub(super) fn insert_user(&mut self, user: NewUser) -> Result<UserId> {
@@ -37,6 +57,13 @@ impl State {
         );
         Ok(id)
     }
+}
+
+fn last_owner(id: UserId) -> plumblog_model::Error {
+    conflict(format!(
+        "user {} is the last active owner; make another user owner first",
+        id.0
+    ))
 }
 
 // `async fn` so nothing is read or written until the future is polled, as with D1.
@@ -83,22 +110,54 @@ impl UserStore for MemoryStore {
         Ok(self.read(|s| s.users.values().cloned().collect()))
     }
 
-    async fn update_user(&self, user: &User) -> Result<()> {
+    async fn update_profile(&self, id: UserId, profile: ProfileUpdate, now: i64) -> Result<()> {
         self.write(|s| {
-            let created_at = s
-                .users
-                .get(&user.id)
-                .ok_or_else(|| user_not_found(user.id))?
-                .created_at;
-            s.check_user_unique(&user.login, &user.slug, Some(user.id))?;
-            s.users.insert(
-                user.id,
-                User {
-                    created_at,
-                    ..user.clone()
-                },
-            );
+            s.user_mut(id)?;
+            s.check_user_unique(&profile.login, &profile.slug, Some(id))?;
+            let u = s.user_mut(id)?;
+            u.login = profile.login;
+            u.slug = profile.slug;
+            u.display_name = profile.display_name;
+            u.bio = profile.bio;
+            u.updated_at = now;
             s.bump();
+            Ok(())
+        })
+    }
+
+    async fn set_password(&self, id: UserId, hash: Option<String>, now: i64) -> Result<()> {
+        self.write(|s| {
+            let u = s.user_mut(id)?;
+            u.password_hash = hash;
+            u.updated_at = now;
+            Ok(())
+        })
+    }
+
+    async fn set_role(&self, id: UserId, role: Role, now: i64) -> Result<()> {
+        self.write(|s| {
+            s.user_mut(id)?;
+            if role != Role::Owner {
+                s.check_not_last_owner(id)?;
+            }
+            let u = s.user_mut(id)?;
+            u.role = role;
+            u.updated_at = now;
+            Ok(())
+        })
+    }
+
+    async fn set_disabled(&self, id: UserId, disabled_at: Option<i64>, now: i64) -> Result<()> {
+        self.write(|s| {
+            s.user_mut(id)?;
+            if disabled_at.is_some() {
+                s.check_not_last_owner(id)?;
+                // sessions.user_id: a disabled account must not stay signed in.
+                s.sessions.retain(|_, x| x.user_id != id);
+            }
+            let u = s.user_mut(id)?;
+            u.disabled_at = disabled_at;
+            u.updated_at = now;
             Ok(())
         })
     }
@@ -108,6 +167,7 @@ impl UserStore for MemoryStore {
             if !s.user_exists(id) {
                 return Err(user_not_found(id));
             }
+            s.check_not_last_owner(id)?;
             // posts.author_id is ON DELETE RESTRICT.
             if s.posts.values().any(|p| p.author_id == id) {
                 return Err(conflict(format!(

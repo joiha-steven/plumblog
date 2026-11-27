@@ -10,6 +10,7 @@ mod library;
 mod listing;
 mod posts;
 mod site;
+mod user_writes;
 
 use crate::Store;
 
@@ -41,7 +42,14 @@ cases! {
     accounts::user_errors,
     accounts::user_delete_effects,
     accounts::sessions,
+    user_writes::user_narrow_writes,
+    user_writes::user_writes_do_not_undo_each_other,
+    user_writes::disable_ends_sessions,
+    user_writes::last_owner_is_kept,
+    user_writes::second_owner_can_be_demoted,
+    user_writes::disabled_user_credentials_do_not_resolve,
     accounts::passkeys,
+    accounts::passkey_sign_count,
     accounts::tokens,
     accounts::invites,
     accounts::accept_invite_conflict_is_atomic,
@@ -53,6 +61,7 @@ cases! {
     library::tag_links_and_versions,
     library::series_round_trip,
     library::series_links_and_versions,
+    library::series_delete_stales_editors,
     posts::post_insert_and_update,
     posts::post_save_errors,
     posts::post_save_is_atomic,

@@ -50,7 +50,8 @@ pub struct Post {
     pub series_position: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
-    /// Optimistic lock: 1 on insert, +1 on every save, trash, restore and scheduled publish.
+    /// Optimistic lock: 1 on insert, +1 on every save, trash, restore, scheduled publish and
+    /// removal from a deleted series.
     pub version: i64,
     /// Ascending.
     pub tag_ids: Vec<TagId>,

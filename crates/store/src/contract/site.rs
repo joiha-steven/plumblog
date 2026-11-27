@@ -608,17 +608,25 @@ pub async fn site_starts_at_version_1<S: Store>(db: &S) -> Check {
 pub async fn reader_metadata_versions<S: Store>(db: &S) -> Check {
     let u = user(db, "alice").await?;
     let v = version(db).await?;
-    let mut profile = ok("get_user", db.get_user(u).await)?;
-    "New bio".clone_into(&mut profile.bio);
-    ok("update_user", db.update_user(&profile).await)?;
-    version_is(db, "update_user", v + 1).await?;
-    profile.id = plumblog_model::UserId(u.0 + 1000);
+    let profile = ok("get_user", db.get_user(u).await)?;
+    let edit = crate::ProfileUpdate {
+        login: profile.login,
+        slug: profile.slug,
+        display_name: profile.display_name,
+        bio: "New bio".into(),
+    };
+    ok(
+        "update_profile",
+        db.update_profile(u, edit.clone(), T0 + 1).await,
+    )?;
+    version_is(db, "update_profile", v + 1).await?;
     fails(
-        "update_user missing",
-        db.update_user(&profile).await,
+        "update_profile missing",
+        db.update_profile(plumblog_model::UserId(u.0 + 1000), edit, T0 + 1)
+            .await,
         ErrorCode::UserNotFound,
     )?;
-    version_is(db, "failed update_user", v + 1).await?;
+    version_is(db, "failed update_profile", v + 1).await?;
 
     let m = ok(
         "create_media",

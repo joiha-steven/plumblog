@@ -86,6 +86,8 @@ Users do not need Rust: releases ship the built Worker and `blog` binaries for m
 - `crates/store` holds the traits and an in-memory store; `crates/worker/src/d1/` is the only D1 code. One contract suite runs against both, so they cannot drift.
 - Every multi-row write is one D1 batch (a transaction): a post save writes the row, its tags, its search text, a revision, an automatic slug redirect and the content-version bump together, or nothing.
 - Ids that leave their row (URLs, translation groups, log entries) use AUTOINCREMENT, so a deleted id is never reused.
+- Posts carry a `version`; every save names the version it edited, and a stale save is refused (`store.conflict`) so the admin can offer a merge instead of silently overwriting. User records change through narrow writes (profile, password, role, disabled), never a full-row rewrite, and the last active owner cannot be demoted, disabled or deleted.
+- Media in use (post body via `post_media`, filled on save, or cover) cannot be deleted; the error lists the posts.
 - Search: SQLite FTS5 with `unicode61 remove_diacritics 2`, which folds Vietnamese tone and horn marks; the app folds d-stroke to `d` itself because the tokenizer treats it as a separate letter. Results are newest first, so the in-memory store answers identically.
 - Lists page by keyset (last row's sort value and id), never OFFSET: D1 bills every row read, including skipped ones.
 - Queries per reader page (cache miss): settings 1, theme options 1, content version 1, plus the page itself: post 1 (with tags) + translations 1; listing 1; search 1. Reader pages never write.

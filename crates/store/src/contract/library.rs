@@ -606,3 +606,38 @@ pub async fn series_links_and_versions<S: Store>(db: &S) -> Check {
     )?;
     Ok(())
 }
+
+/// Deleting a series changes its posts' rows, so their version moves: an editor holding the
+/// old version gets `Conflict` instead of silently writing the deleted series back.
+pub async fn series_delete_stales_editors<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let s = ok("create_series", db.create_series(series("s", "S")).await)?;
+    let other = ok("create_series", db.create_series(series("o", "O")).await)?;
+    let mut p = post(u, "vi", "in", PostStatus::Draft);
+    p.series_id = Some(s);
+    p.series_position = Some(1);
+    let id = save(db, p.clone()).await?;
+    let mut q = post(u, "vi", "out", PostStatus::Draft);
+    q.series_id = Some(other);
+    let out = save(db, q).await?;
+    // The editor opened the post before the delete.
+    let stale = update(db, id, p).await?;
+    let before = ok("get_post", db.get_post(id).await)?.version;
+    let out_before = ok("get_post", db.get_post(out).await)?.version;
+    ok("delete_series", db.delete_series(s).await)?;
+    eq!(
+        "post leaving the series gets a new version",
+        ok("get_post", db.get_post(id).await)?.version,
+        before + 1,
+    )?;
+    eq!(
+        "post in another series keeps its version",
+        ok("get_post", db.get_post(out).await)?.version,
+        out_before,
+    )?;
+    fails(
+        "stale save after the series was deleted",
+        db.save_post(stale).await,
+        ErrorCode::Conflict,
+    )
+}

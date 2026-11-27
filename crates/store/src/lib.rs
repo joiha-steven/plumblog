@@ -39,7 +39,7 @@ pub use posts::{
 pub use redirects::{Redirect, RedirectStore};
 pub use settings::{OptionOwner, PluginState, SettingsStore};
 pub use taxonomy::{NewSeries, Series, Tag, TaxonomyStore};
-pub use users::{NewUser, SiteStore, User, UserStore};
+pub use users::{NewUser, ProfileUpdate, SiteStore, User, UserStore};
 pub use webhooks::{NewWebhook, Webhook, WebhookStore};
 
 /// Largest page any list query returns, so one request cannot read a whole table.

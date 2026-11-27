@@ -139,6 +139,7 @@ impl TaxonomyStore for MemoryStore {
             for p in s.posts.values_mut().filter(|p| p.series_id == Some(id)) {
                 p.series_id = None;
                 p.series_position = None;
+                p.version += 1;
                 published |= p.status == PostStatus::Published;
             }
             if published {

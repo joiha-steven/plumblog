@@ -1,8 +1,8 @@
 use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
-use plumblog_store::{NewUser, SiteStore, User, UserStore};
+use plumblog_store::{NewUser, ProfileUpdate, SiteStore, User, UserStore};
 
 use super::{
-    D1Store, Row, bound, bump_if, int, map_error, message, opt_int, opt_text, storage, text,
+    D1Store, Failure, Row, Stmt, bound, bump_if, guard, int, opt_int, opt_text, storage, text,
 };
 
 pub(super) const USER_COLS: &str =
@@ -25,6 +25,69 @@ pub(super) fn read_user(r: &mut Row) -> Result<User> {
 
 fn user_not_found(id: UserId) -> Error {
     Error::new(ErrorCode::UserNotFound, format!("user {} not found", id.0))
+}
+
+fn last_owner(id: UserId) -> Error {
+    Error::new(
+        ErrorCode::Conflict,
+        format!(
+            "user {} is the last active owner; make another user owner first",
+            id.0
+        ),
+    )
+}
+
+/// True unless the user is an active owner and no other active owner exists. Inside the
+/// batch, so two requests demoting the only two owners at once cannot both pass.
+const NOT_LAST_OWNER: &str = "NOT EXISTS (SELECT 1 FROM users WHERE id = ? AND role = 'owner' \
+     AND disabled_at IS NULL) \
+     OR EXISTS (SELECT 1 FROM users WHERE id <> ? AND role = 'owner' AND disabled_at IS NULL)";
+
+impl D1Store {
+    fn not_last_owner(&self, name: &'static str, id: UserId) -> Result<Stmt> {
+        guard(self, name, NOT_LAST_OWNER, &[bound(id.0), bound(id.0)])
+    }
+
+    /// Runs `stmts` (a [`Self::not_last_owner`] guard first) and checks that statement
+    /// `write_at` changed the user's row.
+    async fn guarded_user_write(
+        &self,
+        what: &'static str,
+        id: UserId,
+        stmts: Vec<Stmt>,
+        write_at: usize,
+    ) -> Result<()> {
+        let results = match self.batch_guarded(what, stmts).await {
+            Ok(r) => r,
+            Err(Failure::Guard) => return Err(last_owner(id)),
+            Err(Failure::Error(e)) => return Err(e),
+        };
+        if Self::changes(what, &results[write_at])? == 0 {
+            return Err(user_not_found(id));
+        }
+        Ok(())
+    }
+
+    /// One `UPDATE users SET {set}, updated_at = ? WHERE id = ?`; `UserNotFound` if absent.
+    async fn set_user_column(
+        &self,
+        name: &'static str,
+        set: &str,
+        value: worker::wasm_bindgen::JsValue,
+        id: UserId,
+        now: i64,
+    ) -> Result<()> {
+        let s = self.stmt(
+            name,
+            &format!("UPDATE users SET {set} = ?, updated_at = ? WHERE id = ?"),
+            &[value, int(now)?, bound(id.0)],
+        )?;
+        let r = self.exec(s).await?;
+        if Self::changes(name, &r)? == 0 {
+            return Err(user_not_found(id));
+        }
+        Ok(())
+    }
 }
 
 impl SiteStore for D1Store {
@@ -112,58 +175,106 @@ impl UserStore for D1Store {
         self.rows(s).await?.iter_mut().map(read_user).collect()
     }
 
-    async fn update_user(&self, user: &User) -> Result<()> {
+    async fn update_profile(&self, id: UserId, profile: ProfileUpdate, now: i64) -> Result<()> {
         let s = self.stmt(
-            "update_user",
-            "UPDATE users SET login = ?, slug = ?, display_name = ?, bio = ?, role = ?, \
-             password_hash = ?, disabled_at = ?, updated_at = ? WHERE id = ?",
+            "update_profile",
+            "UPDATE users SET login = ?, slug = ?, display_name = ?, bio = ?, updated_at = ? \
+             WHERE id = ?",
             &[
-                text(&user.login),
-                text(&user.slug),
-                text(&user.display_name),
-                text(&user.bio),
-                text(user.role.as_str()),
-                opt_text(user.password_hash.as_deref()),
-                opt_int(user.disabled_at)?,
-                int(user.updated_at)?,
-                bound(user.id.0),
+                text(&profile.login),
+                text(&profile.slug),
+                text(&profile.display_name),
+                text(&profile.bio),
+                int(now)?,
+                bound(id.0),
             ],
         )?;
         // Bump only if the user exists; a conflict rolls back both.
         let bump = bump_if(
             self,
             "EXISTS (SELECT 1 FROM users WHERE id = ?)",
-            &[bound(user.id.0)],
+            &[bound(id.0)],
         )?;
-        let results = self.batch("update_user", vec![bump, s]).await?;
-        if Self::changes("update_user", &results[1])? == 0 {
-            return Err(user_not_found(user.id));
+        let results = self.batch("update_profile", vec![bump, s]).await?;
+        if Self::changes("update_profile", &results[1])? == 0 {
+            return Err(user_not_found(id));
         }
         Ok(())
     }
 
-    async fn delete_user(&self, id: UserId) -> Result<()> {
-        // One statement: the schema's ON DELETE rules do the cascades and SET NULLs, and
-        // posts.author_id RESTRICT refuses the delete while they author posts.
-        let s = self.stmt(
-            "delete_user",
-            "DELETE FROM users WHERE id = ?",
-            &[bound(id.0)],
-        )?;
-        let r = s.inner.run().await.map_err(|e| {
-            let msg = message(&e);
-            if msg.contains("FOREIGN KEY constraint failed") {
-                Error::new(
-                    ErrorCode::Conflict,
-                    format!("user {} still authors posts; reassign them first", id.0),
-                )
-            } else {
-                map_error("delete_user", &e)
-            }
-        })?;
-        if Self::changes("delete_user", &r)? == 0 {
-            return Err(user_not_found(id));
+    async fn set_password(&self, id: UserId, hash: Option<String>, now: i64) -> Result<()> {
+        self.set_user_column(
+            "set_password",
+            "password_hash",
+            opt_text(hash.as_deref()),
+            id,
+            now,
+        )
+        .await
+    }
+
+    async fn set_role(&self, id: UserId, role: Role, now: i64) -> Result<()> {
+        if role == Role::Owner {
+            return self
+                .set_user_column("set_role", "role", text(role.as_str()), id, now)
+                .await;
         }
-        Ok(())
+        let stmts = vec![
+            self.not_last_owner("set_role_guard", id)?,
+            self.stmt(
+                "set_role",
+                "UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
+                &[text(role.as_str()), int(now)?, bound(id.0)],
+            )?,
+        ];
+        self.guarded_user_write("set_role", id, stmts, 1).await
+    }
+
+    async fn set_disabled(&self, id: UserId, disabled_at: Option<i64>, now: i64) -> Result<()> {
+        let Some(at) = disabled_at else {
+            return self
+                .set_user_column("set_disabled", "disabled_at", opt_int(None)?, id, now)
+                .await;
+        };
+        let stmts = vec![
+            self.not_last_owner("set_disabled_guard", id)?,
+            self.stmt(
+                "set_disabled",
+                "UPDATE users SET disabled_at = ?, updated_at = ? WHERE id = ?",
+                &[int(at)?, int(now)?, bound(id.0)],
+            )?,
+            // Same transaction: a disabled account must not stay signed in.
+            self.stmt(
+                "set_disabled_sessions",
+                "DELETE FROM sessions WHERE user_id = ?",
+                &[bound(id.0)],
+            )?,
+        ];
+        self.guarded_user_write("set_disabled", id, stmts, 1).await
+    }
+
+    async fn delete_user(&self, id: UserId) -> Result<()> {
+        // The schema's ON DELETE rules do the cascades and SET NULLs, and posts.author_id
+        // RESTRICT refuses the delete while they author posts.
+        let stmts = vec![
+            self.not_last_owner("delete_user_guard", id)?,
+            self.stmt(
+                "delete_user",
+                "DELETE FROM users WHERE id = ?",
+                &[bound(id.0)],
+            )?,
+        ];
+        self.guarded_user_write("delete_user", id, stmts, 1)
+            .await
+            .map_err(|e| {
+                if e.detail.contains("FOREIGN KEY constraint failed") {
+                    Error::new(
+                        ErrorCode::Conflict,
+                        format!("user {} still authors posts; reassign them first", id.0),
+                    )
+                } else {
+                    e
+                }
+            })
     }
 }

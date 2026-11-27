@@ -154,12 +154,13 @@ impl TaxonomyStore for D1Store {
     }
 
     async fn delete_series(&self, id: SeriesId) -> Result<()> {
-        // Bump and clear positions while posts still point at it; the FK then sets
-        // series_id NULL. The position means nothing without the series.
+        // Bump, clear positions and bump post versions while posts still point at it; the
+        // FK then sets series_id NULL. The position means nothing without the series, and
+        // the version bump makes an editor holding the old post reload.
         let bump = bump_if(self, SERIES_IS_PUBLISHED, &[bound(id.0)])?;
         let clear = self.stmt(
             "delete_series_positions",
-            "UPDATE posts SET series_position = NULL WHERE series_id = ?",
+            "UPDATE posts SET series_position = NULL, version = version + 1 WHERE series_id = ?",
             &[bound(id.0)],
         )?;
         let del = self.stmt(

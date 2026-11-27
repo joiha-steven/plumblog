@@ -9,6 +9,9 @@ use super::{D1Store, Row, bound, int, not_found, opt_int, opt_text, text};
 const SESSION_COLS: &str = "id, token_hash, user_id, created_at, expires_at";
 const PASSKEY_COLS: &str =
     "id, user_id, credential_id, public_key, sign_count, name, created_at, last_used_at";
+/// The row's `user_id` is not disabled; part of the one lookup query, not a second read.
+const USER_ACTIVE: &str =
+    "EXISTS (SELECT 1 FROM users u WHERE u.id = user_id AND u.disabled_at IS NULL)";
 const TOKEN_COLS: &str = "id, user_id, name, token_hash, scope, created_at, expires_at, revoked_at";
 const INVITE_COLS: &str =
     "id, code_hash, role, created_by, created_at, expires_at, used_at, used_by";
@@ -82,7 +85,10 @@ impl SessionStore for D1Store {
     async fn find_session(&self, token_hash: &str, now: i64) -> Result<Option<Session>> {
         let s = self.stmt(
             "find_session",
-            &format!("SELECT {SESSION_COLS} FROM sessions WHERE token_hash = ? AND expires_at > ?"),
+            &format!(
+                "SELECT {SESSION_COLS} FROM sessions WHERE token_hash = ? AND expires_at > ? \
+                 AND {USER_ACTIVE}"
+            ),
             &[text(token_hash), bound(now)],
         )?;
         self.row(s)
@@ -163,17 +169,27 @@ impl PasskeyStore for D1Store {
         self.rows(s).await?.iter_mut().map(read_passkey).collect()
     }
 
-    async fn touch_passkey(&self, id: i64, sign_count: i64, at: i64) -> Result<()> {
-        let s = self.stmt(
+    async fn touch_passkey(&self, id: i64, sign_count: i64, at: i64) -> Result<bool> {
+        // The read and the write share one transaction, so the counter compared is the one
+        // replaced even when two sign-ins with the same passkey race.
+        let read = self.stmt(
+            "touch_passkey_read",
+            "SELECT sign_count FROM passkeys WHERE id = ?",
+            &[bound(id)],
+        )?;
+        let write = self.stmt(
             "touch_passkey",
-            "UPDATE passkeys SET sign_count = ?, last_used_at = ? WHERE id = ?",
+            "UPDATE passkeys SET sign_count = MAX(sign_count, ?), last_used_at = ? WHERE id = ?",
             &[int(sign_count)?, int(at)?, bound(id)],
         )?;
-        let r = self.exec(s).await?;
-        if Self::changes("touch_passkey", &r)? == 0 {
+        let results = self.batch("touch_passkey", vec![read, write]).await?;
+        let old = Self::batch_ints("touch_passkey_read", &results[0])?
+            .first()
+            .and_then(|r| r.get("sign_count").copied());
+        let Some(old) = old else {
             return Err(not_found("passkey", id));
-        }
-        Ok(())
+        };
+        Ok(sign_count > old || (sign_count == 0 && old == 0))
     }
 
     async fn delete_passkey(&self, id: i64) -> Result<()> {
@@ -215,7 +231,7 @@ impl TokenStore for D1Store {
             "find_token",
             &format!(
                 "SELECT {TOKEN_COLS} FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL \
-                 AND (expires_at IS NULL OR expires_at > ?)"
+                 AND (expires_at IS NULL OR expires_at > ?) AND {USER_ACTIVE}"
             ),
             &[text(token_hash), bound(now)],
         )?;

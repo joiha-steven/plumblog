@@ -50,7 +50,8 @@ pub trait TaxonomyStore {
     async fn find_series(&self, slug: &str) -> Result<Option<Series>>;
     /// Ordered by title, then id.
     async fn list_series(&self) -> Result<Vec<Series>>;
-    /// `NotFound`. Its posts get `series_id` and `series_position` = `None`; bumps the
-    /// content version if any of them is published.
+    /// `NotFound`. Its posts get `series_id` and `series_position` = `None` and their
+    /// `version` + 1 (an editor holding the old version must reload); bumps the content
+    /// version if any of them is published.
     async fn delete_series(&self, id: SeriesId) -> Result<()>;
 }

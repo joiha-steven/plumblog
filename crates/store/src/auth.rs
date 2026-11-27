@@ -98,7 +98,7 @@ pub struct NewInvite {
 pub trait SessionStore {
     /// `Conflict` on a duplicate hash; `InvalidInput` if the user does not exist.
     async fn create_session(&self, session: NewSession) -> Result<i64>;
-    /// `None` if absent or expired (`expires_at <= now`).
+    /// `None` if absent, expired (`expires_at <= now`) or its user is disabled.
     async fn find_session(&self, token_hash: &str, now: i64) -> Result<Option<Session>>;
     /// Absent hash is Ok (signing out twice is harmless).
     async fn delete_session(&self, token_hash: &str) -> Result<()>;
@@ -115,8 +115,11 @@ pub trait PasskeyStore {
     async fn find_passkey(&self, credential_id: &str) -> Result<Option<Passkey>>;
     /// Ordered by id.
     async fn list_passkeys(&self, user: UserId) -> Result<Vec<Passkey>>;
-    /// Sets `sign_count` and `last_used_at = at`. `NotFound`.
-    async fn touch_passkey(&self, id: i64, sign_count: i64, at: i64) -> Result<()>;
+    /// Records a sign-in: `last_used_at = at`, `sign_count = max(stored, sign_count)` (the
+    /// counter never goes back). Returns whether the counter is acceptable: `sign_count`
+    /// above the stored one, or both 0 (authenticators without a counter always send 0).
+    /// `false` hints at a cloned authenticator; the caller must refuse the sign-in. `NotFound`.
+    async fn touch_passkey(&self, id: i64, sign_count: i64, at: i64) -> Result<bool>;
     /// `NotFound`.
     async fn delete_passkey(&self, id: i64) -> Result<()>;
 }
@@ -125,7 +128,9 @@ pub trait PasskeyStore {
 pub trait TokenStore {
     /// `Conflict` on a duplicate hash; `InvalidInput` if the user does not exist.
     async fn create_token(&self, token: NewToken) -> Result<i64>;
-    /// `None` if absent, revoked, or expired (`expires_at <= now`).
+    /// `None` if absent, revoked, expired (`expires_at <= now`) or its user is disabled.
+    /// Disabling does not revoke: re-enabling the user makes their unrevoked, unexpired
+    /// tokens resolve again.
     async fn find_token(&self, token_hash: &str, now: i64) -> Result<Option<ApiToken>>;
     /// All of a user's tokens, revoked and expired included, ordered by id.
     async fn list_tokens(&self, user: UserId) -> Result<Vec<ApiToken>>;

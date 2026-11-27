@@ -46,7 +46,9 @@ impl SessionStore for MemoryStore {
         Ok(self.read(|s| {
             s.sessions
                 .values()
-                .find(|x| x.token_hash == token_hash && x.expires_at > now)
+                .find(|x| {
+                    x.token_hash == token_hash && x.expires_at > now && s.user_active(x.user_id)
+                })
                 .cloned()
         }))
     }
@@ -131,15 +133,16 @@ impl PasskeyStore for MemoryStore {
         }))
     }
 
-    async fn touch_passkey(&self, id: i64, sign_count: i64, at: i64) -> Result<()> {
+    async fn touch_passkey(&self, id: i64, sign_count: i64, at: i64) -> Result<bool> {
         self.write(|s| {
             let p = s
                 .passkeys
                 .get_mut(&id)
                 .ok_or_else(|| not_found("passkey", id))?;
-            p.sign_count = sign_count;
+            let accepted = sign_count > p.sign_count || (sign_count == 0 && p.sign_count == 0);
+            p.sign_count = p.sign_count.max(sign_count);
             p.last_used_at = Some(at);
-            Ok(())
+            Ok(accepted)
         })
     }
 
@@ -192,6 +195,7 @@ impl TokenStore for MemoryStore {
                     x.token_hash == token_hash
                         && x.revoked_at.is_none()
                         && x.expires_at.is_none_or(|e| e > now)
+                        && s.user_active(x.user_id)
                 })
                 .cloned()
         }))
