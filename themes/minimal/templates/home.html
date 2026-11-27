@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{%- from "entry.html" import entry %}
+{% block main %}
+{%- if site.description %}
+<p class="intro">{{ site.description }}</p>
+{%- endif %}
+{%- set pinned = posts | selectattr("pinned") | list %}
+{%- if pinned %}
+<ol class="posts pinned">
+  {%- for post in pinned %}{{ entry(post, true, theme.options.list_images) }}{% endfor %}
+</ol>
+{%- endif %}
+{#- The rest are grouped by year; a style may show or hide the year heading. #}
+{%- for post in posts | rejectattr("pinned") %}
+{%- if loop.first or post.year != loop.previtem.year %}
+{%- if not loop.first %}
+</ol>
+</section>
+{%- endif %}
+<section class="year" aria-labelledby="y{{ post.year }}">
+<h2 class="year-label" id="y{{ post.year }}">{{ post.year }}</h2>
+<ol class="posts">
+{%- endif %}
+{{ entry(post, loop.index <= 4, theme.options.list_images) }}
+{%- if loop.last %}
+</ol>
+</section>
+{%- endif %}
+{%- endfor %}
+{%- if older_url or newer_url %}
+<nav class="older" aria-label="{{ t("home.pages") }}">
+  {%- if newer_url %}<a href="{{ newer_url }}" rel="prev">{{ t("home.newer_posts") }}</a>{% endif %}
+  {%- if older_url %}<a href="{{ older_url }}" rel="next">{{ t("home.older_posts") }}</a>{% endif %}
+</nav>
+{%- endif %}
+{% endblock %}

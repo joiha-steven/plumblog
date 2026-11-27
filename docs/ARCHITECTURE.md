@@ -19,7 +19,7 @@ agent a Cloudflare API token, and the agent sets up, writes, translates, themes 
 0. **Reading and writing come first.** Every screen is judged first by how well it reads (or how good it feels to write in), then by UI/UX polish. Typography is tuned per font, book-like, never default browser values. Phones, tablets, desktops and foldables (folded and unfolded) are all first-class.
 1. **Lightest and simplest that works.** Fixed budgets, see Budgets. New dependency needs a `# why` line in the workspace `Cargo.toml`.
 2. **Fast and smooth.** PageSpeed 100 on mobile and desktop for every default theme. No layout shift. Animations use only `transform`/`opacity`, 150-250 ms, and stop under `prefers-reduced-motion`.
-3. **English everywhere** in the repo: code, comments, paths, file names, guides. Only `locales/` holds other languages. Comments say why, not what.
+3. **English everywhere** in the repo: code, comments, paths, file names, guides. Only `locales/` and each theme's `locales/` hold other languages. Comments say why, not what.
 4. **Built for AI operators.** If an AI agent can do a job by following a guide, plumblog ships a guide, not a feature.
 5. **No drifting docs.** Fixed list of Markdown files (see Documentation). Anything a machine can generate from code is generated.
 6. **Heavy work happens off the Worker.** The browser (admin) or the user's machine (CLI) does expensive work; the Worker validates, stores and serves.
@@ -90,7 +90,7 @@ Users do not need Rust: releases ship the built Worker and `blog` binaries for m
 ## Content
 
 - Posts and pages; drafts, scheduled, revisions (author recorded), trash with restore.
-- Tags and series; pinned posts; cover image; excerpt; auto table of contents; reading time.
+- Tags and series; pinned posts; cover image; excerpt (written by the author, else cut from the text at a word boundary; the length is the theme option `excerpt_words`, default 55 words); auto table of contents; reading time.
 - Translations: one row per language, linked by a translation group. URLs `/<lang>/<slug>`. Missing translation shows the original with a notice. Translation itself is done by the user's AI.
 - Changing a slug creates a permanent redirect automatically.
 - Author pages.
@@ -131,7 +131,10 @@ Not built: offline reading, newsletter (later), reactions.
   style.css      uses tokens only, no hard-coded colors
   templates/     optional minijinja overrides; missing files fall back to the default theme
   assets/        images, fonts, JS
+  locales/       the theme's own UI text, one TOML per language; templates call t("section.key", name=value)
   ```
+- Options: `theme.toml` declares `[options.<key>]` in the shape of "Plugins and options": `type` is one of the admin field types (`short_text`, `long_text`, `number`, `toggle`, `choice`, `color`, `image`, `list`), plus `default`, limits, `group`, `icon` and locale keys for `label`/`help`. Templates read `theme.options.<key>`; a `color` option names the token it overrides. A `choice` option may map each value to a CSS file (a **style**): only the selected file ships after `style.css`. Values listed in `draft` are not offered to owners.
+- Slots: themes expose named empty points for plugin partials with `{{ slot("<name>") }}`: `head`, `body_start`, `body_end`, `before_post`, `after_post`, `footer`.
 - Themes may contain JS. Installing a theme not made locally shows a warning.
 - **minimal** is built first; literary and technical follow once it is approved.
 - Fonts: pick the most readable font for the theme's role that covers Latin (incl. Vietnamese), Cyrillic and Greek; modify (subset) it if needed, within its license. Loading rules:
@@ -139,7 +142,21 @@ Not built: offline reading, newsletter (later), reactions.
   - Split into `unicode-range` subsets (latin, latin-ext, vietnamese, cyrillic, greek) so a page downloads only the scripts it uses. Variable weight axis only, trimmed to the weights used.
   - Preload only the body latin subset. `font-display: swap` with a metric-matched fallback (`size-adjust`, `ascent-override`...) so the swap causes zero layout shift.
   - CJK, Arabic, Thai and other scripts use system fonts.
-- minimal uses **Inter** (v4, OFL): high x-height, screen-first, wide language coverage. Body ~17px phone to ~19px desktop, line-height ~1.7 (Vietnamese stacked diacritics), measure ~66ch, near-black on white, slightly lighter weight in dark mode, disambiguation features for I/l/1, balanced headings, no orphan words.
+- minimal uses **Inter** (v4, OFL): high x-height, screen-first, wide language coverage. Body 17px phone to 19px desktop (rem, so user font size still scales), line-height 1.7 (Vietnamese stacked diacritics), measure 32 x font size (~66 characters), near-black on white, off-white on near-black in dark mode, `cv05`/`cv08` to tell I/l/1 apart, balanced headings, no orphan words. Accent: plum.
+  - Preload the body, title and mono latin subsets plus the page language's subsets (`preload_by_lang`), so their letters never swap in late and move the layout; mono is above the fold in the writer style (site name, dates), and preloading it keeps mobile Lighthouse at 100.
+  - `scripts/subset-fonts` builds the woff2 files and `faces.css` from the pinned official release. Weight axis 400-700 (starting at the default saves ~20% per file, so dark mode softens text by color, not weight); optical size pinned to the text cut. Subsets never overlap, so a Vietnamese page fetches latin + vietnamese only. Fallback face is Arial with metrics matched to Inter.
+  - Typography values are CSS custom properties at the top of `style.css`; the editor's writing column reuses them.
+  - Renderer contract: color tokens are emitted once as `--c-<key>: light-dark(<light>, <dark>)`, so `color-scheme` (system, toggle, print) switches the palette without a second block; footnotes as `<sup class="fnref"><a href="#fn-N">` plus `<section class="footnotes">` with `<li id="fn-N">` and `a.fnback`; code blocks as `<div class="code" data-lang="rust"><pre><code>` with `tok-keyword|string|number|constant|function|type|builtin|property|attr|tag|punct|operator|comment` spans; wide tables wrapped in `<div class="table">`; task-list items as `<li><label><input type="checkbox" disabled> text</label></li>`; a `wide` class on a figure lets it bleed to the screen edges on phones.
+  - Type scale: five sizes as steps of the body size (`--t-xs` .8125, `--t-sm` .875, body, `--t-md` 1.125, `--t-lg` 1.375, plus `--t-xl` for h1), never em multiples. Mono sits one step below the Inter beside it: same x-height, wider letters. Rows that mix fonts share a baseline.
+  - Search: the header magnifier opens a search panel under the header (`/` also opens it, Esc closes); results appear as you type, read from the search page's own HTML, so core needs no second endpoint. Without JS the magnifier is a link to `search.html`, which gets `query` and `results` (post rows) and works as a plain GET form. Shown when `site.search_url` is set.
+  - Comments: `post.html` gets `comments` only when comments are on: `open`, `items` (`id`, `author`, `owner`, `date_iso`, `date_display`, sanitized `html`), `action_url`, `turnstile_key`, `max_length`, `notice` (`pending` or `error`). Turnstile loads only when the reader focuses the form; the draft survives a failed send.
+  - Titles use **Inter Display** (Inter's display optical size, one static weight, Latin scripts only; Cyrillic and Greek titles fall back to the text cut).
+  - Styles: **writer** (default; text first like a writing app), **book** and **magazine** (drafts, offered once they reach the writer standard). Options: style, accent, list images (off), excerpt words (55), sidenotes (on).
+  - writer home: one row per post, pinned first, in a grid with a narrow mono date column that hangs in the left margin on wide screens and moves under the excerpt on phones; title, excerpt, optional small 4:3 picture. Rows are separated by space, not rules.
+  - Code and metadata use **JetBrains Mono** (OFL, one weight, no ligatures so readers see what is typed). No uppercase or small caps anywhere.
+  - Shared tokens at the top of `style.css`: radii (`--r-sm` 4, `--r-md` 6, `--r-lg` 8), `--tap` 44px, `--ctl-sm`, spacing `--s-1`..`--s-7` (rem), shadows `--raised`, `--pressed`, `--inset`, `--pop`. Controls use only these; spacing inside running text stays in em so it follows the text size.
+  - Controls follow the admin design language: one state system (hover, pressed, selected, focus ring, disabled) shared by the toggle, copy button, checkboxes and footnote buttons.
+  - Sidenotes move into the margin from 76rem (~1216px) wide; narrower screens, folded or unfolded foldables included, get the inline toggle.
 - Footnotes are sidenotes: in the margin beside the sentence on wide screens, an inline toggle under the sentence on narrow screens, classic bottom footnotes when JS is off. About 1 KB JS.
 - AI workflow: `blog theme new | dev | check | push | rollback`. `check` reports template errors, missing dark tokens, contrast failures and size, each with file:line and a fix. Last 5 versions kept for rollback.
 - The template variable reference is generated from Rust types, never written by hand.
@@ -235,6 +252,9 @@ Work is tracked as GitHub Issues grouped in one milestone per phase; this list o
 - 2026-11-27 Reading and writing first; book-like typography tuned per font; foldables first-class.
 - 2026-11-27 minimal theme first, font Inter with unicode-range subsets; footnotes as sidenotes.
 - 2026-11-27 No hard-coded text (all languages incl. English in locale files); no hard-coded layout (themes define page structure); small core, features via themes and plugins.
+- 2026-11-27 minimal: Inter weight axis 400-700 and text optical size only; dark mode softens text by color instead of a lighter weight; plum accent.
+- 2026-11-27 minimal v0.2 after owner review: Inter Display titles, syntax colors, drawn checkboxes, home with excerpts and year groups; color tokens via `light-dark()`.
+- 2026-11-27 Reversed 'no layout variants': themes may declare options incl. styles; minimal ships writer first, book and magazine later at the same standard.
 - 2026-11-27 Theme and plugin options are declarations rendered by the admin; plugins are declarative only; complex needs use API + webhooks; nothing from themes/plugins runs in the admin.
 - 2026-11-27 Reader site and admin are installable web apps with distinct manifests and icon colors; no offline reading.
 - 2026-11-27 One crate per module with an enforced dependency graph; logic is storage-agnostic behind store traits.

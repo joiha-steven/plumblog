@@ -1,0 +1,53 @@
+/* Writer (default style). Text first, one quiet grid, metadata in mono like a writing app.
+   Loaded after style.css; only layout and type live here, controls are shared. */
+
+/* The name is set in mono one step above the menu, so it leads the row (mono ships at 400 only). */
+main { --row-gap: 2.1em; } /* space between post rows */
+.site-name { font: 400 var(--fs)/1 var(--mono); letter-spacing: -.01em; }
+.meta { font: var(--t-xs)/1.5 var(--mono); letter-spacing: 0; }
+.meta > * + *::before { content: "/"; margin: 0 .55em; opacity: .55; }
+
+/* Post */
+h1 { font-size: clamp(1.875rem, 1.4rem + 1.6vw, 2.375rem); line-height: 1.18; letter-spacing: -.022em; }
+.post-head { margin-bottom: 2.5em; }
+.post-head .meta { margin-bottom: 1.1em; }
+.standfirst { font-size: var(--t-md); line-height: 1.55; margin-top: .9em; }
+.cover { margin-top: 2em; }
+.prose h2 { font-size: var(--t-lg); letter-spacing: -.016em; margin: 2.2em 0 .55em; }
+.prose h3 { font-size: var(--t-md); letter-spacing: -.01em; }
+blockquote { border-left-color: var(--c-border); color: var(--c-text-2); }
+.pager a { font: 500 var(--fs)/1.4 var(--font); letter-spacing: -.005em; }
+
+/* Home: every post is one row of the same grid, dates in a narrow mono column. Rows are
+   separated by space, not rules. Pinned posts come first and say so in the date column. */
+.intro { margin: 0 0 3em; color: var(--c-text-2); }
+.year-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; } /* kept for screen readers */
+.posts { display: grid; gap: var(--row-gap); }
+/* Year groups and the pinned list continue the same rhythm: one row gap between every row. */
+.posts.pinned, .year:not(:last-of-type) { margin-bottom: var(--row-gap); }
+.entry { display: grid; grid-template-columns: 7rem 1fr; column-gap: 1.25rem; text-decoration: none; color: inherit; }
+.entry > .entry-title { grid-column: 2; grid-row: 1; font: var(--w-head) var(--t-md)/1.35 var(--display); letter-spacing: -.012em; transition: color var(--dur-state) ease-out; }
+.entry > .excerpt { grid-column: 2; font-size: var(--t-sm); }
+.entry > .meta { grid-column: 1; grid-row: 1 / span 2; display: flex; flex-direction: column; margin-top: .3em; }
+.entry > .meta > * + *::before { content: none; }
+.entry .pin { color: var(--c-text); }
+.entry .read { display: none; }
+.entry:hover > .entry-title { color: var(--c-accent); }
+/* Images are an owner option; when on, every row gets the same small 4:3 picture on the right. */
+.thumb { grid-column: 3; grid-row: 1 / span 2; width: 6rem; aspect-ratio: 4 / 3; margin-left: 1.25rem; border-radius: var(--r-sm); overflow: hidden; background: var(--c-surface); }
+.thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.entry:has(.thumb) { grid-template-columns: 7rem 1fr auto; }
+/* Wide screens: the date column hangs in the margin so titles line up with post text. */
+@media (min-width: 64rem) {
+  .entry { margin-left: -8.25rem; }
+}
+/* Phones: one column, date under the excerpt. */
+@media (max-width: 34rem) {
+  .entry, .entry:has(.thumb) { grid-template-columns: 1fr auto; }
+  .entry > .entry-title, .entry > .excerpt { grid-column: 1; }
+  .entry > .excerpt { grid-column: 1 / -1; }
+  .entry > .meta { grid-column: 1; grid-row: auto; flex-direction: row; margin-top: .5em; }
+  .entry > .meta > * + *::before { content: "/"; }
+  .thumb { grid-column: 2; grid-row: 1; width: 4.5rem; margin-left: 1rem; }
+}
+.older a { font: var(--t-xs) var(--mono); }

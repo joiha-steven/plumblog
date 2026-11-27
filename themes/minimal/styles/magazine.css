@@ -1,0 +1,63 @@
+/* DRAFT style, not offered to owners and not shipped until it reaches the writer standard
+   (all widths, light and dark, every control state, Lighthouse 100). Loaded after style.css. */
+/* Home */
+.intro { margin: 0 0 3em; max-width: 30em; font-size: 1.2em; line-height: 1.55; color: var(--c-text-2); }
+.feature { margin-bottom: 3.5em; }
+.feature a, .entry { display: block; text-decoration: none; color: inherit; }
+.feature img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: var(--radius); margin-bottom: 1.4em; background: var(--c-surface); }
+.feature-title { font-size: clamp(1.6rem, 1.2rem + 1.6vw, 2.2rem); line-height: 1.15; letter-spacing: -.022em; transition: color var(--dur) var(--ease); }
+.feature .excerpt { margin-top: .6em; font-size: 1.06em; }
+.feature a:hover .feature-title, .entry:hover .entry-title { color: var(--c-accent); }
+.excerpt { margin: .35em 0 0; color: var(--c-text-2); line-height: 1.6; }
+.year { margin-bottom: 2.5em; }
+.year-label { display: flex; align-items: center; gap: .9em; margin: 0 0 1.25em; font: var(--w-head) .9em/1 var(--display); color: var(--c-text-2); font-feature-settings: "tnum"; }
+.year-label::after { content: ""; flex: 1; height: 1px; background: var(--c-rule); }
+.posts { list-style: none; padding: 0; margin: 0; display: grid; gap: 2em; }
+/* Phones: thumbnail beside the title only, excerpt full width. Wider: thumbnail beside it all. */
+.entry { display: grid; grid-template-columns: 1fr auto; gap: 0 1.25rem; align-items: start; }
+.entry > :not(.thumb) { grid-column: 1 / -1; }
+.entry > .entry-title { grid-column: 1; }
+.thumb { grid-column: 2; grid-row: 1; }
+.entry-title { font-size: 1.22em; line-height: 1.3; letter-spacing: -.015em; transition: color var(--dur) var(--ease); }
+.entry .meta { margin-top: .5em; }
+.thumb { width: 4.5rem; aspect-ratio: 1; border-radius: 6px; overflow: hidden; background: var(--c-surface); margin-top: .2em; }
+.thumb img { display: block; width: 100%; height: 100%; object-fit: cover; transition: transform 250ms var(--ease); }
+.entry:hover .thumb img { transform: scale(1.04); }
+@media (min-width: 40rem) {
+  .entry > :not(.thumb) { grid-column: 1; }
+  .thumb { width: 8.5rem; aspect-ratio: 4 / 3; grid-row: 1 / 4; }
+}
+/* Wide screens: the year hangs in the left margin and stays in view while its posts scroll. */
+@media (min-width: 64rem) {
+  .year { display: grid; grid-template-columns: 6rem 1fr; gap: 0 2rem; margin-left: -8rem; }
+  .year-label { position: sticky; top: 1.5rem; align-self: start; justify-content: flex-end; margin: .35em 0 0; }
+  .year-label::after { display: none; }
+}
+
+/* C "Editorial": big display type, wide whitespace, one bold accent moment (the pinned post). */
+:root { --measure: calc(31 * var(--fs)); }
+.site-name { font-size: 1.15em; letter-spacing: -.02em; }
+h1 { font-size: clamp(2.4rem, 1.4rem + 4vw, 4rem); line-height: 1.04; letter-spacing: -.035em; }
+.post-head { margin-bottom: 3.5em; }
+.post-head .meta { margin-bottom: 1.6em; }
+.standfirst { font-size: 1.3em; line-height: 1.45; color: var(--c-text); margin-top: 1em; }
+.prose h2 { font-size: 1.75em; letter-spacing: -.028em; line-height: 1.15; margin-top: 2.4em; }
+blockquote { border: 0; padding: 0; font: var(--w-head) 1.35em/1.35 var(--display); letter-spacing: -.015em; }
+/* Code is set dark on every page: a deliberate object, not a grey box. */
+.code, pre { color-scheme: dark; background: var(--c-bg); color: var(--c-code); }
+.code pre { background: none; }
+.copy { background: var(--c-surface); border-color: var(--c-rule); }
+/* Home */
+.intro { font: var(--w-head) clamp(1.6rem, 1.1rem + 2vw, 2.4rem)/1.15 var(--display); letter-spacing: -.025em; color: var(--c-text); max-width: none; margin-bottom: 1.6em; }
+.feature a { padding: clamp(1.25rem, 4vw, 2.25rem); border-radius: 12px; background: var(--c-accent); color: var(--c-on-accent); }
+.feature img { border-radius: 6px; margin-bottom: 1.5em; }
+.feature .meta, .feature .excerpt { color: color-mix(in srgb, var(--c-on-accent) 80%, transparent); }
+.feature a:hover .feature-title { color: inherit; }
+.feature-title { font-size: clamp(1.7rem, 1.2rem + 2vw, 2.5rem); }
+.year-label { font-size: 2.4em; letter-spacing: -.03em; color: var(--c-rule); }
+.year-label::after { display: none; }
+.posts { gap: 2.4em; }
+.entry-title { font-size: 1.45em; line-height: 1.2; letter-spacing: -.02em; }
+.thumb { width: 7rem; aspect-ratio: 3 / 2; border-radius: 6px; }
+@media (min-width: 40rem) { .thumb { width: 10rem; aspect-ratio: 3 / 2; } }
+@media (min-width: 64rem) { .year { grid-template-columns: 8rem 1fr; margin-left: -10rem; } .year-label { margin-top: -.15em; } }
