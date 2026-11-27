@@ -28,7 +28,7 @@ Your posts never live in this repo. It only holds the code. Updating to a new ve
 
 ## Working on it
 
-You need Rust. Then:
+You need Rust and `jq` (`brew install jq` on a Mac). Then:
 
 ```sh
 scripts/check

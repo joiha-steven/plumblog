@@ -1,0 +1,204 @@
+//! Shared types every other crate speaks: ids, errors, roles and permissions. No I/O.
+
+use std::fmt;
+
+/// Engine version, taken from the workspace so it never drifts.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Declares an enum whose variants each carry a stable string code. The enum, `ALL` and
+/// `as_str` come from one list, so adding a variant cannot leave `ALL` or a code behind.
+#[macro_export]
+macro_rules! stable_codes {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident { $($variant:ident => $code:literal),+ $(,)? }
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        $vis enum $name { $($variant),+ }
+
+        impl $name {
+            pub const ALL: &[$name] = &[$($name::$variant),+];
+
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self { $($name::$variant => $code),+ }
+            }
+        }
+    };
+}
+
+stable_codes! {
+    /// Stable error codes. The string form is a public contract: it appears in API responses,
+    /// the system log and locale keys (`error.<code>`), so a code is never renamed once shipped.
+    pub enum ErrorCode {
+        PostNotFound => "post.not_found",
+        UserNotFound => "user.not_found",
+        Forbidden => "auth.forbidden",
+        Unauthenticated => "auth.unauthenticated",
+        InvalidInput => "input.invalid",
+        Storage => "store.failed",
+        Internal => "internal",
+    }
+}
+
+/// One error type across crates. `detail` is for logs and agents, never shown to readers:
+/// user-facing text comes from the locale key derived from `code`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Error {
+    pub code: ErrorCode,
+    pub detail: String,
+}
+
+impl Error {
+    pub fn new(code: ErrorCode, detail: impl Into<String>) -> Self {
+        Self {
+            code,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code.as_str(), self.detail)
+    }
+}
+
+impl std::error::Error for Error {}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// Ties a system log entry to the Worker log line of the same request.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RequestId(String);
+
+impl RequestId {
+    /// Accepts 1-64 chars of `[A-Za-z0-9-]` (fits Cloudflare's `cf-ray`), so ids are safe to
+    /// print in logs and URLs without escaping.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        let ok = (1..=64).contains(&raw.len())
+            && raw.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+        ok.then(|| Self(raw.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct UserId(pub i64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PostId(pub i64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Role {
+    Owner,
+    Writer,
+}
+
+stable_codes! {
+    /// What a role may do. Codes double as API token scope names.
+    pub enum Permission {
+        WritePost => "post.write",
+        PublishPost => "post.publish",
+        EditAnyPost => "post.edit_any",
+        DeleteAnyPost => "post.delete_any",
+        UploadMedia => "media.upload",
+        CreateOwnToken => "token.create_own",
+        ManageSettings => "settings.manage",
+        ManageThemes => "theme.manage",
+        ManagePlugins => "plugin.manage",
+        ManageUsers => "user.manage",
+        ModerateComments => "comment.moderate",
+        ViewSystemLog => "syslog.view",
+    }
+}
+
+impl Permission {
+    /// The whole role model (docs/ARCHITECTURE.md, Users and auth). An exhaustive match, so a
+    /// new permission does not compile until someone decides who holds it.
+    #[must_use]
+    pub const fn roles(self) -> &'static [Role] {
+        const BOTH: &[Role] = &[Role::Owner, Role::Writer];
+        const OWNER: &[Role] = &[Role::Owner];
+        match self {
+            Self::WritePost
+            | Self::PublishPost
+            | Self::EditAnyPost
+            | Self::DeleteAnyPost
+            | Self::UploadMedia
+            | Self::CreateOwnToken => BOTH,
+            Self::ManageSettings
+            | Self::ManageThemes
+            | Self::ManagePlugins
+            | Self::ManageUsers
+            | Self::ModerateComments
+            | Self::ViewSystemLog => OWNER,
+        }
+    }
+}
+
+impl Role {
+    #[must_use]
+    pub fn can(self, permission: Permission) -> bool {
+        permission.roles().contains(&self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ErrorCode, Permission, RequestId, Role};
+
+    /// Pins every shipped code: renaming one breaks API clients and stored log rows.
+    #[test]
+    fn error_codes_are_pinned() {
+        let table: Vec<_> = ErrorCode::ALL.iter().map(|c| (*c, c.as_str())).collect();
+        assert_eq!(
+            table,
+            [
+                (ErrorCode::PostNotFound, "post.not_found"),
+                (ErrorCode::UserNotFound, "user.not_found"),
+                (ErrorCode::Forbidden, "auth.forbidden"),
+                (ErrorCode::Unauthenticated, "auth.unauthenticated"),
+                (ErrorCode::InvalidInput, "input.invalid"),
+                (ErrorCode::Storage, "store.failed"),
+                (ErrorCode::Internal, "internal"),
+            ]
+        );
+    }
+
+    /// The full owner/writer table, so any change to who holds what is a visible test edit.
+    #[test]
+    fn permission_table_is_pinned() {
+        let writer_only_lacks = [
+            Permission::ManageSettings,
+            Permission::ManageThemes,
+            Permission::ManagePlugins,
+            Permission::ManageUsers,
+            Permission::ModerateComments,
+            Permission::ViewSystemLog,
+        ];
+        for p in Permission::ALL {
+            assert!(Role::Owner.can(*p), "owner must have {p:?}");
+            assert_eq!(
+                Role::Writer.can(*p),
+                !writer_only_lacks.contains(p),
+                "writer and {p:?}"
+            );
+        }
+        assert_eq!(Permission::ALL.len(), 12);
+    }
+
+    #[test]
+    fn request_id_rejects_unsafe_input() {
+        assert!(RequestId::parse("8f2a1c3b9d-SIN").is_some());
+        assert!(RequestId::parse("").is_none());
+        assert!(RequestId::parse("a b").is_none());
+        assert!(RequestId::parse(&"a".repeat(65)).is_none());
+    }
+}

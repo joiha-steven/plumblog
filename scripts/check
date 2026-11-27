@@ -18,15 +18,15 @@ fi
 step "fmt"
 cargo fmt --all --check || fail "rustfmt: run 'cargo fmt --all'"
 
-step "clippy (host: core, cli)"
-cargo clippy -q -p plumblog-core -p plumblog-cli --all-targets -- -D warnings \
-  || fail "clippy found warnings in core/cli"
+step "clippy (host: every crate but worker)"
+cargo clippy -q --workspace --exclude plumblog-worker --all-targets -- -D warnings \
+  || fail "clippy found warnings in host crates"
 step "clippy (wasm: worker)"
 cargo clippy -q -p plumblog-worker --target wasm32-unknown-unknown --all-targets -- -D warnings \
   || fail "clippy found warnings in worker"
 
-step "test (core, cli, worker)"
-cargo test -q -p plumblog-core -p plumblog-cli -p plumblog-worker || fail "tests failed"
+step "test (all crates)"
+cargo test -q --workspace || fail "tests failed"
 
 step "worker wasm build + size budget"
 cargo build -q -p plumblog-worker --target wasm32-unknown-unknown --release \
@@ -34,6 +34,42 @@ cargo build -q -p plumblog-worker --target wasm32-unknown-unknown --release \
 size=$(gzip -9 -c "$WASM_FILE" | wc -c | tr -d ' ')
 echo "check: worker.wasm gzip = $size bytes (budget $WASM_GZIP_BUDGET_BYTES)"
 [ "$size" -le "$WASM_GZIP_BUDGET_BYTES" ] || fail "worker wasm gzip $size > budget $WASM_GZIP_BUDGET_BYTES"
+
+# --- crate dependency graph (issue #1) ---
+step "crate dependency graph"
+command -v jq > /dev/null || fail "jq is missing; install it (macOS: brew install jq, Debian/Ubuntu: apt install jq)"
+# Modules stay replaceable only if dependencies point down the list in docs/ARCHITECTURE.md
+# (Code layout); that list is the single source of the allowed order.
+order=$(awk '/^## Code layout/{s=1} s&&/^```/{n++; next} s&&n==1&&/^crates\//{split($1,a,"/"); print a[2]} n>=2{exit}' docs/ARCHITECTURE.md)
+[ -n "$order" ] || fail "no crates/ list found under '## Code layout' in docs/ARCHITECTURE.md"
+# External crates each module may use. Empty for most: a module crate gains an external
+# dependency only by adding a line here with its reason, so runtime crates (worker-sys,
+# web-sys, js-sys, wasm-bindgen, reqwest...) cannot slip into logic that must test on the host.
+external_allowlist='
+worker   worker                 # the Cloudflare runtime; the only crate that does I/O
+cli      clap                   # argument parsing for the `blog` binary
+markdown unicode-normalization  # NFC before heading ids (pure Rust, no I/O)
+'
+meta=$(cargo metadata -q --format-version 1 --no-deps) || fail "cargo metadata failed"
+graph_errors=$(jq -r --arg order "$order" --arg allow "$external_allowlist" '
+  ($order | split("\n") | map(select(. != ""))) as $o
+  | ($allow | split("\n") | map(sub("#.*"; "") | [splits("[ \t]+")] | map(select(. != "")))
+      | map(select(length == 2) | "\(.[0]) \(.[1])")) as $allowed
+  | (.packages | map({key: (.manifest_path | split("/") | .[-2]), value: .}) | from_entries) as $pkgs
+  | (.packages | map({key: .name, value: (.manifest_path | split("/") | .[-2])}) | from_entries) as $dir
+  | ($pkgs | keys[] | . as $k | select(($o | index($k)) == null) | "  crates/\(.) is a workspace member but not listed in Code layout"),
+    ($o[] | select($pkgs[.] == null) | "  crates/\(.) is listed in Code layout but is not a workspace member"),
+    ($pkgs | to_entries[] | .key as $from | ($o | index($from)) as $i | select($i != null)
+      | .value.dependencies[] | select($dir[.name] != null) | $dir[.name] as $to
+      | ($o | index($to)) as $j | select($j != null and $j >= $i)
+      | "  crates/\($from) -> crates/\($to): may only depend on crates listed above it"),
+    ($pkgs | to_entries[] | .key as $from
+      | .value.dependencies[] | select($dir[.name] == null) | .name as $ext
+      | select(($allowed | index("\($from) \($ext)")) == null)
+      | "  crates/\($from) -> \($ext): external crate not in the allowlist in scripts/check")
+' <<< "$meta") || fail "jq failed while reading cargo metadata"
+if [ -n "$graph_errors" ]; then echo "$graph_errors"; fail "crate dependency graph (see docs/ARCHITECTURE.md, Code layout)"; fi
+# --- end crate dependency graph ---
 
 # Files git would track: tracked + untracked, minus ignored, minus deleted.
 # Written to a file first so a git failure fails the check instead of vanishing in a pipe.
