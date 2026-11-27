@@ -116,8 +116,8 @@ jobs:
       matrix:
         include:
           # test: the runner can run this target, so the CLI tests run once per OS first.
-          - { target: aarch64-apple-darwin, os: macos-14, test: true, zig: false }
-          - { target: x86_64-apple-darwin, os: macos-14, test: false, zig: false }
+          - { target: aarch64-apple-darwin, os: macos-15, test: true, zig: false }
+          - { target: x86_64-apple-darwin, os: macos-15, test: false, zig: false }
           - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, test: true, zig: true }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, test: false, zig: true }
           - { target: x86_64-pc-windows-msvc, os: windows-latest, test: true, zig: false }
