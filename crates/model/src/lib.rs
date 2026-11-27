@@ -49,6 +49,16 @@ stable_codes! {
         NotFound => "store.not_found",
         Conflict => "store.conflict",
         InviteInvalid => "invite.invalid",
+        InvalidCredentials => "auth.invalid_credentials",
+        Locked => "auth.locked",
+        TurnstileRequired => "auth.turnstile_required",
+        PasskeyInvalid => "auth.passkey_invalid",
+        SetupInvalid => "setup.invalid",
+        RouteNotFound => "api.not_found",
+        OriginMissing => "settings.origin_missing",
+        ReauthRequired => "auth.reauth_required",
+        BodyTooLarge => "api.body_too_large",
+        LengthRequired => "api.length_required",
     }
 }
 
@@ -204,6 +214,16 @@ mod tests {
                 (ErrorCode::NotFound, "store.not_found"),
                 (ErrorCode::Conflict, "store.conflict"),
                 (ErrorCode::InviteInvalid, "invite.invalid"),
+                (ErrorCode::InvalidCredentials, "auth.invalid_credentials"),
+                (ErrorCode::Locked, "auth.locked"),
+                (ErrorCode::TurnstileRequired, "auth.turnstile_required"),
+                (ErrorCode::PasskeyInvalid, "auth.passkey_invalid"),
+                (ErrorCode::SetupInvalid, "setup.invalid"),
+                (ErrorCode::RouteNotFound, "api.not_found"),
+                (ErrorCode::OriginMissing, "settings.origin_missing"),
+                (ErrorCode::ReauthRequired, "auth.reauth_required"),
+                (ErrorCode::BodyTooLarge, "api.body_too_large"),
+                (ErrorCode::LengthRequired, "api.length_required"),
             ]
         );
     }

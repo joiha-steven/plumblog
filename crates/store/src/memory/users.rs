@@ -1,7 +1,7 @@
 use plumblog_model::{Result, Role, UserId};
 
-use super::{MemoryStore, State, conflict, next_seq, user_not_found};
-use crate::{NewUser, ProfileUpdate, SiteStore, User, UserStore};
+use super::{MemoryStore, State, conflict, invalid, next_rowid, next_seq, user_not_found};
+use crate::{NewSession, NewUser, ProfileUpdate, Session, SiteStore, User, UserStore};
 
 impl State {
     /// `users.login` is `NOCASE` (ASCII only) and `users.slug` is unique.
@@ -134,6 +134,66 @@ impl UserStore for MemoryStore {
         })
     }
 
+    async fn change_password(
+        &self,
+        id: UserId,
+        hash: Option<String>,
+        profile: Option<ProfileUpdate>,
+        session: NewSession,
+        now: i64,
+    ) -> Result<i64> {
+        self.write(|s| {
+            let has_password = s.user_mut(id)?.password_hash.is_some();
+            if hash.is_none() && has_password {
+                return Err(conflict(
+                    "passkey-only change, but the account has a password",
+                ));
+            }
+            if session.user_id != id {
+                return Err(invalid(format!(
+                    "session for user {} given for user {}",
+                    session.user_id.0, id.0
+                )));
+            }
+            if let Some(p) = &profile {
+                s.check_user_unique(&p.login, &p.slug, Some(id))?;
+            }
+            // sessions.token_hash is UNIQUE; the user's own old sessions go first.
+            s.sessions.retain(|_, x| x.user_id != id);
+            if s.sessions
+                .values()
+                .any(|x| x.token_hash == session.token_hash)
+            {
+                return Err(conflict("session token hash already exists"));
+            }
+            let bump = profile.is_some();
+            let u = s.user_mut(id)?;
+            if let Some(p) = profile {
+                u.login = p.login;
+                u.slug = p.slug;
+                u.display_name = p.display_name;
+                u.bio = p.bio;
+            }
+            u.password_hash = hash;
+            u.updated_at = now;
+            if bump {
+                s.bump();
+            }
+            let sid = next_rowid(&s.sessions);
+            s.sessions.insert(
+                sid,
+                Session {
+                    id: sid,
+                    token_hash: session.token_hash,
+                    user_id: id,
+                    created_at: session.created_at,
+                    expires_at: session.expires_at,
+                },
+            );
+            Ok(sid)
+        })
+    }
+
     async fn set_role(&self, id: UserId, role: Role, now: i64) -> Result<()> {
         self.write(|s| {
             s.user_mut(id)?;
@@ -181,6 +241,7 @@ impl UserStore for MemoryStore {
             s.passkeys.retain(|_, x| x.user_id != id);
             s.tokens.retain(|_, x| x.user_id != id);
             s.invites.retain(|_, x| x.created_by != id);
+            s.challenges.retain(|_, x| x.1 != Some(id));
             // ON DELETE SET NULL
             for i in s.invites.values_mut().filter(|i| i.used_by == Some(id)) {
                 i.used_by = None;
