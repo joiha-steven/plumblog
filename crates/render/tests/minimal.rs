@@ -163,11 +163,14 @@ fn every_page_kind_renders() {
                 year: 2026,
                 posts: &posts[..1],
                 years,
+                older_url: Some("/archive/2026/page/2".into()),
+                newer_url: None,
             },
         )
         .unwrap();
     assert!(html.contains("Posts from 2026"));
     assert!(html.contains("href=\"/archive/2026\" aria-current=\"page\""));
+    assert!(html.contains("href=\"/archive/2026/page/2\" rel=\"next\">Older posts"));
 
     let html = theme
         .render(&site(), &page("vi"), &Body::NotFound { recent: &posts })

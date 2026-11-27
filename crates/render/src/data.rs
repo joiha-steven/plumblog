@@ -88,6 +88,8 @@ pub enum Body<'a> {
         year: i32,
         posts: &'a [&'a Post],
         years: Vec<Link>,
+        older_url: Option<String>,
+        newer_url: Option<String>,
     },
     NotFound {
         recent: &'a [&'a Post],

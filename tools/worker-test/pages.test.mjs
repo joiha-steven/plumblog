@@ -62,6 +62,15 @@ test("page 2, and page 1 redirects to the home page", async () => {
   assert.equal(new URL(slash.headers.get("location")).pathname, "/reading-on-screens");
 });
 
+test("hostile paths never redirect off site or to themselves", async () => {
+  for (const path of ["//evil.com/", "/\\evil.com/", "//", "///", "/%2F%2Fevil.com/", "/post//"]) {
+    const res = await get(path);
+    assert.equal(res.status, 404, path);
+    assert.equal(res.headers.get("location"), null, path);
+    await res.arrayBuffer();
+  }
+});
+
 test("post page", async () => {
   const res = await get("/reading-on-screens");
   assert.equal(res.status, 200);

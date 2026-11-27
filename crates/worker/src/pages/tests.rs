@@ -56,9 +56,55 @@ fn routes_parse_to_one_canonical_url() {
         parse("/tag/rust/page/1"),
         Route::Redirect("/tag/rust".into())
     );
-    assert_eq!(parse("/archive/2026"), Route::Archive { year: 2026 });
+    assert_eq!(
+        parse("/archive/2026"),
+        Route::Archive {
+            year: 2026,
+            page: 1
+        }
+    );
+    assert_eq!(
+        parse("/archive/2026/page/2"),
+        Route::Archive {
+            year: 2026,
+            page: 2
+        }
+    );
+    assert_eq!(
+        parse("/archive/2026/page/1"),
+        Route::Redirect("/archive/2026".into())
+    );
     assert_eq!(parse("/archive/26"), Route::NotFound);
     assert_eq!(parse("/a/b"), Route::NotFound);
+}
+
+/// Request paths that once became off-site or self-looping redirects (review of #29).
+#[test]
+fn hostile_paths_never_redirect_off_site_or_to_themselves() {
+    for path in [
+        "//evil.com/",
+        "//evil.com",
+        "/\\evil.com/",
+        "//",
+        "///",
+        "/%2F%2Fevil.com/",
+        "/%2f%2fevil.com/",
+        "/%5Cevil.com/",
+        "/post//",
+        "/tag//rust/",
+    ] {
+        assert_eq!(parse(path), Route::NotFound, "{path}");
+    }
+    // Every redirect the router does produce is a same-site absolute path.
+    for path in ["/post/", "/page/1", "/tag/rust/page/1", "/archive/2026/"] {
+        match parse(path) {
+            Route::Redirect(to) => assert!(
+                to.starts_with('/') && !to.starts_with("//") && to != path,
+                "{path} -> {to}"
+            ),
+            other => panic!("{path}: {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -118,6 +164,9 @@ fn tag_and_archive_pages() {
     assert!(!html.contains("Slow mornings"));
     assert!(html.contains("href=\"/archive/2026\""));
     assert_eq!(get("/archive/1999").0, 404);
+    // Paged like home: 2026 fits on one page here, so page 2 does not exist.
+    assert_eq!(get("/archive/2026/page/2").0, 404);
+    assert_eq!(get("/archive/2026/page/1"), (301, "/archive/2026".into()));
 }
 
 #[test]

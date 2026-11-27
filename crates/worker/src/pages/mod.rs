@@ -75,7 +75,14 @@ pub async fn serve(req: &Request, ctx: &Context) -> Result<Response> {
     let render_ms = worker::Date::now().as_millis().saturating_sub(started);
 
     match outcome {
-        Outcome::Redirect(to) => Response::redirect_with_status(url.join(&to)?, 301),
+        // `to` comes from routes:: builders (a `/`-rooted path without `//`); it is appended
+        // to our own origin, never resolved against the request, so it cannot leave the site.
+        Outcome::Redirect(to) => {
+            if !to.starts_with('/') || to.starts_with("//") {
+                return Ok(failure(&format!("refused redirect target {to:?}")));
+            }
+            Response::redirect_with_status(worker::Url::parse(&format!("{origin}{to}"))?, 301)
+        }
         Outcome::Page { status, html } => {
             let h = Headers::new();
             h.set("content-type", "text/html; charset=utf-8")?;
@@ -152,7 +159,7 @@ pub async fn render(
         Route::Home { page } => p.home(page).await?,
         Route::Post { slug } => p.post(&slug).await?,
         Route::Tag { slug, page } => p.tag(&slug, page).await?,
-        Route::Archive { year } => p.archive(year).await?,
+        Route::Archive { year, page } => p.archive(year, page).await?,
         Route::NotFound => None,
     };
     let (status, html) = match page {
@@ -243,11 +250,11 @@ impl<S: ReaderSource> Pages<'_, S> {
         })
     }
 
-    async fn archive(&self, year: i32) -> PageResult {
-        // A year holds few enough posts for one page; paging can come with real volume.
+    async fn archive(&self, year: i32, n: usize) -> PageResult {
+        // Paged like home: storage work per request stays bounded however busy a year was.
         let slice = self
             .src
-            .posts(Filter::Year(year), 0, usize::MAX)
+            .posts(Filter::Year(year), (n - 1) * self.per, self.per)
             .await
             .map_err(err)?;
         if slice.posts.is_empty() {
@@ -263,13 +270,15 @@ impl<S: ReaderSource> Pages<'_, S> {
             .into_iter()
             .map(|y| Link {
                 name: y.to_string(),
-                url: routes::archive(y),
+                url: routes::archive(y, 1),
             })
             .collect();
         self.show(&Body::Archive {
             year,
             posts: &refs,
             years,
+            older_url: slice.more.then(|| routes::archive(year, n + 1)),
+            newer_url: (n > 1).then(|| routes::archive(year, n - 1)),
         })
     }
 

@@ -304,13 +304,21 @@ impl Theme {
                     newer_url: newer_url.as_deref(),
                 }),
             ),
-            Body::Archive { year, posts, years } => (
+            Body::Archive {
+                year,
+                posts,
+                years,
+                older_url,
+                newer_url,
+            } => (
                 PageKind::Archive,
                 site.description.clone(),
                 ser(ArchiveData {
                     year: *year,
                     posts: entries(posts),
                     years,
+                    older_url: older_url.as_deref(),
+                    newer_url: newer_url.as_deref(),
                 }),
             ),
             Body::NotFound { recent } => (
@@ -446,6 +454,8 @@ struct ArchiveData<'a> {
     year: i32,
     posts: Vec<EntryData<'a>>,
     years: &'a [crate::Link],
+    older_url: Option<&'a str>,
+    newer_url: Option<&'a str>,
 }
 
 #[derive(Serialize)]
