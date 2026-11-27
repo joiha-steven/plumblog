@@ -108,7 +108,9 @@ Navigation feels instant without JS frameworks: Speculation Rules prefetch, cros
 
 Comments: own system, off by default, Turnstile, moderation queue (owner).
 
-Not built: PWA/offline, newsletter (later), reactions.
+Installable web apps: the reader site (scope `/`) and the admin (scope `/admin/`) each have their own manifest and icon, so both can sit on a home screen and are told apart by color. Blog icon = the owner's site icon (uploaded in Settings; default generated from the site name on the theme accent). Admin icon = the same mark on a contrasting dark plate, named "<Site> Admin". No offline reading for the reader site; the admin caches its own shell and keeps drafts offline.
+
+Not built: offline reading, newsletter (later), reactions.
 
 ## Themes
 
@@ -226,3 +228,4 @@ Each phase is one or more sessions; each ends with `scripts/check` green and evi
 - 2026-11-27 Admin controls follow Braun / Dieter Rams: raised keys that lift, sink and latch with a lamp; pills and circles; signal orange as the one accent.
 - 2026-11-27 Admin depth kept shallow; search always rightmost in the page header; phone navigation is a floating glass pill; media gets a full-screen viewer.
 - 2026-11-27 Theme and plugin options are declarations rendered by the admin; plugins are declarative only; complex needs use API + webhooks; nothing from themes/plugins runs in the admin.
+- 2026-11-27 Reader site and admin are installable web apps with distinct manifests and icon colors; no offline reading.
