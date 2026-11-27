@@ -10,6 +10,7 @@ mod post_save;
 mod posts;
 mod redirects;
 mod settings;
+mod signin;
 mod taxonomy;
 mod users;
 mod webhooks;
@@ -23,8 +24,8 @@ use plumblog_model::{
 use plumblog_syslog::Event;
 
 use crate::{
-    ApiToken, Comment, Invite, Media, Passkey, PluginState, Post, Redirect, Revision, Series,
-    Session, Tag, User, Webhook,
+    ApiToken, ChallengePurpose, Comment, Delivery, Invite, Media, Passkey, PluginState, Post,
+    Redirect, Revision, Series, Session, Tag, User, Webhook,
 };
 
 /// In-memory store. `RefCell` because traits take `&self` like the D1 impl.
@@ -55,6 +56,10 @@ struct State {
     passkeys: BTreeMap<i64, Passkey>,
     tokens: BTreeMap<i64, ApiToken>,
     invites: BTreeMap<i64, Invite>,
+    /// `login_failures`: key hash -> (count, `window_start`)
+    login_failures: BTreeMap<String, (i64, i64)>,
+    /// `auth_challenges`: challenge hash -> (purpose, user, `expires_at`)
+    challenges: BTreeMap<String, (ChallengePurpose, Option<UserId>, i64)>,
     media: BTreeMap<MediaId, Media>,
     tags: BTreeMap<TagId, Tag>,
     series: BTreeMap<SeriesId, Series>,
@@ -72,6 +77,8 @@ struct State {
     options: BTreeMap<(&'static str, String, String), (String, i64)>,
     plugins: BTreeMap<String, PluginState>,
     webhooks: BTreeMap<i64, Webhook>,
+    /// `webhook_deliveries`; removed with their webhook (ON DELETE CASCADE).
+    deliveries: BTreeMap<i64, Delivery>,
     log: BTreeMap<i64, Event>,
 }
 
@@ -86,6 +93,8 @@ impl Default for State {
             passkeys: BTreeMap::new(),
             tokens: BTreeMap::new(),
             invites: BTreeMap::new(),
+            login_failures: BTreeMap::new(),
+            challenges: BTreeMap::new(),
             media: BTreeMap::new(),
             tags: BTreeMap::new(),
             series: BTreeMap::new(),
@@ -99,6 +108,7 @@ impl Default for State {
             options: BTreeMap::new(),
             plugins: BTreeMap::new(),
             webhooks: BTreeMap::new(),
+            deliveries: BTreeMap::new(),
             log: BTreeMap::new(),
         }
     }

@@ -6,8 +6,8 @@
 
 use plumblog_model::{PostId, Role, UserId};
 use plumblog_store::{
-    NewRevision, NewUser, PostKind, PostStatus, PostStore, RedirectStore, SavePost, SettingsStore,
-    SiteStore, TaxonomyStore, UserStore,
+    NewPasskey, NewRevision, NewUser, PasskeyStore, PostKind, PostStatus, PostStore, RedirectStore,
+    SavePost, SettingsStore, SiteStore, TaxonomyStore, UserStore,
 };
 
 use super::post_save::Old;
@@ -18,6 +18,7 @@ pub const CASES: &[&str] = &[
     "d1_stale_save_writes_nothing",
     "d1_stale_version_writes_nothing",
     "d1_last_owner_guard_in_batch",
+    "d1_last_passkey_guard_in_batch",
 ];
 
 /// `None` if `name` is not a D1-only case.
@@ -27,6 +28,7 @@ pub async fn run(name: &str, db: &D1Store) -> Option<Result<(), String>> {
         "d1_stale_save_writes_nothing" => stale_save_writes_nothing(db).await,
         "d1_stale_version_writes_nothing" => stale_version_writes_nothing(db).await,
         "d1_last_owner_guard_in_batch" => last_owner_guard_in_batch(db).await,
+        "d1_last_passkey_guard_in_batch" => last_passkey_guard_in_batch(db).await,
         _ => return None,
     };
     Some(out.map_err(|e| format!("{name}: {e}")))
@@ -215,5 +217,33 @@ async fn last_owner_guard_in_batch(db: &D1Store) -> Result<(), String> {
     check(
         "B was demoted",
         db.get_user(b).await.map_err(e)?.role == Role::Writer,
+    )
+}
+
+/// Removing A was prepared while the passwordless user still had A and B; B goes first; A's
+/// batch must then refuse, or the account is left with no way to sign in.
+async fn last_passkey_guard_in_batch(db: &D1Store) -> Result<(), String> {
+    let e = |e: plumblog_model::Error| e.to_string();
+    let u = owner(db, "pk").await?;
+    let key = |cred: &str| NewPasskey {
+        user_id: u,
+        credential_id: cred.to_owned(),
+        public_key: "pk".to_owned(),
+        sign_count: 0,
+        name: cred.to_owned(),
+        created_at: 1_000,
+    };
+    let a = db.add_passkey(key("a")).await.map_err(e)?;
+    let b = db.add_passkey(key("b")).await.map_err(e)?;
+    let delete_a = db.delete_own_passkey_stmts(u, a).map_err(e)?;
+    db.delete_own_passkey(u, b).await.map_err(e)?;
+    let out = db.run_delete_own_passkey(a, delete_a).await;
+    check(
+        "removing the last passkey fires the guard",
+        out.as_ref().err().map(|x| x.code) == Some(plumblog_model::ErrorCode::Conflict),
+    )?;
+    check(
+        "A is still there",
+        db.find_passkey("a").await.map_err(e)?.is_some(),
     )
 }

@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+pub mod ts;
+
 /// Engine version, taken from the workspace so it never drifts.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -38,6 +40,10 @@ macro_rules! stable_codes {
 stable_codes! {
     /// Stable error codes. The string form is a public contract: it appears in API responses,
     /// the system log and locale keys (`error.<code>`), so a code is never renamed once shipped.
+    /// Webhooks: `key_invalid` = `WEBHOOK_KEY` missing or malformed; `url_blocked` = a URL
+    /// the guard refuses (not https, private address...); `secret_unreadable` = a stored
+    /// secret not sealed or not decrypting; `delivery_failed` = an attempt failed (the log
+    /// entry says why).
     pub enum ErrorCode {
         PostNotFound => "post.not_found",
         UserNotFound => "user.not_found",
@@ -49,6 +55,20 @@ stable_codes! {
         NotFound => "store.not_found",
         Conflict => "store.conflict",
         InviteInvalid => "invite.invalid",
+        InvalidCredentials => "auth.invalid_credentials",
+        Locked => "auth.locked",
+        TurnstileRequired => "auth.turnstile_required",
+        PasskeyInvalid => "auth.passkey_invalid",
+        SetupInvalid => "setup.invalid",
+        RouteNotFound => "api.not_found",
+        OriginMissing => "settings.origin_missing",
+        ReauthRequired => "auth.reauth_required",
+        BodyTooLarge => "api.body_too_large",
+        LengthRequired => "api.length_required",
+        WebhookKeyInvalid => "webhook.key_invalid",
+        WebhookUrlBlocked => "webhook.url_blocked",
+        WebhookSecretUnreadable => "webhook.secret_unreadable",
+        WebhookDeliveryFailed => "webhook.delivery_failed",
         // Reader comments (docs/ARCHITECTURE.md, Reader site): the form redirects with one
         // of these, and the theme maps it to a message, so input is never echoed back.
         CommentsUnavailable => "comments.unavailable",
@@ -216,6 +236,23 @@ mod tests {
                 (ErrorCode::NotFound, "store.not_found"),
                 (ErrorCode::Conflict, "store.conflict"),
                 (ErrorCode::InviteInvalid, "invite.invalid"),
+                (ErrorCode::InvalidCredentials, "auth.invalid_credentials"),
+                (ErrorCode::Locked, "auth.locked"),
+                (ErrorCode::TurnstileRequired, "auth.turnstile_required"),
+                (ErrorCode::PasskeyInvalid, "auth.passkey_invalid"),
+                (ErrorCode::SetupInvalid, "setup.invalid"),
+                (ErrorCode::RouteNotFound, "api.not_found"),
+                (ErrorCode::OriginMissing, "settings.origin_missing"),
+                (ErrorCode::ReauthRequired, "auth.reauth_required"),
+                (ErrorCode::BodyTooLarge, "api.body_too_large"),
+                (ErrorCode::LengthRequired, "api.length_required"),
+                (ErrorCode::WebhookKeyInvalid, "webhook.key_invalid"),
+                (ErrorCode::WebhookUrlBlocked, "webhook.url_blocked"),
+                (
+                    ErrorCode::WebhookSecretUnreadable,
+                    "webhook.secret_unreadable"
+                ),
+                (ErrorCode::WebhookDeliveryFailed, "webhook.delivery_failed"),
                 (ErrorCode::CommentsUnavailable, "comments.unavailable"),
                 (ErrorCode::CommentsClosed, "comments.closed"),
                 (ErrorCode::CommentName, "comments.name_invalid"),

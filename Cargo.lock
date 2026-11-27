@@ -546,15 +546,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "plumblog-webhook"
+version = "0.1.0"
+dependencies = [
+ "plumblog-model",
+ "plumblog-store",
+ "plumblog-syslog",
+ "serde_json",
+]
+
+[[package]]
 name = "plumblog-worker"
 version = "0.1.0"
 dependencies = [
+ "plumblog-auth",
  "plumblog-i18n",
  "plumblog-markdown",
  "plumblog-model",
  "plumblog-render",
  "plumblog-store",
  "plumblog-syslog",
+ "plumblog-webhook",
  "roxmltree",
  "worker",
 ]

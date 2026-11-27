@@ -239,7 +239,7 @@ fn failure(detail: &str) -> Response {
     Response::error(text, 500).unwrap_or_else(|_| Response::empty().expect("empty response"))
 }
 
-fn core_text(lang: &str, key: Key) -> String {
+pub(crate) fn core_text(lang: &str, key: Key) -> String {
     let strings = |l: &str| {
         source::CORE_LOCALES
             .iter()
@@ -342,6 +342,20 @@ fn doc(content_type: &'static str, body: String) -> Outcome {
 /// Public URLs when the site has no configured origin: fixed, so every host serves the same
 /// ids, and plainly not the real site, so the warning below gets noticed.
 pub const UNSET_ORIGIN: &str = "http://localhost";
+
+/// A post's public URL for webhook payloads, by the same origin rule as reader pages.
+pub async fn post_url(lang: &str, slug: &str) -> String {
+    let origin = match SampleSource::get().settings().await {
+        Ok(s) => public_origin(&s).to_owned(),
+        Err(e) => {
+            warn(&format!(
+                "webhook.post_url: settings unreadable ({e}); using {UNSET_ORIGIN}"
+            ));
+            UNSET_ORIGIN.to_owned()
+        }
+    };
+    format!("{origin}/{lang}/{slug}")
+}
 
 fn public_origin(settings: &Settings) -> &str {
     match settings.origin.as_deref().map(|o| o.trim_end_matches('/')) {

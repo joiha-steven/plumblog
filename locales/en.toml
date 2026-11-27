@@ -13,3 +13,68 @@ redacted = "[hidden]"
 [llms]
 # Heading of the post list in /llms.txt, read by AI tools.
 posts = "Posts"
+
+[admin]
+# Browser tab and installed app name.
+title = "{site} admin"
+noscript = "The admin needs JavaScript. Turn it on for this site, then reload."
+# A missing admin file (an old script after a deploy): plain-text 404.
+file_not_found = "Not found"
+
+[admin.nav]
+main = "Main"
+posts = "Posts"
+pages = "Pages"
+media = "Media"
+settings = "Settings"
+account = "Account and options"
+# Under the account icon in the phone bar.
+me = "Account"
+
+[admin.role]
+owner = "Owner"
+writer = "Writer"
+
+[admin.me]
+colors = "Light & dark"
+language = "Admin language"
+
+[admin.theme]
+light = "Light"
+dark = "Dark"
+system = "Auto"
+
+[admin.lang]
+# Each language in its own name.
+en = "English"
+vi = "Tiếng Việt"
+
+[admin.posts]
+new = "New post"
+empty = "No posts yet"
+empty_hint = "What you write shows up here."
+
+[admin.pages]
+empty = "No pages yet"
+empty_hint = "Pages are for things that stay put, like About or Contact."
+
+[admin.media]
+empty = "No pictures yet"
+empty_hint = "Pictures you add to posts show up here."
+
+[admin.state]
+loading = "Loading"
+retry = "Try again"
+error_title = "Something went wrong"
+error_hint = "The blog did not answer as expected ({code}). Try again in a moment."
+network_title = "Can't reach the blog"
+network_hint = "Check your connection, then try again."
+offline_title = "You're offline."
+offline_hint = "What you see may be out of date until you're back online."
+no_permission_title = "Only the owner can open Settings"
+no_permission_hint = "You're signed in as a writer. You can still write, publish and manage pictures."
+back_to_posts = "Back to Posts"
+not_found_title = "Page not found"
+not_found_hint = "This address is not part of the admin."
+building_title = "Not built yet"
+building_hint = "This part of the admin is still being built."

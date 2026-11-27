@@ -318,13 +318,13 @@ pub async fn redirect_kept_until_live<S: Store>(db: &S) -> Check {
         ok("find_redirect", db.find_redirect("/vi/later").await)?,
         Some("/vi/elsewhere".into()),
     )?;
-    ok("publish_due", db.publish_due(4999).await)?;
+    ok("publish_due", db.publish_due(4999, 100).await)?;
     eq!(
         "not yet due keeps it",
         ok("find_redirect", db.find_redirect("/vi/later").await)?,
         Some("/vi/elsewhere".into()),
     )?;
-    ok("publish_due", db.publish_due(5000).await)?;
+    ok("publish_due", db.publish_due(5000, 100).await)?;
     eq!(
         "publish_due removes it",
         ok("find_redirect", db.find_redirect("/vi/later").await)?,

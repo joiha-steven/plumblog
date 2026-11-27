@@ -1,6 +1,6 @@
 //! Storage behind traits. The Worker implements them over D1/R2; `memory` implements them
-//! in plain Rust so logic is tested without Cloudflare. `migrations/0001_init.sql` is the
-//! schema both follow; its constraints and ON DELETE rules are part of the contract.
+//! in plain Rust so logic is tested without Cloudflare. The files in `migrations/` are the
+//! schema both follow; their constraints and ON DELETE rules are part of the contract.
 //!
 //! Shared rules for every trait:
 //! - Times are `i64` ms since the Unix epoch (UTC). The store never reads a clock.
@@ -21,6 +21,7 @@ mod posts;
 mod redirects;
 pub mod search;
 mod settings;
+mod signin;
 mod taxonomy;
 mod users;
 mod webhooks;
@@ -45,9 +46,16 @@ pub use posts::{
 };
 pub use redirects::{Redirect, RedirectStore};
 pub use settings::{OptionOwner, PluginState, SettingsStore};
+pub use signin::{
+    ChallengePurpose, ChallengeStore, INTERNAL_SETTING_KEYS, LoginLimitStore, MAX_FAILURE_KEYS,
+    ORIGIN_KEY, Recorded, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore,
+    TURNSTILE_SITE_KEY, is_internal_setting, public_settings, setup_hash_json,
+};
 pub use taxonomy::{NewSeries, Series, Tag, TaxonomyStore};
 pub use users::{NewUser, ProfileUpdate, SiteStore, User, UserStore};
-pub use webhooks::{NewWebhook, Webhook, WebhookStore};
+pub use webhooks::{
+    AttemptResult, Delivery, DeliveryStore, NewDelivery, NewWebhook, Webhook, WebhookStore,
+};
 
 /// Largest page any list query returns, so one request cannot read a whole table.
 pub const MAX_PAGE: u32 = 100;
@@ -60,6 +68,9 @@ pub trait Store:
     + PasskeyStore
     + TokenStore
     + InviteStore
+    + LoginLimitStore
+    + ChallengeStore
+    + SetupStore
     + MediaStore
     + TaxonomyStore
     + PostStore
@@ -67,6 +78,7 @@ pub trait Store:
     + CommentStore
     + SettingsStore
     + WebhookStore
+    + DeliveryStore
     + LogStore
     + plumblog_syslog::LogSink
 {
@@ -79,6 +91,9 @@ impl<T> Store for T where
         + PasskeyStore
         + TokenStore
         + InviteStore
+        + LoginLimitStore
+        + ChallengeStore
+        + SetupStore
         + MediaStore
         + TaxonomyStore
         + PostStore
@@ -86,6 +101,7 @@ impl<T> Store for T where
         + CommentStore
         + SettingsStore
         + WebhookStore
+        + DeliveryStore
         + LogStore
         + plumblog_syslog::LogSink
         + ?Sized

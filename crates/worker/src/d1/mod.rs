@@ -21,6 +21,7 @@ mod row;
 #[cfg(feature = "contract-tests")]
 pub mod selftest;
 mod settings;
+mod signin;
 mod taxonomy;
 mod users;
 mod webhooks;
@@ -336,12 +337,15 @@ impl D1Store {
             "passkeys",
             "api_tokens",
             "invites",
+            "login_failures",
+            "auth_challenges",
             "media",
             "series",
             "tags",
             "settings",
             "extension_options",
             "plugins",
+            "webhook_deliveries",
             "webhooks",
             "system_log",
             "users",

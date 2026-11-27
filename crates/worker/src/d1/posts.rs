@@ -344,22 +344,24 @@ impl PostStore for D1Store {
         Ok(())
     }
 
-    async fn publish_due(&self, now: i64) -> Result<Vec<PostId>> {
-        // One batch; every statement selects the same due set, which only the last one
-        // changes. Paths built in SQL match `/<lang>/<slug>` from save_post.
-        let due = "status = 'scheduled' AND published_at <= ?";
+    async fn publish_due(&self, now: i64, limit_n: u32) -> Result<Vec<PostId>> {
+        // One batch; every statement selects the same due set (earliest `limit_n`), which
+        // only the last one changes. Paths built in SQL match `/<lang>/<slug>` from save_post.
+        let due = "id IN (SELECT id FROM posts WHERE status = 'scheduled' AND published_at <= ? \
+                   ORDER BY published_at, id LIMIT ?)";
+        let p = || [bound(now), bound(i64::from(limit_n))];
         let redirects = self.stmt(
             "publish_due_redirects",
             &format!(
                 "DELETE FROM redirects WHERE from_path IN \
                  (SELECT '/' || lang || '/' || slug FROM posts WHERE {due})"
             ),
-            &[bound(now)],
+            &p(),
         )?;
         let bump = bump_if(
             self,
             &format!("EXISTS (SELECT 1 FROM posts WHERE {due})"),
-            &[bound(now)],
+            &p(),
         )?;
         let up = self.stmt(
             "publish_due",
@@ -367,7 +369,7 @@ impl PostStore for D1Store {
                 "UPDATE posts SET status = 'published', version = version + 1 WHERE {due} \
                  RETURNING id"
             ),
-            &[bound(now)],
+            &p(),
         )?;
         let results = self.batch("publish_due", vec![redirects, bump, up]).await?;
         let mut ids = Self::batch_ints("publish_due", &results[2])?

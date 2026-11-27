@@ -1,8 +1,9 @@
 use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
-use plumblog_store::{NewUser, ProfileUpdate, SiteStore, User, UserStore};
+use plumblog_store::{NewSession, NewUser, ProfileUpdate, SiteStore, User, UserStore};
 
 use super::{
-    D1Store, Failure, Row, Stmt, bound, bump_if, guard, int, opt_int, opt_text, storage, text,
+    D1Store, Failure, Row, Stmt, bound, bump, bump_if, guard, int, invalid, opt_int, opt_text,
+    storage, text,
 };
 
 pub(super) const USER_COLS: &str =
@@ -224,6 +225,91 @@ impl UserStore for D1Store {
             now,
         )
         .await
+    }
+
+    async fn change_password(
+        &self,
+        id: UserId,
+        hash: Option<String>,
+        profile: Option<ProfileUpdate>,
+        session: NewSession,
+        now: i64,
+    ) -> Result<i64> {
+        if session.user_id != id {
+            return Err(invalid(format!(
+                "session for user {} given for user {}",
+                session.user_id.0, id.0
+            )));
+        }
+        // Passkey-only (`hash = None`): the account must still have no password when the
+        // batch runs, or an owner reset racing this change would be left unusable.
+        let condition = if hash.is_some() {
+            "EXISTS (SELECT 1 FROM users WHERE id = ?)"
+        } else {
+            "EXISTS (SELECT 1 FROM users WHERE id = ? AND password_hash IS NULL)"
+        };
+        let mut stmts = vec![guard(
+            self,
+            "change_password_guard",
+            condition,
+            &[bound(id.0)],
+        )?];
+        let write = if let Some(p) = &profile {
+            stmts.push(bump(self)?);
+            self.stmt(
+                "change_password",
+                "UPDATE users SET login = ?, slug = ?, display_name = ?, bio = ?, \
+                 password_hash = ?, updated_at = ? WHERE id = ?",
+                &[
+                    text(&p.login),
+                    text(&p.slug),
+                    text(&p.display_name),
+                    text(&p.bio),
+                    opt_text(hash.as_deref()),
+                    int(now)?,
+                    bound(id.0),
+                ],
+            )?
+        } else {
+            self.stmt(
+                "change_password",
+                "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+                &[opt_text(hash.as_deref()), int(now)?, bound(id.0)],
+            )?
+        };
+        stmts.push(write);
+        stmts.push(self.stmt(
+            "change_password_sessions",
+            "DELETE FROM sessions WHERE user_id = ?",
+            &[bound(id.0)],
+        )?);
+        stmts.push(self.stmt(
+            "change_password_session",
+            "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            &[
+                text(&session.token_hash),
+                bound(id.0),
+                int(session.created_at)?,
+                int(session.expires_at)?,
+            ],
+        )?);
+        let results = match self.batch_guarded("change_password", stmts).await {
+            Ok(r) => r,
+            Err(Failure::Guard) if hash.is_none() => {
+                // Which half of the guard failed: a missing user, or one with a password.
+                self.get_user(id).await?;
+                return Err(Error::new(
+                    ErrorCode::Conflict,
+                    "passkey-only change, but the account has a password",
+                ));
+            }
+            Err(Failure::Guard) => return Err(user_not_found(id)),
+            Err(Failure::Error(e)) => return Err(e),
+        };
+        let last = results
+            .last()
+            .ok_or_else(|| storage("change_password", "batch returned no results"))?;
+        Self::last_row_id("change_password_session", last)
     }
 
     async fn set_role(&self, id: UserId, role: Role, now: i64) -> Result<()> {

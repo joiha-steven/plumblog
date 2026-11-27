@@ -41,16 +41,7 @@ fn main() {
 
     embed_plugins(&root.join("plugins"), &mut out);
 
-    // Core UI text, for the few strings shown when the theme itself cannot render.
-    let mut locales = Vec::new();
-    walk(&root.join("locales"), &mut locales);
-    locales.sort();
-    out.push_str("pub static CORE_LOCALES: &[(&str, &str)] = &[\n");
-    for p in &locales {
-        let lang = p.file_stem().unwrap().to_string_lossy();
-        writeln!(out, "    ({lang:?}, include_str!({:?})),", p.display()).unwrap();
-    }
-    out.push_str("];\n");
+    embed_locales(&root.join("locales"), &mut out);
 
     let mut posts = Vec::new();
     walk(&sample, &mut posts);
@@ -170,4 +161,37 @@ fn rel(root: &Path, p: &Path) -> String {
         .unwrap()
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+/// A locale file without its `[admin.<name>]` sections (each runs to the next `[` header).
+/// The bare `[admin]` section stays: the Worker's shell uses its title and noscript text.
+fn without_admin_client_text(src: &str) -> String {
+    let mut keep = true;
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        if line.starts_with('[') {
+            keep = !line.starts_with("[admin.");
+        }
+        if keep {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn embed_locales(dir: &Path, out: &mut String) {
+    // Core UI text, for the few strings shown when the theme itself cannot render. The admin
+    // client's text (`[admin.*]` subsections) is built into its bundle by scripts/admin-build,
+    // so it is left out here: it would only grow the wasm.
+    let mut locales = Vec::new();
+    walk(dir, &mut locales);
+    locales.sort();
+    out.push_str("pub static CORE_LOCALES: &[(&str, &str)] = &[\n");
+    for p in &locales {
+        let lang = p.file_stem().unwrap().to_string_lossy();
+        let text = without_admin_client_text(&fs::read_to_string(p).unwrap());
+        writeln!(out, "    ({lang:?}, {text:?}),").unwrap();
+    }
+    out.push_str("];\n");
 }

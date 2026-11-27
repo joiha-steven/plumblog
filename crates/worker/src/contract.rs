@@ -28,7 +28,8 @@ const MODERATE: &str = "/__moderate";
 /// this variable, which only tools/wrangler.dev.toml sets.
 const ENABLE_VAR: &str = "PLUMBLOG_CONTRACT_TESTS";
 
-fn enabled(env: &Env) -> bool {
+/// Whether this Worker may serve test routes (`/__contract`, `/__webhooks/...`).
+pub fn enabled(env: &Env) -> bool {
     env.var(ENABLE_VAR).map(|v| v.to_string()).ok().as_deref() == Some("wipe-db")
 }
 
