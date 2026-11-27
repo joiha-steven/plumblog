@@ -144,21 +144,54 @@ test("picture descriptions are one line with brackets and backslashes escaped", 
   assert.equal(md('<img src="https://x.test/a.png" alt="a\nb\n\n  c [d] e\\">'), "![a b c \\[d\\] e\\\\](https://x.test/a.png)");
 });
 
-test("20,000 nested spans and 50,000-deep nesting convert fast and do not throw", () => {
-  const nest = (tag, n, inner = "x") => `<${tag}>`.repeat(n) + inner + `</${tag}>`.repeat(n);
-  for (const [name, html] of [
-    ["spans", nest("span", 20_000)],
-    ["spans around a block", nest("span", 20_000, "<p>x</p>")],
-    ["divs", nest("div", 50_000)],
-    ["bold", nest("b", 50_000)],
-    ["lists", "<ul><li>".repeat(50_000) + "x" + "</li></ul>".repeat(50_000)],
-    ["quotes", nest("blockquote", 50_000)],
-  ]) {
-    const t = performance.now();
-    const out = md(html);
-    const took = performance.now() - t;
-    assert.match(out, /x/, name);
-    assert.ok(took < 1000, `${name}: ${took.toFixed(0)} ms`);
+// Wall time on a shared CI runner is a poor clock, so this checks how the work grows, not a
+// fixed number of milliseconds: doubling the input must not much more than double the time
+// (quadratic work would quadruple it). Only conversion is timed, never happy-dom's parsing;
+// best of three conversions per size. The absolute bound is a backstop far above normal.
+const nest = (tag, n, inner = "x") => `<${tag}>`.repeat(n) + inner + `</${tag}>`.repeat(n);
+const SHAPES = {
+  spans: (n) => nest("span", n),
+  "spans around a block": (n) => nest("span", n, "<p>x</p>"),
+  divs: (n) => nest("div", n),
+  bold: (n) => nest("b", n),
+  lists: (n) => "<ul><li>".repeat(n) + "x" + "</li></ul>".repeat(n),
+  quotes: (n) => nest("blockquote", n),
+};
+const parsed = (html) => new win.DOMParser().parseFromString(html, "text/html").body;
+const convertMs = (body) => {
+  const t = performance.now();
+  const out = htmlToMarkdown(body);
+  return [performance.now() - t, out];
+};
+// One parse, three conversions: conversion only reads the tree.
+const best = (html) => {
+  const body = parsed(html);
+  let ms = Infinity;
+  let out = "";
+  for (let i = 0; i < 3; i++) {
+    const [took, o] = convertMs(body);
+    ms = Math.min(ms, took);
+    out = o;
+  }
+  return [ms, out];
+};
+
+test("deep and wide nesting converts in time linear in its size, and never throws", () => {
+  for (const [name, make] of Object.entries(SHAPES)) {
+    const [small, outSmall] = best(make(10_000));
+    const [large, outLarge] = best(make(20_000));
+    assert.match(outSmall, /x/, name);
+    assert.match(outLarge, /x/, name);
+    // A floor keeps timer noise on tiny durations from deciding the ratio.
+    const ratio = large / Math.max(small, 5);
+    assert.ok(ratio < 3, `${name}: ${small.toFixed(0)} ms -> ${large.toFixed(0)} ms (x${ratio.toFixed(2)})`);
+    assert.ok(large < 10_000, `${name}: ${large.toFixed(0)} ms`);
+  }
+});
+
+test("50,000-deep nesting converts without overflowing the stack", () => {
+  for (const [name, make] of Object.entries(SHAPES)) {
+    assert.match(htmlToMarkdown(parsed(make(50_000))), /x/, name);
   }
 });
 
