@@ -1,7 +1,8 @@
 // Starts the real Rust Worker under `wrangler dev` with local D1/R2, for HTTP-level tests.
-// Run through scripts/worker-test, which installs the pinned tools this file expects.
+// Run through scripts/worker-test: it installs the pinned tools, builds the wasm once
+// (node --test runs files in parallel processes) and sets WORKER_TEST_RUN_DIR.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -10,14 +11,16 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const CONFIG = join(ROOT, "tools/wrangler.dev.toml");
 const WRANGLER = join(ROOT, "tools/node_modules/.bin/wrangler");
-const WORKER_BUILD = process.env.WORKER_BUILD ?? join(ROOT, "target/tools/bin/worker-build");
+// scripts/worker-test removes this dir and kills the process groups recorded in it,
+// as a second line of defence if this process dies without running its own cleanup.
+const RUN_DIR = process.env.WORKER_TEST_RUN_DIR ?? tmpdir();
 const READY_TIMEOUT_MS = 60_000;
 
 // Keep wrangler quiet and non-interactive; never phone home from tests.
 const ENV = { ...process.env, WRANGLER_SEND_METRICS: "false", CI: "1", NO_COLOR: "1" };
 
-function run(cmd, args, opts = {}) {
-  const r = spawnSync(cmd, args, { cwd: ROOT, env: ENV, encoding: "utf8", ...opts });
+function run(cmd, args) {
+  const r = spawnSync(cmd, args, { cwd: ROOT, env: ENV, encoding: "utf8" });
   if (r.status !== 0) {
     throw new Error(`${cmd} ${args.join(" ")} failed (exit ${r.status ?? r.signal})\n${r.stdout}\n${r.stderr}`);
   }
@@ -36,23 +39,40 @@ function freePort() {
   });
 }
 
-// Built once per test process; every test file shares the same wasm.
-let built = false;
-function buildWorker() {
-  if (built) return;
-  // --no-opt: wasm-opt is for deploy size; tests want the fastest correct build.
-  run(WORKER_BUILD, ["--release", "--no-opt", "--out-dir", "../../target/worker-dev"], {
-    cwd: join(ROOT, "crates/worker"),
+// Every live wrangler group and temp dir, so Ctrl-C or a crash cannot leak them.
+const live = new Set();
+function cleanupSync(entry) {
+  if (!live.has(entry)) return; // already cleaned; never signal a pid that may be reused
+  if (entry.pgid) {
+    try {
+      process.kill(-entry.pgid, "SIGKILL");
+    } catch {
+      // Group already gone.
+    }
+  }
+  rmSync(entry.state, { recursive: true, force: true });
+  if (entry.pgidFile) rmSync(entry.pgidFile, { force: true });
+  live.delete(entry);
+}
+process.on("exit", () => [...live].forEach(cleanupSync));
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(sig, () => {
+    [...live].forEach(cleanupSync);
+    process.exit(128 + ({ SIGHUP: 1, SIGINT: 2, SIGTERM: 15 })[sig]);
   });
-  built = true;
 }
 
-/** Builds the Worker, applies migrations to a fresh local D1, starts it. Call stop() when done. */
+/** Applies migrations to a fresh local D1 and starts the Worker. Call stop() when done. */
 export async function startWorker() {
-  buildWorker();
-  const state = mkdtempSync(join(tmpdir(), "plumblog-wrangler-"));
-  const common = ["--config", CONFIG, "--persist-to", state];
-  run(WRANGLER, ["d1", "migrations", "apply", "DB", "--local", ...common]);
+  const entry = { state: mkdtempSync(join(RUN_DIR, "plumblog-wrangler-")), pgid: null, pgidFile: null };
+  live.add(entry);
+  const common = ["--config", CONFIG, "--persist-to", entry.state];
+  try {
+    run(WRANGLER, ["d1", "migrations", "apply", "DB", "--local", ...common]);
+  } catch (e) {
+    cleanupSync(entry);
+    throw e;
+  }
 
   const port = await freePort();
   const inspector = await freePort();
@@ -63,6 +83,9 @@ export async function startWorker() {
       "--show-interactive-dev-session=false", "--log-level", "warn"],
     { cwd: ROOT, env: ENV, detached: true, stdio: ["ignore", "pipe", "pipe"] },
   );
+  entry.pgid = child.pid;
+  entry.pgidFile = join(RUN_DIR, `${child.pid}.pgid`);
+  writeFileSync(entry.pgidFile, "");
   let log = "";
   child.stdout.on("data", (d) => (log += d));
   child.stderr.on("data", (d) => (log += d));
@@ -72,11 +95,11 @@ export async function startWorker() {
   const stop = () =>
     new Promise((ok) => {
       if (exited !== null) {
-        rmSync(state, { recursive: true, force: true });
+        cleanupSync(entry);
         return ok();
       }
       child.once("exit", () => {
-        rmSync(state, { recursive: true, force: true });
+        cleanupSync(entry);
         ok();
       });
       try {
@@ -84,19 +107,16 @@ export async function startWorker() {
       } catch {
         // Already gone between the check and the kill.
       }
-      setTimeout(() => {
-        try {
-          process.kill(-child.pid, "SIGKILL");
-        } catch {
-          // Exited after SIGTERM, as intended.
-        }
-      }, 5_000).unref();
+      setTimeout(() => cleanupSync(entry), 5_000).unref();
     });
 
   const url = `http://127.0.0.1:${port}`;
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (exited !== null) throw new Error(`wrangler dev exited early (${exited}):\n${log}`);
+    if (exited !== null) {
+      await stop();
+      throw new Error(`wrangler dev exited early (${exited}):\n${log}`);
+    }
     try {
       await fetch(`${url}/healthz`);
       return { url, stop };
