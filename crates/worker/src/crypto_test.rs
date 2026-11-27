@@ -71,7 +71,7 @@ async fn run(body: &[u8]) -> std::result::Result<String, String> {
             Ok(n.to_string())
         }
         // The browser stretch done in Rust (salt from `stretch_salt`), to hold
-        // web/admin/js/stretch.js to the same vector.
+        // web/admin/src/auth/stretch.ts to the same vector.
         "stretch" => {
             use plumblog_auth::password::{STRETCH_ITERATIONS, stretch_salt};
             let salt = stretch_salt(get("site_id")?, get("login")?);
