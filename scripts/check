@@ -83,6 +83,18 @@ for f in "${files[@]}"; do
 done
 [ -z "$bad" ] || fail "non-ASCII characters outside locales/ and guides/: $bad"
 
+step "no uppercase styling in web/ and themes/"
+# All-caps and small-caps are hard to read, worst for Vietnamese diacritics; write words in normal case.
+bad=""
+for f in "${files[@]}"; do
+  case "$f" in web/*.css|web/*.html|themes/*.css|themes/*.html) ;; *) continue ;; esac
+  rc=0
+  hits=$(grep -nEi 'text-transform[[:space:]]*:[[:space:]]*(uppercase|capitalize)|font-variant(-caps)?[[:space:]]*:[^;}]*small-caps' "$f") || rc=$?
+  [ "$rc" -le 1 ] || fail "grep error while scanning $f"
+  if [ "$rc" -eq 0 ]; then bad+="$f "; echo "$hits" | sed "s|^|  $f:|" | cut -c1-140; fi
+done
+[ -z "$bad" ] || fail "uppercase or small-caps styling (see docs/ARCHITECTURE.md, Design language): $bad"
+
 step "doc length limits"
 # Long docs drift and get skimmed; a hard cap forces saying each thing once.
 bad=""
