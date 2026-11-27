@@ -2,6 +2,7 @@
 //! theme contract, raw HTML is dropped and URLs are filtered in one place.
 
 use crate::link::{self, Embed};
+use crate::mathml;
 use crate::text::{self, Counter};
 use crate::{Options, Rendered, TocEntry, Warning};
 use pulldown_cmark::{
@@ -38,6 +39,8 @@ struct Writer {
     note_bodies: HashMap<String, String>,
     note_depth: usize,
     note_label: Option<String>,
+    /// Id of the first reference to each note, where its back link points.
+    note_first_ref: HashMap<String, String>,
     ids: HashSet<String>,
     toc: Vec<TocEntry>,
     heading_text: Option<String>,
@@ -81,16 +84,11 @@ enum CodeKind {
 
 impl Writer {
     fn new(events: &[Event]) -> Self {
-        let defined_notes = events
-            .iter()
-            .filter_map(|e| match e {
-                Event::Start(Tag::FootnoteDefinition(l)) => Some(l.to_string()),
-                _ => None,
-            })
-            .collect();
+        let (defined_notes, note_order) = note_numbering(events);
         Self {
             bufs: vec![String::new()],
             defined_notes,
+            note_order,
             ..Self::default()
         }
     }
@@ -116,6 +114,8 @@ impl Writer {
 
     /// Text that is prose (not code, alt text or metadata) feeds the counters.
     fn prose(&mut self, s: &str) {
+        // NFC so decomposed input (macOS) counts and cuts like composed input.
+        let s = &*text::nfc(s);
         self.words.add(s);
         if let Some(h) = &mut self.heading_text {
             h.push_str(s);
@@ -139,6 +139,13 @@ impl Writer {
                 } else {
                     self.alt.push_str(t);
                 }
+            }
+            // Inside alt text, math and note markers are plain words.
+            Event::InlineMath(t) | Event::DisplayMath(t) if !self.image.is_empty() => {
+                self.alt.push_str(t);
+            }
+            Event::FootnoteReference(_) | Event::HardBreak if !self.image.is_empty() => {
+                self.alt.push(' ');
             }
             Event::InlineMath(t) => self.math(t, false),
             Event::DisplayMath(t) => self.math(t, true),
@@ -517,22 +524,15 @@ impl Writer {
         self.seen.math = true;
         let storage = Storage::new();
         // Parse once to find errors: pulldown-latex would print a multi-line diagnostic into
-        // the page. Readers get the TeX source instead; the author gets a warning.
-        let error = Parser::new(tex, &storage).find_map(Result::err);
-        if let Some(err) = error {
+        // the page. Its output is untrusted even without errors, see `mathml`.
+        if let Some(err) = Parser::new(tex, &storage).find_map(Result::err) {
             let first_line = err
                 .to_string()
                 .lines()
                 .next()
                 .unwrap_or_default()
                 .to_owned();
-            self.warnings.push(Warning {
-                code: "markdown.math_invalid",
-                detail: format!("{first_line}: {tex}"),
-            });
-            self.push("<code class=\"math-error\">");
-            self.esc(tex);
-            self.push("</code>");
+            self.math_error(tex, &first_line);
             return;
         }
         let storage = Storage::new();
@@ -544,18 +544,25 @@ impl Writer {
             },
             ..RenderConfig::default()
         };
-        let mut mathml = String::new();
-        if let Err(err) = push_mathml(&mut mathml, Parser::new(tex, &storage), config) {
-            self.warnings.push(Warning {
-                code: "markdown.math_invalid",
-                detail: format!("{err}: {tex}"),
-            });
-            self.push("<code class=\"math-error\">");
-            self.esc(tex);
-            self.push("</code>");
-        } else {
-            self.push(&mathml);
+        let mut raw = String::new();
+        match push_mathml(&mut raw, Parser::new(tex, &storage), config) {
+            Err(err) => self.math_error(tex, &err.to_string()),
+            Ok(()) => match mathml::sanitize(&raw) {
+                Some(safe) => self.push(&safe),
+                None => self.math_error(tex, "markup outside the MathML allowlist"),
+            },
         }
+    }
+
+    /// Readers see the TeX source; the author gets a warning to fix it.
+    fn math_error(&mut self, tex: &str, detail: &str) {
+        self.warnings.push(Warning {
+            code: "markdown.math_invalid",
+            detail: format!("{detail}: {tex}"),
+        });
+        self.push("<code class=\"math-error\">");
+        self.esc(tex);
+        self.push("</code>");
     }
 
     fn note_ref(&mut self, label: &str) {
@@ -566,12 +573,18 @@ impl Writer {
             self.push("]");
             return;
         }
-        let n = if let Some(p) = self.note_order.iter().position(|l| l == label) {
-            p + 1
-        } else {
-            self.note_order.push(label.to_owned());
-            self.note_order.len()
+        let in_unused_note = self
+            .note_label
+            .as_ref()
+            .is_some_and(|l| !self.note_order.contains(l));
+        let Some(pos) = self.note_order.iter().position(|l| l == label) else {
+            return;
         };
+        if in_unused_note {
+            // This body is discarded; counting its reference would shift the ids of real ones.
+            return;
+        }
+        let n = pos + 1;
         let count = self.note_refs.entry(label.to_owned()).or_insert(0);
         *count += 1;
         let id = if *count == 1 {
@@ -579,6 +592,9 @@ impl Writer {
         } else {
             format!("fnref-{n}-{count}")
         };
+        self.note_first_ref
+            .entry(label.to_owned())
+            .or_insert_with(|| id.clone());
         let _ = write!(
             self.out(),
             "<sup class=\"fnref\" id=\"{id}\"><a href=\"#fn-{n}\" role=\"doc-noteref\">{n}</a></sup>"
@@ -607,8 +623,13 @@ impl Writer {
             for (i, label) in self.note_order.iter().enumerate() {
                 let n = i + 1;
                 let body = self.note_bodies.remove(label).unwrap_or_default();
+                let target = self
+                    .note_first_ref
+                    .get(label)
+                    .cloned()
+                    .unwrap_or_else(|| format!("fnref-{n}"));
                 let back = format!(
-                    " <a class=\"fnback\" href=\"#fnref-{n}\" role=\"doc-backlink\">&#8617;&#xFE0E;</a>"
+                    " <a class=\"fnback\" href=\"#{target}\" role=\"doc-backlink\">&#8617;&#xFE0E;</a>"
                 );
                 let _ = write!(html, "<li id=\"fn-{n}\">");
                 if let Some(head) = body.strip_suffix("</p>\n") {
@@ -631,6 +652,44 @@ impl Writer {
             warnings: self.warnings,
         }
     }
+}
+
+/// Defined note labels, and the notes to show in display order: notes referenced from the
+/// post in order of first reference, then notes referenced only from those notes. A note
+/// reachable from nowhere is not shown, and references inside it do not count.
+fn note_numbering(events: &[Event]) -> (HashSet<String>, Vec<String>) {
+    let mut defined = HashSet::new();
+    let mut main_refs: Vec<String> = Vec::new();
+    let mut nested: HashMap<String, Vec<String>> = HashMap::new();
+    let mut current: Option<String> = None;
+    for e in events {
+        match e {
+            Event::Start(Tag::FootnoteDefinition(l)) => {
+                defined.insert(l.to_string());
+                current = Some(l.to_string());
+            }
+            Event::End(TagEnd::FootnoteDefinition) => current = None,
+            Event::FootnoteReference(l) => match &current {
+                None => main_refs.push(l.to_string()),
+                Some(c) => nested.entry(c.clone()).or_default().push(l.to_string()),
+            },
+            _ => {}
+        }
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut queue = main_refs;
+    let mut i = 0;
+    while i < queue.len() {
+        let label = queue[i].clone();
+        i += 1;
+        if defined.contains(&label) && !order.contains(&label) {
+            if let Some(children) = nested.get(&label) {
+                queue.extend(children.iter().cloned());
+            }
+            order.push(label);
+        }
+    }
+    (defined, order)
 }
 
 fn escape(out: &mut String, s: &str) {

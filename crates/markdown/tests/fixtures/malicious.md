@@ -19,3 +19,11 @@
 <style>body{display:none}</style>
 
 &lt;script&gt; written as entities
+
+Math: $\operatorname{<img src=x onerror=alert(1)>}$ and $\mathop{<svg onload=alert(1)>}$ and $\mathrm{a<b}$.
+
+$$\operatorname{<img src=x onerror=alert(1)>}$$
+
+```math
+\mathop{<svg onload=alert(1)>}
+```

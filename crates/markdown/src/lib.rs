@@ -7,6 +7,7 @@
 
 mod html;
 mod link;
+mod mathml;
 mod text;
 
 pub use text::heading_id;
