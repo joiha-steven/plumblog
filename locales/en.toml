@@ -213,6 +213,7 @@ selection_bar = "Format selection"
 more_tools = "More tools"
 blocks = "Insert a block"
 saving = "Saving…"
+saved = "Saved"
 saved_here = "Saved on this device"
 not_saved = "Not saved"
 not_saved_hint = "This browser is not letting the admin keep drafts. Copy your text somewhere safe, then check the site's storage settings."
@@ -258,6 +259,13 @@ tab_title = "This draft was changed in another tab."
 tab_hint = "Saving here is paused so neither copy is lost."
 keep_this = "Keep this one"
 load_other = "Load that version"
+
+[admin.editor.sync]
+failed = "Could not save to the site. Your text is kept on this device; it is sent again when you next edit or come back online."
+slug_taken = "Could not save to the site: posts with this title's address already exist. Change the title a little and keep writing."
+
+[admin.editor.warning.markdown]
+math_invalid = "A formula could not be rendered; check the TeX between the dollar signs."
 
 [admin.editor.mode]
 write = "Write"

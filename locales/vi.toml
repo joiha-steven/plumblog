@@ -205,6 +205,7 @@ selection_bar = "Định dạng đoạn đã chọn"
 more_tools = "Thêm công cụ"
 blocks = "Chèn khối"
 saving = "Đang lưu…"
+saved = "Đã lưu"
 saved_here = "Đã lưu trên máy này"
 not_saved = "Chưa lưu được"
 not_saved_hint = "Trình duyệt này không cho trang quản trị giữ bản nháp. Hãy chép bài ra chỗ an toàn, rồi kiểm tra cài đặt lưu trữ của trang."
@@ -250,6 +251,13 @@ tab_title = "Bản nháp này vừa được sửa ở một tab khác."
 tab_hint = "Tạm dừng lưu ở đây để không mất bản nào."
 keep_this = "Giữ bản này"
 load_other = "Tải bản kia"
+
+[admin.editor.sync]
+failed = "Chưa lưu được lên trang. Bài vẫn được giữ trên máy này và sẽ được gửi lại khi bạn sửa tiếp hoặc có mạng trở lại."
+slug_taken = "Chưa lưu được lên trang: địa chỉ theo tiêu đề này đã có bài dùng. Hãy đổi tiêu đề một chút rồi viết tiếp."
+
+[admin.editor.warning.markdown]
+math_invalid = "Có công thức chưa hiển thị được; hãy xem lại phần TeX giữa hai dấu đô la."
 
 [admin.editor.mode]
 write = "Viết"

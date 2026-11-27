@@ -2,7 +2,8 @@
  * The writing screen (docs/ARCHITECTURE.md, Admin and editor): title and Markdown body with
  * live styling, Write / Split / Preview, a toolbar that steps back while you type, a
  * selection bubble, the "/" block menu, focus mode, typewriter scrolling, a word count and
- * drafts saved in this browser. Loaded as its own chunk, only on the editor route.
+ * drafts saved in this browser, then on the server (sync.ts). Loaded as its own chunk, only
+ * on the editor route.
  */
 
 import { redo, undo } from "@codemirror/commands";
@@ -12,13 +13,14 @@ import type { Post } from "../api/model.gen";
 import { type Child, h } from "../dom";
 import { type IconName, icon } from "../icons";
 import { num, t } from "../i18n";
-import { HREF } from "../router";
+import { HREF, editHref, go } from "../router";
 import { closePop, openPop, openPopEl, toast } from "../ui";
 import { BLOCKS, type Block, blockName, fold, picker } from "./blocks";
 import { createEditor, inCode, removeCard, showCard } from "./cm";
 import { countWords, heading, link, linePrefix, wrap } from "./commands";
 import { mdAlt, mdUrl } from "./md-text";
-import { draftKey, loadDraft, saveDraft } from "./drafts";
+import { draftKey, loadDraft, saveDraft, startState } from "./drafts";
+import type { Sync } from "./sync";
 
 export interface EditorOptions {
   root: HTMLElement;
@@ -92,6 +94,9 @@ const statusName = (s: Post["status"]): string =>
   // i18n: admin.status.draft admin.status.scheduled admin.status.published admin.status.trashed
   t(`admin.status.${s}`);
 
+/** The last editor's final local save, flushed when it left the page; the next mount reads after it. */
+let flushed: Promise<unknown> = Promise.resolve();
+
 export async function mountEditor(o: EditorOptions): Promise<void> {
   const post = o.post;
   // A new post's draft key lives in its URL (?draft=), so a reload finds it again and two new
@@ -104,22 +109,27 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     history.replaceState(history.state, "", url);
   }
   const key = draftKey(o.user, post?.id, newId);
+  await flushed;
+  // Redrawn (online/offline) while an earlier mount was creating this post: open the post it
+  // became rather than creating a second one (sync.ts `creates`).
+  if (post === undefined) {
+    const made = await import("./sync").then(
+      (m) => m.settled(key),
+      () => undefined,
+    );
+    if (made) {
+      history.replaceState(history.state, "", editHref(made.id));
+      return go(editHref(made.id));
+    }
+  }
   const local = await loadDraft(key);
-  const same = local !== undefined && post !== undefined && local.title === post.title && local.body === post.markdown;
-  const fromLocal = local !== undefined && !same;
-  // The draft is the writer's latest text, unless the server copy moved on since the version
-  // the draft started from: then both exist and the writer chooses (never a silent pick).
-  const serverMoved = fromLocal && post !== undefined && local.base !== post.updated_at;
-  /** The server version the text in this editor started from. */
-  let base: number | null = fromLocal ? local.base : (post?.updated_at ?? null);
-  /** The stored draft's `rev` this tab last read or wrote; saves expect it. */
-  let rev = local?.rev ?? 0;
-  /** Saving waits while another tab's newer draft is unresolved. */
-  let paused = false;
+  const { st, fromLocal, serverMoved } = startState(key, local, post);
+  let sync: Sync | undefined;
   const lang = post?.lang ?? o.lang;
   const status = post?.status ?? "draft";
-  let title = fromLocal ? local.title : (post?.title ?? "");
-  const body = fromLocal ? local.body : (post?.markdown ?? "");
+  const start = fromLocal ? local : undefined;
+  let title = start?.title ?? post?.title ?? "";
+  const body = start?.body ?? post?.markdown ?? "";
 
   let mode: Mode = "write";
   let focusMode = false;
@@ -146,6 +156,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   const toolbar = h("div", { class: "tools", role: "toolbar", "aria-label": t("admin.editor.toolbar") });
   const toolsWrap = h("div", { class: "tools-wrap" }, toolbar);
   const choiceSlot = h("div", {});
+  const note = h("div", {});
   const write = h(
     "div",
     { class: "pane ed-write" },
@@ -155,6 +166,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
       "div",
       { class: "col" },
       titleIn,
+      note,
       cmHost,
       h("div", { class: "phone-status" }, h("span", {}, statusName(status), " \u00b7 ", saved2), wc2),
     ),
@@ -263,29 +275,40 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
       el.classList.toggle("settled", quiet);
     }
   };
+  /** A local save is waiting for its debounce. */
+  let unsaved = false;
+  const saveNow = async () => {
+    unsaved = false;
+    if (st.paused) return setSaved(t("admin.editor.not_saved"));
+    // After any draft move or drop sync.ts has queued, so it reads the current key and rev.
+    const job = st.q.then(() =>
+      saveDraft(st.key, { title: titleIn.value, body: view.state.doc.toString(), base: st.base, version: st.version, savedAt: Date.now() }, st.rev),
+    );
+    st.q = job;
+    const res = await job;
+    if (res === "conflict") {
+      st.paused = true;
+      setSaved(t("admin.editor.not_saved"));
+      otherTab();
+      return;
+    }
+    if (res === "failed") {
+      setSaved(t("admin.editor.not_saved"));
+      toast(t("admin.editor.not_saved_hint"), 6000);
+      return;
+    }
+    st.rev++;
+    setSaved(t("admin.editor.saved_here"));
+    quietTimer = setTimeout(() => setSaved(t("admin.editor.saved_here"), true), 1800);
+    if (mode !== "write" && root.isConnected) preview();
+    sync?.changed();
+  };
   const dirty = () => {
     clearTimeout(saveTimer);
     clearTimeout(quietTimer);
     setSaved(t("admin.editor.saving"));
-    saveTimer = setTimeout(async () => {
-      if (paused) return setSaved(t("admin.editor.not_saved"));
-      const res = await saveDraft(key, { title: titleIn.value, body: view.state.doc.toString(), base, savedAt: Date.now() }, rev);
-      if (res === "conflict") {
-        paused = true;
-        setSaved(t("admin.editor.not_saved"));
-        otherTab();
-        return;
-      }
-      if (res === "failed") {
-        setSaved(t("admin.editor.not_saved"));
-        toast(t("admin.editor.not_saved_hint"), 6000);
-        return;
-      }
-      rev++;
-      setSaved(t("admin.editor.saved_here"));
-      quietTimer = setTimeout(() => setSaved(t("admin.editor.saved_here"), true), 1800);
-      if (mode !== "write") preview();
-    }, 700);
+    unsaved = true;
+    saveTimer = setTimeout(saveNow, 700);
   };
   setSaved(fromLocal || post ? t("admin.editor.saved_here") : "", true);
 
@@ -313,26 +336,16 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
       ),
     );
   };
-  /** The server copy moved on since this device's draft began. */
-  const serverChoice = (p: Post) =>
+  /** The server copy moved on since this device's draft began. Either pick bases the text on it. */
+  const serverChoice = (p: Post) => {
+    const adopt = () => Object.assign(st, { hold: false, base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
     choice(
       t("admin.editor.conflict.server_title"),
       t("admin.editor.conflict.server_hint"),
-      [
-        t("admin.editor.conflict.keep_mine"),
-        () => {
-          base = p.updated_at;
-          dirty();
-        },
-      ],
-      [
-        t("admin.editor.conflict.use_saved"),
-        () => {
-          base = p.updated_at;
-          setText(p.title, p.markdown);
-        },
-      ],
+      [t("admin.editor.conflict.keep_mine"), () => (adopt(), dirty())],
+      [t("admin.editor.conflict.use_saved"), () => (adopt(), setText(p.title, p.markdown))],
     );
+  };
   /** Another tab saved this draft after this tab last read it. */
   const otherTab = () =>
     choice(
@@ -341,19 +354,20 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
       [
         t("admin.editor.conflict.keep_this"),
         async () => {
-          rev = (await loadDraft(key))?.rev ?? 0;
-          paused = false;
+          st.rev = (await loadDraft(st.key))?.rev ?? 0;
+          st.paused = false;
           dirty();
         },
       ],
       [
         t("admin.editor.conflict.load_other"),
         async () => {
-          const d = await loadDraft(key);
-          paused = false;
+          const d = await loadDraft(st.key);
+          st.paused = false;
           if (!d) return dirty();
-          rev = d.rev;
-          base = d.base;
+          st.rev = d.rev;
+          st.base = d.base;
+          st.version = d.version;
           setText(d.title, d.body);
         },
       ],
@@ -915,6 +929,9 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   // Leaving the screen (a route change replaces the root) drops the listeners with it.
   new MutationObserver((_, obs) => {
     if (!root.isConnected) {
+      // Redrawn or left within the debounce: the last keys are saved now, under the current key.
+      clearTimeout(saveTimer);
+      if (unsaved) flushed = saveNow();
       removeEventListener("resize", relayout);
       vv?.removeEventListener("resize", keyboard);
       vv?.removeEventListener("scroll", keyboard);
@@ -926,6 +943,26 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
 
   drawModes();
   if (serverMoved && post) serverChoice(post);
+  // Drafts also go to the server (sync.ts); published and scheduled posts stay here.
+  void import("./sync").then(
+    (m) => {
+      sync = m.startSync({
+        api: o.api,
+        user: o.user,
+        lang,
+        st,
+        id: post?.id,
+        draft: status === "draft",
+        offline: o.offline,
+        alive: () => root.isConnected,
+        text: () => [titleIn.value, view.state.doc.toString()],
+        say: (s) => setSaved(s),
+        choose: serverChoice,
+        note,
+      });
+    },
+    (e: unknown) => console.error("admin editor: loading the server sync failed; drafts stay on this device", e),
+  );
   if (!body && !title) titleIn.focus();
   else if (!phone()) {
     view.focus();

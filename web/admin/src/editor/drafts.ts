@@ -1,6 +1,7 @@
 /**
  * Drafts kept in this browser (IndexedDB), so writing survives a closed tab, a crash or no
- * network (docs/ARCHITECTURE.md, Admin and editor). The server copy comes with the posts API.
+ * network (docs/ARCHITECTURE.md, Admin and editor). A draft is dropped once the server holds
+ * its exact text (editor/sync.ts).
  *
  * Nothing is ever picked silently: a draft remembers the server version it started from
  * (`base`), and every save is conditional on the draft not having changed under this tab
@@ -12,10 +13,59 @@ export interface Draft {
   body: string;
   /** The server copy's `updated_at` the draft started from; `null` for a post never saved. */
   base: number | null;
+  /** The server `version` the draft started from; absent when unknown (older drafts, new posts). */
+  version?: number | undefined;
   /** Raised by every save; a save expecting another value lost a race with another tab. */
   rev: number;
   /** Unix milliseconds, for display only: never compared with a server time. */
   savedAt: number;
+}
+
+import type { Post } from "../api/model.gen";
+
+/** The editor's saving state, shared with index.ts. */
+export interface EdState {
+  /** The local draft's key; moves from `<user>:new-<id>` to `<user>:post-<id>` on create. */
+  key: string;
+  /** The server `updated_at` and `version` the editor's text is based on. */
+  base: number | null;
+  version: number | undefined;
+  /** The stored draft's `rev` this tab last read or wrote. */
+  rev: number;
+  /** Another tab's newer draft is unresolved. */
+  paused: boolean;
+  /** The server copy moved on and the writer has not chosen yet: nothing is sent. */
+  hold: boolean;
+  /** The text the server holds (title, body); undefined for a post never saved. */
+  server: [string, string] | undefined;
+  /** Every draft read-modify-write runs through this chain, so none interleave. */
+  q: Promise<unknown>;
+}
+
+/**
+ * The editor's starting state from the stored draft and the server copy. The draft is the
+ * writer's latest text, unless the server copy moved on since the version the draft started
+ * from (its `updated_at` for drafts that do not know the version): then both exist, nothing is
+ * sent (`hold`) and the writer chooses (never a silent pick).
+ */
+export function startState(key: string, local: Draft | undefined, post: Post | undefined): { st: EdState; fromLocal: boolean; serverMoved: boolean } {
+  const same = local !== undefined && post !== undefined && local.title === post.title && local.body === post.markdown;
+  const fromLocal = local !== undefined && !same;
+  const serverMoved =
+    fromLocal && post !== undefined && (local.version === undefined ? local.base !== post.updated_at : local.version !== post.version);
+  const st: EdState = {
+    key,
+    base: fromLocal ? local.base : (post?.updated_at ?? null),
+    // Until the writer picks, the draft keeps the version it started from, so a reload still
+    // sees the server copy as moved and asks again (only the pick, index.ts adopt, changes it).
+    version: serverMoved ? local?.version : post?.version,
+    rev: local?.rev ?? 0,
+    paused: false,
+    hold: serverMoved,
+    server: post && [post.title, post.markdown],
+    q: Promise.resolve(),
+  };
+  return { st, fromLocal, serverMoved };
 }
 
 export type SaveResult = "saved" | "conflict" | "failed";
@@ -103,14 +153,45 @@ export async function saveDraft(key: string, d: Omit<Draft, "rev">, expectRev: n
   }
 }
 
-/** Removes a draft once its text is safe elsewhere (the server, or the writer chose another). */
-export async function dropDraft(key: string): Promise<void> {
+/**
+ * Removes a draft once its text is safe on the server, only if it is still at `expectRev`
+ * (checked and deleted in one transaction, so a save made meanwhile is kept). True if removed.
+ */
+export async function dropDraft(key: string, expectRev: number): Promise<boolean> {
   try {
-    await run<true>("readwrite", (s, done) => {
-      s.delete(key).onsuccess = () => done(true);
+    return await run<boolean>("readwrite", (s, done) => {
+      const req = s.get(key);
+      req.onsuccess = () => {
+        const cur: unknown = req.result;
+        if (!isDraft(cur) || cur.rev !== expectRev) return done(false);
+        s.delete(key).onsuccess = () => done(true);
+      };
     });
   } catch (e) {
     console.error(`admin drafts: removing ${key} failed`, e);
+    return false;
+  }
+}
+
+/**
+ * Moves the draft at `from` to `to` with `patch` applied, in one transaction, so a new post's
+ * draft becomes the saved post's without a moment where both or neither exist. Resolves to
+ * the moved draft's `rev` (0: nothing stored at `from`, or a storage failure, logged).
+ */
+export async function moveDraft(from: string, to: string, patch: Partial<Draft>): Promise<number> {
+  try {
+    return await run<number>("readwrite", (s, done) => {
+      const req = s.get(from);
+      req.onsuccess = () => {
+        const cur: unknown = req.result;
+        if (!isDraft(cur)) return done(0);
+        s.put({ ...cur, ...patch }, to);
+        s.delete(from).onsuccess = () => done(cur.rev);
+      };
+    });
+  } catch (e) {
+    console.error(`admin drafts: moving ${from} to ${to} failed`, e);
+    return 0;
   }
 }
 
@@ -193,6 +274,7 @@ function isDraft(v: unknown): v is Draft {
     typeof d?.title === "string" &&
     typeof d.body === "string" &&
     (d.base === null || typeof d.base === "number") &&
+    (d.version === undefined || typeof d.version === "number") &&
     typeof d.rev === "number" &&
     typeof d.savedAt === "number"
   );
