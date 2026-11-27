@@ -9,6 +9,7 @@ pub mod json;
 pub mod password;
 pub mod ratelimit;
 pub mod session;
+pub mod sha256;
 #[cfg(test)]
 mod testutil;
 pub mod webauthn;

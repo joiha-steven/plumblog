@@ -41,13 +41,32 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
         return comments::handle(&mut req, &env, slug).await;
     }
     match (req.method().as_ref(), path.as_str()) {
-        ("GET", "/healthz") => Response::ok("ok"),
+        ("GET", "/healthz") => healthz(&env),
         ("GET" | "HEAD", p) if p == admin::PREFIX || p.starts_with("/admin/") => {
             admin::serve(&req).await
         }
         ("GET" | "HEAD", _) => pages::serve(&req, &env, &ctx).await,
         _ => Ok(Response::empty()?.with_status(405)),
     }
+}
+
+/// Version header name; `blog deploy` waits for the new version id here before it calls a
+/// deploy good (crates/cli deploy smoke check).
+const VERSION_HEADER: &str = "x-plumblog-version";
+
+/// `ok`, plus the running version's id from the `CF_VERSION_METADATA` binding. Without the
+/// binding (an older config) there is simply no header.
+fn healthz(env: &Env) -> Result<Response> {
+    let mut res = Response::ok("ok")?;
+    let id = worker::js_sys::Reflect::get(env, &"CF_VERSION_METADATA".into())
+        .ok()
+        .filter(worker::wasm_bindgen::JsValue::is_object)
+        .and_then(|m| worker::js_sys::Reflect::get(&m, &"id".into()).ok())
+        .and_then(|v| v.as_string());
+    if let Some(id) = id {
+        res.headers_mut().set(VERSION_HEADER, &id)?;
+    }
+    Ok(res)
 }
 
 /// The one cron trigger, every 10 minutes; `jobs::run` picks the jobs by scheduled time.

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Lays out the Worker's static assets: the one layout scripts/worker-test serves and
+# scripts/build-bundle ships (docs/ARCHITECTURE.md, Release bundle).
+#   scripts/assemble-assets <out-dir> <admin-build-dir>
+# <out-dir> is replaced. <admin-build-dir> is scripts/admin-build's output (target/admin).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+fail() { echo "assemble-assets: FAIL: $1" >&2; exit 1; }
+[ $# -eq 2 ] || fail "usage: scripts/assemble-assets <out-dir> <admin-build-dir>"
+out=$1
+admin=$2
+[ -d "$admin" ] || fail "no admin build at $admin"
+
+rm -rf "$out"
+# The theme's fonts and JS at crates/worker/src/pages THEME_ASSETS_URL.
+mkdir -p "$out/theme"
+cp -R themes/minimal/assets "$out/theme/minimal"
+# Bundled plugins' assets at PLUGIN_ASSETS_URL (/plugin/<name>/).
+for dir in plugins/*/; do
+  [ -d "$dir/assets" ] || continue
+  name=$(basename "$dir")
+  mkdir -p "$out/plugin"
+  cp -R "$dir/assets" "$out/plugin/$name"
+done
+# The admin under /admin/.
+cp -R "$admin" "$out/admin"
+# Cache rules for the admin's static files, written by admin-build; Workers static assets read
+# `_headers` at the root of the assets directory.
+mv "$out/admin/_headers" "$out/_headers"
