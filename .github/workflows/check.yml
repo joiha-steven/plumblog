@@ -9,6 +9,8 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # A normal run takes ~5 min; a hung Worker test must fail fast, not hold the PR for hours.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain (reads rust-toolchain.toml)
