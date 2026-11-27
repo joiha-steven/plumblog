@@ -1,0 +1,20 @@
+/* Media: picture grid on the left, a details card on the right (below on tablets and phones). */
+.media-layout { display: grid; grid-template-columns: minmax(0, 1fr) var(--insp-w); align-items: start; }
+.drop.over { outline: 2px dashed var(--accent); outline-offset: calc(-1 * var(--sp-8)); }
+.drop-hint { display: flex; align-items: center; gap: var(--sp-8); margin-top: var(--sp-32); padding: var(--sp-12) var(--sp-16); border-radius: var(--r-16); border: 1px dashed var(--line-strong); }
+.inspector { position: sticky; top: var(--head-h); padding: 0 max(var(--gutter), env(safe-area-inset-right, 0px)) var(--gutter) 0; }
+.insp-card { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-16); padding: var(--sp-16); border-radius: var(--r-22); background: var(--bg); border: 1px solid var(--line); }
+.stage { position: relative; display: grid; place-items: center; aspect-ratio: 4 / 3; padding: var(--sp-12); border: 0; border-radius: var(--r-16); background-color: var(--well); --raise: var(--sh-well); cursor: zoom-in; }
+.stage img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; border-radius: var(--r-6); box-shadow: var(--sh-img); }
+.stage-ico { position: absolute; right: var(--sp-12); bottom: var(--sp-12); opacity: 0; transition: opacity var(--dur-1) var(--ease); }
+.stage:hover .stage-ico, .stage:focus-visible .stage-ico, .stage.is-focus .stage-ico { opacity: 1; }
+@media (hover: none) { .stage-ico { opacity: 1; } }
+.insp-title { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-2); min-width: 0; }
+.insp-title b { font: var(--type-item-strong); overflow-wrap: anywhere; }
+.insp-title span { font: var(--type-meta); color: var(--faint); font-variant-numeric: tabular-nums; }
+.lamp-hint { display: flex; align-items: baseline; gap: var(--sp-8); }
+@media (max-width: 1099px) {
+  .media-layout { grid-template-columns: minmax(0, 1fr); }
+  .inspector { position: static; padding: 0 max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-32) max(var(--gutter), env(safe-area-inset-left, 0px)); }
+  .insp-card { max-width: var(--measure); }
+}
