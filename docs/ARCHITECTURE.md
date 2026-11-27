@@ -35,7 +35,7 @@ agent a Cloudflare API token, and the agent sets up, writes, translates, themes 
 | Posts, users, settings, sessions | D1 | FTS5 for search |
 | Images, theme bundles | R2 | |
 | Admin JS/CSS, default theme assets | Workers static assets | |
-| Rendered pages | Cache API | Cache keys include a site content version that every publish bumps, so no purge calls. Cloudflare docs only promise working cache operations on custom domains; behaviour on `*.workers.dev` is unconfirmed and must be measured (issue #8). The blog works either way: without cache every view is rendered (about 1-2 ms CPU, more D1 reads). Each response says `x-plumblog-cache: hit|miss|bypass`; a failing cache is bypassed, never an error. Free plan: cache calls share the 50-per-request subrequest budget |
+| Rendered pages | Cache API | Cache keys include a site content version that every publish bumps, so no purge calls. Cloudflare docs only promise working cache operations on custom domains; behaviour on `*.workers.dev` is unconfirmed and must be measured (issue #8). The blog works either way: without cache every view is rendered (measured locally in workerd: about 0.06 ms wasm CPU per page with sample content; a cache hit costs about the same, so the cache mainly saves D1 reads). Each response says `x-plumblog-cache: hit|miss|bypass`; a failing cache is bypassed, never an error. Free plan: cache calls share the 50-per-request subrequest budget |
 | Scheduled publishing | Cron Trigger | |
 | Spam protection | Turnstile | Login after failures, comments |
 | Analytics | Cloudflare Web Analytics | Not built into admin; an AI guide fetches numbers |
