@@ -273,8 +273,8 @@ fn not_found_is_friendly_and_suggests_posts() {
 #[test]
 fn every_page_renders_without_a_blowup() {
     // Wall time on a shared CI runner is a poor clock, and a debug build on the host says
-    // little about wasm, so this gates only on a bound 50x above normal (0.35 ms): it catches
-    // a blowup, not the budget. The real per-page time is the `perf` line below (`scripts/perf`
+    // little about wasm, so this gates only on a bound about 8x what a CI runner takes (0.4 ms on a
+    // laptop, ~1 ms on CI): it catches a slowdown, not the budget. The real per-page time is the `perf` line below (`scripts/perf`
     // shows it; PLUMBLOG_PERF_STRICT holds it to 2 ms natively) and the Worker's Server-Timing.
     for path in [
         "/",
@@ -299,8 +299,8 @@ fn every_page_renders_without_a_blowup() {
             assert!(per.as_micros() < 2_000, "{path} took {per:?} natively");
         }
         assert!(
-            per.as_millis() < 20,
-            "{path} took {per:?}, far above normal"
+            per.as_millis() < 8,
+            "{path} took {per:?}, about 8x CI-normal"
         );
     }
 }

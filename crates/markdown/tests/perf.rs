@@ -5,8 +5,8 @@
 //!
 //! Wall time on a shared CI runner is a poor clock, so `scripts/check` does not gate on that
 //! budget. It gates on how the best time grows with the input (a 4x larger input must take
-//! under 10x: linear work takes about 4x, quadratic 16x), plus an absolute bound far above
-//! normal for blowups. Work cannot be counted here: the workspace forbids `unsafe`, so no
+//! under 10x: linear work takes about 4x, quadratic 16x), plus an absolute bound about 6x CI-normal
+//! (a uniform slowdown). Work cannot be counted here: the workspace forbids `unsafe`, so no
 //! counting allocator, and the renderer has no hook. The real budget is printed as `perf ...` lines
 //! (`scripts/perf` shows them) and enforced when `PLUMBLOG_PERF_STRICT` is set, on a machine
 //! that is not shared.
@@ -19,8 +19,9 @@ use std::time::{Duration, Instant};
 
 /// The real budget: 2 ms natively for a 5,000-word post or a 5,000-character comment.
 const BUDGET: Duration = Duration::from_millis(2);
-/// Far above normal (0.6 ms): only a blowup gets here, on any runner.
-const BACKSTOP: Duration = Duration::from_millis(25);
+/// About 5x what a CI runner takes (laptop 0.6 ms, CI roughly 2.5x that = 1.7 ms; 10 ms is 6x CI, with room for a laptop busy with other builds); a uniform 10x slowdown fails on a CI-class runner (17 ms), so a
+/// uniform 5-10x slowdown fails on any runner; the ratio test catches growth.
+const BACKSTOP: Duration = Duration::from_millis(10);
 
 /// Best of 30 runs: the minimum is the least noisy estimate of the real cost.
 fn best(mut f: impl FnMut()) -> Duration {
@@ -51,7 +52,7 @@ fn report(what: &str, best: Duration, budget: Duration) {
     if std::env::var_os("PLUMBLOG_PERF_STRICT").is_some() {
         assert!(best <= budget, "{what}: {best:?} over budget {budget:?}");
     }
-    assert!(best <= BACKSTOP, "{what}: {best:?}, far above normal");
+    assert!(best <= BACKSTOP, "{what}: {best:?}, about 6x CI-normal");
 }
 
 /// About 5,000 words using every feature the renderer knows.

@@ -3,7 +3,7 @@
 //
 // Wall time on a shared CI runner is a poor clock, so no test gates on a number of
 // milliseconds. Linearity is shown two ways: the regex calls and characters matched (counted,
-// so exact) grow in proportion to the input, and the time of an 8x larger block stays well
+// so exact) grow in proportion to the input, and the time of an 8x larger block (CPU time, not wall time) stays well
 // under the 64x a quadratic scan would take. The absolute bound only catches blowups.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -13,7 +13,7 @@ const SRC = readFileSync(new URL("../../themes/minimal/assets/highlight.js", imp
 const LANGS = ["sh", "js", "ts", "python", "rust", "go", "c", "html", "css", "json", "yaml", "toml", "sql", "markdown", "diff"];
 const SMALL = 6_000;
 const LARGE = 48_000; // under the script's 50,000 limit; 8x: linear work grows 8x, quadratic 64x
-const BACKSTOP_MS = 2_000; // normal is 5-25 ms; only a catastrophic regex gets here
+const BACKSTOP_MS = 300; // laptop worst 23 ms, CI about 2.5x that: this is 5x CI-normal
 const big = (s, n) => s.repeat(Math.ceil(n / s.length)).slice(0, n);
 
 // Shapes that make backtracking regexes slow: unclosed openers, runs of brackets, long lines
@@ -81,13 +81,14 @@ function run(blocks, count) {
       return m;
     };
   }
-  const t = performance.now();
+  const t = process.cpuUsage();
   try {
     new Function("document", "console", SRC)(stubDom(blocks), { warn() {}, error() {} });
   } finally {
     RegExp.prototype.exec = realExec;
   }
-  return { ms: performance.now() - t, ...work };
+  const used = process.cpuUsage(t); // CPU time: a busy machine descheduling us is not counted
+  return { ms: (used.user + used.system) / 1000, ...work };
 }
 
 // Counts come from one run (they are the same every run); time is the best of seven, the
@@ -117,11 +118,11 @@ for (const lang of LANGS) {
       assert.ok(l.calls < 12 * s.calls, `${at}: regex calls ${s.calls} -> ${l.calls}`);
       assert.ok(l.matched < 12 * Math.max(s.matched, SMALL), `${at}: matched chars ${s.matched} -> ${l.matched}`);
       // Time inside one regex cannot be counted: compare the sizes with a wide bound (linear
-      // 8x, quadratic 64x; up to 2.8x over linear seen under load); the floor keeps timer
+      // 8x, quadratic 64x; up to 2.7x over linear seen under load, CPU time); the floor keeps timer
       // noise on tiny runs out.
-      const ratio = l.ms / Math.max(s.ms, 1);
+      const ratio = l.ms / Math.max(s.ms, 2);
       if (ratio > worst.ratio) worst = { ratio, at };
-      assert.ok(ratio < 28, `${at}: ${s.ms.toFixed(1)} ms -> ${l.ms.toFixed(1)} ms (x${ratio.toFixed(1)})`);
+      assert.ok(ratio < 32, `${at}: ${s.ms.toFixed(1)} ms -> ${l.ms.toFixed(1)} ms (x${ratio.toFixed(1)})`);
       assert.ok(l.ms < BACKSTOP_MS, `${at}: ${l.ms.toFixed(0)} ms`);
       if (l.b.code.out !== null) assert.equal(l.b.code.out, large[name], `${at}: text changed`);
     }

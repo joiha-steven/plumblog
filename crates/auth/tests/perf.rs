@@ -6,7 +6,7 @@
 //! Wall time on a shared CI runner is a poor clock, so `scripts/check` does not gate on that
 //! budget. It gates on how the best time grows with the input (a 4x smaller document must
 //! cost at least 1/10 as much: linear work takes about 1/4, quadratic 1/16), on a refused
-//! document costing about what an accepted one does, and on an absolute bound far above
+//! document costing about what an accepted one does, and on an absolute bound about 8x CI-normal
 //! normal. Work cannot be counted here: the workspace forbids `unsafe`, so no counting
 //! allocator, and the parser has no hook. The real budget is printed as `perf ...` lines
 //! (`scripts/perf` shows them) and enforced when `PLUMBLOG_PERF_STRICT` is set, on a machine
@@ -23,9 +23,11 @@ use std::time::{Duration, Instant};
 
 /// The real budget.
 const BUDGET: Duration = Duration::from_millis(1);
-/// Far above normal (0.25 ms): only a blowup gets here, on any runner. Per-key duplicate scans
-/// once made the 22,000-key document take ~20 ms.
-const BACKSTOP: Duration = Duration::from_millis(10);
+/// About 8x what a CI runner takes (laptop 0.22 ms, CI roughly 2.5x that = 0.6 ms). Measured
+/// 3.3 ms on a laptop busy with other builds, so tighter flakes; a uniform 10x slowdown still
+/// fails on a CI-class runner (6 ms). The ratio test below catches growth (a scan
+/// quadratic in an object's width); this catches a constant factor.
+const BACKSTOP: Duration = Duration::from_millis(5);
 
 /// Timings run one at a time: tests in one binary run in parallel threads, and two timed loops
 /// sharing a core measured ~30% slower.
@@ -78,17 +80,20 @@ fn worst_accepted(div: usize) -> Vec<(&'static str, String)> {
         format!("{{\"d\":{}{inner}{}}}", "[".repeat(n), "]".repeat(n))
     };
     let budget_values = MAX_VALUES / div - (MAX_DEPTH - 1);
-    // Objects of MAX_ITEMS members with the longest distinct keys that fit: every member
+    // Objects shrink with the document (width, not just count), so a scan that is quadratic in
+    // one object's width costs 16x, not 4x, when the document is 4x.
+    let width = MAX_ITEMS / div;
+    // Objects of `width` members with the longest distinct keys that fit: every member
     // hashed for the duplicate check, a key allocation each.
     let key_len = (body - 1024) / budget_values - 5;
     assert!(key_len <= MAX_KEY);
     let mut members = Vec::new();
     let mut objects = Vec::new();
-    for i in 0..budget_values - budget_values / MAX_ITEMS - 1 {
+    for i in 0..budget_values - budget_values / width - 1 {
         let k = name(i);
         // `_` ends the name, so padded keys stay distinct.
         members.push(format!("\"{k}_{}\":0", "x".repeat(key_len - k.len() - 1)));
-        if members.len() == MAX_ITEMS {
+        if members.len() == width {
             objects.push(format!("{{{}}}", members.join(",")));
             members.clear();
         }
@@ -97,9 +102,9 @@ fn worst_accepted(div: usize) -> Vec<(&'static str, String)> {
     let keys = deep(&objects.join(","));
     // Integers of 19 digits: the slowest number path.
     let int = "-9223372036854775807";
-    let all = vec![int; budget_values - budget_values / MAX_ITEMS - 1];
+    let all = vec![int; budget_values - budget_values / width - 1];
     let arrays: Vec<String> = all
-        .chunks(MAX_ITEMS)
+        .chunks(width)
         .map(|c| format!("[{}]", c.join(",")))
         .collect();
     let ints = deep(&arrays.join(","));
@@ -136,7 +141,10 @@ fn report(what: &str, bytes: usize, d: Duration) {
     if std::env::var_os("PLUMBLOG_PERF_STRICT").is_some() {
         assert!(d <= BUDGET, "{what}: parse took {d:?}, budget {BUDGET:?}");
     }
-    assert!(d <= BACKSTOP, "{what}: parse took {d:?}, far above normal");
+    assert!(
+        d <= BACKSTOP,
+        "{what}: parse took {d:?}, about 8x CI-normal"
+    );
 }
 
 /// Below this, timer noise decides a ratio.
