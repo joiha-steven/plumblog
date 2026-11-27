@@ -117,6 +117,12 @@ pub(crate) struct PostData<'a> {
     #[serde(flatten)]
     pub entry: EntryData<'a>,
     pub html: &'a str,
+    /// The theme loads its code-highlighting script only when this is true.
+    pub has_code: bool,
+    /// Math is rendered to `MathML` on save; a theme may still want a math stylesheet.
+    pub has_math: bool,
+    /// Click-to-load embed facades are in the post.
+    pub has_embed: bool,
     pub tags: &'a [Link],
     pub prev: Option<LinkData<'a>>,
     pub next: Option<LinkData<'a>>,
@@ -147,32 +153,6 @@ pub(crate) fn civil(unix: i64) -> (i32, u32, u32) {
     )
 }
 
-/// Words of visible text in stored HTML, for reading time. Counts runs of alphanumerics
-/// outside tags; entities count as separators, which is close enough for minutes.
-pub(crate) fn word_count(html: &str) -> usize {
-    let mut words = 0;
-    let mut in_tag = false;
-    let mut in_word = false;
-    for c in html.chars() {
-        match c {
-            '<' => {
-                in_tag = true;
-                in_word = false;
-            }
-            '>' => in_tag = false,
-            _ if in_tag => {}
-            c if c.is_alphanumeric() => {
-                if !in_word {
-                    words += 1;
-                    in_word = true;
-                }
-            }
-            _ => in_word = false,
-        }
-    }
-    words
-}
-
 /// First `max` words of `text`; an ellipsis marks a cut. 0 means no excerpt.
 pub(crate) fn cut_words(text: &str, max: usize) -> String {
     if max == 0 {
@@ -199,7 +179,7 @@ pub(crate) fn cut_words(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{civil, cut_words, word_count};
+    use super::{civil, cut_words};
 
     #[test]
     fn civil_dates() {
@@ -207,15 +187,6 @@ mod tests {
         assert_eq!(civil(951_782_400), (2000, 2, 29));
         assert_eq!(civil(1_772_668_800), (2026, 3, 5));
         assert_eq!(civil(-86_400), (1969, 12, 31));
-    }
-
-    #[test]
-    fn words_skip_tags() {
-        assert_eq!(
-            word_count("<p class=\"x y\">Hello <b>big</b> world.</p>"),
-            3
-        );
-        assert_eq!(word_count("<p>Ti\u{1ebf}ng Vi\u{1ec7}t</p>"), 2);
     }
 
     #[test]

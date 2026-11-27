@@ -137,7 +137,7 @@ fn post_page_has_content_neighbours_and_tags() {
         html.contains("<link rel=\"canonical\" href=\"https://blog.test/reading-on-screens\">")
     );
     assert!(
-        html.contains("<section class=\"footnotes\">"),
+        html.contains("<section class=\"footnotes\""),
         "stored HTML is inserted as is"
     );
     assert!(html.contains("Oct 2, 2026"));
@@ -146,6 +146,17 @@ fn post_page_has_content_neighbours_and_tags() {
     assert!(html.contains("class=\"prev\" href=\"/a-tiny-http-server\""));
     assert!(html.contains("class=\"next\" href=\"/why-small-tools\""));
     assert_eq!(get("/no-such-post").0, 404);
+}
+
+#[test]
+fn sample_posts_go_through_the_markdown_renderer() {
+    let (status, html) = get("/a-tiny-http-server");
+    assert_eq!(status, 200);
+    assert!(html.contains("<div class=\"code\" data-lang=\"rust\">"));
+    assert!(
+        html.contains("1 min read"),
+        "reading time comes from Rendered"
+    );
 }
 
 #[test]

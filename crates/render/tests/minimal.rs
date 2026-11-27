@@ -59,8 +59,9 @@ fn post(slug: &str, title: &str, at: i64, pinned: bool) -> Post {
         excerpt: None,
         body: Rendered {
             html: "<p>Some words <em>here</em> &amp; there.</p>".into(),
-            toc: vec![],
             excerpt: "Some words here and there for the excerpt".into(),
+            reading_minutes: 1,
+            ..Rendered::default()
         },
         tags: vec![Link {
             name: "rust".into(),
@@ -281,4 +282,40 @@ fn partial_theme_falls_back_and_bad_slots_fail() {
         "error names the template: {}",
         err.detail
     );
+}
+
+#[test]
+fn post_flags_reach_templates() {
+    let files = theme_files();
+    let default: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let default = default.as_slice();
+    let child = [
+        ("theme.toml", default.read("theme.toml").unwrap()),
+        ("style.css", ""),
+        ("styles/writer.css", ""),
+        ("assets/fonts/faces.css", ""),
+        (
+            "templates/post.html",
+            "{{ post.has_code }} {{ post.has_math }} {{ post.has_embed }} {{ post.reading_minutes }}",
+        ),
+    ];
+    let theme = Theme::load(&&child[..], Some(&default), &BTreeMap::new(), "/a").unwrap();
+    let mut p = post("x", "X", 0, false);
+    p.body.has_code = true;
+    p.body.reading_minutes = 7;
+    let html = theme
+        .render(
+            &site(),
+            &page("en"),
+            &Body::Post {
+                post: &p,
+                prev: None,
+                next: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(html, "True False False 7");
 }

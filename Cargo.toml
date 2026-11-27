@@ -34,6 +34,11 @@ minijinja = { version = "3.1.0", default-features = false, features = ["builtins
 toml = { version = "1.2.1", default-features = false, features = ["std", "parse", "serde"] }
 # Typed theme.toml and template data; minijinja and toml both speak serde.
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
+# CommonMark + GFM parser for rendering posts on save; a correct CommonMark parser is far
+# too much code to own. Default features off: we write our own HTML, so no `html` module.
+pulldown-cmark = { version = "0.13.6", default-features = false }
+# LaTeX math to MathML at save time, so readers need no math JS (~70 KB gzip in wasm, measured).
+pulldown-latex = "0.8.0"
 # Internal module crates; allowed edges between them are enforced by scripts/check.
 plumblog-model = { path = "crates/model" }
 plumblog-markdown = { path = "crates/markdown" }

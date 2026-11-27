@@ -52,14 +52,14 @@ fn main() {
 
     let mut posts = Vec::new();
     walk(&sample, &mut posts);
-    posts.retain(|p| p.extension().is_some_and(|e| e == "html"));
+    posts.retain(|p| p.extension().is_some_and(|e| e == "txt") && !p.ends_with("site.txt"));
     posts.sort();
     out.push_str("pub static SAMPLE_POSTS: &[SamplePost] = &[\n");
     for p in &posts {
         let text = fs::read_to_string(p).unwrap();
         let (head, body) = text
             .split_once("\n\n")
-            .unwrap_or_else(|| panic!("{}: header, blank line, then HTML", p.display()));
+            .unwrap_or_else(|| panic!("{}: header, blank line, then Markdown", p.display()));
         let field = |name: &str| -> String {
             head.lines()
                 .find_map(|l| l.strip_prefix(name).and_then(|r| r.strip_prefix(':')))
@@ -75,7 +75,7 @@ fn main() {
             .collect();
         writeln!(
             out,
-            "    SamplePost {{ slug: {slug:?}, title: {:?}, date: {:?}, pinned: {}, excerpt: {:?}, tags: &{tags:?}, html: {body:?} }},",
+            "    SamplePost {{ slug: {slug:?}, title: {:?}, date: {:?}, pinned: {}, excerpt: {:?}, tags: &{tags:?}, markdown: {body:?} }},",
             field("title"),
             field("date"),
             field("pinned") == "yes",

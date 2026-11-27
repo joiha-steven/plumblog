@@ -1,8 +1,6 @@
 //! Loading a theme and rendering pages with it.
 
-use crate::data::{
-    Body, EntryData, LinkData, PageInfo, Post, PostData, Site, civil, cut_words, word_count,
-};
+use crate::data::{Body, EntryData, LinkData, PageInfo, Post, PostData, Site, civil, cut_words};
 use crate::{PageKind, SLOTS, css, locale};
 use minijinja::value::{Kwargs, Serde, Value};
 use minijinja::{Environment, State};
@@ -283,6 +281,9 @@ impl Theme {
                 let data = PostData {
                     entry,
                     html: &post.body.html,
+                    has_code: post.body.has_code,
+                    has_math: post.body.has_math,
+                    has_embed: post.body.has_embed,
                     tags: &post.tags,
                     prev: link(*prev),
                     next: link(*next),
@@ -371,9 +372,8 @@ impl Theme {
             Some(e) if !e.trim().is_empty() => e.trim().to_owned(),
             _ => cut_words(&post.body.excerpt, excerpt_words),
         };
-        let words = word_count(&post.body.html);
-        // 220 words a minute; at least one so no post claims "0 min read".
-        let minutes = u32::try_from(words.div_ceil(220).max(1)).unwrap_or(u32::MAX);
+        // Computed on save by the markdown crate; reading never counts words.
+        let minutes = post.body.reading_minutes;
         let date_display = self.text(
             &post.lang,
             "date.short",

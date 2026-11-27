@@ -76,7 +76,7 @@ test("post page", async () => {
   assert.equal(res.status, 200);
   const html = await res.text();
   assert.match(html, /<title>Reading on screens, done properly - Plum Notes<\/title>/);
-  assert.match(html, /<section class="footnotes">/);
+  assert.match(html, /<section class="footnotes"/);
   assert.match(html, /href="\/tag\/typography" rel="tag"/);
   assert.match(html, /<link rel="canonical" href="http:\/\/127\.0\.0\.1:\d+\/reading-on-screens">/);
 });

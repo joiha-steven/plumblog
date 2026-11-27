@@ -1,0 +1,19 @@
+title: Why I keep my tools small
+date: 2026-11-20
+pinned: yes
+tags: tools, writing
+excerpt: A blog needs a place to write, a place to read, and nothing that gets in between.
+
+Every tool I have kept for more than a few years does one job and stays out of the way. The editor opens fast, the notes sync, and the blog shows what I wrote without asking me to think about servers.
+
+When a tool grows past its job, the cost shows up slowly: a slower start, one more setting, a migration nobody asked for. None of these is large on its own. Together they make writing feel like maintenance.
+
+## What small means
+
+Small is not the same as minimal. A small tool can have a lot inside it, as long as the part you touch every day is quiet. Here is the test I use:
+
+- It starts in under a second.
+- I can explain what it does in one sentence.
+- Leaving it is a copy, not a project.
+
+The last point matters most. If my words live in files I can read without the tool, I can stay because I want to, not because I have to.

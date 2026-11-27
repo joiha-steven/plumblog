@@ -2,7 +2,7 @@
 //! rows; until the storage issue (#6) lands, `SampleSource` serves the embedded sample posts.
 //! When `store` grows post listing, its traits replace this one and only this file changes.
 
-use plumblog_markdown::Rendered;
+use plumblog_markdown::{Options, Rendered};
 use plumblog_model::Result;
 use std::sync::OnceLock;
 
@@ -75,7 +75,7 @@ pub struct SamplePost {
     pub pinned: bool,
     pub excerpt: &'static str,
     pub tags: &'static [&'static str],
-    pub html: &'static str,
+    pub markdown: &'static str,
 }
 
 pub struct SampleSite {
@@ -122,11 +122,8 @@ fn to_post(p: &SamplePost) -> StoredPost {
         published_at: unix_from_date(p.date),
         pinned: p.pinned,
         excerpt: (!p.excerpt.is_empty()).then(|| p.excerpt.to_owned()),
-        body: Rendered {
-            html: p.html.to_owned(),
-            toc: Vec::new(),
-            excerpt: first_paragraph_text(p.html),
-        },
+        // What saving a post does; done once per isolate for the embedded samples.
+        body: plumblog_markdown::render(p.markdown, Options::default()),
         tags: p
             .tags
             .iter()
@@ -136,33 +133,6 @@ fn to_post(p: &SamplePost) -> StoredPost {
             })
             .collect(),
     }
-}
-
-/// Stand-in for the auto excerpt the markdown issue stores on save.
-fn first_paragraph_text(html: &str) -> String {
-    let para = html
-        .split_once("<p>")
-        .and_then(|(_, rest)| rest.split_once("</p>"))
-        .map_or("", |(p, _)| p);
-    // Footnote markers are not part of the sentence.
-    let mut para = para.to_owned();
-    while let Some(i) = para.find("<sup") {
-        let end = para[i..]
-            .find("</sup>")
-            .map_or(para.len(), |e| i + e + "</sup>".len());
-        para.replace_range(i..end, "");
-    }
-    let mut out = String::new();
-    let mut in_tag = false;
-    for c in para.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            c if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    out.replace("&amp;", "&")
 }
 
 /// `YYYY-MM-DD` at noon UTC (noon keeps the calendar day in every time zone a reader is in).
@@ -272,14 +242,7 @@ impl ReaderSource for SampleSource {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_paragraph_text, unix_from_date, year_of};
-
-    #[test]
-    fn auto_excerpt_drops_tags_and_footnote_markers() {
-        let html =
-            "<p>To zoom.<sup class=\"fnref\"><a href=\"#fn-1\">1</a></sup> A &amp; B</p><p>x</p>";
-        assert_eq!(first_paragraph_text(html), "To zoom. A & B");
-    }
+    use super::{unix_from_date, year_of};
 
     #[test]
     fn dates_round_trip() {
