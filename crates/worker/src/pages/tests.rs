@@ -14,8 +14,19 @@ fn run<F: Future>(f: F) -> F::Output {
 
 fn get(path: &str) -> (u16, String) {
     match run(render(SampleSource::get(), "https://blog.test", path)).unwrap() {
-        Outcome::Page { status, html } => (status, html),
+        Outcome::Page { status, body, .. } => (status, body),
         Outcome::Redirect(to) => (301, to),
+    }
+}
+
+pub(super) fn get_typed(path: &str) -> (u16, &'static str, String) {
+    match run(render(SampleSource::get(), "https://blog.test", path)).unwrap() {
+        Outcome::Page {
+            status,
+            content_type,
+            body,
+        } => (status, content_type, body),
+        Outcome::Redirect(to) => panic!("{path} redirected to {to}"),
     }
 }
 

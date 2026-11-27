@@ -16,6 +16,8 @@ pub struct StoredPost {
     pub excerpt: Option<String>,
     pub body: Rendered,
     pub tags: Vec<Tag>,
+    /// Other language versions: `(lang, slug)`. Filled by the translations issue.
+    pub translations: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +40,8 @@ pub enum Filter<'a> {
     All,
     Tag(&'a str),
     Year(i32),
+    /// One language, newest first (feeds).
+    Lang(&'a str),
 }
 
 /// One page of posts and whether more follow.
@@ -64,6 +68,8 @@ pub trait ReaderSource {
     async fn posts(&self, filter: Filter<'_>, offset: usize, limit: usize) -> Result<Slice>;
     async fn post(&self, slug: &str) -> Result<Option<Neighbours>>;
     async fn tag(&self, slug: &str) -> Result<Option<Tag>>;
+    /// Every tag with at least one published post (sitemap).
+    async fn tags(&self) -> Result<Vec<Tag>>;
     /// Years that have posts, newest first.
     async fn years(&self) -> Result<Vec<i32>>;
 }
@@ -132,6 +138,7 @@ fn to_post(p: &SamplePost) -> StoredPost {
                 name: (*t).to_owned(),
             })
             .collect(),
+        translations: Vec::new(),
     }
 }
 
@@ -199,6 +206,11 @@ impl ReaderSource for SampleSource {
                 .into_iter()
                 .filter(|p| year_of(p.published_at) == y)
                 .collect(),
+            Filter::Lang(lang) => self
+                .by_date()
+                .into_iter()
+                .filter(|p| p.lang == lang)
+                .collect(),
         };
         Ok(Slice {
             posts: matching
@@ -230,6 +242,17 @@ impl ReaderSource for SampleSource {
             .flat_map(|p| &p.tags)
             .find(|t| t.slug == slug)
             .cloned())
+    }
+
+    async fn tags(&self) -> Result<Vec<Tag>> {
+        let mut tags: Vec<Tag> = self
+            .posts
+            .iter()
+            .flat_map(|p| p.tags.iter().cloned())
+            .collect();
+        tags.sort_by(|a, b| a.slug.cmp(&b.slug));
+        tags.dedup_by(|a, b| a.slug == b.slug);
+        Ok(tags)
     }
 
     async fn years(&self) -> Result<Vec<i32>> {

@@ -2,6 +2,7 @@
 //! kept in the Cache API under a key that includes the site content version.
 
 mod cache;
+mod docs;
 mod routes;
 pub mod source;
 
@@ -24,7 +25,11 @@ const NOT_FOUND_SUGGESTIONS: usize = 5;
 /// What a request ends as, before it becomes a `Response`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
-    Page { status: u16, html: String },
+    Page {
+        status: u16,
+        content_type: &'static str,
+        body: String,
+    },
     Redirect(String),
 }
 
@@ -85,9 +90,13 @@ pub async fn serve(req: &Request, ctx: &Context) -> Result<Response> {
             }
             Response::redirect_with_status(worker::Url::parse(&format!("{origin}{to}"))?, 301)
         }
-        Outcome::Page { status, html } => {
+        Outcome::Page {
+            status,
+            content_type,
+            body,
+        } => {
             let h = Headers::new();
-            h.set("content-type", "text/html; charset=utf-8")?;
+            h.set("content-type", content_type)?;
             // Server-Timing lets local runs and DevTools see render cost; on Cloudflare the
             // clock stands still while code runs, so it reads 0 there.
             h.set("server-timing", &format!("render;dur={render_ms}"))?;
@@ -104,9 +113,7 @@ pub async fn serve(req: &Request, ctx: &Context) -> Result<Response> {
                 h.set("cache-control", "no-store")?;
             }
             h.set("x-plumblog-cache", lookup.label())?;
-            let mut resp = Response::from_html(html)?
-                .with_status(status)
-                .with_headers(h);
+            let mut resp = Response::ok(body)?.with_status(status).with_headers(h);
             if status == 200 && matches!(lookup, cache::Lookup::Miss) {
                 cache::put_later(ctx, key, resp.cloned()?);
             }
@@ -153,6 +160,7 @@ pub async fn render(
         info: PageInfo {
             lang: settings.lang.clone(),
             canonical: format!("{origin}{path}"),
+            origin: origin.to_owned(),
         },
         per: settings.per_page.max(1),
     };
@@ -162,13 +170,31 @@ pub async fn render(
         Route::Post { slug } => p.post(&slug).await?,
         Route::Tag { slug, page } => p.tag(&slug, page).await?,
         Route::Archive { year, page } => p.archive(year, page).await?,
+        Route::Feed { lang, format } => {
+            return Ok(match p.feed(&settings, lang.as_deref(), format).await? {
+                Some(body) => doc(format.content_type(), body),
+                None => p.not_found_page().await?,
+            });
+        }
+        Route::Sitemap => return Ok(doc(docs::XML, p.sitemap().await?)),
+        Route::Robots => return Ok(doc(docs::TEXT, docs::robots(origin))),
+        Route::Llms => return Ok(doc(docs::TEXT, p.llms(&settings).await?)),
         Route::NotFound => None,
     };
-    let (status, html) = match page {
-        Some(html) => (200, html),
-        None => (404, p.not_found().await?),
-    };
-    Ok(Outcome::Page { status, html })
+    match page {
+        Some(html) => Ok(doc(HTML, html)),
+        None => p.not_found_page().await,
+    }
+}
+
+const HTML: &str = "text/html; charset=utf-8";
+
+fn doc(content_type: &'static str, body: String) -> Outcome {
+    Outcome::Page {
+        status: 200,
+        content_type,
+        body,
+    }
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -305,6 +331,14 @@ impl<S: ReaderSource> Pages<'_, S> {
         let refs: Vec<&Post> = posts.iter().collect();
         self.render(&Body::NotFound { recent: &refs })
     }
+
+    async fn not_found_page(&self) -> std::result::Result<Outcome, String> {
+        Ok(Outcome::Page {
+            status: 404,
+            content_type: HTML,
+            body: self.not_found().await?,
+        })
+    }
 }
 
 fn site(s: &Settings) -> Site {
@@ -312,9 +346,13 @@ fn site(s: &Settings) -> Site {
         title: s.title.clone(),
         description: s.description.clone(),
         home_url: "/".to_owned(),
-        // Search and feeds land with their own issues (#16, #19).
+        // Search lands with its own issue (#16).
         search_url: None,
-        feed_url: "/feed.xml".to_owned(),
+        feed_url: routes::feed(None, routes::FeedFormat::Atom),
+        rss_url: routes::feed(None, routes::FeedFormat::Rss),
+        json_feed_url: routes::feed(None, routes::FeedFormat::Json),
+        image_url: None,
+        author: None,
         // No site icon yet (issue: installable web apps); `data:,` stops the browser from
         // requesting /favicon.ico for nothing.
         icon_url: "data:,".to_owned(),
@@ -342,8 +380,20 @@ fn to_render(p: &StoredPost) -> Post {
             .collect(),
         cover: None,
         thumb: None,
+        translations: p
+            .translations
+            .iter()
+            .map(|(lang, slug)| plumblog_render::Alternate {
+                lang: lang.clone(),
+                url: routes::post(slug),
+            })
+            .collect(),
     }
 }
 
 #[cfg(test)]
+mod docs_tests;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+use tests as tests_support;
