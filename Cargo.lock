@@ -424,6 +424,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "minijinja"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "509eeb2603a84eccabb4d75f6ec8ba23b46bbf441aaeb863d6b83a5887fd51e4"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -508,6 +517,13 @@ version = "0.1.0"
 [[package]]
 name = "plumblog-render"
 version = "0.1.0"
+dependencies = [
+ "minijinja",
+ "plumblog-i18n",
+ "plumblog-markdown",
+ "serde",
+ "toml",
+]
 
 [[package]]
 name = "plumblog-store"
@@ -528,6 +544,9 @@ dependencies = [
 name = "plumblog-worker"
 version = "0.1.0"
 dependencies = [
+ "plumblog-markdown",
+ "plumblog-model",
+ "plumblog-render",
  "worker",
 ]
 

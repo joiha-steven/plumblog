@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{%- from "entry.html" import entry %}
+{%- block title %}{{ t("post.page_title", title=t("notfound.title"), site=site.title) }}{% endblock %}
+{%- block head %}
+<meta name="robots" content="noindex">
+{%- endblock %}
+{% block main %}
+<h1 class="list-title">{{ t("notfound.title") }}</h1>
+<p class="intro">{{ t("notfound.text") }} <a href="{{ site.home_url }}">{{ t("notfound.home") }}</a></p>
+{#- Suggestions: the newest posts, so a reader who followed a dead link still finds something. #}
+{%- if posts %}
+<h2 class="list-sub">{{ t("notfound.recent") }}</h2>
+<ol class="posts">
+  {%- for post in posts %}{{ entry(post, false, theme.options.list_images) }}{% endfor %}
+</ol>
+{%- endif %}
+{% endblock %}
