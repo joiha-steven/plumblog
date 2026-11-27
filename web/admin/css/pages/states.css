@@ -1,0 +1,9 @@
+/* States page: every control in every state, in both themes, for review. */
+.states { display: grid; grid-template-columns: minmax(0, 1fr); }
+.states > section { display: grid; gap: var(--sp-16); padding: var(--stack) max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-32) max(var(--gutter), env(safe-area-inset-left, 0px)); min-width: 0; }
+.states h2 { font: var(--type-section); }
+.stbl-wrap { overflow-x: auto; }
+.stbl { border-collapse: collapse; font: var(--type-meta); min-width: var(--stbl-min); width: 100%; max-width: var(--measure-wide); }
+.stbl th { font-weight: var(--fw-medium); color: var(--faint); text-align: left; padding: var(--sp-6) var(--sp-8); white-space: nowrap; }
+.stbl td { padding: var(--sp-8); vertical-align: middle; border-top: 1px solid var(--line); }
+.stbl td:first-child { color: var(--muted); white-space: nowrap; padding-right: var(--sp-16); }

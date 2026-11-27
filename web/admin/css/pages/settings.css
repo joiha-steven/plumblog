@@ -1,0 +1,12 @@
+/* Settings: section list on the left (a row of tabs on narrow screens), plain sections on the right. */
+.settings { display: grid; grid-template-columns: var(--subnav-w) minmax(0, 1fr); gap: var(--sp-32); align-items: start; max-width: var(--measure-wide); }
+.subnav { display: grid; gap: var(--sp-2); position: sticky; top: calc(var(--head-h) + var(--stack)); }
+.from-line { margin-top: calc(-1 * var(--sp-8)); }
+.plug-list { display: grid; }
+.plug-ico { display: grid; place-items: center; width: var(--ctl); height: var(--ctl); border-radius: var(--r-round); border: 1px solid var(--line-ctl); background: var(--key); box-shadow: var(--sh-rest); color: var(--muted); flex: none; }
+.plug-head { display: flex; align-items: center; gap: var(--sp-12); }
+@media (max-width: 767px) {
+  .settings { grid-template-columns: minmax(0, 1fr); gap: var(--sp-16); }
+  .subnav { position: static; display: flex; overflow-x: auto; scrollbar-width: none; margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); scroll-padding-inline: var(--gutter); margin-top: calc(-1 * var(--stack)); }
+  /* The strip plays the role of the filter row on other pages, so it sits flush under the header like they do. */
+}
