@@ -24,6 +24,9 @@ cargo clippy -q --workspace --exclude plumblog-worker --all-targets -- -D warnin
 step "clippy (wasm: worker)"
 cargo clippy -q -p plumblog-worker --target wasm32-unknown-unknown --all-targets -- -D warnings \
   || fail "clippy found warnings in worker"
+# The test-only contract route and D1 self-tests compile only with this feature.
+cargo clippy -q -p plumblog-worker --target wasm32-unknown-unknown --all-targets --features contract-tests -- -D warnings \
+  || fail "clippy found warnings in worker (--features contract-tests)"
 
 step "test (all crates)"
 cargo test -q --workspace || fail "tests failed"
@@ -69,6 +72,7 @@ render   serde                  # typed theme.toml and template data
 markdown pulldown-cmark         # CommonMark + GFM parser
 markdown pulldown-latex         # LaTeX to MathML at save time
 i18n     toml                   # locale files are TOML
+store unicode-normalization  # in-memory search folds diacritics like FTS5 unicode61
 '
 meta=$(cargo metadata -q --format-version 1 --no-deps) || fail "cargo metadata failed"
 graph_errors=$(jq -r --arg order "$order" --arg allow "$external_allowlist" '

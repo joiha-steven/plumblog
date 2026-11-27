@@ -8,6 +8,11 @@ publish.workspace = true
 [dependencies]
 plumblog-model.workspace = true
 plumblog-syslog.workspace = true
+unicode-normalization.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# Exposes the contract suite so the Worker can run it against D1.
+contract = []

@@ -362,9 +362,13 @@ fn hostile_inputs_render_safely() {
             panic!("input {src:?}\noutput {html:?}\n{e}");
         }
         // Author-typed tags must never reach the MathML at all, not even as escaped text
-        // (that would mean they only failed to parse). Inside `\text{}` a `<` is a literal
-        // character and correctly shown as one, so text mode is exempt.
-        if !src.contains("\\text") {
+        // (that would mean they only failed to parse). Inside `\text{}`, `\operatorname{}`
+        // and `\mathop{}` a `<` is a literal character and correctly shown as one, so those
+        // are exempt.
+        if !["\\text", "\\operatorname", "\\mathop"]
+            .iter()
+            .any(|c| src.contains(c))
+        {
             for part in html.split("<math").skip(1) {
                 let math = part.split("</math>").next().unwrap_or_default();
                 assert!(

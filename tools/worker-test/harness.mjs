@@ -62,6 +62,21 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   });
 }
 
+/** Runs wrangler with the dev config; throws with its output on failure. */
+export function wrangler(args) {
+  return run(WRANGLER, [...args, "--config", CONFIG]);
+}
+
+/**
+ * A fresh directory for a local D1 (`--persist-to`), removed by remove() and, like the
+ * Worker's state, on exit, Ctrl-C or a crash.
+ */
+export function makeStateDir() {
+  const entry = { state: mkdtempSync(join(RUN_DIR, "plumblog-d1-")), pgid: null, pgidFile: null };
+  live.add(entry);
+  return { dir: entry.state, remove: () => cleanupSync(entry) };
+}
+
 /** Applies migrations to a fresh local D1 and starts the Worker. Call stop() when done. */
 export async function startWorker() {
   const entry = { state: mkdtempSync(join(RUN_DIR, "plumblog-wrangler-")), pgid: null, pgidFile: null };

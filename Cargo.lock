@@ -531,6 +531,7 @@ version = "0.1.0"
 dependencies = [
  "plumblog-model",
  "plumblog-syslog",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -548,6 +549,8 @@ dependencies = [
  "plumblog-markdown",
  "plumblog-model",
  "plumblog-render",
+ "plumblog-store",
+ "plumblog-syslog",
  "roxmltree",
  "worker",
 ]
