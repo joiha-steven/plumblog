@@ -24,6 +24,13 @@ macro_rules! stable_codes {
             pub const fn as_str(self) -> &'static str {
                 match self { $($name::$variant => $code),+ }
             }
+
+            /// The variant whose code is `code`; `None` for unknown codes (e.g. a stored row
+            /// written by a newer version).
+            #[must_use]
+            pub fn parse(code: &str) -> Option<Self> {
+                Self::ALL.iter().copied().find(|v| v.as_str() == code)
+            }
         }
     };
 }
@@ -39,6 +46,9 @@ stable_codes! {
         InvalidInput => "input.invalid",
         Storage => "store.failed",
         Internal => "internal",
+        NotFound => "store.not_found",
+        Conflict => "store.conflict",
+        InviteInvalid => "invite.invalid",
     }
 }
 
@@ -95,10 +105,27 @@ pub struct UserId(pub i64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PostId(pub i64);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Role {
-    Owner,
-    Writer,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MediaId(pub i64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TagId(pub i64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SeriesId(pub i64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CommentId(pub i64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RevisionId(pub i64);
+
+stable_codes! {
+    /// Codes are stored in D1 (`users.role`, `invites.role`, `api_tokens.scope`).
+    pub enum Role {
+        Owner => "owner",
+        Writer => "writer",
+    }
 }
 
 stable_codes! {
@@ -168,8 +195,27 @@ mod tests {
                 (ErrorCode::InvalidInput, "input.invalid"),
                 (ErrorCode::Storage, "store.failed"),
                 (ErrorCode::Internal, "internal"),
+                (ErrorCode::NotFound, "store.not_found"),
+                (ErrorCode::Conflict, "store.conflict"),
+                (ErrorCode::InviteInvalid, "invite.invalid"),
             ]
         );
+    }
+
+    /// Role codes are stored in D1 rows.
+    #[test]
+    fn role_codes_are_pinned_and_parse() {
+        assert_eq!(Role::Owner.as_str(), "owner");
+        assert_eq!(Role::Writer.as_str(), "writer");
+        for r in Role::ALL {
+            assert_eq!(Role::parse(r.as_str()), Some(*r));
+        }
+        assert_eq!(Role::parse("Owner"), None);
+        assert_eq!(
+            ErrorCode::parse("store.conflict"),
+            Some(ErrorCode::Conflict)
+        );
+        assert_eq!(ErrorCode::parse("nope"), None);
     }
 
     /// The full owner/writer table, so any change to who holds what is a visible test edit.
