@@ -23,5 +23,8 @@ plumblog-i18n.workspace = true
 plumblog-store.workspace = true
 plumblog-syslog.workspace = true
 
+[dev-dependencies]
+roxmltree.workspace = true
+
 [lints]
 workspace = true

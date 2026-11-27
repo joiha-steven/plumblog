@@ -187,7 +187,7 @@ CREATE TABLE post_media (
 -- Media details "used in" list, the unused filter, and the delete check.
 CREATE INDEX post_media_media ON post_media (media_id, post_id);
 
--- Snapshot of the title and text as saved, with who saved it; the newest is the current text.
+-- Snapshots of the title and text, with who saved them; written only when a save asks for one, so the newest snapshot may be older than the post.
 CREATE TABLE revisions (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   post_id    INTEGER NOT NULL REFERENCES posts (id) ON DELETE CASCADE,

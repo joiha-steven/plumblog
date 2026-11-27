@@ -28,7 +28,7 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     }
     match (req.method().as_ref(), req.path().as_str()) {
         ("GET", "/healthz") => Response::ok("ok"),
-        ("GET" | "HEAD", _) => pages::serve(&req, &ctx).await,
+        ("GET" | "HEAD", _) => pages::serve(&req, &env, &ctx).await,
         _ => Ok(Response::empty()?.with_status(405)),
     }
 }

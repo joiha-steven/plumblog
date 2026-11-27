@@ -49,6 +49,19 @@ impl D1Store {
         guard(self, name, NOT_LAST_OWNER, &[bound(id.0), bound(id.0)])
     }
 
+    /// The `set_role` batch for a non-owner `role`: the guard, then the write at index 1.
+    /// Separate so `selftest` can run it after the owners changed under it.
+    pub(super) fn demote_stmts(&self, id: UserId, role: Role, now: i64) -> Result<Vec<Stmt>> {
+        Ok(vec![
+            self.not_last_owner("set_role_guard", id)?,
+            self.stmt(
+                "set_role",
+                "UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
+                &[text(role.as_str()), int(now)?, bound(id.0)],
+            )?,
+        ])
+    }
+
     /// Runs `stmts` (a [`Self::not_last_owner`] guard first) and checks that statement
     /// `write_at` changed the user's row.
     async fn guarded_user_write(
@@ -290,14 +303,7 @@ impl UserStore for D1Store {
                 .set_user_column("set_role", "role", text(role.as_str()), id, now)
                 .await;
         }
-        let stmts = vec![
-            self.not_last_owner("set_role_guard", id)?,
-            self.stmt(
-                "set_role",
-                "UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
-                &[text(role.as_str()), int(now)?, bound(id.0)],
-            )?,
-        ];
+        let stmts = self.demote_stmts(id, role, now)?;
         self.guarded_user_write("set_role", id, stmts, 1).await
     }
 
