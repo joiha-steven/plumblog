@@ -9,6 +9,7 @@
 //! Rust code names keys only through [`Key`] constants in its crate's `keys.rs`, which the
 //! repository locale check reads; templates pass literal keys to `t()`.
 
+pub mod admin;
 mod plural;
 
 pub use plural::{Plural, categories, plural};

@@ -1,7 +1,7 @@
 {
   "name": "plumblog-tools",
   "private": true,
-  "description": "Contributor-only tooling (local Worker tests). Blog owners never need Node.",
+  "description": "Contributor-only tooling (local Worker tests, admin build). Blog owners never need Node.",
   "license": "AGPL-3.0-only",
   "type": "module",
   "engines": {
@@ -11,7 +11,17 @@
     "test:worker": "node --test \"worker-test/*.test.mjs\""
   },
   "devDependencies": {
+    "esbuild": "0.28.2",
     "happy-dom": "21.0.4",
+    "playwright-core": "1.65.1",
+    "typescript": "7.0.2",
     "wrangler": "4.160.0"
+  },
+  "why": {
+    "esbuild": "admin bundle: TypeScript to minified ES modules with code splitting, one fast binary",
+    "typescript": "type-checks the admin (tsc --noEmit); esbuild only strips types",
+    "playwright-core": "admin screenshots and smoke tests in the system Chrome; no browser download",
+    "happy-dom": "DOM for theme script tests",
+    "wrangler": "runs the Worker locally (workerd, local D1/R2)"
   }
 }

@@ -214,6 +214,16 @@ Not built: offline reading, newsletter (later), reactions.
 - Admin in light and dark; English and Vietnamese UI.
 - Dashboard (drafts, recent posts, last backup time), media library, users/invites, settings, tokens, audit log, update notice from GitHub Releases.
 
+How the admin is built:
+- No framework: TypeScript ES modules in `web/admin/src` with a small own DOM helper (`dom.ts`); screens are forms and lists, and CodeMirror owns the only complex DOM. `tsc --noEmit` type-checks, esbuild bundles and code-splits (shell; editor and image encoder load on demand). Pinned in `tools/package.json`, which says why for each tool.
+- Built by `scripts/admin-build` into `target/admin` (the mock build into `target/admin-dev`) and never committed: `scripts/check` builds it once, worker-test serves it from `target/worker-test` (`scripts/admin-dev` from `target/worker-dev`, so a check never swaps files under it), and releases ship it prebuilt like the Worker wasm (#21), so owners never need Node. The build writes `_headers` for Workers static assets: hashed chunks `immutable` for a year, `app.js`, `app.css` and `sw.js` revalidated; the release must put it at the assets root.
+- Served as Workers static assets under `/admin/`; every other `/admin/*` path gets one HTML shell from the Worker (`crates/worker/src/admin.rs`) naming one language (cookie `pb_lang`, else `Accept-Language`, else the site language) and preloading that language's UI text module, `/admin/i18n/<lang>.js` with English behind it. The text is part of the admin build (`crates/i18n` `admin`, run by admin-build), not the Worker: the wasm embeds only the bare `[admin]` section (title, noscript), so admin screens never grow it. Strict CSP: scripts and styles from the site only, no inline code; the client sets styles through the CSSOM.
+- Installable: the Worker serves `/admin/manifest.webmanifest` (scope `/admin/`, "<Site> admin") and a default icon (the site's first letter on a signal disc, on a dark plate) until a site icon can be uploaded. A service worker keeps the shell offline, network first; it never caches `/api/`. Its cache is named after the build's hash and holds only the shell and that build's files (listed at build time); activating a new build deletes the old cache. A missing `/admin/` file (an extension or under `chunks/`) is a 404, never the shell.
+- One API client (`web/admin/src/api/client.ts`): every call resolves to a result with the server's stable error code, never throws, and logs failures. Codes, roles and permissions are generated from `crates/model` (`model.gen.ts`, kept current by a test); API body types join them as they move into `model`. `api/mock.ts` implements the same interface over `web/admin/fixtures` so screens are built before their API (`scripts/admin-dev`, with `?mock=loading|error|offline` and `?role=writer`); worker-test checks the fixtures against the real API as each endpoint lands.
+- Preview renders on the server through the markdown crate (debounced), so it matches the published page; offline, it says so.
+- UI text: `t("literal")` only, `[admin.*]` keys in `locales/`; a key built at runtime is a template string with `// i18n: <every key>` above, checked by the locale test like templates. The test also rejects text that bypasses `t`: string literals with letters as `h()` children or `aria-label`/`title`/`placeholder`/`alt` values, and `t` imported under another name.
+- Evidence for each admin change: `tools/admin-shots.mjs` (every state at the widths below, light and dark, English and Vietnamese, with the layout audit) and the browser smoke test in worker-test.
+
 The approved prototype (https://claude.ai/artifact/JEowACAfZPJ5VJydhFcgFt) is the visual reference for every admin screen. Its stylesheets live in `web/admin/css/`: `tokens.css`, `components.css` and `pages/*.css`, loaded in that order; the admin code builds on them rather than restyling. The rules they follow are in Design language below.
 
 ### Design language
@@ -274,7 +284,9 @@ Node.js is a contributor-only tool (wrangler, Playwright, Lighthouse). Users nev
 | Worker wasm, gzip | <= 1 MiB |
 | Reader page JS | 0 KB by default, <= 5 KB with theme toggle and TOC |
 | Reader page CSS (inlined) | <= 15 KB |
-| Admin JS | measured every build, budget set when the editor lands |
+| Admin shell JS (every admin page: `app.js`, the chunks it imports statically and the largest UI text module), gzip | <= 35 KB |
+| Admin lazy chunk (editor, ...), gzip, each | <= 110 KB |
+| Admin CSS, gzip | <= 20 KB |
 | Lighthouse (mobile + desktop, sample content) | 100, CLS 0 |
 
 ## Documentation
@@ -324,4 +336,5 @@ Work is tracked as GitHub Issues grouped in one milestone per phase; this list o
 - 2026-11-27 Markdown: raw HTML dropped (inline text kept), GitHub alert callouts, title as figure caption, MathML at save time via pulldown-latex.
 - 2026-11-27 Storage: D1 schema v1, store traits with in-memory and D1 implementations checked by one contract suite; atomic batches; FTS5 search with app-side d-stroke folding; keyset paging.
 - 2026-11-27 Theme and plugin options at runtime: JSON values checked against the declaration, defaults on any mismatch (logged); `image` as a media id read via `.id`, `list` as short strings; plugins are bundled folders (`plugin.toml`, `partials/`, `assets/`, `locales/`) whose partials only fill theme-declared slots; plugin CSS inlined and JS deferred only when enabled; broken plugins skipped and logged; `blog guide options` generated from the Rust types.
+- 2026-11-27 Admin stack: no framework, TypeScript + esbuild (dev tools pinned in `tools/`), built output not committed (releases ship it), Worker-served shell with boot JSON and strict CSP (UI text built into the admin bundle, not the wasm), generated model types via an own emitter, mock client over shared fixtures, server-side preview; budgets 35 / 110 / 20 KB gzip.
 - 2026-11-27 Auth: browser-stretched passwords, hashed-key D1 rate limit with Turnstile step, rotating SameSite=Strict sessions with Origin check, passkeys (none attestation, ES256/RS256/Ed25519, own CBOR reader), setup code in settings.
