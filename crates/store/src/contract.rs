@@ -100,6 +100,7 @@ cases! {
     site::log_prune,
     site::log_detail_redacted,
     site::log_retention_job,
+    site::log_retention_job_record_failure,
 }
 
 #[cfg(test)]

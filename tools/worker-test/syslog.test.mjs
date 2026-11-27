@@ -58,3 +58,35 @@ test("page views write nothing; the daily job prunes and records itself", async 
   console.log("Worker log line:", line);
   assert.match(line ?? "", /job\.run system_log\.retention deleted=1/);
 });
+
+/** The first Worker log line after `from` (an offset into the log) matching `re`. */
+async function logLine(from, re) {
+  for (let i = 0; i < 50; i++) {
+    const line = worker.log().slice(from).split("\n").find((l) => re.test(l));
+    if (line) return line;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return undefined;
+}
+
+test("a backlog drains in bounded runs (Retention::per_run)", async () => {
+  const old = Date.now() - 120 * DAY_MS;
+  sql(
+    "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2500) " +
+      `INSERT INTO system_log (at_ms, request_id, kind, detail) SELECT ${old} + i, 'bulk', 'system.deploy', '' FROM n`,
+  );
+  const runs = [];
+  for (const want of [2000, 500]) {
+    const from = worker.log().length;
+    const res = await fetch(`${worker.url}/__scheduled?cron=${encodeURIComponent("17 3 * * *")}`);
+    assert.equal(res.status, 200);
+    const line = await logLine(from, /prune_log deleted=/);
+    console.log("Worker log line:", line);
+    assert.match(line ?? "", new RegExp(`prune_log deleted=${want} rows_written=\\d+`));
+    runs.push(Number(/rows_written=(\d+)/.exec(line)[1]));
+  }
+  const left = sql("SELECT count(*) AS n FROM system_log WHERE request_id = 'bulk'")[0].n;
+  assert.equal(left, 0, "the second run finishes the backlog");
+  // Each deleted row is written once per table and index (4 for system_log).
+  assert.ok(runs[0] <= 2000 * 4, `first run wrote ${runs[0]} rows`);
+});

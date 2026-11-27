@@ -44,18 +44,24 @@ impl LogStore for MemoryStore {
         }))
     }
 
-    async fn prune_log(&self, older_than_ms: u64, keep_max: u32) -> Result<u64> {
+    async fn prune_log(&self, older_than_ms: u64, keep_max: u32, limit: u32) -> Result<u64> {
         self.write(|s| {
-            let before = s.log.len();
-            s.log.retain(|_, e| e.at_ms() >= older_than_ms);
             let mut newest: Vec<(u64, i64)> =
                 s.log.iter().map(|(id, e)| (e.at_ms(), *id)).collect();
             newest.sort_unstable_by(|a, b| b.cmp(a));
             let keep = usize::try_from(keep_max).unwrap_or(usize::MAX);
-            for (_, id) in newest.into_iter().skip(keep) {
-                s.log.remove(&id);
+            let mut doomed: Vec<(u64, i64)> = newest
+                .iter()
+                .enumerate()
+                .filter(|(rank, (at, _))| *at < older_than_ms || *rank >= keep)
+                .map(|(_, row)| *row)
+                .collect();
+            doomed.sort_unstable();
+            doomed.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+            for (_, id) in &doomed {
+                s.log.remove(id);
             }
-            Ok(count(before - s.log.len()))
+            Ok(count(doomed.len()))
         })
     }
 }

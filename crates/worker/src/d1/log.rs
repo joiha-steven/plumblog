@@ -1,6 +1,7 @@
 use plumblog_model::{ErrorCode, RequestId, Result, UserId};
 use plumblog_store::{LogEntry, LogQuery, LogStore};
 use plumblog_syslog::{Event, EventKind, Logger};
+use worker::console_log;
 use worker::wasm_bindgen::JsValue;
 
 use super::{D1Store, Row, bound, limit, opt_int, opt_text, storage, text, ubound, uint};
@@ -67,21 +68,31 @@ impl LogStore for D1Store {
         self.rows(s).await?.iter_mut().map(read_entry).collect()
     }
 
-    async fn prune_log(&self, older_than_ms: u64, keep_max: u32) -> Result<u64> {
-        let old = self.stmt(
-            "prune_log_age",
-            "DELETE FROM system_log WHERE at_ms < ?",
-            &[ubound(older_than_ms)],
+    // 1 query. Oldest first, so a run cut short by `limit` leaves the newest rows and the
+    // next run continues where this one stopped.
+    async fn prune_log(&self, older_than_ms: u64, keep_max: u32, limit: u32) -> Result<u64> {
+        let s = self.stmt(
+            "prune_log",
+            "DELETE FROM system_log WHERE id IN (SELECT id FROM system_log \
+             WHERE at_ms < ?1 OR id NOT IN \
+             (SELECT id FROM system_log ORDER BY at_ms DESC, id DESC LIMIT ?2) \
+             ORDER BY at_ms, id LIMIT ?3)",
+            &[
+                ubound(older_than_ms),
+                JsValue::from(keep_max),
+                JsValue::from(limit),
+            ],
         )?;
-        let extra = self.stmt(
-            "prune_log_count",
-            "DELETE FROM system_log WHERE id NOT IN \
-             (SELECT id FROM system_log ORDER BY at_ms DESC, id DESC LIMIT ?)",
-            &[JsValue::from(keep_max)],
-        )?;
-        let results = self.batch("prune_log", vec![old, extra]).await?;
-        Ok(Self::changes("prune_log_age", &results[0])?
-            + Self::changes("prune_log_count", &results[1])?)
+        let r = self.exec(s).await?;
+        let deleted = Self::changes("prune_log", &r)?;
+        // What the free plan's daily write budget sees: each row once per table and index.
+        if let Ok(Some(meta)) = r.meta() {
+            console_log!(
+                "prune_log deleted={deleted} rows_written={}",
+                meta.rows_written.unwrap_or_default()
+            );
+        }
+        Ok(deleted)
     }
 }
 

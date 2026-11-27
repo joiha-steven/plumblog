@@ -114,8 +114,10 @@ impl Event {
     #[must_use]
     pub fn field(mut self, key: &str, value: &str) -> Self {
         if self.fields.len() < MAX_FIELDS {
+            // The full name decides redaction: a long name must not hide a `_password`
+            // suffix behind the cut.
+            let value = redact::value(key.trim(), value);
             let key = redact::truncate(key.trim(), 40);
-            let value = redact::value(&key, value);
             self.fields.push((key, value));
         }
         self
@@ -233,6 +235,7 @@ fn unescape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Event, EventKind, MAX_FIELDS, Severity};
+    use crate::REDACTED;
     use plumblog_model::{ErrorCode, RequestId, UserId};
 
     fn rid() -> RequestId {
@@ -328,7 +331,23 @@ mod tests {
     fn restore_redacts_again() {
         let raw = "x\npassword\thunter2\nnote\tmail me at a@b.co\ncolor\tblue";
         let e = Event::restore(1, rid(), EventKind::SettingsChanged, None, None, raw);
-        let values: Vec<_> = e.fields().iter().map(|(_, v)| v.as_str()).collect();
-        assert_eq!(values, ["[redacted]", "[redacted]", "blue"]);
+        let values: Vec<_> = e.fields().iter().map(|(_, v)| v.clone()).collect();
+        assert_eq!(
+            values,
+            [
+                REDACTED.to_owned(),
+                format!("mail me at {REDACTED}"),
+                "blue".to_owned()
+            ]
+        );
+    }
+
+    /// A long key is checked whole, then cut: the `_password` suffix past 40 chars counts.
+    #[test]
+    fn long_keys_are_checked_before_truncation() {
+        let key = format!("{}_password", "a".repeat(60));
+        let e = Event::new(EventKind::SettingsChanged, rid(), 1).field(&key, "hunter2");
+        assert_eq!(e.fields()[0].1, REDACTED);
+        assert_eq!(e.fields()[0].0.chars().count(), 41);
     }
 }

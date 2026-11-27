@@ -8,8 +8,8 @@ mod retention;
 mod scope;
 
 pub use event::{Event, EventKind, Severity};
-pub use redact::REDACTED;
-pub use retention::{Prune, Retention};
+pub use redact::{REDACTED, redacted_label, secret_name};
+pub use retention::Retention;
 pub use scope::{Scope, request_id};
 
 use plumblog_model::Result;
