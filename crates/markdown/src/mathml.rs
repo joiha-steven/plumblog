@@ -84,7 +84,12 @@ const TEXT_COMMANDS: &[&str] = &[
     "mbox",
 ];
 
-/// TeX with `<` and `>` turned into `\lt` / `\gt` outside text-mode arguments.
+/// Commands whose argument pulldown-latex copies into the output as raw text, without
+/// interpreting commands (so `\lt` would show as the letters "\lt").
+const RAW_TEXT_COMMANDS: &[&str] = &["operatorname", "mathop"];
+
+/// TeX with `<` and `>` turned into `\lt` / `\gt` outside text-mode arguments, and into
+/// the `&lt;` / `&gt;` entities inside raw-text arguments. Either way no tag can form.
 pub fn neutralize(tex: &str) -> String {
     let mut out = String::with_capacity(tex.len() + 8);
     let mut chars = tex.char_indices().peekable();
@@ -109,13 +114,15 @@ pub fn neutralize(tex: &str) -> String {
                     // is `<`/`>`, which the next iteration rewrites.
                     continue;
                 }
-                if TEXT_COMMANDS.contains(&&tex[name_start..name_end]) {
+                let name = &tex[name_start..name_end];
+                let raw = RAW_TEXT_COMMANDS.contains(&name);
+                if raw || TEXT_COMMANDS.contains(&name) {
                     while chars.peek().is_some_and(|&(_, n)| n == ' ') {
                         out.push(' ');
                         chars.next();
                     }
                     if chars.peek().is_some_and(|&(_, n)| n == '{') {
-                        copy_group(&mut chars, &mut out);
+                        copy_group(&mut chars, &mut out, raw);
                     }
                 }
             }
@@ -125,11 +132,21 @@ pub fn neutralize(tex: &str) -> String {
     out
 }
 
-/// Copies a balanced `{...}` group verbatim (escaped braces do not count).
-fn copy_group(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>, out: &mut String) {
+/// Copies a balanced `{...}` group (escaped braces do not count). With `raw`, `<` and `>`
+/// become entities: pulldown-latex copies raw-text arguments as they are, and the sanitizer
+/// keeps entities as text.
+fn copy_group(
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    out: &mut String,
+    raw: bool,
+) {
     let mut depth = 0usize;
     while let Some((_, c)) = chars.next() {
-        out.push(c);
+        match c {
+            '<' if raw => out.push_str("&lt;"),
+            '>' if raw => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
         match c {
             '\\' => {
                 if let Some((_, n)) = chars.next() {
@@ -335,8 +352,9 @@ mod tests {
         assert_eq!(neutralize("\\text {x{<}y}>"), "\\text {x{<}y}\\gt ");
         assert_eq!(
             neutralize("\\operatorname{<mtext style=x>}"),
-            "\\operatorname{\\lt mtext style=x\\gt }"
+            "\\operatorname{&lt;mtext style=x&gt;}"
         );
+        assert_eq!(neutralize("\\mathop {a>b}<c"), "\\mathop {a&gt;b}\\lt c");
     }
 
     #[test]
