@@ -1,6 +1,7 @@
 /** Admin entry: reads the shell's boot data, then draws the signed-out page or the route for the signed-in user. */
 
 import { type Api, type Me, type Result, httpApi, session } from "./api/client";
+import type { Post } from "./api/model.gen";
 import { mockApi } from "./api/mock";
 import { loadText, readBoot } from "./boot";
 import { h } from "./dom";
@@ -50,7 +51,7 @@ let navigated = false;
 /** The editor is its own chunk: lists and settings never load CodeMirror. */
 async function editor(route: Route): Promise<void> {
   root.replaceChildren(loadingRows());
-  let post;
+  let post: Post | undefined;
   if (route.id !== undefined) {
     const r = await api.post(route.id);
     if (!r.ok) {

@@ -88,6 +88,7 @@ building_hint = "This part of the admin is still being built."
 draft = "Draft"
 scheduled = "Scheduled"
 published = "Published"
+trashed = "Trashed"
 
 [admin.common]
 cancel = "Cancel"

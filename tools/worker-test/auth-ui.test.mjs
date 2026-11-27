@@ -106,8 +106,8 @@ async function open(w) {
   });
   const page = await context.newPage();
   const problems = [];
-  // The posts list is not served yet (the admin home asks for it); any other 404 is a fault.
-  page.on("response", (r) => r.status() === 404 && !r.url().endsWith("/api/posts") && problems.push(`404 ${r.url()}`));
+  // Any 404 is a fault.
+  page.on("response", (r) => r.status() === 404 && problems.push(`404 ${r.url()}`));
   page.on("pageerror", (e) => problems.push(`page error: ${e}`));
   page.on("console", (m) => {
     const text = m.text();

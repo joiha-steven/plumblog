@@ -3,8 +3,8 @@
  * (issue #10); each screen already has its real header, empty and no-permission states.
  */
 
-import type { Api, Me, PostSummary } from "./api/client";
-import { PERMISSION_ROLES } from "./api/model.gen";
+import type { Api, Me } from "./api/client";
+import { PERMISSION_ROLES, type PostSummary } from "./api/model.gen";
 import { type Child, h } from "./dom";
 import { icon } from "./icons";
 import { t } from "./i18n";
@@ -21,7 +21,7 @@ const newPost = (folding: boolean): HTMLElement =>
   );
 
 const statusName = (s: PostSummary["status"]): string =>
-  // i18n: admin.status.draft admin.status.scheduled admin.status.published
+  // i18n: admin.status.draft admin.status.scheduled admin.status.published admin.status.trashed
   t(`admin.status.${s}`);
 
 /** Title / status / date / language, aligned so the eye can run down each column. */
@@ -41,10 +41,10 @@ function postsList(api: Api): HTMLElement {
   const box = h("div", {}, loadingRows());
   const load = async () => {
     box.replaceChildren(loadingRows());
-    const r = await api.posts();
+    const r = await api.posts({ kind: "post" });
     if (!r.ok) box.replaceChildren(failed(r.error, () => void load()));
-    else if (!r.value.length) box.replaceChildren(empty({ icon: "posts", title: t("admin.posts.empty"), hint: t("admin.posts.empty_hint"), action: newPost(false) }));
-    else box.replaceChildren(h("div", { class: "rows" }, ...r.value.map(row)));
+    else if (!r.value.posts.length) box.replaceChildren(empty({ icon: "posts", title: t("admin.posts.empty"), hint: t("admin.posts.empty_hint"), action: newPost(false) }));
+    else box.replaceChildren(h("div", { class: "rows" }, ...r.value.posts.map(row)));
   };
   void load();
   return box;

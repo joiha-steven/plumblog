@@ -490,7 +490,7 @@ test("session.expired runs on a 401 outside /api/auth/ only", async () => {
   await api.me();
   assert.equal(n, 0);
   await api.call("GET", "/api/posts");
-  await api.posts();
+  await api.posts({});
   assert.equal(n, 2);
   fakeFetch(401, '{"error":"auth.invalid_credentials"}');
   await api.call("GET", "/api/posts");
@@ -499,5 +499,5 @@ test("session.expired runs on a 401 outside /api/auth/ only", async () => {
     throw new Error("hook broke");
   };
   fakeFetch(401, '{"error":"auth.unauthenticated"}');
-  assert.equal((await api.posts()).error.code, "auth.unauthenticated");
+  assert.equal((await api.posts({})).error.code, "auth.unauthenticated");
 });

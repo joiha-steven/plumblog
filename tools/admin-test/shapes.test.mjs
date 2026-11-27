@@ -1,0 +1,136 @@
+// The shape checker, and that the admin's fixtures and mock answer to the generated SHAPES
+// (the same table worker-test holds the real API to).
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+import { build } from "esbuild";
+import * as gen from "../../web/admin/src/api/model.gen.ts";
+import { checkShape } from "../shape-check.mjs";
+
+const root = new URL("../../", import.meta.url);
+const { SHAPES, ...rest } = gen;
+const lists = Object.fromEntries(Object.entries(rest).filter(([, v]) => Array.isArray(v)));
+const check = (name, value) => checkShape(SHAPES, lists, name, value);
+const fixtures = JSON.parse(readFileSync(new URL("web/admin/fixtures/posts.json", root), "utf8"));
+
+async function bundle(file) {
+  const out = await build({
+    entryPoints: [new URL(file, root).pathname],
+    bundle: true,
+    write: false,
+    format: "esm",
+    logLevel: "silent",
+    loader: { ".txt": "text" },
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(out.outputFiles[0].text).toString("base64")}`);
+}
+
+// --- the checker ---
+
+const toy = { inner: { n: "integer" }, outer: { s: "string|null", l: "integer[]", c: "code:COLORS", i: "shape:inner", is: "shape:inner[]", b: "boolean" } };
+const codes = { COLORS: ["red", "blue"] };
+const good = () => ({ s: null, l: [1, 2], c: "red", i: { n: 1 }, is: [{ n: 2 }], b: true });
+const toyCheck = (v) => checkShape(toy, codes, "outer", v);
+
+test("shape checker: a valid value passes", () => {
+  assert.deepEqual(toyCheck(good()), []);
+  assert.deepEqual(toyCheck({ ...good(), s: "x", l: [] , is: [] }), []);
+});
+
+test("shape checker: each kind of problem is found", () => {
+  const cases = [
+    ["missing key", (v) => (delete v.b, v), /b: missing key/],
+    ["extra key", (v) => ({ ...v, z: 1 }), /z: extra key/],
+    ["key order", (v) => ({ b: v.b, s: v.s, l: v.l, c: v.c, i: v.i, is: v.is }), /key order differs/],
+    ["wrong type", (v) => ({ ...v, b: "yes" }), /b: expected boolean/],
+    ["float is not integer", (v) => ({ ...v, l: [1.5] }), /l\[0\]: expected integer/],
+    ["null where not allowed", (v) => ({ ...v, b: null }), /b: expected boolean, got null/],
+    ["code not in list", (v) => ({ ...v, c: "green" }), /c: "green" is not in COLORS/],
+    ["list expected", (v) => ({ ...v, l: 3 }), /l: expected a list/],
+    ["nested shape", (v) => ({ ...v, i: { n: "1" } }), /outer\.i\.n: expected integer/],
+    ["nested list item", (v) => ({ ...v, is: [{ n: 1 }, { n: null }] }), /outer\.is\[1\]\.n: expected integer/],
+  ];
+  for (const [what, mutate, re] of cases) {
+    const problems = toyCheck(mutate(good()));
+    assert.ok(problems.some((p) => re.test(p)), `${what}: ${problems.join("; ")}`);
+  }
+  assert.ok(checkShape(toy, codes, "outer", [1])[0].includes("expected an object"));
+  assert.ok(checkShape(toy, codes, "nope", {})[0].includes("unknown shape"));
+});
+
+// --- fixtures ---
+
+test("fixtures: every post matches SHAPES.post, ids 1..N", () => {
+  fixtures.forEach((p, i) => {
+    assert.deepEqual(check("post", p), [], `fixture ${i + 1}`);
+    assert.equal(p.id, i + 1);
+  });
+  assert.ok(fixtures.some((p) => p.kind === "page") && fixtures.some((p) => p.status === "trashed"));
+});
+
+// --- the mock ---
+
+const mock = await bundle("web/admin/src/api/mock.ts");
+const api = (qs = "") => mock.mockApi(new URLSearchParams(qs));
+const ok = (r) => (assert.ok(r.ok, JSON.stringify(r)), r.value);
+
+test("mock: list, get and create answer in the real shapes", async () => {
+  const a = api();
+  const page = ok(await a.posts({}));
+  assert.deepEqual(check("post_page", page), []);
+  assert.equal(page.posts.length, fixtures.length);
+  assert.deepEqual(check("post", ok(await a.post(1))), []);
+  assert.ok(ok(await a.post(1)).markdown.length > 500, "the long post's body comes from post-1.txt");
+  const made = ok(await a.createPost({ lang: "en", slug: "new-one", title: "New", markdown: "Hello $$ x" }));
+  assert.deepEqual(check("post", made), []);
+  assert.equal(made.version, 1);
+  assert.deepEqual(made.warnings, ["markdown.math_invalid"]);
+  const missing = await a.post(999);
+  assert.ok(!missing.ok && missing.error.code === "post.not_found" && missing.error.status === 404);
+});
+
+test("mock: filters, and paging walks every post once", async () => {
+  const a = api();
+  const kinds = ok(await a.posts({ kind: "page" })).posts;
+  assert.ok(kinds.length > 0 && kinds.every((p) => p.kind === "page"));
+  assert.ok(ok(await a.posts({ status: "trashed" })).posts.every((p) => p.status === "trashed"));
+  assert.ok(ok(await a.posts({ lang: "en" })).posts.every((p) => p.lang === "en"));
+  const seen = [];
+  let cursor;
+  for (let i = 0; i < 20; i++) {
+    const page = ok(await a.posts({ limit: 2, ...(cursor ? { cursor } : {}) }));
+    assert.deepEqual(check("post_page", page), []);
+    seen.push(...page.posts.map((p) => p.id));
+    cursor = page.next_cursor;
+    if (cursor === null) break;
+  }
+  assert.equal(cursor, null);
+  assert.equal(new Set(seen).size, seen.length, "no duplicates");
+  assert.deepEqual([...seen].sort((x, y) => x - y), fixtures.map((p) => p.id));
+});
+
+test("mock: a stale update is a conflict with the current version; a fresh one saves", async () => {
+  const a = api();
+  const stale = await a.updatePost(2, { expected_version: 1, title: "X" });
+  assert.ok(!stale.ok);
+  assert.equal(stale.error.code, "store.conflict");
+  assert.equal(stale.error.status, 409);
+  assert.equal(stale.error.field, "expected_version");
+  assert.equal(stale.error.version, fixtures[1].version);
+  assert.deepEqual(check("conflict", { error: stale.error.code, field: stale.error.field, version: stale.error.version }), []);
+  const saved = ok(await a.updatePost(2, { expected_version: fixtures[1].version, title: "Y" }));
+  assert.deepEqual(check("post", saved), []);
+  assert.equal(saved.title, "Y");
+  assert.equal(saved.version, fixtures[1].version + 1);
+  const pub = ok(await a.updatePost(3, { expected_version: fixtures[2].version, status: "published", published_at: null }));
+  assert.ok(pub.published_at > 0);
+  const taken = await a.updatePost(1, { expected_version: 7, slug: "about", lang: "en" });
+  assert.ok(!taken.ok && taken.error.field === "slug" && taken.error.version === undefined);
+});
+
+test("mock: ?conflict=1 makes the first update conflict only", async () => {
+  const a = api("conflict=1");
+  const first = await a.updatePost(2, { expected_version: fixtures[1].version, title: "X" });
+  assert.ok(!first.ok && first.error.field === "expected_version" && first.error.version === fixtures[1].version + 1);
+  ok(await a.updatePost(2, { expected_version: first.error.version, title: "X" }));
+});

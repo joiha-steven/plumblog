@@ -80,6 +80,7 @@ building_hint = "Phần này của trang quản trị đang được làm."
 draft = "Bản nháp"
 scheduled = "Đã hẹn giờ"
 published = "Đã đăng"
+trashed = "Đã xoá"
 
 [admin.common]
 cancel = "Huỷ"

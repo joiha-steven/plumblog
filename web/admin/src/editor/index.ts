@@ -7,7 +7,8 @@
 
 import { redo, undo } from "@codemirror/commands";
 import { EditorView, type ViewUpdate } from "@codemirror/view";
-import type { Api, PostDraft } from "../api/client";
+import type { Api } from "../api/client";
+import type { Post } from "../api/model.gen";
 import { type Child, h } from "../dom";
 import { type IconName, icon } from "../icons";
 import { num, t } from "../i18n";
@@ -23,7 +24,7 @@ export interface EditorOptions {
   root: HTMLElement;
   api: Api;
   /** The post being edited; undefined for a new one. */
-  post: PostDraft | undefined;
+  post: Post | undefined;
   /** The signed-in user: drafts are kept per user. */
   user: number;
   lang: string;
@@ -87,8 +88,8 @@ const modeName = (m: Mode): string =>
   // i18n: admin.editor.mode.write admin.editor.mode.split admin.editor.mode.preview
   t(`admin.editor.mode.${m}`);
 
-const statusName = (s: PostDraft["status"]): string =>
-  // i18n: admin.status.draft admin.status.scheduled admin.status.published
+const statusName = (s: Post["status"]): string =>
+  // i18n: admin.status.draft admin.status.scheduled admin.status.published admin.status.trashed
   t(`admin.status.${s}`);
 
 export async function mountEditor(o: EditorOptions): Promise<void> {
@@ -104,7 +105,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   }
   const key = draftKey(o.user, post?.id, newId);
   const local = await loadDraft(key);
-  const same = local !== undefined && post !== undefined && local.title === post.title && local.body === post.body;
+  const same = local !== undefined && post !== undefined && local.title === post.title && local.body === post.markdown;
   const fromLocal = local !== undefined && !same;
   // The draft is the writer's latest text, unless the server copy moved on since the version
   // the draft started from: then both exist and the writer chooses (never a silent pick).
@@ -118,7 +119,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   const lang = post?.lang ?? o.lang;
   const status = post?.status ?? "draft";
   let title = fromLocal ? local.title : (post?.title ?? "");
-  const body = fromLocal ? local.body : (post?.body ?? "");
+  const body = fromLocal ? local.body : (post?.markdown ?? "");
 
   let mode: Mode = "write";
   let focusMode = false;
@@ -313,7 +314,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     );
   };
   /** The server copy moved on since this device's draft began. */
-  const serverChoice = (p: PostDraft) =>
+  const serverChoice = (p: Post) =>
     choice(
       t("admin.editor.conflict.server_title"),
       t("admin.editor.conflict.server_hint"),
@@ -328,7 +329,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
         t("admin.editor.conflict.use_saved"),
         () => {
           base = p.updated_at;
-          setText(p.title, p.body);
+          setText(p.title, p.markdown);
         },
       ],
     );
