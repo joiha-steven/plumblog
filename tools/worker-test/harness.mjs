@@ -2,10 +2,12 @@
 // Run through scripts/worker-test: it installs the pinned tools, builds the wasm once
 // (node --test runs files in parallel processes) and sets WORKER_TEST_RUN_DIR.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { afterEach, beforeEach } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -17,30 +19,100 @@ const RUN_DIR = process.env.WORKER_TEST_RUN_DIR ?? tmpdir();
 // The test build (scripts/worker-test), apart from target/worker-dev that the config names
 // for scripts/admin-dev, so tests never replace files under a running dev server.
 const OUT = process.env.WORKER_TEST_OUT ?? join(ROOT, "target/worker-test");
+// Readiness and helper-process bounds. A start is wrangler migrations + seed + build of the
+// worker: about 5 s idle, 17 s under a loaded 16-core run (measured); 60 s leaves 3x on a slow CI box.
 const READY_TIMEOUT_MS = 60_000;
+// One `wrangler d1 execute` / `r2 object get`: about 1 s; a hang here must fail, not stall the file.
+const HELPER_TIMEOUT_MS = 60_000;
 
 // Keep wrangler quiet and non-interactive; never phone home from tests.
 const ENV = { ...process.env, WRANGLER_SEND_METRICS: "false", CI: "1", NO_COLOR: "1" };
 
 function run(cmd, args) {
-  const r = spawnSync(cmd, args, { cwd: ROOT, env: ENV, encoding: "utf8" });
+  const r = spawnSync(cmd, args, { cwd: ROOT, env: ENV, encoding: "utf8", timeout: HELPER_TIMEOUT_MS });
   if (r.status !== 0) {
-    throw new Error(`${cmd} ${args.join(" ")} failed (exit ${r.status ?? r.signal})\n${r.stdout}\n${r.stderr}`);
+    const why = r.error?.code === "ETIMEDOUT" ? `timed out after ${HELPER_TIMEOUT_MS} ms` : `exit ${r.status ?? r.signal}`;
+    throw new Error(`${cmd} ${args.join(" ")} failed (${why})\n${r.stdout}\n${r.stderr}`);
   }
   return r.stdout;
 }
 
-function freePort() {
-  return new Promise((ok, fail) => {
+// Ports come from a range below every OS's ephemeral range (Linux 32768+, macOS 49152+), so
+// nothing that binds port 0 (workerd's own sockets, other tools) can take one. Within the range
+// a lock file per port, created with O_EXCL, hands each port to one starter at a time across
+// all parallel test files and concurrent runs. The old way (bind port 0, close, pass the number
+// to wrangler seconds later, after migrations and seeding) left a window in which two files
+// could get the same port, and one then reached the other's Worker or died with "Address
+// already in use".
+const PORT_LO = 20_000;
+const PORT_COUNT = 10_000;
+const PORT_DIR = join(tmpdir(), "plumblog-worker-test-ports");
+
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+
+/** Takes the lock file for a port; a lock whose owner process is gone is taken over. */
+function claim(lock) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(lock, "wx");
+      writeFileSync(fd, String(process.pid));
+      closeSync(fd);
+      return true;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      const owner = Number(readFileSync(lock, "utf8"));
+      if (owner && alive(owner)) return false;
+      rmSync(lock, { force: true });
+    }
+  }
+  return false;
+}
+
+function bindable(port) {
+  return new Promise((ok) => {
     const s = createServer();
     s.unref();
-    s.on("error", fail);
-    s.listen(0, "127.0.0.1", () => {
-      const { port } = s.address();
-      s.close(() => ok(port));
-    });
+    s.on("error", () => ok(false));
+    s.listen(port, "127.0.0.1", () => s.close(() => ok(true)));
   });
 }
+
+/** A port nobody else holds, with the lock file that keeps it ours until released. */
+async function reservePort() {
+  mkdirSync(PORT_DIR, { recursive: true });
+  const first = Math.floor(Math.random() * PORT_COUNT);
+  for (let i = 0; i < PORT_COUNT; i++) {
+    const port = PORT_LO + ((first + i) % PORT_COUNT);
+    const lock = join(PORT_DIR, String(port));
+    if (!claim(lock)) continue;
+    if (await bindable(port)) return { port, lock };
+    rmSync(lock, { force: true }); // held by something that is not a test worker
+  }
+  throw new Error(`no free port in ${PORT_LO}..${PORT_LO + PORT_COUNT - 1}`);
+}
+
+// Per-test timeout that names the test. Longest test measured: about 12 s idle on 16 cores (the
+// webhook timeout test waits 10 s by design); a 2-core CI runner is about 3x slower. 120 s is
+// 10x the slowest test and well under the 20 min a CI cancel takes. Not node:test's `timeout`:
+// that cannot be set once for every test, and `--test-timeout` bounds a whole file.
+// Exiting runs the exit handler below, so the Workers die with the process.
+const TEST_TIMEOUT_MS = 120_000;
+let testTimer = null;
+beforeEach((t) => {
+  testTimer = setTimeout(() => {
+    console.error(`worker-test: FAIL: test "${t.fullName ?? t.name}" in ${basename(process.argv[1] ?? "?")} ran over ${TEST_TIMEOUT_MS / 1000} s; stopping this file`);
+    process.exit(1);
+  }, TEST_TIMEOUT_MS);
+  testTimer.unref();
+});
+afterEach(() => clearTimeout(testTimer));
 
 // Every live wrangler group and temp dir, so Ctrl-C or a crash cannot leak them.
 const live = new Set();
@@ -55,9 +127,13 @@ function cleanupSync(entry) {
   }
   rmSync(entry.state, { recursive: true, force: true });
   if (entry.pgidFile) rmSync(entry.pgidFile, { force: true });
+  if (entry.portLock) rmSync(entry.portLock, { force: true });
   live.delete(entry);
 }
 process.on("exit", () => [...live].forEach(cleanupSync));
+// node:test's own uncaughtException handler rethrows, which ends the process (exit code 7)
+// without an "exit" event, so Workers would outlive the file. Kill them first (prepend: it runs before node:test's).
+process.prependListener("uncaughtException", () => [...live].forEach(cleanupSync));
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(sig, () => {
     [...live].forEach(cleanupSync);
@@ -75,7 +151,7 @@ export function wrangler(args) {
  * Worker's state, on exit, Ctrl-C or a crash.
  */
 export function makeStateDir() {
-  const entry = { state: mkdtempSync(join(RUN_DIR, "plumblog-d1-")), pgid: null, pgidFile: null };
+  const entry = { state: mkdtempSync(join(RUN_DIR, "plumblog-d1-")), pgid: null, pgidFile: null, portLock: null };
   live.add(entry);
   return { dir: entry.state, remove: () => cleanupSync(entry) };
 }
@@ -85,15 +161,26 @@ export function makeStateDir() {
  * `seedSql` runs after the migrations, before the Worker starts (test data only); it may be a
  * function of the Worker's URL (e.g. to configure the site origin); `vars`
  * become `--var KEY:VALUE` (wrangler dev's way to set vars and secrets per run).
+ * Ready means this start's own Worker answered with its own token (`/__instance`), not just
+ * that something answers on the port. `port` pins the port; only the harness's own test uses it.
  */
-export async function startWorker({ seedSql = null, vars = {} } = {}) {
-  const entry = { state: mkdtempSync(join(RUN_DIR, "plumblog-wrangler-")), pgid: null, pgidFile: null };
+export async function startWorker({ seedSql = null, vars = {}, port: pinned = null } = {}) {
+  const entry = { state: mkdtempSync(join(RUN_DIR, "plumblog-wrangler-")), pgid: null, pgidFile: null, portLock: null };
   live.add(entry);
   const common = ["--config", CONFIG, "--persist-to", entry.state];
-  const port = await freePort();
-  const inspector = await freePort();
-  const url = `http://127.0.0.1:${port}`;
+  const who = basename(process.argv[1] ?? "worker-test");
+  const token = randomUUID();
+  let port;
   try {
+    if (pinned === null) {
+      const r = await reservePort();
+      port = r.port;
+      entry.portLock = r.lock;
+    } else {
+      port = pinned;
+    }
+    const url = `http://127.0.0.1:${port}`;
+    entry.url = url;
     run(WRANGLER, ["d1", "migrations", "apply", "DB", "--local", ...common]);
     const sql = typeof seedSql === "function" ? seedSql(url) : seedSql;
     if (sql) {
@@ -105,17 +192,24 @@ export async function startWorker({ seedSql = null, vars = {} } = {}) {
     cleanupSync(entry);
     throw e;
   }
+  const url = entry.url;
 
   // detached: wrangler starts workerd children; killing the group stops them all.
+  // The inspector port 0 lets the OS pick: nothing here connects to it.
   const child = spawn(
     WRANGLER,
-    ["dev", join(OUT, "worker/shim.mjs"), "--assets", join(OUT, "assets"), ...common, "--ip", "127.0.0.1", "--port", String(port), "--inspector-port", String(inspector),
+    ["dev", join(OUT, "worker/shim.mjs"), "--assets", join(OUT, "assets"), ...common, "--ip", "127.0.0.1", "--port", String(port), "--inspector-port", "0",
       "--show-interactive-dev-session=false", "--log-level", "log",
       // Serves /__scheduled so tests can fire the cron trigger.
       "--test-scheduled",
-      ...Object.entries(vars).flatMap(([k, v]) => ["--var", `${k}:${v}`])],
+      ...Object.entries({ ...vars, PLUMBLOG_TEST_INSTANCE: token }).flatMap(([k, v]) => ["--var", `${k}:${v}`])],
     { cwd: ROOT, env: ENV, detached: true, stdio: ["ignore", "pipe", "pipe"] },
   );
+  // A suite that fails (or a hook that throws before stop() is reachable) must not keep node
+  // alive on these handles; the exit handler above then kills the group.
+  child.unref();
+  child.stdout.unref();
+  child.stderr.unref();
   entry.pgid = child.pid;
   entry.pgidFile = join(RUN_DIR, `${child.pid}.pgid`);
   writeFileSync(entry.pgidFile, "");
@@ -127,6 +221,8 @@ export async function startWorker({ seedSql = null, vars = {} } = {}) {
 
   const stop = () =>
     new Promise((ok) => {
+      // Waiting for the exit needs a live handle, or node sees an empty loop and cancels the test.
+      child.ref();
       if (exited !== null) {
         cleanupSync(entry);
         return ok();
@@ -140,31 +236,47 @@ export async function startWorker({ seedSql = null, vars = {} } = {}) {
       } catch {
         // Already gone between the check and the kill.
       }
-      setTimeout(() => cleanupSync(entry), 5_000).unref();
+      setTimeout(() => {
+        cleanupSync(entry);
+        ok();
+      }, 5_000);
     });
 
   const deadline = Date.now() + READY_TIMEOUT_MS;
+  let last = "no response yet";
+  let foreign = null;
   while (Date.now() < deadline) {
     if (exited !== null) {
       await stop();
-      throw new Error(`wrangler dev exited early (${exited}):\n${log}`);
+      throw new Error(`${who}: wrangler dev on ${url} exited early (${exited}):\n${log}`);
     }
     try {
-      await fetch(`${url}/healthz`);
-      // Reads the running Worker's local D1 (test assertions only).
-      const query = (sql) =>
-        JSON.parse(run(WRANGLER, ["d1", "execute", "DB", "--local", ...common, "--json", "--command", sql]))[0].results;
-      // Size of an object in the running Worker's local R2 bucket, or null when it is absent.
-      const r2Size = (key) => {
-        const r = spawnSync(WRANGLER, ["r2", "object", "get", `plumblog-dev/${key}`, "--local", ...common, "--pipe"], { cwd: ROOT, env: ENV, maxBuffer: 64 << 20 });
-        return r.status === 0 ? r.stdout.length : null;
-      };
-      // state: the --persist-to dir, for reading the local D1 with `wrangler d1 execute`.
-      return { url, stop, state: entry.state, log: () => log, query, r2Size };
-    } catch {
-      await new Promise((r) => setTimeout(r, 200));
+      const res = await fetch(`${url}/__instance`, { signal: AbortSignal.timeout(2_000) });
+      const body = await res.text();
+      last = `HTTP ${res.status} ${JSON.stringify(body.slice(0, 80))}`;
+      if (res.status === 200 && body === token && exited === null) {
+        // Reads the running Worker's local D1 (test assertions only).
+        const query = (sql) =>
+          JSON.parse(run(WRANGLER, ["d1", "execute", "DB", "--local", ...common, "--json", "--command", sql]))[0].results;
+        // Size of an object in the running Worker's local R2 bucket, or null when it is absent.
+        const r2Size = (key) => {
+          const r = spawnSync(WRANGLER, ["r2", "object", "get", `plumblog-dev/${key}`, "--local", ...common, "--pipe"], { cwd: ROOT, env: ENV, maxBuffer: 64 << 20, timeout: HELPER_TIMEOUT_MS });
+          return r.status === 0 ? r.stdout.length : null;
+        };
+        // state: the --persist-to dir, for reading the local D1 with `wrangler d1 execute`.
+        return { url, instance: token, stop, state: entry.state, log: () => log, query, r2Size };
+      }
+      if (res.status === 200 && body !== "") foreign = body;
+    } catch (e) {
+      last = `${e.name}: ${e.message}`;
     }
+    if (foreign !== null) {
+      // Another start's Worker owns this port: no amount of waiting makes it ours.
+      await stop();
+      throw new Error(`${who}: ${url} is answered by another Worker (instance ${JSON.stringify(foreign)}, expected ${token}); wrangler log:\n${log}`);
+    }
+    await new Promise((r) => setTimeout(r, 200));
   }
   await stop();
-  throw new Error(`wrangler dev not ready after ${READY_TIMEOUT_MS} ms:\n${log}`);
+  throw new Error(`${who}: wrangler dev on ${url} not ready after ${READY_TIMEOUT_MS} ms; last response: ${last}\n${log}`);
 }

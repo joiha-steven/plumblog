@@ -88,5 +88,5 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-WORKER_TEST_RUN_DIR="$run_dir" WORKER_TEST_OUT="$PWD/$out" node --test "tools/worker-test/*.test.mjs" \
+WORKER_TEST_RUN_DIR="$run_dir" WORKER_TEST_OUT="$PWD/$out" node tools/worker-test/run.mjs \
   || fail "Worker integration tests failed"
