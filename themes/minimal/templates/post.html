@@ -54,6 +54,7 @@
   <p class="comments-empty">{{ t("comments.empty") }}</p>
   {%- endif %}
   {%- if comments.notice %}
+  {#- i18n: comments.notice_pending comments.notice_error #}
   <p class="notice is-{{ comments.notice }}" role="status">{{ t("comments.notice_" ~ comments.notice) }}</p>
   {%- endif %}
   {%- if comments.open %}

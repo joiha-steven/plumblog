@@ -4,7 +4,7 @@
 
 mod css;
 mod data;
-mod locale;
+mod keys;
 mod theme;
 
 pub use data::{Body, Image, Link, NavItem, PageInfo, Post, Site};
@@ -15,7 +15,7 @@ pub use theme::{Theme, ThemeError, ThemeFiles};
 /// # Errors
 /// Invalid TOML or a value that is not text, naming the key.
 pub fn parse_locale(src: &str) -> Result<std::collections::HashMap<String, String>, String> {
-    locale::flatten(src)
+    plumblog_i18n::parse(src).map_err(|e| e.detail)
 }
 
 /// Reader page kinds; each maps to one theme template.

@@ -45,9 +45,20 @@ impl Plural {
     }
 }
 
-/// Base language of a tag: `pt-BR` -> `pt`, `zh_Hant` -> `zh`.
+/// Lowercase tag with `-` separators: `pt_BR` and `PT-br` both become `pt-br`.
+fn normalize(lang: &str) -> String {
+    lang.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+/// Base language of a normalised tag: `pt-br` -> `pt`.
 fn base(lang: &str) -> &str {
-    lang.split(['-', '_']).next().unwrap_or(lang)
+    lang.split('-').next().unwrap_or(lang)
+}
+
+/// CLDR `many` for French, Spanish, Italian and Portuguese whole numbers: exact millions
+/// (1,000,000 and up). Compact forms like "1M" are not counts we format.
+fn is_millions(n: u64) -> bool {
+    n != 0 && n.is_multiple_of(1_000_000)
 }
 
 /// Plural category for the whole number `n` in `lang`. Unknown languages use English
@@ -55,10 +66,9 @@ fn base(lang: &str) -> &str {
 #[must_use]
 pub fn plural(lang: &str, n: u64) -> Plural {
     use Plural::{Few, Many, One, Other, Two, Zero};
+    let lang = normalize(lang);
     let (n10, n100) = (n % 10, n % 100);
-    match base(lang) {
-        // No grammatical plural.
-        "vi" | "zh" | "ja" | "ko" | "th" | "id" | "ms" | "lo" | "km" | "my" => Other,
+    match base(&lang) {
         "ru" | "uk" | "be" => match (n10, n100) {
             (1, 11) | (5..=9 | 0, _) | (_, 12..=14) => Many,
             (1, _) => One,
@@ -83,21 +93,13 @@ pub fn plural(lang: &str, n: u64) -> Plural {
             (_, 11..=99) => Many,
             _ => Other,
         },
-        // French and Brazilian Portuguese count 0 as singular.
-        "fr" => {
-            if n <= 1 {
-                One
-            } else {
-                Other
-            }
-        }
-        "pt" if lang.ends_with("BR") || lang == "pt" => {
-            if n <= 1 {
-                One
-            } else {
-                Other
-            }
-        }
+        // French and Brazilian Portuguese count 0 as singular; European Portuguese does not.
+        "fr" | "pt" if n <= 1 && lang != "pt-pt" => One,
+        "es" | "it" | "pt" if n == 1 => One,
+        "fr" | "es" | "it" | "pt" if is_millions(n) => Many,
+        // No grammatical plural (vi, zh...), or the rest of fr/es/it/pt.
+        "vi" | "zh" | "ja" | "ko" | "th" | "id" | "ms" | "lo" | "km" | "my" | "fr" | "es"
+        | "it" | "pt" => Other,
         _ => {
             if n == 1 {
                 One
@@ -112,8 +114,9 @@ pub fn plural(lang: &str, n: u64) -> Plural {
 #[must_use]
 pub fn categories(lang: &str) -> &'static [Plural] {
     use Plural::{Few, Many, One, Other, Two, Zero};
-    match base(lang) {
+    match base(&normalize(lang)) {
         "vi" | "zh" | "ja" | "ko" | "th" | "id" | "ms" | "lo" | "km" | "my" => &[Other],
+        "fr" | "es" | "it" | "pt" => &[One, Many, Other],
         "ru" | "uk" | "be" | "pl" => &[One, Few, Many, Other],
         "cs" | "sk" => &[One, Few, Other],
         "ar" => &[Zero, One, Two, Few, Many, Other],
@@ -147,10 +150,20 @@ mod tests {
         assert_eq!(plural("fr", 0), One);
         assert_eq!(plural("pt-BR", 0), One);
         assert_eq!(plural("de", 0), Other);
+        assert_eq!(plural("pt-PT", 0), Other);
+        assert_eq!(plural("pt_pt", 1), One);
+        assert_eq!(plural("pt-br", 0), One);
+        assert_eq!(plural("RU", 3), Few);
+        assert_eq!(plural("fr", 1_000_000), Many);
+        assert_eq!(plural("es", 2_000_000), Many);
+        assert_eq!(plural("it", 1_000_001), Other);
+        assert_eq!(plural("es", 0), Other);
         assert_eq!(plural("unknown", 1), One);
         // Every category a rule can return is one the language's files must provide.
-        for lang in ["en", "vi", "ru", "pl", "cs", "ar", "fr", "pt-BR"] {
-            for n in 0..=200 {
+        for lang in [
+            "en", "vi", "ru", "pl", "cs", "ar", "fr", "pt-BR", "pt-PT", "es", "it",
+        ] {
+            for n in (0..=200).chain([1_000_000, 3_000_000]) {
                 assert!(categories(lang).contains(&plural(lang, n)), "{lang} {n}");
             }
         }

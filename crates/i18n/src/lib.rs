@@ -1,25 +1,60 @@
 //! UI text: locale files, lookup with English fallback, CLDR plurals and `{name}` arguments.
 //!
 //! Locale files are TOML. Sections nest keys (`[post] next = "Next"` is `post.next`). A
-//! plural message is a table of CLDR categories and must have `other`:
-//! `reading_time = { one = "{count} minute", other = "{count} minutes" }`; it is chosen by
-//! the `count` argument. Output is plain text: escaping belongs to the template layer.
+//! plural message is a table of CLDR categories that includes `other` (a table without
+//! `other` is an ordinary section): `reading_time = { one = "{count} minute", other =
+//! "{count} minutes" }`, chosen by the `count` argument. Output is plain text: escaping
+//! belongs to the template layer.
+//!
+//! Rust code names keys only through [`Key`] constants in its crate's `keys.rs`, which the
+//! repository locale check reads; templates pass literal keys to `t()`.
 
 mod plural;
 
 pub use plural::{Plural, categories, plural};
 
 use plumblog_model::{Error, ErrorCode, Result};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Mutex;
 
-/// Flattens a locale file into `section.key -> text`; plural messages become
-/// `key.<category>`. Anything but text, sections and plural tables is an error with the key,
-/// because a number or list where text belongs is a mistake the author must see.
+/// A locale key used from Rust. Construct it only in a crate's `keys.rs`: `scripts/check`
+/// rejects `Key(` anywhere else, so every key Rust can ask for is listed where it checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Key(pub &'static str);
+
+/// Keys a page asked for that exist in neither its language nor English. Shared by the
+/// lookups of one render; the caller drains it and logs `i18n.missing_key` once per key.
+#[derive(Debug, Default)]
+pub struct MissingKeys(Mutex<BTreeSet<(String, String)>>);
+
+impl MissingKeys {
+    fn record(&self, lang: &str, key: &str) {
+        // A poisoned lock only means another lookup panicked; the set is still usable.
+        let mut set = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set.insert((lang.to_owned(), key.to_owned()));
+    }
+
+    /// `(lang, key)` pairs seen since the last call, each once.
+    #[must_use]
+    pub fn take(&self) -> Vec<(String, String)> {
+        let mut set = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut *set).into_iter().collect()
+    }
+}
+
+/// Flattens a locale file into `section.key -> text`; a plural message's forms become
+/// `key.<category>`. Anything but text and tables is an error naming the key, because a
+/// number or list where text belongs is a mistake the author must see.
 ///
 /// # Errors
 ///
-/// [`ErrorCode::InvalidInput`] for invalid TOML, a non-text value, or a plural table
-/// without `other`.
+/// [`ErrorCode::InvalidInput`] for invalid TOML or a non-text value.
 pub fn parse(src: &str) -> Result<HashMap<String, String>> {
     let table: toml::Table =
         toml::from_str(src).map_err(|e| Error::new(ErrorCode::InvalidInput, e.to_string()))?;
@@ -39,15 +74,6 @@ fn walk(prefix: &str, table: &toml::Table, out: &mut HashMap<String, String>) ->
             toml::Value::String(s) => {
                 out.insert(key, s.clone());
             }
-            toml::Value::Table(t) if is_plural_table(t) => {
-                if !t.contains_key("other") {
-                    return Err(Error::new(
-                        ErrorCode::InvalidInput,
-                        format!("{key}: plural message needs an `other` form"),
-                    ));
-                }
-                walk(&key, t, out)?;
-            }
             toml::Value::Table(t) => walk(&key, t, out)?,
             _ => {
                 return Err(Error::new(
@@ -58,13 +84,6 @@ fn walk(prefix: &str, table: &toml::Table, out: &mut HashMap<String, String>) ->
         }
     }
     Ok(())
-}
-
-/// A table whose keys are all plural categories is one message, not a section.
-fn is_plural_table(t: &toml::Table) -> bool {
-    !t.is_empty()
-        && t.iter()
-            .all(|(k, v)| Plural::from_name(k).is_some() && v.is_str())
 }
 
 /// One language's strings with English behind it.
@@ -106,19 +125,36 @@ impl Catalog {
 
     /// Text for `key` with `{name}` placeholders filled from `args`. A plural message picks
     /// its form from the `count` argument: this language's form, else its `other`, then the
-    /// same in English.
+    /// same in English. A `count` that is not a whole number uses `other`.
     #[must_use]
     pub fn t(&self, key: &str, args: &[(&str, String)]) -> String {
+        self.lookup(key, args, None)
+    }
+
+    /// Like [`Catalog::t`], recording a key found nowhere into `missing`.
+    #[must_use]
+    pub fn t_reporting(&self, key: &str, args: &[(&str, String)], missing: &MissingKeys) -> String {
+        self.lookup(key, args, Some(missing))
+    }
+
+    fn lookup(&self, key: &str, args: &[(&str, String)], missing: Option<&MissingKeys>) -> String {
         let count = args
             .iter()
             .find(|(k, _)| *k == "count")
-            .and_then(|(_, v)| v.parse::<u64>().ok());
-        let text = count
-            .and_then(|n| {
-                Self::plural_form(&self.strings, &self.lang, key, n)
-                    .or_else(|| Self::plural_form(&self.fallback, "en", key, n))
-            })
-            .unwrap_or_else(|| self.get(key));
+            .map(|(_, v)| v.parse::<u64>().ok());
+        let plural_text = count.and_then(|n| {
+            Self::plural_form(&self.strings, &self.lang, key, n)
+                .or_else(|| Self::plural_form(&self.fallback, "en", key, n))
+        });
+        let text = plural_text.unwrap_or_else(|| {
+            let text = self.get(key);
+            if let Some(m) = missing
+                && std::ptr::eq(text, key)
+            {
+                m.record(&self.lang, key);
+            }
+            text
+        });
         fill(text, args)
     }
 
@@ -126,12 +162,12 @@ impl Catalog {
         map: &'a HashMap<String, String>,
         lang: &str,
         key: &str,
-        n: u64,
+        n: Option<u64>,
     ) -> Option<&'a str> {
-        let form = plural(lang, n).name();
-        map.get(&format!("{key}.{form}"))
-            .or_else(|| map.get(&format!("{key}.other")))
-            .map(String::as_str)
+        // Only a table with `other` is a plural message (see `parse`).
+        let other = map.get(&format!("{key}.other"))?;
+        let form = n.map_or("other", |n| plural(lang, n).name());
+        Some(map.get(&format!("{key}.{form}")).unwrap_or(other).as_str())
     }
 }
 
@@ -167,7 +203,7 @@ pub fn fill(text: &str, args: &[(&str, String)]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Catalog, fill, parse};
+    use super::{Catalog, MissingKeys, fill, parse};
     use std::collections::HashMap;
 
     fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -204,12 +240,17 @@ mod tests {
                 .detail
                 .contains("post.n")
         );
-        assert!(
-            parse("[post]\nm = { one = \"x\" }\n")
-                .unwrap_err()
-                .detail
-                .contains("other")
-        );
+        // Category-named keys without `other` are a plain section, not a plural message.
+        let rank = parse(
+            "[rank]
+one = \"First\"
+two = \"Second\"
+",
+        )
+        .unwrap();
+        let c = Catalog::new(rank, HashMap::new());
+        assert_eq!(c.t("rank.one", &[]), "First");
+        assert_eq!(c.t("rank", &[("count", "1".into())]), "rank");
         assert!(parse("not toml =").is_err());
     }
 
@@ -242,8 +283,23 @@ mod tests {
         let fr = Catalog::new(HashMap::new(), en).with_lang("fr");
         assert_eq!(fr.t("c.posts", &n(1)), "1 post");
         assert_eq!(fr.t("c.posts", &n(2)), "2 posts");
+        // A count that is not a whole number uses `other`.
+        assert_eq!(fr.t("c.posts", &[("count", "1.5".into())]), "1.5 posts");
+        assert_eq!(fr.t("c.posts", &[("count", "-1".into())]), "-1 posts");
         // No count: the plain key path, visible when missing.
         assert_eq!(fr.t("c.posts", &[]), "c.posts");
+    }
+
+    #[test]
+    fn missing_keys_are_reported_once_per_key() {
+        let c = Catalog::new(map(&[("a", "A")]), map(&[("b", "B")])).with_lang("vi");
+        let missing = MissingKeys::default();
+        assert_eq!(c.t_reporting("a", &[], &missing), "A");
+        assert_eq!(c.t_reporting("b", &[], &missing), "B");
+        assert_eq!(c.t_reporting("nope", &[], &missing), "nope");
+        assert_eq!(c.t_reporting("nope", &[], &missing), "nope");
+        assert_eq!(missing.take(), [("vi".to_owned(), "nope".to_owned())]);
+        assert!(missing.take().is_empty());
     }
 
     #[test]

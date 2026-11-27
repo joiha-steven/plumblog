@@ -1,10 +1,11 @@
 //! Loading a theme and rendering pages with it.
 
 use crate::data::{Body, EntryData, LinkData, PageInfo, Post, PostData, Site, civil, cut_words};
-use crate::{PageKind, SLOTS, css, locale};
+use crate::keys;
+use crate::{PageKind, SLOTS, css};
 use minijinja::value::{Kwargs, Serde, Value};
 use minijinja::{Environment, State};
-use plumblog_i18n::Catalog;
+use plumblog_i18n::{Catalog, Key, MissingKeys};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write as _};
@@ -134,6 +135,7 @@ pub struct Theme {
     preload_by_lang: BTreeMap<String, Vec<String>>,
     js: Vec<String>,
     catalogs: Arc<Catalogs>,
+    missing: Arc<MissingKeys>,
 }
 
 struct Catalogs {
@@ -191,7 +193,9 @@ impl Theme {
         add_templates(&mut env, theme, |_| true)?;
 
         let catalogs = Arc::new(load_catalogs(theme, default)?);
+        let missing = Arc::new(MissingKeys::default());
         let for_t = Arc::clone(&catalogs);
+        let missing_t = Arc::clone(&missing);
         env.add_function(
             "t",
             move |state: &State, key: &str, kwargs: Kwargs| -> Result<String, minijinja::Error> {
@@ -199,7 +203,7 @@ impl Theme {
                 let args = kwargs_strings(&kwargs)?;
                 let args: Vec<(&str, String)> =
                     args.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-                Ok(locale::fill(for_t.get(&lang).get(key), &args))
+                Ok(for_t.get(&lang).t_reporting(key, &args, &missing_t))
             },
         );
         env.add_function("slot", |name: &str| -> Result<Value, minijinja::Error> {
@@ -229,6 +233,7 @@ impl Theme {
                 .collect(),
             js: manifest.js.files.iter().map(|p| asset(p)).collect(),
             catalogs,
+            missing,
         })
     }
 
@@ -245,8 +250,18 @@ impl Theme {
 
     /// Text for `key` in `lang` (theme locale, then English, then the key itself).
     #[must_use]
-    pub fn text(&self, lang: &str, key: &str, args: &[(&str, String)]) -> String {
-        locale::fill(self.catalogs.get(lang).get(key), args)
+    pub fn text(&self, lang: &str, key: Key, args: &[(&str, String)]) -> String {
+        self.catalogs
+            .get(lang)
+            .t_reporting(key.0, args, &self.missing)
+    }
+
+    /// Keys rendering asked for that exist in neither the page language nor English, as
+    /// `(lang, key)`, each once since the last call. The Worker logs each as
+    /// `i18n.missing_key` after a render.
+    #[must_use]
+    pub fn take_missing_keys(&self) -> Vec<(String, String)> {
+        self.missing.take()
     }
 
     /// Renders one reader page.
@@ -376,12 +391,12 @@ impl Theme {
         let minutes = post.body.reading_minutes;
         let date_display = self.text(
             &post.lang,
-            "date.short",
+            keys::DATE_SHORT,
             &[
                 ("day", day.to_string()),
                 (
                     "month",
-                    self.text(&post.lang, &format!("date.month_{month}"), &[]),
+                    self.text(&post.lang, keys::MONTHS[month_index(month)], &[]),
                 ),
                 ("year", year.to_string()),
             ],
@@ -506,6 +521,11 @@ fn ser<T: Serialize>(v: T) -> Value {
     Value::from(Serde(v))
 }
 
+/// `civil` months are 1-12; clamp so a bad timestamp can never index out of bounds.
+fn month_index(month: u32) -> usize {
+    usize::try_from(month.clamp(1, 12) - 1).unwrap_or(0)
+}
+
 fn page_lang(state: &State) -> String {
     state
         .lookup("page")
@@ -561,8 +581,8 @@ fn load_catalogs(
             else {
                 continue;
             };
-            let strings = locale::flatten(files.read(path).unwrap_or_default())
-                .map_err(|e| ThemeError::new(format!("{path}: {e}")))?;
+            let strings = plumblog_i18n::parse(files.read(path).unwrap_or_default())
+                .map_err(|e| ThemeError::new(format!("{path}: {}", e.detail)))?;
             merged.entry(lang.to_owned()).or_default().extend(strings);
         }
     }
@@ -571,7 +591,8 @@ fn load_catalogs(
         .into_iter()
         .map(|(lang, strings)| {
             let fallback = english_strings.clone();
-            (lang, Catalog::new(strings, fallback))
+            let catalog = Catalog::new(strings, fallback).with_lang(&lang);
+            (lang, catalog)
         })
         .collect();
     Ok(Catalogs {

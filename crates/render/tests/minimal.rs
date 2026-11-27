@@ -319,3 +319,60 @@ fn post_flags_reach_templates() {
         .unwrap();
     assert_eq!(html, "True False False 7");
 }
+
+/// A theme following the documented plural format shows the right form per language, and
+/// a key found nowhere is reported for the Worker to log.
+#[test]
+fn plural_messages_and_missing_keys_in_theme_locales() {
+    let mut files = theme_files();
+    for (path, text) in &mut files {
+        match path.as_str() {
+            "locales/en.toml" => text.push_str(
+                "\n[test]\nposts = { one = \"{count} post\", other = \"{count} posts\" }\n",
+            ),
+            "templates/home.html" => {
+                // Inside the last block: text outside blocks of a child template is ignored.
+                let at = text.rfind("{% endblock %}").unwrap();
+                text.insert_str(at, "<p id=\"plural\">{{ t(\"test.posts\", count=1) }}|{{ t(\"test.posts\", count=3) }}|{{ t(\"test.posts\", count=5) }}|{{ t(\"test.posts\", count=21) }}|{{ t(\"test.gone\") }}</p>");
+            }
+            _ => {}
+        }
+    }
+    files.push((
+        "locales/ru.toml".into(),
+        "[test]\nposts = { one = \"{count} \u{437}\u{430}\u{43f}\u{438}\u{441}\u{44c}\", few = \"{count} \u{437}\u{430}\u{43f}\u{438}\u{441}\u{438}\", many = \"{count} \u{437}\u{430}\u{43f}\u{438}\u{441}\u{435}\u{439}\", other = \"{count} \u{437}\u{430}\u{43f}\u{438}\u{441}\u{438}\" }\n".into(),
+    ));
+    let theme = load(&files, &BTreeMap::new());
+    let render = |lang: &str| {
+        theme
+            .render(
+                &site(),
+                &page(lang),
+                &Body::Home {
+                    posts: &[],
+                    older_url: None,
+                    newer_url: None,
+                },
+            )
+            .unwrap()
+    };
+    let line = |html: &str| {
+        let start = html.find("<p id=\"plural\">").unwrap() + 15;
+        html[start..start + html[start..].find("</p>").unwrap()].to_owned()
+    };
+    assert_eq!(
+        line(&render("en")),
+        "1 post|3 posts|5 posts|21 posts|test.gone"
+    );
+    assert_eq!(
+        line(&render("ru")),
+        "1 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{44c}|3 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{438}|5 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{435}\u{439}|21 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{44c}|test.gone"
+    );
+    assert_eq!(
+        theme.take_missing_keys(),
+        [
+            ("en".to_owned(), "test.gone".to_owned()),
+            ("ru".to_owned(), "test.gone".to_owned())
+        ]
+    );
+}
