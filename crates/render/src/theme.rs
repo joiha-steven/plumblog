@@ -219,6 +219,24 @@ impl Theme {
                 Ok(for_t.get(&lang).t_template(key, &args, missing))
             },
         );
+        // Templates link theme files that only some pages need (the code highlighter) by name.
+        let assets_base = assets_url.to_owned();
+        env.add_function(
+            "asset",
+            move |path: &str| -> Result<String, minijinja::Error> {
+                if path.is_empty()
+                    || path.starts_with('/')
+                    || path.contains("..")
+                    || path.contains("//")
+                {
+                    return Err(minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        format!("asset({path:?}): give a path inside the theme's assets/ folder"),
+                    ));
+                }
+                Ok(format!("{assets_base}/{path}"))
+            },
+        );
         env.add_function("slot", |name: &str| -> Result<Value, minijinja::Error> {
             if SLOTS.contains(&name) {
                 // Plugins land with issue #15; until then every slot is empty.

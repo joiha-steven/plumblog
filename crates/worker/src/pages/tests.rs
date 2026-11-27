@@ -175,8 +175,16 @@ fn tag_and_archive_pages() {
     assert!(!html.contains("Slow mornings"));
     assert!(html.contains("href=\"/archive/2026\""));
     assert_eq!(get("/archive/1999").0, 404);
-    // Paged like home: 2026 fits on one page here, so page 2 does not exist.
-    assert_eq!(get("/archive/2026/page/2").0, 404);
+    // Paged like home: 2026 has six sample posts, five per page.
+    let (status, html) = get("/archive/2026");
+    assert_eq!(status, 200);
+    assert!(html.contains("href=\"/archive/2026/page/2\" rel=\"next\">"));
+    assert!(!html.contains("Slow mornings"));
+    let (status, html) = get("/archive/2026/page/2");
+    assert_eq!(status, 200);
+    assert!(html.contains("Slow mornings"));
+    assert!(html.contains("href=\"/archive/2026\" rel=\"prev\">"));
+    assert_eq!(get("/archive/2026/page/3").0, 404);
     assert_eq!(get("/archive/2026/page/1"), (301, "/archive/2026".into()));
 }
 

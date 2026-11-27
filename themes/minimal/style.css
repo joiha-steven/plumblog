@@ -140,7 +140,7 @@ blockquote > :last-child { margin-bottom: 0; }
 /* Section break: a short centered rule. */
 hr { border: 0; height: 1px; margin: 2.6em auto; width: 4em; background: var(--c-text-2); }
 
-/* Code. Highlighting arrives as tok-* classes from core (made at save time, not here). */
+/* Code. assets/highlight.js adds the tok-* spans on the reader page (only on posts with code). */
 code, kbd, pre { font-family: var(--mono); font-size: var(--t-sm); letter-spacing: 0; font-feature-settings: normal; }
 :not(pre) > code { padding: .1em .3em; border-radius: var(--r-sm); background: var(--c-surface); overflow-wrap: anywhere; }
 .code { position: relative; border-radius: var(--r-md); background: var(--c-surface); }

@@ -140,6 +140,7 @@ Not built: offline reading, newsletter (later), reactions.
   locales/       the theme's own UI text, one TOML per language; templates call t("section.key", name=value)
   ```
 - Options: `theme.toml` declares `[options.<key>]` in the shape of "Plugins and options": `type` is one of the admin field types (`short_text`, `long_text`, `number`, `toggle`, `choice`, `color`, `image`, `list`), plus `default`, limits, `group`, `icon` and locale keys for `label`/`help`. Templates read `theme.options.<key>`; a `color` option names the token it overrides. A `choice` option may map each value to a CSS file (a **style**): only the selected file ships after `style.css`. Values listed in `draft` are not offered to owners.
+- Templates link optional theme files with `asset("<path in assets/>")`, e.g. a script only some pages load.
 - Slots: themes expose named empty points for plugin partials with `{{ slot("<name>") }}`: `head`, `body_start`, `body_end`, `before_post`, `after_post`, `footer`.
 - Themes may contain JS. Installing a theme not made locally shows a warning.
 - **minimal** is built first; literary and technical follow once it is approved.
