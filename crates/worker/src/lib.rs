@@ -1,3 +1,4 @@
+mod admin;
 #[cfg(feature = "contract-tests")]
 mod contract;
 pub mod d1;
@@ -14,8 +15,12 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     if let Some(res) = contract::handle(&req, &env).await? {
         return Ok(res);
     }
-    match (req.method().as_ref(), req.path().as_str()) {
+    let path = req.path();
+    match (req.method().as_ref(), path.as_str()) {
         ("GET", "/healthz") => Response::ok("ok"),
+        ("GET" | "HEAD", p) if p == admin::PREFIX || p.starts_with("/admin/") => {
+            admin::serve(&req).await
+        }
         ("GET" | "HEAD", _) => pages::serve(&req, &env, &ctx).await,
         _ => Ok(Response::empty()?.with_status(405)),
     }

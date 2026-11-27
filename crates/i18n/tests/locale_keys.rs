@@ -12,6 +12,8 @@
 //! Templates: `t` may only appear as a direct call `t(...)`; a key built at runtime
 //! (`t("a_" ~ x)`, `t(var)`) needs `{# i18n: <every key> #}` on the same or previous line,
 //! checked both ways against `en.toml`.
+//! Admin TypeScript (`web/admin/src`): the same rules for `t("key")`; a key built at runtime is
+//! a template string (`` t(`a.${x}`) ``) with `// i18n: <every key>` on the line above.
 
 use plumblog_i18n::{categories, parse};
 use std::collections::{BTreeMap, BTreeSet};
@@ -304,6 +306,93 @@ fn rust_keys(src: &str, bridge_allowed: bool, problems: &mut Vec<String>, at: &s
     keys
 }
 
+/// Every `t(...)` call in admin TypeScript. Comment lines and imports are skipped; any other
+/// `t` not called directly is a problem, like in templates.
+fn ts_uses(src: &str) -> Scan {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut uses = Vec::new();
+    let mut misuse = Vec::new();
+    for (n, line) in lines.iter().enumerate() {
+        let lead = line.trim_start();
+        if lead.starts_with("//")
+            || lead.starts_with('*')
+            || lead.starts_with("/*")
+            || lead.starts_with("import ")
+        {
+            continue;
+        }
+        let declared = n
+            .checked_sub(1)
+            .and_then(|p| lines.get(p))
+            .and_then(|l| l.trim_start().strip_prefix("// i18n:"))
+            .map(|k| k.split_whitespace().map(str::to_owned).collect::<Vec<_>>());
+        let bytes = line.as_bytes();
+        for (i, _) in line.match_indices('t') {
+            let before = line[..i].chars().next_back();
+            let after = line[i + 1..].chars().next();
+            if before.is_some_and(|c| is_ident(c) || c == '.' || c == '$')
+                || after.is_some_and(|c| is_ident(c) || c == '$')
+            {
+                continue;
+            }
+            let rest = line[i + 1..].trim_start();
+            let Some(args) = rest.strip_prefix('(') else {
+                // `t` inside a string or a type is not a use; a bare `t` value is.
+                if !in_string(bytes, i) {
+                    misuse.push((
+                        "t used as a value; call it directly: t(\"key\")".to_owned(),
+                        n + 1,
+                    ));
+                }
+                continue;
+            };
+            let args = args.trim_start();
+            let quote = args.chars().next();
+            match quote {
+                Some(q @ ('"' | '\'')) => {
+                    let body = &args[1..];
+                    let end = body.find(q).unwrap_or(body.len());
+                    uses.push((Use::Literal(body[..end].to_owned()), n + 1));
+                }
+                Some('`') => {
+                    let body = &args[1..];
+                    let end = body.find('`').unwrap_or(body.len());
+                    let tpl = &body[..end];
+                    match tpl.find("${") {
+                        Some(dollar) => uses.push((
+                            Use::Dynamic {
+                                prefix: tpl[..dollar].to_owned(),
+                                declared: declared.clone(),
+                            },
+                            n + 1,
+                        )),
+                        None => uses.push((Use::Literal(tpl.to_owned()), n + 1)),
+                    }
+                }
+                _ => misuse.push((
+                    "t() takes a string literal, or a template string with `// i18n:` above"
+                        .to_owned(),
+                    n + 1,
+                )),
+            }
+        }
+    }
+    (uses, misuse)
+}
+
+/// Whether byte `i` sits inside a quoted string on its line.
+fn in_string(line: &[u8], i: usize) -> bool {
+    let mut quote = None;
+    for &b in &line[..i] {
+        match quote {
+            None if matches!(b, b'"' | b'\'' | b'`') => quote = Some(b),
+            Some(q) if b == q => quote = None,
+            _ => {}
+        }
+    }
+    quote.is_some()
+}
+
 fn check_template(
     uses: &[(Use, usize)],
     at: &str,
@@ -410,11 +499,50 @@ fn locale_keys_are_complete_and_consistent() {
         }
     }
 
+    let admin = root.join("web/admin/src");
+    for file in files(&admin, "ts") {
+        let at = rel(&file);
+        // The lookup itself, and code generated from Rust types.
+        if at.ends_with("/i18n.ts") || at.ends_with(".gen.ts") {
+            continue;
+        }
+        let src = fs::read_to_string(&file).unwrap_or_default();
+        let (uses, misuse) = ts_uses(&src);
+        for (p, line) in misuse {
+            problems.push(format!("{at}:{line}: {p}"));
+        }
+        check_template(&uses, &at, core.get("en"), "locales/en.toml", &mut problems);
+    }
+
     assert!(
         problems.is_empty(),
         "locale problems:\n  {}",
         problems.join("\n  ")
     );
+}
+
+#[test]
+fn ts_scanner_reads_literal_and_declared_calls() {
+    let src = "h(\"b\", {}, t(\"a.b\"));\nconst x = t( 'c.d', { n: 1 });\n// i18n: e.one e.two\nt(`e.${k}`);\nt(`f.${k}`);\nconst g = t;\nt(key);\n// t(\"in.comment\")\nimport { t } from \"./i18n\";\nconst s = \"don't t\"; at(\"no\"); x.t(\"no\"); let tt = 1;";
+    let (uses, misuse) = ts_uses(src);
+    let got: Vec<String> = uses
+        .iter()
+        .map(|(u, l)| match u {
+            Use::Literal(k) => format!("{l}:{k}"),
+            Use::Dynamic { prefix, declared } => format!("{l}:{prefix}*{declared:?}"),
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            "1:a.b",
+            "2:c.d",
+            "4:e.*Some([\"e.one\", \"e.two\"])",
+            "5:f.*None"
+        ]
+    );
+    let lines: Vec<usize> = misuse.iter().map(|(_, l)| *l).collect();
+    assert_eq!(lines, [6, 7], "{misuse:?}");
 }
 
 #[test]

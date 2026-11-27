@@ -9,3 +9,9 @@ pub const PAGE_FAILED: Key = key!("error.page_failed");
 
 /// Heading of the post list in llms.txt.
 pub const LLMS_POSTS: Key = key!("llms.posts");
+
+/// Admin window title and installed app name; `{site}` is the site title.
+pub const ADMIN_TITLE: Key = key!("admin.title");
+
+/// Shown when the browser runs no JavaScript.
+pub const ADMIN_NOSCRIPT: Key = key!("admin.noscript");

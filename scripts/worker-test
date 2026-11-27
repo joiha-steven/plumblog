@@ -5,22 +5,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 WORKER_BUILD_VERSION=0.9.0 # keep in step with the `worker` crate version in Cargo.toml
-NODE_MAJOR_MIN=22
 
 fail() { echo "worker-test: FAIL: $1" >&2; exit 1; }
 
-command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 \
-  || fail "Node.js $NODE_MAJOR_MIN+ with npm is required for Worker tests (contributors only). Install it from https://nodejs.org or with your package manager, then rerun."
-major=$(node -p 'process.versions.node.split(".")[0]')
-[ "$major" -ge "$NODE_MAJOR_MIN" ] || fail "Node.js $NODE_MAJOR_MIN+ is required, found $(node -v). Upgrade Node, then rerun."
+# --serve: build like the tests, then keep the Worker running for a person to click through
+# (scripts/admin-dev).
+serve=false
+if [ "${1:-}" = "--serve" ]; then serve=true; shift; fi
 
-# Pinned wrangler from tools/package-lock.json; reinstall only when the lockfile changed.
-stamp=tools/node_modules/.lock-stamp
-if ! cmp -s tools/package-lock.json "$stamp" 2>/dev/null; then
-  echo "worker-test: npm ci in tools/ (first run or lockfile change only)"
-  npm ci --prefix tools --no-audit --no-fund --loglevel=error || fail "npm ci in tools/ failed"
-  cp tools/package-lock.json "$stamp"
-fi
+# Pinned Node tools (wrangler, esbuild...) from tools/package-lock.json.
+scripts/tools-install || fail "contributor tools (above)"
 
 # Pinned worker-build, installed into target/ so it is cached with the cargo build.
 wb=target/tools/bin/worker-build
@@ -51,6 +45,21 @@ for dir in plugins/*/; do
   mkdir -p target/worker-dev/assets/plugin
   cp -R "$dir/assets" "target/worker-dev/assets/plugin/$name"
 done
+
+# The admin (scripts/admin-build) under /admin/. Served with the mock API when a person
+# clicks through, since the posts and media APIs do not exist yet.
+if $serve; then scripts/admin-build --dev; else scripts/admin-build; fi || fail "admin build (above)"
+cp -R target/admin target/worker-dev/assets/admin
+
+if $serve; then
+  port="${PORT:-8790}"
+  state=target/worker-dev/state
+  wr=tools/node_modules/.bin/wrangler
+  "$wr" d1 migrations apply DB --local --config tools/wrangler.dev.toml --persist-to "$state" >/dev/null \
+    || fail "applying migrations to the local D1"
+  echo "worker-test: serving http://localhost:$port/admin/ (Ctrl-C stops)"
+  exec "$wr" dev --config tools/wrangler.dev.toml --persist-to "$state" --ip 127.0.0.1 --port "$port"
+fi
 
 # The harness cleans up after itself, even on Ctrl-C. This trap is the second line of
 # defence: kill any wrangler process group it recorded and remove its temp state.
