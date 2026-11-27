@@ -25,7 +25,7 @@ agent a Cloudflare API token, and the agent sets up, writes, translates, themes 
 6. **Heavy work happens off the Worker.** The browser (admin) or the user's machine (CLI) does expensive work; the Worker validates, stores and serves.
 7. **No hard-coded text.** Every user-facing string, English included, lives in a locale file (`locales/` for core and admin, the theme's own locale files for theme text). Code and templates only reference keys.
 8. **No hard-coded layout.** Core produces data and semantic content; every reader-facing page structure (what appears, where, in which order) is defined by the theme's templates. Core ships no reader HTML layout of its own beyond the default theme.
-9. **Small core, extensible edges.** Core contains only what a working blog needs. Anything else is added by themes or plugins through stable extension points. The plugin mechanism is still to be designed (constraint: one Worker bundle on the free plan, so no runtime loading of native code; likely candidates are declarative hooks, theme-level JS, and build-time plugins compiled into the Worker).
+9. **Small core, extensible edges.** Core contains only what a working blog needs. Themes and declarative plugins add the rest (see Plugins and options); complex needs use the API and webhooks from outside.
 
 ## Platform
 
@@ -133,6 +133,15 @@ Not built: PWA/offline, newsletter (later), reactions.
 - The template variable reference is generated from Rust types, never written by hand.
 - Owner-only admin page for colors, fonts, logo.
 
+## Plugins and options
+
+- Themes and plugins declare options; they never ship admin UI. A declaration lists fields from a fixed set of types owned by the admin (short text, long text, number, toggle, single choice, color, image, list), with labels and help as locale keys, grouping, and icons by name from the admin icon set. The admin renders every field with its own components, so every theme and plugin tab follows the admin design language.
+- Settings: **Appearance** shows the active theme's options; **Plugins** lists plugins (enable/disable) with one tab per plugin, generated from its declaration.
+- Plugins are declarative only: settings, HTML partials for named slots that themes must expose (head, body end, before/after post, footer...), browser JS/CSS, locale files. No server code inside the blog. A disabled plugin costs zero bytes.
+- Complex needs are the user's own project: a separate Worker or service talking to plumblog through the API and outgoing webhooks (post published/updated/deleted). Core adds webhooks, nothing more.
+- Isolation: no theme or plugin HTML, CSS or JS ever runs in the admin. Theme CSS needed in the admin (editor typography, live preview) loads in an isolated frame. Admin has a strict CSP. `blog theme check` and `blog plugin check` reject unknown field types, hard-coded text and admin-targeted files.
+- A broken plugin is disabled automatically and named in the admin; the blog keeps working.
+
 ## Admin and editor
 
 - Markdown source editor (CodeMirror 6) with live styling: syntax marks dimmed, headings and emphasis styled as typed. Modes: Write / Split / Preview (tabs on mobile).
@@ -151,8 +160,8 @@ Models: Bear and iA Writer. Everything serves writing; the chrome is quiet, flat
 - **Type.** UI: system font. Scale 11 / 12 / 13 / 14 / 16 / 20 px, weights 400 / 500 / 600 only. Labels and metadata 12-13 px; section labels are 12 px, weight 600, muted, in normal case. No uppercase or small caps anywhere (scripts/check enforces it). Numbers, sizes and dates use tabular figures; file names use the mono font at 12 px. Writing column: the active theme's font and line-height, at a calmer size than the reader page (16 px phone, 17 px desktop, line-height 1.65, max 64ch); title 1.5em, weight 650.
 - **Space.** 4 / 8 / 12 / 16 / 24 / 32 / 48 px. Rows are dense (list row 56-64 px) and separated by spacing and a soft hover or selected surface, never by full-width rules; whitespace goes around the writing column, not inside controls.
 - **Color.** Neutral greys with a faint warm bias, never pure grey. Ink (near-black, or near-white in dark) is the primary action color. One accent (muted plum) only for caret, selection, links and the focus ring. Status colors are muted, Pantone-like: draft = warm grey, scheduled = ochre, published = sage, error = brick. Each has a light and a dark value; text on a status tint keeps 4.5:1.
-- **Radius.** 6 px for controls, 8 px for popovers and sheets, 0 for list rows and panels. No large rounded cards.
-- **Depth.** Raised control (button, segment thumb, switch knob): 1 px border one step darker than the surface, top inner highlight `inset 0 1px 0 rgb(255 255 255 / .7)` and contact shadow `0 1px 1px rgb(0 0 0 / .06)`; dark: highlight `/ .06`, shadow `rgb(0 0 0 / .5)`. Inset control (text field, select, switch track, segmented track): field background one step below the surface, 1 px border, `inset 0 1px 2px rgb(0 0 0 / .06)` (dark `/ .35`). Popovers: `0 4px 16px rgb(0 0 0 / .12)` plus a 1 px border; nothing else casts a shadow. No gradients that make a control look curved.
+- **Radius.** 6 px for controls, 8 px for popovers, sheets and list rows (0 for rows on phones and for panels), 10 px for the floating editor toolbar. No large rounded cards.
+- **Depth.** Raised control (button, segment thumb, switch knob): 1 px border one step darker than the surface, top inner highlight `inset 0 1px 0 rgb(255 255 255 / .7)` and contact shadow `0 1px 1px rgb(0 0 0 / .06)`; dark: highlight `/ .06`, shadow `rgb(0 0 0 / .5)`. Inset control (text field, select, switch track, segmented track): field background one step below the surface, 1 px border, `inset 0 1px 2px rgb(0 0 0 / .06)` (dark `/ .35`). Popovers and the floating editor toolbar: a soft shadow (`0 4px 16px rgb(0 0 0 / .12)`, toolbar `/ .06`) plus a 1 px border; nothing else casts a shadow. No gradients that make a control look curved.
 - **States, one system for every control.** States are drawn by a flat tint laid over the control's own background, so every component reacts the same way:
   rest = as designed; hover = ink tint 5%; pressed = ink tint 10%, outer shadow removed, content moves down 1 px; selected = ink tint 8% plus ink text (segment thumb and toggles use the raised recipe instead); focus-visible = 2 px accent ring outside a 1 px surface-colored gap, never removed; disabled = 45% opacity, no shadow, no hover. Image tiles show hover and selection as a ring around the picture (1 px line, 2 px ink) instead of a tint. Transitions 120 ms ease-out on background, border and shadow only.
 - **Icons.** One line set, 1.5 px stroke, round caps and joins, 16 px in lists and sidebars, 20 px in the editor toolbar; icon-only buttons are 32 px (36 px in the editor toolbar, 44 px on touch) with a tooltip and an accessible label. The editor toolbar is a contained bar the width of the writing column, never an edge-to-edge strip; what does not fit goes into an overflow menu.
@@ -213,3 +222,4 @@ Each phase is one or more sessions; each ends with `scripts/check` green and evi
 - 2026-11-27 minimal theme first, font Inter with unicode-range subsets; footnotes as sidenotes.
 - 2026-11-27 No hard-coded text (all languages incl. English in locale files); no hard-coded layout (themes define page structure); small core, features via themes and plugins.
 - 2026-11-27 Admin design language: Bear / iA Writer as models, flat with slight depth on controls, one state system, muted status palette.
+- 2026-11-27 Theme and plugin options are declarations rendered by the admin; plugins are declarative only; complex needs use API + webhooks; nothing from themes/plugins runs in the admin.
