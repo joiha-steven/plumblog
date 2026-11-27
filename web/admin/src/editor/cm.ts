@@ -6,7 +6,7 @@
 import { history, historyKeymap, indentWithTab, standardKeymap } from "@codemirror/commands";
 import { HighlightStyle, ensureSyntaxTree, syntaxHighlighting, syntaxTree, LanguageSupport } from "@codemirror/language";
 import { deleteMarkupBackward, insertNewlineContinueMarkup, markdownLanguage } from "@codemirror/lang-markdown";
-import { EditorState, type Extension, Prec, RangeSetBuilder, StateField, type Transaction } from "@codemirror/state";
+import { EditorState, type Extension, Prec, RangeSetBuilder, StateEffect, StateField, type Transaction } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, type KeyBinding, ViewPlugin, type ViewUpdate, WidgetType, keymap, placeholder } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import { wrap } from "./commands";
@@ -42,8 +42,9 @@ class Picture extends WidgetType {
   override toDOM(): HTMLElement {
     const box = document.createElement("div");
     box.className = this.current ? "cm-img cm-cur" : "cm-img";
-    // The CSP allows pictures from this site only; others keep just their caption here.
-    if (this.src.startsWith("/")) {
+    // The CSP allows pictures from this site (and this browser's own, just uploaded in the
+    // mock) only; others keep just their caption here.
+    if (this.src.startsWith("/") || this.src.startsWith("blob:")) {
       const img = document.createElement("img");
       img.src = this.src;
       img.alt = this.alt;
@@ -148,6 +149,75 @@ function decorations(missingAlt: string): Extension {
   });
 }
 
+/** A picture being uploaded: a card under the line it was pasted or dropped on, moving with the
+ * text, until the upload ends. The card's element comes from the editor screen, which updates it. */
+class Card extends WidgetType {
+  constructor(
+    readonly id: number,
+    readonly dom: HTMLElement,
+  ) {
+    super();
+  }
+  override eq(o: Card): boolean {
+    return o.id === this.id;
+  }
+  override toDOM(): HTMLElement {
+    return this.dom;
+  }
+  // Its buttons are the card's own; CodeMirror leaves their clicks alone.
+  override ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+const addCard = StateEffect.define<{ id: number; pos: number; dom: HTMLElement }>({
+  map: (v, ch) => ({ ...v, pos: ch.mapPos(v.pos) }),
+});
+const dropCard = StateEffect.define<number>();
+let cards = 0;
+
+const cardField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(set, tr) {
+    let next = set.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(addCard)) {
+        const at = tr.state.doc.lineAt(e.value.pos).to;
+        const widget = new Card(e.value.id, e.value.dom);
+        next = next.update({ add: [Decoration.widget({ widget, block: true, side: 1, card: e.value.id }).range(at)] });
+      } else if (e.is(dropCard)) next = next.update({ filter: (_a, _b, d) => d.spec.card !== e.value });
+    }
+    return next;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
+/** Shows `dom` as a card under the line holding `pos`; returns its id. */
+export function showCard(view: EditorView, pos: number, dom: HTMLElement): number {
+  const id = ++cards;
+  view.dispatch({ effects: addCard.of({ id, pos, dom }) });
+  return id;
+}
+
+/** Removes a card; returns where it stood (the end of its line), or undefined if it is gone. */
+export function removeCard(view: EditorView, id: number): number | undefined {
+  let at: number | undefined;
+  view.state.field(cardField).between(0, view.state.doc.length, (from, _to, d) => {
+    if (d.spec.card === id) at = from;
+  });
+  view.dispatch({ effects: dropCard.of(id) });
+  return at;
+}
+
+/** Whether `pos` is inside code, where pasted text must stay as it is. */
+export function inCode(state: EditorState, pos: number): boolean {
+  type Node = ReturnType<ReturnType<typeof syntaxTree>["resolveInner"]>;
+  for (let n: Node | null = syntaxTree(state).resolveInner(pos, -1); n; n = n.parent) {
+    if (n.name === "FencedCode" || n.name === "CodeBlock" || n.name === "InlineCode") return true;
+  }
+  return false;
+}
+
 /** Footnote references `[^1]` look like the superscript they become. */
 const footnoteRefs = ViewPlugin.fromClass(
   class {
@@ -198,6 +268,7 @@ export function createEditor(parent: HTMLElement, doc: string, hooks: Hooks): Ed
       language,
       syntaxHighlighting(style),
       decorations(hooks.missingAlt),
+      cardField,
       footnoteRefs,
       EditorView.lineWrapping,
       placeholder(hooks.placeholder),

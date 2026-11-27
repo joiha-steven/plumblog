@@ -111,6 +111,8 @@ scripts/admin-build || fail "admin build (run scripts/admin-build for details)"
 # Own block: the real Worker over HTTP under local wrangler (about 5 s warm). Needs Node.
 step "worker integration (wrangler dev, local D1/R2)"
 scripts/worker-test --admin-prebuilt || fail "worker integration tests (run scripts/worker-test for details)"
+step "admin script tests (node)"
+node --test "tools/admin-test/*.test.mjs" || fail "admin script tests (run: node --test 'tools/admin-test/*.test.mjs')"
 step "theme script tests (node)"
 node --test "tools/theme-test/*.test.mjs" || fail "theme script tests (run: node --test 'tools/theme-test/*.test.mjs')"
 
