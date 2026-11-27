@@ -16,6 +16,9 @@
 //! a template string (`` t(`a.${x}`) ``) with `// i18n: <every key>` on the line above. Text
 //! must not bypass `t`: no string with letters as an `h()` child or as an `aria-label`,
 //! `title`, `placeholder` or `alt` value, and `t` may not be imported under another name.
+//! The `blog` CLI (`crates/cli/src`): no letters in a `print!`/`eprint!` format string, a
+//! clap help setter or attribute, and no doc comment on a clap derive (clap prints those as
+//! help). Its text comes from `key!` like the rest; test modules are not user text.
 //! The admin's per-language text modules (`plumblog_i18n::admin`, built by admin-build) are
 //! checked too: every English admin key exactly once, plurals in the language's own forms.
 
@@ -309,6 +312,102 @@ fn rust_keys(src: &str, bridge_allowed: bool, problems: &mut Vec<String>, at: &s
         }
     }
     keys
+}
+
+/// Hard-coded user text in CLI source: see the module comment. Returns `(problem, line)`.
+fn cli_hardcoded(src: &str) -> Vec<(String, usize)> {
+    // Test modules sit at the end of a file and are not user text.
+    let src = src.split("#[cfg(test)]").next().unwrap_or("");
+    let code: String = src
+        .lines()
+        .map(|l| {
+            if l.trim_start().starts_with("//") && !l.trim_start().starts_with("///") {
+                ""
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let line_of = |i: usize| code[..i].matches('\n').count() + 1;
+    let mut out = Vec::new();
+    let sinks = [
+        "print!(",
+        "println!(",
+        "eprint!(",
+        "eprintln!(",
+        ".about(",
+        ".long_about(",
+        ".help(",
+        ".long_help(",
+        ".before_help(",
+        ".after_help(",
+        "about =",
+        "help =",
+    ];
+    for sink in sinks {
+        for (i, _) in code.match_indices(sink) {
+            let ident_before = code[..i]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !sink.starts_with('.') && ident_before {
+                continue; // `eprint!(` also contains `print!(`.
+            }
+            let rest = code[i + sink.len()..].trim_start();
+            let Some(lit) = rest.strip_prefix('"') else {
+                continue;
+            };
+            let mut text = String::new();
+            let mut chars = lit.chars();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => {
+                        chars.next();
+                    }
+                    '"' => break,
+                    c => text.push(c),
+                }
+            }
+            // Placeholders (`{name}`, `{}`) are not text.
+            let mut depth = 0;
+            let letters = text.chars().any(|c| {
+                match c {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+                depth == 0 && c.is_ascii_alphabetic()
+            });
+            if letters {
+                out.push((
+                    format!(
+                        "hard-coded text in `{}`: use a locale key",
+                        sink.trim_end_matches('(')
+                    ),
+                    line_of(i),
+                ));
+            }
+        }
+    }
+    let mut in_clap = false;
+    for (n, line) in code.lines().enumerate() {
+        if line.contains("derive(")
+            && ["Parser", "Subcommand", "Args"]
+                .iter()
+                .any(|d| line.contains(d))
+        {
+            in_clap = true;
+        } else if line == "}" {
+            in_clap = false;
+        } else if in_clap && line.trim_start().starts_with("///") {
+            out.push((
+                "doc comment on a clap item becomes English help: use a locale key".to_owned(),
+                n + 1,
+            ));
+        }
+    }
+    out
 }
 
 /// Every `t(...)` call in admin TypeScript. Comment lines and imports are skipped; any other
@@ -648,6 +747,11 @@ fn locale_keys_are_complete_and_consistent() {
             let at = rel(&file);
             let src = fs::read_to_string(&file).unwrap_or_default();
             let bridge = at == "crates/render/src/theme.rs";
+            if at.starts_with("crates/cli/src/") {
+                for (p, line) in cli_hardcoded(&src) {
+                    problems.push(format!("{at}:{line}: {p}"));
+                }
+            }
             for key in rust_keys(&src, bridge, &mut problems, &at) {
                 if en.is_some_and(|en| !en.contains_key(&key)) {
                     problems.push(format!("{at}: uses `{key}`, missing from {en_file}"));
@@ -844,4 +948,12 @@ fn rust_scanner_reads_key_macros_and_rejects_bypasses() {
     let mut ok = Vec::new();
     rust_keys("c.t_template(k, &a, &m)", true, &mut ok, "theme.rs");
     assert!(ok.is_empty());
+}
+
+#[test]
+fn cli_scanner_rejects_hard_coded_text() {
+    let src = "fn main() {\n    eprintln!(\"error: {msg}\");\n    print!(\"{text}\");\n    eprint!(\n        \"Bad {x}\"\n    );\n    // println!(\"comment\");\n    cmd.about(\"Some help\").help(t(k));\n}\n#[derive(Parser)]\nstruct Cli {\n    /// Help from a doc comment\n    #[arg(long, help = \"English\")]\n    x: bool,\n}\n/// Fine: not a clap item.\nfn f() {}\n#[cfg(test)]\nmod tests { fn t() { println!(\"test output\"); } }\n";
+    let mut found: Vec<usize> = cli_hardcoded(src).into_iter().map(|(_, l)| l).collect();
+    found.sort_unstable();
+    assert_eq!(found, [2, 4, 8, 12, 13], "{:?}", cli_hardcoded(src));
 }

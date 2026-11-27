@@ -1,4 +1,5 @@
-//! Embeds guides/*.md into the binary so `blog guide` works offline, with no extra crate.
+//! Embeds guides/*.md and locales/*.toml into the binary so `blog` works offline, with no
+//! extra crate.
 use std::{env, fmt::Write, fs, path::PathBuf};
 
 fn main() {
@@ -48,6 +49,33 @@ fn main() {
     out.push_str("];\n");
     fs::write(
         PathBuf::from(env::var("OUT_DIR").unwrap()).join("guides.rs"),
+        out,
+    )
+    .unwrap();
+
+    // Core locale files: `(language, source)`. Every language the repo ships is available.
+    let locales = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../locales");
+    println!("cargo:rerun-if-changed={}", locales.display());
+    let mut files: Vec<PathBuf> = fs::read_dir(&locales)
+        .expect("locales/ directory is missing")
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+        .collect();
+    files.sort();
+    let mut out = String::from("pub const LOCALES: &[(&str, &str)] = &[\n");
+    for path in files {
+        let lang = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let abs = path.canonicalize().unwrap();
+        writeln!(
+            out,
+            "    ({lang:?}, include_str!({:?})),",
+            abs.to_str().unwrap()
+        )
+        .unwrap();
+    }
+    out.push_str("];\n");
+    fs::write(
+        PathBuf::from(env::var("OUT_DIR").unwrap()).join("locales.rs"),
         out,
     )
     .unwrap();
