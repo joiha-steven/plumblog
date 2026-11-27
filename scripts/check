@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# The ONE check: every rule of this repo that a machine can verify lives here.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+WASM_GZIP_BUDGET_BYTES=$((1024 * 1024)) # Workers free plan allows 3 MiB gzipped; keep headroom.
+WASM_FILE="${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/plumblog_worker.wasm"
+
+fail() { echo "check: FAIL: $1" >&2; exit 1; }
+step() { echo "check: $1"; }
+
+# 1. Self-heal the hook so commits always run this script.
+if [ "$(git config core.hooksPath || true)" != "scripts/hooks" ]; then
+  git config core.hooksPath scripts/hooks
+  step "set core.hooksPath=scripts/hooks"
+fi
+
+step "fmt"
+cargo fmt --all --check || fail "rustfmt: run 'cargo fmt --all'"
+
+step "clippy (host: core, cli)"
+cargo clippy -q -p plumblog-core -p plumblog-cli --all-targets -- -D warnings \
+  || fail "clippy found warnings in core/cli"
+step "clippy (wasm: worker)"
+cargo clippy -q -p plumblog-worker --target wasm32-unknown-unknown --all-targets -- -D warnings \
+  || fail "clippy found warnings in worker"
+
+step "test (core, cli, worker)"
+cargo test -q -p plumblog-core -p plumblog-cli -p plumblog-worker || fail "tests failed"
+
+step "worker wasm build + size budget"
+cargo build -q -p plumblog-worker --target wasm32-unknown-unknown --release \
+  || fail "worker wasm build failed"
+size=$(gzip -9 -c "$WASM_FILE" | wc -c | tr -d ' ')
+echo "check: worker.wasm gzip = $size bytes (budget $WASM_GZIP_BUDGET_BYTES)"
+[ "$size" -le "$WASM_GZIP_BUDGET_BYTES" ] || fail "worker wasm gzip $size > budget $WASM_GZIP_BUDGET_BYTES"
+
+# Files git would track: tracked + untracked, minus ignored, minus deleted.
+# Written to a file first so a git failure fails the check instead of vanishing in a pipe.
+list_file=$(mktemp)
+trap 'rm -f "$list_file"' EXIT
+git -c core.quotePath=false ls-files -z --cached --others --exclude-standard > "$list_file" \
+  || fail "git ls-files failed"
+files=()
+while IFS= read -r -d '' f; do [ -f "$f" ] && files+=("$f"); done < "$list_file"
+
+step "markdown allowlist"
+bad=""
+for f in "${files[@]}"; do
+  case "$f" in
+    README.md|AGENTS.md|CLAUDE.md|CHANGELOG.md|docs/ARCHITECTURE.md) ;;
+    guides/*/*) case "$f" in *.md) bad+="$f "; echo "  guides must be top level: $f" ;; esac ;;
+    guides/*.md) ;;
+    *.md) bad+="$f "; echo "  not allowed: $f" ;;
+  esac
+done
+[ -z "$bad" ] || fail "markdown outside allowlist (only the fixed files and top-level guides/*.md): $bad"
+
+step "english-only paths"
+bad=""
+for f in "${files[@]}"; do
+  case "$f" in
+    README.md|AGENTS.md|CLAUDE.md|CHANGELOG.md|LICENSE|Cargo.toml|Cargo.lock|docs/ARCHITECTURE.md) continue ;;
+  esac
+  case "$f" in *$'\n'*) bad+="newline-in-path "; echo "  bad path (newline): ${f//$'\n'/\\n}"; continue ;; esac
+  rc=0
+  printf '%s' "$f" | LC_ALL=C grep -Eq '^([a-z0-9._-]+/)*[a-z0-9._-]+$|^crates/[a-z0-9_-]+/Cargo\.toml$' || rc=$?
+  [ "$rc" -le 1 ] || fail "grep error while checking path $f"
+  # Cargo.toml only passes as the exact crate manifest; any other uppercase fails the first regex.
+  if [ "$rc" -eq 1 ]; then bad+="$f "; echo "  bad path: $f"; fi
+done
+[ -z "$bad" ] || fail "paths must match ^[a-z0-9._/-]+\$: $bad"
+
+step "english-only source"
+bad=""
+for f in "${files[@]}"; do
+  # Top-level docs may use typographic symbols (arrows, dashes); code and config may not.
+  case "$f" in locales/*|guides/*|LICENSE) continue ;; esac
+  rc=0
+  # -I skips binary files; the class allows printable ASCII plus whitespace.
+  hits=$(LC_ALL=C grep -nI '[^ -~[:space:]]' "$f") || rc=$?
+  [ "$rc" -le 1 ] || fail "grep error while scanning $f"
+  if [ "$rc" -eq 0 ]; then bad+="$f "; echo "$hits" | sed "s|^|  $f:|" | cut -c1-120; fi
+done
+[ -z "$bad" ] || fail "non-ASCII characters outside locales/ and guides/: $bad"
+
+step "dependencies only via workspace"
+manifests=()
+for f in "${files[@]}"; do [ "$(basename "$f")" = "Cargo.toml" ] && manifests+=("$f"); done
+bad=""
+for f in "${manifests[@]}"; do
+  out=$(awk -v file="$f" '
+    function strip(l,   i, c, q, r) {  # drop a trailing # comment that is outside quotes
+      q = ""; r = ""
+      for (i = 1; i <= length(l); i++) {
+        c = substr(l, i, 1)
+        if (q == "" && c == "#") break
+        if (q == "" && (c == "\"" || c == "\x27")) q = c
+        else if (q != "" && c == q) q = ""
+        r = r c
+      }
+      return r
+    }
+    function flush() { if (sub_name != "" && !sub_ok) print file ": [" sub_name "] needs workspace = true"; sub_name = "" }
+    {
+      line = strip($0); gsub(/[ \t\r]/, "", line)
+      if (line == "") next
+      if (line ~ /^\[/) {
+        flush()
+        h = line; gsub(/^\[+|\]+$/, "", h)
+        dep = 0; sub_name = ""
+        if (h ~ /^(target\..*\.)?(dev-|build-)?dependencies$/) dep = 1
+        else if (h ~ /^(target\..*\.)?(dev-|build-)?dependencies\./) { sub_name = h; sub_ok = 0 }
+        next
+      }
+      if (sub_name != "") { if (line ~ /^workspace=true$/) sub_ok = 1; next }
+      if (!dep) {
+        if (line ~ /^(dev-|build-)?dependencies[.=]/ || line ~ /^target\./) print file ":" NR ": use a [dependencies] table: " $0
+        next
+      }
+      v = line; gsub(/"[^"]*"/, "\"\"", v); gsub(/\x27[^\x27]*\x27/, "\x27\x27", v)
+      if (v ~ /^[A-Za-z0-9_-]+\.workspace=true$/) next
+      if (v ~ /^[A-Za-z0-9_-]+=\{.*[{,]workspace=true[,}].*\}$/ || v ~ /^[A-Za-z0-9_-]+=\{workspace=true\}$/) next
+      print file ":" NR ": " $0
+    }
+    END { flush() }
+  ' "$f") || fail "awk failed on $f"
+  if [ -n "$out" ]; then bad+="$f "; echo "$out" | sed 's/^/  /'; fi
+done
+[ -z "$bad" ] || fail "dependency not using workspace = true: $bad"
+
+echo "check: all passed"

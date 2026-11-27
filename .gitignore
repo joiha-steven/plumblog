@@ -1,0 +1,13 @@
+target/
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars*
+site.local.toml
+wrangler.toml
+wrangler.json
+wrangler.jsonc
+node_modules/
+.wrangler/
+.DS_Store
