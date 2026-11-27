@@ -6,15 +6,15 @@
  */
 
 import { redo, undo } from "@codemirror/commands";
-import type { EditorView, ViewUpdate } from "@codemirror/view";
+import { EditorView, type ViewUpdate } from "@codemirror/view";
 import type { Api, PostDraft } from "../api/client";
 import { type Child, h } from "../dom";
 import { type IconName, icon } from "../icons";
 import { num, t } from "../i18n";
 import { HREF } from "../router";
 import { closePop, openPop, openPopEl, toast } from "../ui";
-import { BLOCKS, type Block, blockName, fold } from "./blocks";
-import { createEditor } from "./cm";
+import { BLOCKS, type Block, blockName, fold, picker } from "./blocks";
+import { createEditor, inCode, removeCard, showCard } from "./cm";
 import { countWords, heading, link, linePrefix, wrap } from "./commands";
 import { draftKey, loadDraft, saveDraft } from "./drafts";
 
@@ -55,6 +55,7 @@ const TOOLS: Tool[][] = [
   [
     { id: "link", icon: "link", show: "all", key: `${MOD}K` },
     { id: "quote", icon: "quote", show: "mid" },
+    { id: "picture", icon: "image", show: "all" },
   ],
   [
     { id: "list", icon: "ul", show: "wide" },
@@ -72,10 +73,13 @@ const TOOLS: Tool[][] = [
     { id: "redo", icon: "redo", show: "wide", key: `\u21e7${MOD}Z` },
   ],
 ];
+/** The largest picture taken as is: bigger ones are almost always a mistake (a raw camera
+ * file, a scan) and would take minutes on a phone connection. */
+const MAX_PICTURE = 20 * 1024 * 1024;
 const SHOW_CLASS: Record<Show, string> = { all: "", wide: " wide-only", mid: " wide-only mid", menu: " menu-only" };
 
 const toolName = (id: string): string =>
-  // i18n: admin.editor.tool.heading admin.editor.tool.bold admin.editor.tool.italic admin.editor.tool.strike admin.editor.tool.code admin.editor.tool.link admin.editor.tool.quote admin.editor.tool.list admin.editor.tool.numbered admin.editor.tool.task admin.editor.tool.table admin.editor.tool.math admin.editor.tool.footnote admin.editor.tool.divider admin.editor.tool.undo admin.editor.tool.redo
+  // i18n: admin.editor.tool.heading admin.editor.tool.bold admin.editor.tool.italic admin.editor.tool.strike admin.editor.tool.code admin.editor.tool.link admin.editor.tool.quote admin.editor.tool.picture admin.editor.tool.list admin.editor.tool.numbered admin.editor.tool.task admin.editor.tool.table admin.editor.tool.math admin.editor.tool.footnote admin.editor.tool.divider admin.editor.tool.undo admin.editor.tool.redo
   t(`admin.editor.tool.${id}`);
 
 const modeName = (m: Mode): string =>
@@ -452,6 +456,151 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     openPop(anchor ?? cmHost, formEl, t("admin.editor.link_to"), box ? { at: box } : {});
   };
 
+  /* ---------- pasting and pictures ---------- */
+  /** Asks for a picture's description after it is added; it stays empty if the writer skips. */
+  const altPrompt = (url: string) => {
+    const src = `![](${url})`;
+    if (!view.state.doc.toString().includes(src)) return;
+    const input = h("input", { class: "input", id: "pb-alt", autocomplete: "off", "aria-describedby": "pb-alt-hint" });
+    const formEl = h(
+      "form",
+      { class: "altpop" },
+      h("label", { class: "label", for: "pb-alt" }, t("admin.editor.upload.alt_label")),
+      input,
+      h("p", { class: "hint", id: "pb-alt-hint" }, t("admin.editor.upload.alt_hint")),
+      h(
+        "div",
+        { class: "btn-row end" },
+        h("button", { type: "button", class: "btn quiet", onclick: () => (closePop(false), view.focus()) }, t("admin.editor.upload.alt_skip")),
+        h("button", { type: "submit", class: "btn primary" }, t("admin.editor.upload.alt_save")),
+      ),
+    );
+    formEl.addEventListener("submit", (e) => {
+      e.preventDefault();
+      closePop(false);
+      // Found again by its address: the text may have moved while the writer typed.
+      const now = view.state.doc.toString().indexOf(src);
+      const alt = input.value.replace(/[[\]\n]/g, " ").trim();
+      if (now >= 0 && alt) view.dispatch({ changes: { from: now + 2, insert: alt } });
+      view.focus();
+    });
+    // Under the picture itself, so the writer sees what they describe.
+    const pic = Array.from(view.dom.querySelectorAll(".cm-img img")).find((i) => i.getAttribute("src") === url)?.parentElement;
+    openPop(pic ?? cmHost, formEl, t("admin.editor.upload.alt_label"));
+  };
+
+  /** Puts `md` on lines of its own at the end of the line holding `at`. */
+  const insertOwnLine = (at: number, md: string) => {
+    const line = view.state.doc.lineAt(at);
+    const before = line.text.trim() ? "\n\n" : "";
+    const next = line.number < view.state.doc.lines ? view.state.doc.line(line.number + 1).text.trim() : "";
+    const after = next ? "\n\n" : line.number < view.state.doc.lines ? "" : "\n";
+    view.dispatch({
+      changes: { from: line.to, insert: before + md + after },
+      effects: EditorView.scrollIntoView(line.to + before.length, { y: "center" }),
+      userEvent: "input.paste",
+    });
+  };
+
+  /** One picture: a card with progress where it goes, then its Markdown, then its description. */
+  const uploadOne = async (file: File, pos: number): Promise<void> => {
+    const bar = h("i", {});
+    const label = h("span", {}, t("admin.editor.upload.sending", { name: file.name }));
+    const card = h("div", { class: "up", role: "status" }, label, h("div", { class: "bar" }, bar));
+    bar.style.transform = "scaleX(0)";
+    // The outer box holds the card's space above and below (a widget may not have margins).
+    const id = showCard(view, pos, h("div", { class: "cm-upload" }, card));
+    const r = await o.api.upload(file, (sent) => (bar.style.transform = `scaleX(${sent})`));
+    if (r.ok) {
+      const at = removeCard(view, id) ?? view.state.doc.length;
+      insertOwnLine(at, `![](${r.value.url})`);
+      // After CodeMirror has scrolled to it and drawn the picture.
+      const url = r.value.url;
+      requestAnimationFrame(() => requestAnimationFrame(() => altPrompt(url)));
+      return;
+    }
+    // Failed: the card says so and offers another try; the text is untouched.
+    card.className = "up fail";
+    card.setAttribute("role", "alert");
+    label.textContent = r.error.code === "network" ? t("admin.editor.upload.offline") : t("admin.editor.upload.failed", { name: file.name });
+    const retry = h("button", { type: "button", class: "btn quiet" }, t("admin.editor.upload.retry"));
+    const remove = h("button", { type: "button", class: "btn quiet" }, t("admin.editor.upload.remove"));
+    card.querySelector(".bar")?.replaceWith(h("div", { class: "btn-row" }, retry, remove));
+    remove.onclick = () => (removeCard(view, id), view.focus());
+    retry.onclick = () => {
+      const at = removeCard(view, id);
+      void uploadOne(file, at ?? pos);
+    };
+  };
+
+  /** Pictures from a paste, a drop or the picker, one after another; anything else is refused. */
+  const addPictures = async (files: File[], pos: number): Promise<void> => {
+    if (o.offline()) {
+      toast(t("admin.editor.upload.offline"), 6000);
+      return;
+    }
+    for (const f of files) {
+      if (!f.type.startsWith("image/")) toast(t("admin.editor.upload.not_picture", { name: f.name }), 6000);
+      else if (f.size > MAX_PICTURE) toast(t("admin.editor.upload.too_big", { name: f.name }), 6000);
+      else await uploadOne(f, pos);
+    }
+  };
+
+  const fileInput = h("input", { type: "file", accept: "image/*", multiple: true, hidden: true, tabindex: "-1" });
+  let pickAt = 0;
+  fileInput.addEventListener("change", () => {
+    const files = Array.from(fileInput.files ?? []);
+    fileInput.value = "";
+    if (files.length) void addPictures(files, pickAt);
+  });
+  picker.open = (at) => {
+    pickAt = at;
+    fileInput.click();
+  };
+
+  const onPaste = (e: ClipboardEvent, v: EditorView): boolean => {
+    const d = e.clipboardData;
+    if (!d) return false;
+    const sel = v.state.selection.main;
+    const files = Array.from(d.files);
+    if (files.length) {
+      e.preventDefault();
+      void addPictures(files, sel.head);
+      return true;
+    }
+    const text = d.getData("text/plain");
+    // An address pasted over selected words links them.
+    if (!sel.empty && /^(https?:\/\/|mailto:)\S+$/.test(text.trim())) {
+      e.preventDefault();
+      link(v, sel.from, sel.to, text.trim(), "");
+      return true;
+    }
+    const html = d.getData("text/html");
+    if (!html || inCode(v.state, sel.head)) return false;
+    // Rich text is converted by a small module loaded on the first such paste.
+    e.preventDefault();
+    import("./paste-md")
+      .then((m) => {
+        const md = m.isRich(html) ? m.htmlToMarkdown(new DOMParser().parseFromString(html, "text/html").body) : "";
+        v.dispatch(v.state.replaceSelection(md || text), { userEvent: "input.paste", scrollIntoView: true });
+      })
+      .catch((err: unknown) => {
+        // Offline before the module was ever loaded: paste the plain text, never nothing.
+        console.error("admin editor: loading the paste converter failed", err);
+        v.dispatch(v.state.replaceSelection(text), { userEvent: "input.paste", scrollIntoView: true });
+      });
+    return true;
+  };
+
+  const onDrop = (e: DragEvent, v: EditorView): boolean => {
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (!files.length) return false;
+    e.preventDefault();
+    const at = v.posAtCoords({ x: e.clientX, y: e.clientY }) ?? v.state.selection.main.head;
+    void addPictures(files, at);
+    return true;
+  };
+
   /* ---------- "/" block menu ---------- */
   let slash: { from: number; sel: number; items: Block[] } | undefined;
   const closeSlash = () => {
@@ -551,6 +700,8 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
       }
     },
     events: {
+      paste: onPaste,
+      drop: onDrop,
       blur: () => {
         setTimeout(() => {
           if (!view.hasFocus) hideBubble();
@@ -658,6 +809,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
       strike: () => wrap(view, "~~"),
       code: () => wrap(view, "`"),
       link: () => linkPrompt(view, btn),
+      picture: () => picker.open(view.state.selection.main.head),
       quote: () => linePrefix(view, "> "),
       list: () => linePrefix(view, "- "),
       numbered: () => linePrefix(view, "1. "),
