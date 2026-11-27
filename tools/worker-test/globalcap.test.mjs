@@ -3,7 +3,7 @@
 // (a valid token lets the attempt through). Every attempt comes from its own address, like a
 // flood from a /48, so only the site-wide key can stop it.
 import assert from "node:assert/strict";
-import { createHash, pbkdf2, pbkdf2Sync, randomBytes } from "node:crypto";
+import { createHash, generateKeyPairSync, pbkdf2, pbkdf2Sync, randomBytes, sign } from "node:crypto";
 import { createServer } from "node:http";
 import { after, before, describe, test } from "node:test";
 import { promisify } from "node:util";
@@ -21,6 +21,14 @@ const sha256hex = (s) => createHash("sha256").update(s).digest("hex");
 const sq = (s) => `'${String(s).replaceAll("'", "''")}'`;
 const wrong = () => b64u(randomBytes(32));
 const SESSION = b64u(randomBytes(32));
+const LOGIN_OPT = "/api/auth/passkey/login/options";
+const LOGIN_VERIFY = "/api/auth/passkey/login/verify";
+
+// Bob's passkey (Ed25519), seeded as passkeys row 1; row 2 is a spare to remove.
+const KEY = generateKeyPairSync("ed25519");
+const KEY_ID = b64u(randomBytes(16));
+const KEY_STORED = `ed25519:${KEY.publicKey.export({ format: "jwk" }).x}`;
+let signCount = 0;
 
 function serverHash(stretched) {
   const salt = randomBytes(16);
@@ -75,7 +83,10 @@ before(async () => {
     INSERT INTO users (id, login, slug, display_name, role, password_hash, disabled_at, created_at, updated_at) VALUES
       (1, 'Bob', 'bob', 'Bob', 'owner', ${sq(serverHash(bobPw))}, NULL, ${T}, ${T});
     INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES
-      (${sq(sha256hex(SESSION))}, 1, ${T}, ${T + 29 * DAY});`;
+      (${sq(sha256hex(SESSION))}, 1, ${T}, ${T + 29 * DAY});
+    INSERT INTO passkeys (id, user_id, credential_id, public_key, sign_count, name, created_at) VALUES
+      (1, 1, ${sq(KEY_ID)}, ${sq(KEY_STORED)}, 0, 'phone', ${T}),
+      (2, 1, ${sq(b64u(randomBytes(16)))}, ${sq(KEY_STORED)}, 0, 'spare', ${T});`;
   [off, on] = await Promise.all([
     startWorker({ seedSql: (url) => seed(url, false), vars: { PLUMBLOG_TEST_GLOBAL_CAP: String(CAP) } }),
     startWorker({
@@ -114,6 +125,31 @@ const unknownKey = {
   reauth_signature: b64u("x"),
 };
 
+/** Passkey sign-in options; returns the challenge. */
+async function loginOptions(w, extra = {}) {
+  const r = await api(w, "POST", LOGIN_OPT, { body: extra });
+  assert.equal(r.status, 200, r.text);
+  return r.json.publicKey.challenge;
+}
+const clientData = (type, challenge, w) =>
+  Buffer.from(JSON.stringify({ type, challenge, origin: w.url, crossOrigin: false }));
+/** A valid assertion by Bob's passkey over `challenge`; field names start with `prefix`. */
+function assertion(w, challenge, prefix = "") {
+  const cd = clientData("webauthn.get", challenge, w);
+  const ad = Buffer.alloc(37);
+  createHash("sha256").update(new URL(w.url).hostname).digest().copy(ad, 0);
+  ad[32] = 0x05; // user present, user verified
+  ad.writeUInt32BE(++signCount, 33);
+  const sig = sign(null, Buffer.concat([ad, createHash("sha256").update(cd).digest()]), KEY.privateKey);
+  return {
+    [`${prefix}credential_id`]: KEY_ID,
+    [`${prefix}client_data_json`]: b64u(cd),
+    [`${prefix}authenticator_data`]: b64u(ad),
+    [`${prefix}signature`]: b64u(sig),
+  };
+}
+const passkeyLogin = (w, body) => api(w, "POST", LOGIN_VERIFY, { body });
+
 /** One of every limited attempt, each from a new address. */
 const flood = (w, extra = {}) =>
   Promise.all([
@@ -125,9 +161,13 @@ const flood = (w, extra = {}) =>
     api(w, "POST", "/api/auth/invite/accept", { body: { code: "guess", login: "x", slug: "x", display_name: "x", password: wrong(), ...extra } }),
   ]);
 
+let offChallenge, onChallenge;
+
 describe("Turnstile off", () => {
   test("up to the cap: counted as usual, one log entry when it trips", async () => {
-    for (let i = 0; i < CAP; i++) assertError(await login(off, wrong()), 401, "auth.invalid_credentials");
+    // A passkey challenge issued below the cap counts too.
+    offChallenge = await loginOptions(off);
+    for (let i = 1; i < CAP; i++) assertError(await login(off, wrong()), 401, "auth.invalid_credentials");
     assert.deepEqual(off.query("SELECT count FROM login_failures WHERE key_hash = 'global'"), [{ count: CAP }]);
     assert.equal(capLogs(off), 1);
   });
@@ -138,6 +178,12 @@ describe("Turnstile off", () => {
     assert.deepEqual(snapshot(off), before, "refused attempts wrote rows");
     for (const r of replies) assertError(r, 429, "auth.locked");
     assert.equal(capLogs(off), 1, "one log entry per window");
+  });
+
+  test("passkey sign-in with a challenge from below the cap is 429 and writes nothing", async () => {
+    const before = snapshot(off);
+    assertError(await passkeyLogin(off, assertion(off, offChallenge)), 429, "auth.locked");
+    assert.deepEqual(snapshot(off), before, "the challenge was consumed or a row written");
   });
 
   test("a signed-in session still works", async () => {
@@ -165,7 +211,8 @@ describe("Turnstile off", () => {
 
 describe("Turnstile on", () => {
   test("fill the cap", async () => {
-    for (let i = 0; i < CAP; i++) assertError(await login(on, wrong()), 401, "auth.invalid_credentials");
+    onChallenge = await loginOptions(on);
+    for (let i = 1; i < CAP; i++) assertError(await login(on, wrong()), 401, "auth.invalid_credentials");
     assert.equal(capLogs(on), 1);
   });
 
@@ -186,6 +233,44 @@ describe("Turnstile on", () => {
     assert.equal(opts.status, 200, opts.text);
     assert.equal(snapshot(on).challenges, before.challenges + 1);
     assert.equal(capLogs(on), 1);
+  });
+
+  // Issue #63: tokens are single use, so the challenge from options that passed the gate
+  // carries the proof to the sign-in.
+  test("passkey sign-in at the cap: one token, for options, is enough", async () => {
+    const body = assertion(on, await loginOptions(on, { turnstile_token: "pass" }));
+    const ok = await passkeyLogin(on, body);
+    assert.equal(ok.status, 200, ok.text);
+    // Replayed: the challenge is gone, with or without a token.
+    assertError(await passkeyLogin(on, body), 403, "auth.turnstile_required");
+    assertError(await passkeyLogin(on, { ...body, turnstile_token: "pass" }), 400, "auth.passkey_invalid");
+    // The spent token sent again beside a gated challenge changes nothing.
+    const again = await passkeyLogin(on, { ...assertion(on, await loginOptions(on, { turnstile_token: "pass" })), turnstile_token: "fail" });
+    assert.equal(again.status, 200, again.text);
+    assert.equal(capLogs(on), 1);
+  });
+
+  test("passkey sign-in at the cap with a challenge from below it still needs a token", async () => {
+    const body = assertion(on, onChallenge);
+    const before = snapshot(on);
+    assertError(await passkeyLogin(on, body), 403, "auth.turnstile_required");
+    assert.deepEqual(snapshot(on), before, "refused attempt wrote rows or took the challenge");
+    const ok = await passkeyLogin(on, { ...body, turnstile_token: "pass" });
+    assert.equal(ok.status, 200, ok.text);
+  });
+
+  test("a gated challenge cannot register a passkey, and stays usable for sign-in", async () => {
+    const challenge = await loginOptions(on, { turnstile_token: "pass" });
+    const cd = b64u(clientData("webauthn.create", challenge, on));
+    assertError(await addPasskey(on, { current_password: bobPw, client_data_json: cd }), 400, "auth.passkey_invalid");
+    const ok = await passkeyLogin(on, assertion(on, challenge));
+    assert.equal(ok.status, 200, ok.text);
+  });
+
+  test("a gated challenge works for signed-in re-auth", async () => {
+    const challenge = await loginOptions(on, { turnstile_token: "pass" });
+    const r = await api(on, "DELETE", "/api/auth/passkey/2", { cookie: SESSION, body: assertion(on, challenge, "reauth_") });
+    assert.equal(r.status, 204, r.text);
   });
 
   test("a signed-in session still works", async () => {
