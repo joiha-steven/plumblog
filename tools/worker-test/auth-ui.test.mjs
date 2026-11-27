@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { after, before, test } from "node:test";
 import { chromium } from "playwright-core";
 import { startWorker } from "./harness.mjs";
@@ -24,6 +25,9 @@ const en = (() => {
     if (s) section = s[1];
     const kv = /^(\w+) = "((?:[^"\\]|\\.)*)"$/.exec(line);
     if (kv) out[`${section}.${kv[1]}`] = kv[2].replaceAll('\\"', '"');
+    // Plural forms: key = { one = "...", other = "..." }.
+    const pl = /^(\w+) = \{(.*)\}$/.exec(line);
+    if (pl) for (const [, k, v] of pl[2].matchAll(/(\w+) = "((?:[^"\\]|\\.)*)"/g)) out[`${section}.${pl[1]}.${k}`] = v;
   }
   return out;
 })();
@@ -39,12 +43,26 @@ const OWNER = { login: "Hana", slug: "hana", name: "Hana Owner", password: "corr
 const INVITE = "invite-writer-ui-code";
 const WRITER = { login: "wren", slug: "wren", name: "Wren Writer", password: "writer pass phrase 1" };
 
-let fresh, invited, browser;
+// Cloudflare's always-pass test site key; siteverify is a local stub that passes its dummy token.
+const TS_SITE_KEY = "1x00000000000000000000AA";
+const TS_TOKEN = "XXXX.DUMMY.TOKEN.XXXX";
+
+let fresh, invited, guarded, stub, browser;
 // Where the page is opened: the same port, under the name the configured origin uses.
 const at = (w, path = "") => `${w.url.replace("127.0.0.1", "localhost")}${path}`;
 
 before(async () => {
-  [fresh, invited] = await Promise.all([
+  stub = createServer((req, res) => {
+    let data = "";
+    req.on("data", (d) => (data += d));
+    req.on("end", () => {
+      const ok = new URLSearchParams(data).get("response") === TS_TOKEN;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ success: ok, hostname: "localhost", "error-codes": [] }));
+    });
+  });
+  await new Promise((ok) => stub.listen(0, "127.0.0.1", ok));
+  [fresh, invited, guarded] = await Promise.all([
     startWorker({
       seedSql: (url) => `INSERT INTO settings (key, value_json, updated_at) VALUES
         ('site_id', ${sq(JSON.stringify(SITE))}, ${T}),
@@ -59,12 +77,23 @@ before(async () => {
         INSERT INTO invites (code_hash, role, created_by, created_at, expires_at)
           VALUES (${sq(sha256hex(INVITE))}, 'writer', 1, ${T}, ${T + DAY});`,
     }),
+    // Turnstile on; the one user's stored hash matches no password, so every sign-in fails.
+    startWorker({
+      seedSql: (url) => `INSERT INTO settings (key, value_json, updated_at) VALUES
+        ('site_id', ${sq(JSON.stringify("site-ui-3"))}, ${T}),
+        ('origin', ${sq(JSON.stringify(url.replace("127.0.0.1", "localhost")))}, ${T}),
+        ('turnstile_site_key', ${sq(JSON.stringify(TS_SITE_KEY))}, ${T});
+        INSERT INTO users (id, login, slug, display_name, role, password_hash, disabled_at, created_at, updated_at)
+          VALUES (1, 'boss', 'boss', 'Boss', 'owner', 'p1$1000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', NULL, ${T}, ${T});`,
+      vars: { TURNSTILE_SECRET: "stub-secret", TURNSTILE_VERIFY_URL: `http://127.0.0.1:${stub.address().port}/verify` },
+    }),
   ]);
   browser = await chromium.launch({ channel: "chrome", headless: true });
 });
 after(async () => {
   await browser?.close();
-  await Promise.all([fresh?.stop(), invited?.stop()]);
+  await Promise.all([fresh?.stop(), invited?.stop(), guarded?.stop()]);
+  stub?.close();
 });
 
 /** A page that records CSP violations, page errors and console errors (checked by done()). */
@@ -206,6 +235,99 @@ test("a writer accepts an invite and the account page loads for them", async () 
     await page.locator("#main").getByText(WRITER.name, { exact: true }).waitFor();
     await page.locator("#main").getByText(tx("admin.role.writer"), { exact: true }).waitFor();
     await page.getByText(tx("admin.account.passkeys_empty"), { exact: true }).waitFor();
+
+    // Signing out with drafts on this device asks first, then deletes this writer's only.
+    const me = invited.query(`SELECT id FROM users WHERE login = ${sq(WRITER.login)}`)[0].id;
+    const keys = [`${me}:new-a`, `${me}:post-5`, "1:new-b"];
+    await idb(page, "put", keys);
+    await page.getByRole("button", { name: new RegExp(`^${WRITER.name}`) }).click();
+    await page.getByRole("button", { name: tx("admin.account.signout"), exact: true }).click();
+    const ask = tx("admin.account.signout_drafts.other").replace("{count}", "2");
+    await page.getByText(ask, { exact: true }).waitFor();
+    assert.deepEqual(await idb(page, "keys"), keys.toSorted());
+    await page.getByRole("button", { name: tx("admin.account.signout_delete"), exact: true }).click();
+    await page.waitForURL(/\/admin\/signin$/);
+    assert.deepEqual(await idb(page, "keys"), ["1:new-b"]);
+    assert.equal(invited.query("SELECT count(*) AS n FROM sessions")[0].n, 0);
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+/** The admin's drafts store (web/admin/src/editor/drafts.ts): put drafts under `keys`, or list the keys. */
+function idb(page, op, keys = []) {
+  return page.evaluate(
+    ([op, keys]) =>
+      new Promise((resolve, reject) => {
+        const req = indexedDB.open("plumblog-admin", 2);
+        req.onupgradeneeded = () => req.result.createObjectStore("drafts");
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const db = req.result;
+          const tx = db.transaction("drafts", op === "put" ? "readwrite" : "readonly");
+          const store = tx.objectStore("drafts");
+          let out;
+          if (op === "put") for (const k of keys) store.put({ title: k, body: k, base: null, rev: 1, savedAt: 0 }, k);
+          else store.getAllKeys().onsuccess = (e) => (out = e.target.result);
+          tx.oncomplete = () => (db.close(), resolve(out));
+          tx.onerror = () => reject(tx.error);
+        };
+      }),
+    [op, keys],
+  );
+}
+
+test("Turnstile: one sign-in request per submit, even when the widget solves itself again", async () => {
+  const { context, page, problems } = await open(guarded);
+  // Turnstile's script, replaced by one that acts like managed mode at its most eager: it
+  // solves on render and on every reset, then again by itself (a refresh) shortly after.
+  let solves = 0;
+  await page.route("https://challenges.cloudflare.com/turnstile/v0/api.js*", (route) =>
+    route.fulfill({
+      contentType: "text/javascript",
+      body: `window.turnstile = {
+        render(el, o) { this.o = o; this.solve(); return "w1"; },
+        reset() { this.solve(); },
+        solve() { for (const ms of [50, 400]) setTimeout(() => { window.__solves = (window.__solves || 0) + 1; this.o.callback(${JSON.stringify(TS_TOKEN)}); }, ms); },
+      };`,
+    }),
+  );
+  const logins = [];
+  page.on("request", (r) => r.url().endsWith("/api/auth/login") && logins.push(JSON.parse(r.postData() ?? "{}")));
+  const submit = async () => {
+    await page.getByRole("button", { name: tx("admin.auth.signin"), exact: true }).click();
+    await page.getByRole("alert").filter({ hasText: /./ }).waitFor();
+    await page.getByRole("button", { name: tx("admin.auth.signin"), exact: true }).and(page.locator(":enabled")).waitFor();
+  };
+  const quiet = () => page.waitForTimeout(1500);
+  try {
+    await page.goto(at(guarded, "/admin/signin"));
+    await page.getByLabel(tx("admin.auth.login")).fill("boss");
+    await page.getByLabel(tx("admin.auth.password"), { exact: true }).fill("a typo");
+    // Five wrong passwords: one request each, no Turnstile yet.
+    for (let i = 1; i <= 5; i++) {
+      await submit();
+      assert.equal(logins.length, i);
+    }
+    // The sixth is refused for want of a token: the widget shows and solves itself, and nothing
+    // is sent until the writer submits again.
+    await submit();
+    await page.getByText(tx("admin.auth.err_turnstile"), { exact: true }).waitFor();
+    await quiet();
+    assert.equal(logins.length, 6);
+    assert.ok(!("turnstile_token" in logins[5]));
+    // Each later submit sends exactly one request with a token, and the widget's own re-solves
+    // never send another.
+    for (let i = 7; i <= 9; i++) {
+      await submit();
+      await page.getByText(tx("admin.auth.err_invalid_credentials"), { exact: true }).waitFor();
+      await quiet();
+      assert.equal(logins.length, i, `requests after submit ${i}`);
+      assert.equal(logins[i - 1].turnstile_token, TS_TOKEN);
+    }
+    solves = await page.evaluate(() => window.__solves);
+    assert.ok(solves >= 4, `the widget solved itself ${solves} times`);
     assert.deepEqual(problems, []);
   } finally {
     await context.close();

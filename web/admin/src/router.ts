@@ -24,7 +24,9 @@ export interface Route {
 }
 
 export function current(): Route {
-  const path = location.pathname.replace(/\/+$/, "") || "/";
+  // At most one trailing slash, as the Worker (is_auth_page) and sw.ts read paths: anything
+  // else is not a page, so a sign-in page never renders under the signed-in CSP.
+  const path = location.pathname.replace(/\/$/, "") || "/";
   if (path === "/admin") return { screen: "posts" };
   const auth = /^\/admin\/(signin|setup|invite)$/.exec(path);
   if (auth) return { screen: auth[1] as AuthScreen };
