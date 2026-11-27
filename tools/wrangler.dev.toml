@@ -1,0 +1,17 @@
+# Dev-only Worker config for local tests (tools/worker-test). Never deployed:
+# the real wrangler.toml is generated per site by `blog` and gitignored.
+# Paths are relative to this file. tools/worker-test/harness.mjs builds `main` first.
+name = "plumblog-dev"
+main = "../target/worker-dev/worker/shim.mjs"
+compatibility_date = "2026-11-01"
+
+# Binding names are provisional until the store adapters land; keep them in sync with crates/worker.
+[[d1_databases]]
+binding = "DB"
+database_name = "plumblog-dev"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "../migrations"
+
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "plumblog-dev"
