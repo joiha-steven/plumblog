@@ -157,7 +157,7 @@ describe("api v1 site", () => {
     assert.ok(put.fields.some((f) => f.name === "value" && f.type === "json"));
     for (const method of ["PUT", "DELETE"]) {
       const r2 = r.json.routes.find((x) => x.method === method && x.path === "/api/v1/settings/{key}");
-      assert.deepEqual(r2.session_only_keys, ["origin"], method);
+      assert.deepEqual(r2.session_only_keys, ["origin", "turnstile_site_key"], method);
     }
     const opts = (kind) => r.json.routes.find((x) => x.method === "GET" && x.path === `/api/v1/${kind}/{name}/options`);
     assert.equal(opts("plugins").access, "plugin.manage");
@@ -400,6 +400,23 @@ describe("api v1 site", () => {
     const back = await api(w, "DELETE", "/api/v1/settings/origin", { as: AS.ownerSession, origin: "https://blog.example" });
     assert.equal(back.status, 204, back.text);
     assert.equal(settingRow("origin"), undefined);
+  });
+
+  test("settings: turnstile_site_key is session only; a leaked owner token cannot turn Turnstile off", async () => {
+    const path = "/api/v1/settings/turnstile_site_key";
+    for (const as of [AS.ownerToken, AS.writerToken, AS.readToken]) {
+      assertError(await api(w, "PUT", path, { as, body: { value: "0x4AAAAAAA" } }), 403, "auth.forbidden");
+    }
+    assert.equal(settingRow("turnstile_site_key"), undefined);
+    const set = await api(w, "PUT", path, { as: AS.ownerSession, body: { value: "0x4AAAAAAA" } });
+    assert.equal(set.status, 204, set.text);
+    for (const as of [AS.ownerToken, AS.writerToken, AS.readToken]) {
+      assertError(await api(w, "DELETE", path, { as }), 403, "auth.forbidden");
+    }
+    assert.equal(settingRow("turnstile_site_key"), '"0x4AAAAAAA"');
+    const back = await api(w, "DELETE", path, { as: AS.ownerSession });
+    assert.equal(back.status, 204, back.text);
+    assert.equal(settingRow("turnstile_site_key"), undefined);
   });
 
   test("plugin options are read by owners only (they may hold plugin secrets); theme options by anyone signed in", async () => {

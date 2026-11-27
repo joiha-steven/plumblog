@@ -28,8 +28,9 @@ pub const MAX_LIMIT: u32 = 100;
 pub const DEFAULT_LIMIT: u32 = 20;
 /// Settings only a signed-in session may write or clear; an API token gets 403
 /// `auth.forbidden`. The origin is what browser writes and passkeys are checked against, so
-/// changing it can lock the owner out, like the `/api/auth` routes tokens may not use.
-pub const SESSION_ONLY_SETTINGS: &[&str] = &["origin"];
+/// changing it can lock the owner out, like the `/api/auth` routes tokens may not use. The
+/// Turnstile site key guards sign-in: a leaked owner token must not be able to turn it off.
+pub const SESSION_ONLY_SETTINGS: &[&str] = &["origin", "turnstile_site_key"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {

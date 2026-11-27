@@ -296,5 +296,12 @@ mod tests {
             assert!(writable_key(key).is_err(), "{key}");
         }
         assert!(writable_key("origin").is_ok());
+        // The model's list spells the store's keys by hand; keep them bound together.
+        for key in [
+            plumblog_store::ORIGIN_KEY,
+            plumblog_store::TURNSTILE_SITE_KEY,
+        ] {
+            assert!(super::api::SESSION_ONLY_SETTINGS.contains(&key), "{key}");
+        }
     }
 }

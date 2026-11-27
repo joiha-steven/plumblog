@@ -51,7 +51,7 @@ fn api_reference() -> String {
         if !r.session_only_keys.is_empty() {
             let _ = writeln!(
                 o,
-                "session only (API tokens get 403) for key: {}",
+                "session only (API tokens get 403) for keys: {}",
                 r.session_only_keys.join(", ")
             );
         }
@@ -177,8 +177,10 @@ mod tests {
             "body: original, limit 20971520 bytes\nanswer: 201 media\nvariants: admin_encoder\n"
         ));
         assert_eq!(
-            text.matches("session only (API tokens get 403) for key: origin\n")
-                .count(),
+            text.matches(
+                "session only (API tokens get 403) for keys: origin, turnstile_site_key\n"
+            )
+            .count(),
             2
         );
         assert!(guide_list().contains("api"));
