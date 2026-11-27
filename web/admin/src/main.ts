@@ -1,6 +1,6 @@
 /** Admin entry: reads the shell's boot data, then draws the signed-out page or the route for the signed-in user. */
 
-import { type Api, type Me, type Result, httpApi, session } from "./api/client";
+import { type Api, type Me, type Result, flushLocal, httpApi, session } from "./api/client";
 import type { Post } from "./api/model.gen";
 import { mockApi } from "./api/mock";
 import { loadText, readBoot } from "./boot";
@@ -24,9 +24,11 @@ const root = document.getElementById("app") ?? document.body.appendChild(h("div"
 
 /**
  * Always a full page load: the sign-in pages run under their own CSP (Turnstile), so client-side
- * routing would draw them under the wrong one.
+ * routing would draw them under the wrong one. An open editor's last keys are saved on this
+ * device first: leaving drops its pending local save.
  */
-function toSignIn(): void {
+async function toSignIn(): Promise<void> {
+  await flushLocal();
   location.assign(`/admin/signin?next=${encodeURIComponent(location.pathname + location.search)}`);
 }
 
@@ -97,7 +99,7 @@ async function load(): Promise<void> {
   render();
   me = await api.me();
   if (!me.ok && me.error.code === "auth.unauthenticated") {
-    toSignIn();
+    await toSignIn();
     return;
   }
   render();
@@ -119,7 +121,7 @@ const first = current().screen;
 if (isAuth(first)) {
   void signedOut(first);
 } else {
-  session.expired = toSignIn;
+  session.expired = () => void toSignIn();
   start(() => {
     navigated = true;
     render();

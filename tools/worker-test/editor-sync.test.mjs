@@ -14,6 +14,9 @@ const T = Date.now();
 const SETUP_CODE = "setup-code-sync-0123456789";
 const OWNER = { login: "Wren", slug: "wren", name: "Wren Owner", password: "correct horse battery" };
 let session;
+/** The signed-in browser's cookies, for the later tests' own contexts. */
+let cookies = [];
+const DAY = 86_400_000;
 
 // String values of locales/en.toml as "section.key" (as in auth-ui.test.mjs).
 const en = (() => {
@@ -90,7 +93,8 @@ test("a new post is saved to the server, then updated, and a concurrent change a
     await page.getByLabel(tx("admin.auth.password_repeat")).fill(OWNER.password);
     await page.getByRole("button", { name: tx("admin.auth.create") }).click();
     await page.waitForURL(/\/admin\/$/);
-    session = (await context.cookies()).find((c) => c.name === "__Host-plumblog_session")?.value;
+    cookies = await context.cookies();
+    session = cookies.find((c) => c.name === "__Host-plumblog_session")?.value;
     assert.ok(session, "signed in");
 
     await page.goto(at("/admin/posts/new"));
@@ -177,6 +181,299 @@ test("a new post is saved to the server, then updated, and a concurrent change a
     problems.splice(before6, problems.length - before6, ...problems.slice(before6).filter((x) => !/ERR_INTERNET_DISCONNECTED|no response/.test(x)));
 
     assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+/** A signed-in page on `path` with the editor drawn; `sent` lists every posts API request it makes. */
+async function editorPage(path, context) {
+  if (!context) {
+    context = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: "en-US" });
+    await context.addCookies(cookies);
+  }
+  const page = await context.newPage();
+  const sent = [];
+  const errors = [];
+  page.on("request", (r) => /\/api\/v1\/posts/.test(r.url()) && sent.push(`${r.method()} ${new URL(r.url()).pathname}`));
+  page.on("pageerror", (e) => errors.push(`page error: ${e}`));
+  await page.goto(at(path));
+  await page.getByRole("toolbar", { name: tx("admin.editor.toolbar") }).waitFor();
+  return { context, page, sent, errors };
+}
+
+/** Every draft this browser keeps (drafts.ts), by key. */
+const stored = (page) =>
+  page.evaluate(
+    () =>
+      new Promise((ok, no) => {
+        const r = indexedDB.open("plumblog-admin");
+        r.onerror = () => no(r.error);
+        r.onsuccess = () => {
+          const db = r.result;
+          const t = db.transaction("drafts");
+          const keys = t.objectStore("drafts").getAllKeys();
+          const vals = t.objectStore("drafts").getAll();
+          t.oncomplete = () => {
+            db.close();
+            ok(Object.fromEntries(keys.result.map((k, i) => [k, vals.result[i]])));
+          };
+        };
+      }),
+  );
+
+/** A draft post made through the API, as another device would. */
+async function newDraft(slug, markdown) {
+  const made = await api("POST", "/api/v1/posts", { lang: "en", slug, title: slug, markdown });
+  assert.equal(made.status, 201, JSON.stringify(made.json));
+  return made.json;
+}
+
+const uid = () => w.query("SELECT id FROM users WHERE login = 'Wren'")[0].id;
+const typeAtEnd = async (page, text) => {
+  await page.locator(".cm-content").click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await page.keyboard.type(text);
+};
+
+test("a draft published or scheduled elsewhere is never changed by autosave, even after Keep my draft", async () => {
+  for (const status of ["published", "scheduled"]) {
+    const p = await newDraft(`live-${status}`, "Original.");
+    const { context, page, sent, errors } = await editorPage(`/admin/posts/${p.id}`);
+    try {
+      const change = { expected_version: p.version, status, markdown: `The ${status} text.` };
+      if (status === "scheduled") change.published_at = Date.now() + DAY;
+      const live = await api("PATCH", `/api/v1/posts/${p.id}`, change);
+      assert.equal(live.status, 200, JSON.stringify(live.json));
+
+      await typeAtEnd(page, " Mine.");
+      const banner = page.getByRole("alert").filter({ hasText: tx("admin.editor.conflict.server_title") });
+      await banner.waitFor({ timeout: 15_000 });
+      const before = sent.length;
+      await banner.getByRole("button", { name: tx("admin.editor.conflict.keep_mine") }).click();
+      await typeAtEnd(page, " More.");
+      // Autosave runs 3 s after the last local save: wait well past it.
+      await new Promise((ok) => setTimeout(ok, 5000));
+
+      assert.deepEqual(sent.slice(before).filter((r) => r.startsWith("PATCH")), [], `${status}: nothing sent after Keep my draft`);
+      const [row] = w.query(`SELECT status, markdown FROM posts WHERE id = ${p.id}`);
+      assert.deepEqual(row, { status, markdown: `The ${status} text.` }, "the live post is unchanged");
+      assert.equal(await page.locator(".crumb .st").textContent(), tx(`admin.status.${status}`), "the status chip shows it");
+      assert.equal(await page.locator(".ed-actions .saved").textContent(), tx("admin.editor.saved_here"));
+      const kept = (await stored(page))[`${uid()}:post-${p.id}`];
+      assert.equal(kept?.body, "Original. Mine. More.", "the writer's text stays on this device");
+      assert.deepEqual(errors, []);
+    } finally {
+      await context.close();
+    }
+  }
+});
+
+test("'Use the saved version' after a 409 shows the server text and sends nothing", async () => {
+  const p = await newDraft("use-saved", "Base.");
+  const { context, page, sent } = await editorPage(`/admin/posts/${p.id}`);
+  try {
+    assert.equal((await api("PATCH", `/api/v1/posts/${p.id}`, { expected_version: p.version, markdown: "Theirs." })).status, 200);
+    await typeAtEnd(page, " Mine.");
+    const banner = page.getByRole("alert").filter({ hasText: tx("admin.editor.conflict.server_title") });
+    await banner.waitFor({ timeout: 15_000 });
+    const before = sent.length;
+    await banner.getByRole("button", { name: tx("admin.editor.conflict.use_saved") }).click();
+    await page.locator(".cm-content", { hasText: /^Theirs\.$/ }).waitFor();
+    await page.locator(".ed-actions .saved", { hasText: new RegExp(`^${tx("admin.editor.saved")}$`) }).waitFor({ timeout: 15_000 });
+    assert.deepEqual(sent.slice(before).filter((r) => r.startsWith("PATCH")), []);
+    assert.deepEqual(w.query(`SELECT markdown, version FROM posts WHERE id = ${p.id}`)[0], { markdown: "Theirs.", version: p.version + 1 });
+    assert.equal((await stored(page))[`${uid()}:post-${p.id}`], undefined, "the local draft goes once the server holds it");
+  } finally {
+    await context.close();
+  }
+});
+
+/** Two or more pages on one draft, with server saves cut off so the drafts meet on this device. */
+async function localOnly() {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: "en-US" });
+  await context.addCookies(cookies);
+  await context.route("**/api/v1/posts/*", (r) => (r.request().method() === "PATCH" ? r.abort() : r.continue()));
+  return context;
+}
+const sidesOf = (all, key) => Object.keys(all).filter((k) => k.startsWith(`${key}~`));
+const tabBanner = (page) => page.getByRole("alert").filter({ hasText: tx("admin.editor.conflict.tab_title") });
+/** Pages A and B on one draft; B is paused by A's save and keeps typing under the banner. */
+async function pausedPair(slug) {
+  const p = await newDraft(slug, "Start.");
+  const context = await localOnly();
+  const key = `${uid()}:post-${p.id}`;
+  const a = await editorPage(`/admin/posts/${p.id}`, context);
+  const b = await editorPage(`/admin/posts/${p.id}`, context);
+  await typeAtEnd(a.page, " A.");
+  await a.page.locator(".ed-actions .saved", { hasText: tx("admin.editor.saved_here") }).waitFor();
+  await typeAtEnd(b.page, " B.");
+  await tabBanner(b.page).waitFor();
+  await typeAtEnd(b.page, " Under the banner.");
+  // Past the 700 ms local save.
+  await new Promise((ok) => setTimeout(ok, 1500));
+  return { p, context, key, a, b };
+}
+
+test("typing in a tab paused by another tab's save is kept on this device and offered back", async () => {
+  const { p, context, key, b } = await pausedPair("two-tabs");
+  try {
+    const all = await stored(b.page);
+    assert.equal(all[key].body, "Start. A.", "the other tab's draft is not overwritten");
+    assert.equal(sidesOf(all, key).length, 1, "one side copy");
+    assert.equal(all[sidesOf(all, key)[0]].body, "Start. B. Under the banner.");
+
+    // The paused tab closes; opening the post again offers its text, never a silent pick.
+    await b.page.close();
+    const c = await editorPage(`/admin/posts/${p.id}`, context);
+    await tabBanner(c.page).waitFor();
+    assert.equal(await c.page.locator(".cm-content").textContent(), "Start. A.", "opens with the draft; the copy is only offered");
+    await tabBanner(c.page).getByRole("button", { name: tx("admin.editor.conflict.load_other") }).click();
+    await c.page.locator(".cm-content", { hasText: /^Start\. B\. Under the banner\.$/ }).waitFor();
+    await new Promise((ok) => setTimeout(ok, 500));
+    const after = await stored(c.page);
+    assert.equal(after[key].body, "Start. B. Under the banner.", "the pick is in the draft");
+    assert.deepEqual(sidesOf(after, key), [], "the side copy is gone after the pick");
+  } finally {
+    await context.close();
+  }
+});
+
+test("a page that opens while another is paused never writes the paused page's copy", async () => {
+  const { p, context, key, b } = await pausedPair("three-tabs");
+  try {
+    const [bKey] = sidesOf(await stored(b.page), key);
+    // C opens: B's copy is offered; C types, then B types more and closes at once.
+    const c = await editorPage(`/admin/posts/${p.id}`, context);
+    await tabBanner(c.page).waitFor();
+    await typeAtEnd(c.page, " C.");
+    await new Promise((ok) => setTimeout(ok, 1500));
+    await typeAtEnd(b.page, " B last.");
+    await b.page.close({ runBeforeUnload: true });
+    await typeAtEnd(c.page, " C again.");
+    await new Promise((ok) => setTimeout(ok, 1500));
+
+    const all = await stored(c.page);
+    assert.equal(all[bKey]?.body, "Start. B. Under the banner. B last.", "B's copy holds B's last keys");
+    const cKeys = sidesOf(all, key).filter((k) => k !== bKey);
+    assert.equal(cKeys.length, 1, "C writes a copy of its own");
+    assert.equal(all[cKeys[0]].body, "Start. A. C. C again.");
+    assert.equal(all[key].body, "Start. A.", "the draft waits for the pick");
+
+    // "Load that version" reads B's copy as it is now, then both copies go.
+    await tabBanner(c.page).getByRole("button", { name: tx("admin.editor.conflict.load_other") }).click();
+    await c.page.locator(".cm-content", { hasText: /^Start\. B\. Under the banner\. B last\.$/ }).waitFor();
+    await new Promise((ok) => setTimeout(ok, 500));
+    const after = await stored(c.page);
+    assert.equal(after[key].body, "Start. B. Under the banner. B last.");
+    assert.deepEqual(sidesOf(after, key), []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a copy another page left is offered, never written over a newer draft; one equal to the draft just goes", async () => {
+  const p = await newDraft("left-copy", "Start.");
+  const context = await localOnly();
+  const key = `${uid()}:post-${p.id}`;
+  try {
+    // The state a closed tab can leave: its copy (old text) and a draft written since, which
+    // went back to rev 0 when the server held it, then up again (the copy's rev means nothing).
+    const first = await editorPage(`/admin/posts/${p.id}`, context);
+    await first.page.evaluate(
+      ([key]) =>
+        new Promise((ok) => {
+          const r = indexedDB.open("plumblog-admin");
+          r.onsuccess = () => {
+            const t = r.result.transaction("drafts", "readwrite");
+            const s = t.objectStore("drafts");
+            const d = (body, rev, savedAt) => ({ title: "left-copy", body, base: null, rev, savedAt });
+            // Based on version 0: the server copy (version 1) moved on, so that choice waits too.
+            s.put({ ...d("Newer text.", 5, 3), version: 0 }, key);
+            s.put({ ...d("Old text.", 1, 1), after: 5 }, `${key}~aaaaaaaaaaaaaaaa`);
+            s.put(d("Newer text.", 2, 2), `${key}~bbbbbbbbbbbbbbbb`);
+            t.oncomplete = () => (r.result.close(), ok());
+          };
+        }),
+      [key],
+    );
+    await first.page.close();
+    const c = await editorPage(`/admin/posts/${p.id}`, context);
+    await tabBanner(c.page).waitFor();
+    assert.equal(await c.page.locator(".cm-content").textContent(), "Newer text.");
+    const all = await stored(c.page);
+    assert.equal(all[key].body, "Newer text.", "the newer draft is not overwritten");
+    assert.deepEqual(sidesOf(all, key), [`${key}~aaaaaaaaaaaaaaaa`], "the copy equal to the draft is gone, the other kept");
+    await tabBanner(c.page).getByRole("button", { name: tx("admin.editor.conflict.keep_this") }).click();
+    await new Promise((ok) => setTimeout(ok, 500));
+    const after = await stored(c.page);
+    assert.equal(after[key].body, "Newer text.");
+    assert.deepEqual(sidesOf(after, key), [], "kept this: the offered copy goes");
+    await c.page.getByRole("alert").filter({ hasText: tx("admin.editor.conflict.server_title") }).waitFor();
+  } finally {
+    await context.close();
+  }
+});
+
+test("keys typed just before the tab is hidden or closed are kept", async () => {
+  const p = await newDraft("hide-close", "Start.");
+  const key = `${uid()}:post-${p.id}`;
+  const context = await localOnly();
+  const { page } = await editorPage(`/admin/posts/${p.id}`, context);
+  try {
+    // Hidden (switching apps on a phone): saved at once, not 700 ms later; no copy left.
+    await typeAtEnd(page, " Hidden.");
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await new Promise((ok) => setTimeout(ok, 300));
+    const hidden = await stored(page);
+    assert.equal(hidden[key]?.body, "Start. Hidden.");
+    assert.deepEqual(sidesOf(hidden, key), [], "the copy goes once the text is in the draft");
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+    });
+
+    // Closed straight after typing: reopened, the last keys are offered, never lost.
+    await typeAtEnd(page, " Closed.");
+    await page.close({ runBeforeUnload: true });
+    const again = await editorPage(`/admin/posts/${p.id}`, context);
+    const all = await stored(again.page);
+    if (all[key]?.body !== "Start. Hidden. Closed.") {
+      await tabBanner(again.page).getByRole("button", { name: tx("admin.editor.conflict.load_other") }).click();
+      await again.page.locator(".cm-content", { hasText: /^Start\. Hidden\. Closed\.$/ }).waitFor();
+      await new Promise((ok) => setTimeout(ok, 500));
+    }
+    const after = await stored(again.page);
+    assert.equal(after[key]?.body, "Start. Hidden. Closed.");
+    assert.deepEqual(sidesOf(after, key), []);
+  } finally {
+    await context.close();
+  }
+});
+
+// Last in this file: it ends the shared session.
+test("an expired session saves the last keys on this device before going to sign in", async () => {
+  const p = await newDraft("expired", "Start.");
+  const key = `${uid()}:post-${p.id}`;
+  const { context, page } = await editorPage(`/admin/posts/${p.id}`);
+  try {
+    let release;
+    const gate = new Promise((ok) => (release = ok));
+    await page.route("**/api/v1/posts/*", async (r) => {
+      if (r.request().method() === "PATCH") await gate;
+      await r.continue();
+    });
+    const patch = page.waitForRequest((r) => r.method() === "PATCH", { timeout: 15_000 });
+    await typeAtEnd(page, " Before.");
+    await patch;
+    w.query("DELETE FROM sessions");
+    // The save is out; the writer keeps typing, then the 401 lands within the local debounce.
+    await page.keyboard.type(" After.");
+    release();
+    await page.waitForURL(/\/admin\/signin\?next=/, { timeout: 15_000 });
+    assert.equal((await stored(page))[key]?.body, "Start. Before. After.");
   } finally {
     await context.close();
   }

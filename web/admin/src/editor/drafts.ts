@@ -81,6 +81,36 @@ const STORE = "drafts";
 export const draftKey = (user: number, post: number | undefined, newId: string): string =>
   post === undefined ? `${user}:new-${newId}` : `${user}:post-${post}`;
 
+/**
+ * A page load's own copy of `key` (`tab` is new on every load, so no two pages ever write one):
+ * typing while its saves to `key` are paused (another tab saved it after this one read it), and
+ * the last keys written as the page is hidden or closed (`putNow`). The writer's pick, or the
+ * text reaching `key`, drops it; one left behind is offered when the post is next opened
+ * (index.ts), never taken in silently.
+ */
+export const sideKey = (key: string, tab: string): string => `${key}~${tab}`;
+
+/** The side copies of `key` left by tabs, newest first. A storage failure is logged and reads as none. */
+export async function loadSides(key: string): Promise<{ key: string; tab: string; draft: Draft }[]> {
+  try {
+    const all = await run<{ key: string; tab: string; draft: Draft }[]>("readonly", (s, done) => {
+      const found: { key: string; tab: string; draft: Draft }[] = [];
+      const req = s.openCursor(IDBKeyRange.bound(`${key}~`, `${key}~\uffff`));
+      req.onsuccess = () => {
+        const c = req.result;
+        if (!c) return done(found);
+        const k = String(c.key);
+        if (isDraft(c.value)) found.push({ key: k, tab: k.slice(key.length + 1), draft: c.value });
+        c.continue();
+      };
+    });
+    return all.sort((a, b) => b.draft.savedAt - a.draft.savedAt);
+  } catch (e) {
+    console.error(`admin drafts: reading side copies of ${key} failed`, e);
+    return [];
+  }
+}
+
 function open(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB, VERSION);
@@ -92,6 +122,45 @@ function open(): Promise<IDBDatabase> {
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error ?? new Error("indexedDB.open failed"));
   });
+}
+
+/** An open connection for `putNow`: a page going away has no time to open one. */
+let held: IDBDatabase | undefined;
+
+/** Opens the connection `putNow` needs; the editor calls it on mount. */
+export function holdOpen(): void {
+  if (held) return;
+  open().then(
+    (db) => {
+      held = db;
+      // Another tab upgrading the database must not wait on this one.
+      db.onversionchange = () => {
+        db.close();
+        held = undefined;
+      };
+    },
+    (e: unknown) => console.error("admin drafts: opening the database failed", e),
+  );
+}
+
+/**
+ * Writes `d` under `key` synchronously, as far as IndexedDB allows: for a page being hidden or
+ * closed, which may not live to run a callback. Unconditional, so only for a key no other tab
+ * writes (a side copy). False when no connection is open or the browser refused it (logged).
+ */
+export function putNow(key: string, d: Draft): boolean {
+  if (!held) return false;
+  try {
+    const tx = held.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).put(d, key);
+    tx.onerror = () => console.error(`admin drafts: saving ${key} on leave failed`, tx.error);
+    // Sent now rather than when the page's tasks run again: there may be none.
+    tx.commit();
+    return true;
+  } catch (e) {
+    console.error(`admin drafts: saving ${key} on leave failed`, e);
+    return false;
+  }
 }
 
 function run<T>(mode: IDBTransactionMode, act: (s: IDBObjectStore, done: (v: T) => void) => void): Promise<T> {
@@ -153,6 +222,18 @@ export async function saveDraft(key: string, d: Omit<Draft, "rev">, expectRev: n
   }
 }
 
+/** Writes `d` under `key` as is: only for a key no other page writes (sideKey). */
+export async function putDraft(key: string, d: Draft): Promise<SaveResult> {
+  try {
+    return await run<SaveResult>("readwrite", (s, done) => {
+      s.put(d, key).onsuccess = () => done("saved");
+    });
+  } catch (e) {
+    console.error(`admin drafts: saving ${key} failed`, e);
+    return "failed";
+  }
+}
+
 /**
  * Removes a draft once its text is safe on the server, only if it is still at `expectRev`
  * (checked and deleted in one transaction, so a save made meanwhile is kept). True if removed.
@@ -196,19 +277,12 @@ export async function moveDraft(from: string, to: string, patch: Partial<Draft>)
 }
 
 /**
- * How many drafts `user` keeps here, so sign-out can warn before `clearDrafts` deletes them.
- * A storage failure is logged and counts as none (sign-out's clear would fail the same way).
+ * How many drafts `user` keeps here, so sign-out can warn before `clearDrafts` deletes them:
+ * one per post, as the posts list shows them (listDrafts). A storage failure is logged there
+ * and counts as none (sign-out's clear would fail the same way).
  */
 export async function countDrafts(user: number): Promise<number> {
-  try {
-    return await run<number>("readonly", (s, done) => {
-      const req = s.count(IDBKeyRange.bound(`${user}:`, `${user}:\uffff`));
-      req.onsuccess = () => done(req.result);
-    });
-  } catch (e) {
-    console.error(`admin drafts: counting user ${user} failed`, e);
-    return 0;
-  }
+  return (await listDrafts(user)).length;
 }
 
 /** A kept draft as the posts list shows it. */
@@ -226,12 +300,29 @@ export interface DraftEntry {
  * ours, a stored value that is not a draft, or a draft with nothing written in it.
  */
 export function toEntry(user: number, key: string, v: unknown): DraftEntry | undefined {
-  const m = /^(\d+):(?:post-(\d{1,15})|new-([a-z0-9]{12,32}))$/.exec(key);
+  // A side copy (`~<tab>`, sideKey) names the same post: listDrafts shows one row per post.
+  const m = /^(\d+):(?:post-(\d{1,15})|new-([a-z0-9]{12,32}))(?:~[a-z0-9]{8,32})?$/.exec(key);
   if (!m || Number(m[1]) !== user || !isDraft(v) || (v.title.trim() === "" && v.body.trim() === "")) return undefined;
   const entry: DraftEntry = { key, title: v.title, savedAt: v.savedAt };
   if (m[2] !== undefined) entry.post = Number(m[2]);
   else if (m[3] !== undefined) entry.newId = m[3];
   return entry;
+}
+
+/**
+ * Newest first, one entry per post: a post's draft and the side copies other tabs left of it
+ * (sideKey) are one row, the newest, since opening the post offers every copy anyway.
+ */
+export function onePerPost(entries: DraftEntry[]): DraftEntry[] {
+  const seen = new Set<string>();
+  return [...entries]
+    .sort((a, b) => b.savedAt - a.savedAt)
+    .filter((e) => {
+      const id = e.post !== undefined ? `post-${e.post}` : `new-${e.newId ?? ""}`;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
 }
 
 /** What `user` has written here and not saved to the server, newest first. Read-only; a
@@ -249,7 +340,7 @@ export async function listDrafts(user: number): Promise<DraftEntry[]> {
         c.continue();
       };
     });
-    return all.sort((a, b) => b.savedAt - a.savedAt);
+    return onePerPost(all);
   } catch (e) {
     console.error(`admin drafts: listing user ${user} failed`, e);
     return [];

@@ -3,7 +3,8 @@
  * every change on this device first (drafts.ts); this sends the text about 3 s after the last
  * local save, one request at a time, only while online and only for drafts: a published or
  * scheduled post is never sent, so editing one never changes the live page; it stays on this
- * device until the publish step.
+ * device until the publish step. That holds for a draft published elsewhere while open too: the
+ * first server copy seen that is not a draft (a 409's fetch, any answer) stops sending for good.
  *
  * A new post becomes a server post on its first save: its URL and its draft key move to the
  * post's id. Every update is conditional on the version the text is based on; a stale one
@@ -43,6 +44,11 @@ export interface SyncHost {
   say(text: string): void;
   /** Shows the server copy next to this text and lets the writer pick (index.ts serverChoice). */
   choose(p: Post): void;
+  /**
+   * The server copy is no longer a draft (published, scheduled or trashed elsewhere): nothing
+   * more is sent from this editor; it shows the post's status and keeps the text here.
+   */
+  live(p: Post): void;
   /** Where the renderer's warnings show, under the title. */
   note: HTMLElement;
 }
@@ -115,6 +121,24 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
   let again = false;
   /** The last attempt failed: the next failure in a row adds no toast. */
   let failing = false;
+  /** The server copy turned out not to be a draft: this editor never sends again. */
+  let stopped = false;
+
+  /**
+   * Every server copy this editor learns of passes here. One that is not a draft stops the
+   * sync for good: a PATCH without `status` keeps the live status, so sending would change the
+   * live page without the writer's Update. True while it is still a draft.
+   */
+  const learn = (p: Post): boolean => {
+    if (p.status === "draft") return true;
+    if (!stopped) {
+      stopped = true;
+      clearTimeout(timer);
+      console.warn(`admin editor: post ${p.id} is ${p.status} on the server; edits stay on this device`);
+      if (o.alive()) o.live(p);
+    }
+    return false;
+  };
 
   /** Drops the local draft when the server holds the editor's exact text and no save came since `rev`. */
   const tidy = (rev: number) =>
@@ -124,7 +148,7 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
 
   const changed = () => {
     clearTimeout(timer);
-    if (st.hold) return;
+    if (st.hold || stopped) return;
     if (same(o.text(), st.server)) {
       o.say(t("admin.editor.saved"));
       void tidy(st.rev);
@@ -181,17 +205,19 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
       return failed(r.error);
     }
     const p = r.value;
+    const draft = learn(p);
     if (same(o.text(), [p.title, p.markdown])) {
       Object.assign(st, { hold: false, base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
-      o.say(t("admin.editor.saved"));
+      o.say(draft ? t("admin.editor.saved") : t("admin.editor.saved_here"));
       return tidy(st.rev);
     }
-    o.say(t("admin.editor.not_saved"));
+    // Not a draft: either pick only keeps the text on this device (learn stopped the sync).
+    o.say(draft ? t("admin.editor.not_saved") : t("admin.editor.saved_here"));
     o.choose(p);
   };
 
   const send = async (): Promise<void> => {
-    if (st.hold || st.paused || o.offline() || !o.alive()) return;
+    if (stopped || st.hold || st.paused || o.offline() || !o.alive()) return;
     if (busy) {
       again = true;
       return;
@@ -203,7 +229,7 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
     } finally {
       busy = false;
     }
-    if (again && o.alive()) {
+    if (again && o.alive() && !stopped) {
       again = false;
       await send();
     }
@@ -239,6 +265,7 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
       // What the server holds is its answer, not what was sent: a normalised text is not "confirmed".
       Object.assign(st, { base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
       failing = false;
+      if (!learn(p)) return;
       if (o.alive()) {
         o.say(t("admin.editor.saved"));
         // i18n: admin.editor.warning.markdown.math_invalid
