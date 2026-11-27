@@ -174,13 +174,31 @@ Not built: offline reading, newsletter (later), reactions.
 ## Admin and editor
 
 - Markdown source editor (CodeMirror 6) with live styling: syntax marks dimmed, headings and emphasis styled as typed. Modes: Write / Split / Preview (tabs on mobile).
-- The writing column uses the published post's typography, so writing looks like the result.
+- The writing column uses the active theme's font and line-height, so writing looks like the result, at a calmer size (see Design language).
 - Toolbar that fades while typing; selection bubble (bold, italic, link); `/` menu for blocks.
 - Paste or drop images: placeholder with progress, encode, insert, ask for alt text. Paste from Word/Google Docs converts to Markdown. Pasting a URL over a selection makes a link.
 - Focus mode, typewriter scrolling, word count, discreet "Saved", offline draft in IndexedDB.
 - Post settings in a collapsible side panel. Publish button always in the same place.
 - Admin in light and dark; English and Vietnamese UI.
 - Dashboard (drafts, recent posts, last backup time), media library, users/invites, settings, tokens, audit log, update notice from GitHub Releases.
+
+### Design language
+
+Models: Bear and iA Writer for focus; Braun and Dieter Rams (Bauhaus) for the controls. Everything serves writing; the chrome is quiet and practical, and every control reads as a physical key you can press.
+
+- **Type.** UI: system font. Scale 11 / 12 / 13 / 14 / 16 / 20 px, weights 400 / 500 / 600 only. Labels and metadata 12-13 px; section labels are 12 px, weight 600, muted, in normal case. No uppercase or small caps anywhere (scripts/check enforces it). Numbers, sizes and dates use tabular figures; file names use the mono font at 12 px. Writing column: the active theme's font and line-height, at a calmer size than the reader page (16 px phone, 17 px desktop, line-height 1.65, max 64ch); title 1.5em, weight 650.
+- **Space.** 4 / 8 / 12 / 16 / 24 / 32 / 48 px. Rows are dense (list row 56-64 px) and separated by spacing and a soft hover or selected surface, never by full-width rules; whitespace goes around the writing column, not inside controls.
+- **Color.** Off-white and warm greys, never pure grey; ink (near-black, near-white in dark) for primary actions. One accent, Braun signal orange (light `#c4561f`, dark `#e0804b`), only for caret, selection, links, the focus ring and lit lamps (a switch that is on, a latched key). Status colors are muted, Pantone-like: draft = warm grey, scheduled = ochre, published = sage, error = brick; text on a status tint keeps 4.5:1.
+- **Shape.** Generous rounding: buttons, segmented controls, tags, status chips, toasts and the editor toolbar are pills; icon buttons, switch knobs, radios, lamps and status dots are circles; fields 10 px, menu items and nav items 9-10 px, list rows 12 px (0 on phones), popovers 14 px, checkboxes 6 px.
+- **Depth, kept shallow.** Keys: a key face (`--key`) with a lit top edge and a 1-2 px cast shadow (`--sh-rest`). Wells: text fields, selects, switch slots and segmented tracks sit slightly recessed (`--well`, `--sh-well`). Raised and sunk must read at a glance but never look deep or heavy. Popovers, the floating toolbar and the phone bar cast a soft shadow; nothing else does. No gradients on control faces.
+- **States, one system for every control.** rest = raised key (quiet icon buttons are flat until hovered); hover = the key lifts (bigger shadow, 1 px up), flat items get a 6% ink tint; pressed = the key sinks (inner shadow, 1 px down, darker well color); selected = the key stays latched down and its lamp lights in signal orange, while a selected flat item (nav, menu, row) becomes a raised key outlined on all four edges; focus-visible = 2 px signal ring outside a 2 px gap, never removed; disabled = 40% opacity, no shadow, no motion. Transitions 120 ms ease-out.
+- **Icons.** One line set, 1.5 px stroke, round caps and joins, 16 px in lists and sidebars, 20 px in the editor toolbar; icon-only buttons are round, 32 px (36 px in the editor toolbar, 44 px on touch), with a tooltip and an accessible label. The editor toolbar is a contained pill centered on the writing column, never an edge-to-edge strip; what does not fit goes into an overflow menu.
+- **Layout.** Page header 60 px, its middle level with the logo in the sidebar. Title left; actions right; search, where a page has it, is always the rightmost control, so it sits in the same place on every page. The account entry is an icon with name and role, no avatar. On phones the navigation (posts, pages, media, settings, account) is a floating glass pill above the bottom edge; the current item is a lighter lens with a signal-orange icon and label.
+- **Media.** A grid of pictures with name and size below; a missing description shows as a lamp badge on the picture. Each picture has an eye button (on hover, always on touch) that opens a full-screen dark viewer with previous/next, arrows and Esc, and focus returns to the picture. Details sit in a card: the picture at its true proportions, then description, where it is used (links to posts), file size and actions. Filters: all, no description, unused.
+- **Color swatches.** Flat discs of color with a 1 px rim and no shading; hover adds an outer line ring, the selected disc gets a 2 px ink ring outside a 2 px gap, focus the signal ring.
+- **One stylesheet system.** `web/admin/css/tokens.css` holds every raw value: colors per theme, type roles, the space scale, control sizes (32 px, 44 px on touch), radii, shadows, durations, z-index. `components.css` defines each shared piece once: buttons, fields, switches, segmented controls, nav items, page header, filter row, list rows, sections, empty and loading states, popovers, toasts, the drawer, the toolbar, the viewer. Page files (`pages/*.css`) only lay out and compose; a page that needs a variant adds a modifier to the component. `scripts/check-admin-css` enforces it: no raw value outside tokens, no component restyled in a page file. Every screen is checked at 344, 375, 673, 768, 884 and 1440 px, light and dark, English and Vietnamese, including empty, long text, loading, error, offline and writer cases: no overflow or misaligned edges, text contrast 4.5:1, touch targets 44 px, a visible focus ring on every control.
+- **Motion.** 120 ms for states, 180 ms for panels and popovers (opacity + 4 px translate), nothing while typing except the toolbar fade. Off under `prefers-reduced-motion`.
+- **Never:** big rounded cards; soft drop shadows on everything; gradients on controls or swatches; glass except on the phone bar and on buttons over pictures; emoji or filled cartoon icons; everything centered; oversized hero text; colored icon tiles; decorative illustrations; more than one accent; status shown by color alone; uppercase or small-caps text; full-width rules between list rows; edge-to-edge toolbars.
 
 ## AI surface
 
@@ -255,6 +273,10 @@ Work is tracked as GitHub Issues grouped in one milestone per phase; this list o
 - 2026-11-27 minimal: Inter weight axis 400-700 and text optical size only; dark mode softens text by color instead of a lighter weight; plum accent.
 - 2026-11-27 minimal v0.2 after owner review: Inter Display titles, syntax colors, drawn checkboxes, home with excerpts and year groups; color tokens via `light-dark()`.
 - 2026-11-27 Reversed 'no layout variants': themes may declare options incl. styles; minimal ships writer first, book and magazine later at the same standard.
+- 2026-11-27 Admin design language: Bear / iA Writer as models, flat with slight depth on controls, one state system, muted status palette.
+- 2026-11-27 Admin controls follow Braun / Dieter Rams: raised keys that lift, sink and latch with a lamp; pills and circles; signal orange as the one accent.
+- 2026-11-27 Admin depth kept shallow; search always rightmost in the page header; phone navigation is a floating glass pill; media gets a full-screen viewer.
+- 2026-11-27 Admin CSS is one system: raw values only in tokens.css, each component defined once in components.css, pages only compose; enforced by scripts/check-admin-css.
 - 2026-11-27 Theme and plugin options are declarations rendered by the admin; plugins are declarative only; complex needs use API + webhooks; nothing from themes/plugins runs in the admin.
 - 2026-11-27 Reader site and admin are installable web apps with distinct manifests and icon colors; no offline reading.
 - 2026-11-27 One crate per module with an enforced dependency graph; logic is storage-agnostic behind store traits.

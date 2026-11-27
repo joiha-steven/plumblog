@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Admin CSS rules, run by scripts/check on web/admin/css (takes any directory, so prototypes can be checked too).
+# Why: the admin must look like one product. Raw values (colors, font sizes, spacing, radii, shadows, durations,
+# z-index) live only in tokens.css; every shared piece is defined once in components.css; page files only lay
+# out and compose. A page that restyles a component, or invents its own size or color, is how screens drift apart.
+set -euo pipefail
+dir="${1:?usage: scripts/check-admin-css DIR}"
+[ -d "$dir" ] || exit 0
+[ -f "$dir/tokens.css" ] || { echo "  $dir/tokens.css missing"; exit 1; }
+[ -f "$dir/components.css" ] || { echo "  $dir/components.css missing"; exit 1; }
+
+# Shared parser. mode=collect prints the classes that components.css styles (the subject of each selector);
+# mode=check reports raw values (unless the file is tokens.css) and, for page files, restyled components.
+read -r -d '' prog <<'AWK' || true
+function trim(s) { gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", s); return s }
+function report(msg) { printf "  %s:%d: %s\n", FILENAME, line, msg; bad = 1 }
+function lengths(v, units,   s, n) {
+  s = v
+  while (match(s, "[0-9.]+(" units ")")) {
+    n = substr(s, RSTART, RLENGTH); sub(/[a-z%]+$/, "", n)
+    if (n + 0 != 0) return 1
+    s = substr(s, RSTART + RLENGTH)
+  }
+  return 0
+}
+function decl(d,   i, p, v, vv) {
+  d = trim(d); i = index(d, ":"); if (i == 0) return
+  p = tolower(trim(substr(d, 1, i - 1))); v = trim(substr(d, i + 1))
+  if (raw_ok) return
+  vv = v
+  gsub(/var\(--[A-Za-z0-9_-]+\)/, "", vv); gsub(/env\([^)]*\)/, "", vv); gsub(/url\([^)]*\)/, "", vv)
+  if (vv ~ /#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]/ || vv ~ /(rgb|rgba|hsl|hsla|hwb|lab|lch|oklab|oklch)\([^)]*[0-9]/)
+    report("raw color in '" p ": " v "' (use a color token)")
+  if (p ~ /^(padding|margin|gap|row-gap|column-gap|inset|top|right|bottom|left|font|font-size|letter-spacing)/ || p ~ /^--/) {
+    if (lengths(vv, "px|rem|em|ch")) report("raw length in '" p ": " v "' (use a size, space or type token)")
+  }
+  if (p ~ /radius/ && lengths(vv, "px|rem|em|%")) report("raw radius in '" p ": " v "' (use a --r-* token)")
+  if (p ~ /^(box-shadow|text-shadow)$/ && vv ~ /[0-9]/) report("raw shadow in '" p ": " v "' (use a --sh-* token)")
+  if (p ~ /^(transition|animation)/ && vv ~ /(^|[^a-z0-9-])[0-9.]+m?s([^a-z]|$)/) report("raw duration in '" p ": " v "' (use a --dur-* token)")
+  if (p == "z-index" && vv ~ /[0-9]/) report("raw z-index '" v "' (use a --z-* token)")
+}
+function subjects(prelude,   n, parts, k, s, m, toks, c) {
+  n = split(prelude, parts, ",")
+  for (k = 1; k <= n; k++) {
+    s = parts[k]
+    gsub(/\[[^]]*\]/, "", s); gsub(/::?[A-Za-z-]+(\([^)]*\))?/, "", s); s = trim(s)
+    m = split(s, toks, /[ \t\n>+~]+/); s = toks[m]
+    while (match(s, /\.[A-Za-z0-9_-]+/)) {
+      c = substr(s, RSTART + 1, RLENGTH - 1); s = substr(s, RSTART + RLENGTH)
+      if (mode == "collect") print c
+      else if (page && (c in comp)) report("page restyles component ." c " in '" trim(parts[k]) "' (add a modifier in components.css)")
+    }
+  }
+}
+BEGIN {
+  if (mode == "check") { n = split(comps, a, " "); for (i = 1; i <= n; i++) comp[a[i]] = 1 }
+}
+{ text = text $0 "\n" }
+END {
+  # Drop comments, keeping newlines so line numbers stay right.
+  out = ""
+  while ((i = index(text, "/*")) > 0) {
+    j = index(substr(text, i + 2), "*/"); if (j == 0) break
+    c = substr(text, i, j + 3); gsub(/[^\n]/, "", c)
+    out = out substr(text, 1, i - 1) c; text = substr(text, i + j + 3)
+  }
+  text = out text
+  line = 1; buf = ""; inrule = 0; paren = 0
+  L = length(text)
+  for (k = 1; k <= L; k++) {
+    ch = substr(text, k, 1)
+    if (ch == "\n") line++
+    if (ch == "(") paren++
+    if (ch == ")") paren--
+    if (paren > 0) { buf = buf ch; continue }
+    if (ch == "{") {
+      pre = trim(buf); buf = ""
+      if (pre ~ /^@/ && pre !~ /^@(font-face|page)/) continue
+      inrule = 1; if (pre !~ /^@/) subjects(pre)
+      continue
+    }
+    if (ch == ";") { if (inrule && mode == "check") decl(buf); buf = ""; continue }
+    if (ch == "}") { if (inrule && mode == "check") decl(buf); inrule = 0; buf = ""; continue }
+    buf = buf ch
+  }
+  exit bad
+}
+AWK
+
+comps=$(awk -v mode=collect "$prog" "$dir/components.css" | sort -u | tr '\n' ' ')
+status=0
+while IFS= read -r -d '' f; do
+  raw_ok=0; page=1
+  case "$f" in "$dir/tokens.css") raw_ok=1; page=0 ;; "$dir/components.css") page=0 ;; esac
+  awk -v mode=check -v raw_ok="$raw_ok" -v page="$page" -v comps="$comps" "$prog" "$f" || status=1
+done < <(find "$dir" -name '*.css' -print0 | sort -z)
+exit "$status"
