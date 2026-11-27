@@ -593,7 +593,18 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     if (!doc || inCode(v.state, sel.head)) return false;
     // Rich text is converted by a small module loaded on the first such paste.
     e.preventDefault();
-    const put = (md: string) => v.dispatch(v.state.replaceSelection(md || text), { userEvent: "input.paste", scrollIntoView: true });
+    const put = (md: string) => {
+      const out = md || text;
+      // Blocks (several paragraphs, a table, a list, a heading) get lines of their own: glued
+      // to the text around the caret they would stop being blocks. One plain run stays inline.
+      const r = v.state.selection.main;
+      const block = md !== "" && (md.includes("\n") || /^(#{1,6} |[-+] |\d+\. |> |\||```)/.test(md));
+      const before = v.state.doc.lineAt(r.from);
+      const after = v.state.doc.lineAt(r.to);
+      const lead = block && v.state.sliceDoc(before.from, r.from).trim() ? "\n\n" : "";
+      const tail = block && v.state.sliceDoc(r.to, after.to).trim() ? "\n\n" : "";
+      v.dispatch(v.state.replaceSelection(lead + out + tail), { userEvent: "input.paste", scrollIntoView: true });
+    };
     import("./paste-md").then(
       (m) => {
         let md = "";
