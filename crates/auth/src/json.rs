@@ -6,6 +6,9 @@
 //!   i64 range), nesting and container sizes capped, for `/api/v1` bodies.
 
 use plumblog_model::{Error, ErrorCode, Result};
+use std::collections::HashMap;
+use std::collections::hash_map::{Entry, RandomState};
+use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Json {
@@ -34,6 +37,62 @@ pub const MAX_KEY: usize = 64;
 
 fn invalid(detail: impl Into<String>) -> Error {
     Error::new(ErrorCode::InvalidInput, format!("json: {}", detail.into()))
+}
+
+/// Objects up to this many keys are checked for duplicates by a plain scan: cheaper than
+/// hashing for the small objects nearly every request sends.
+const SCAN_KEYS: usize = 8;
+
+/// Duplicate-key check for one object. Scanning every key is quadratic: 160 KiB of 1000-key
+/// objects took ~20 ms natively (`tests/perf.rs`). Past [`SCAN_KEYS`], each key is hashed once
+/// with `std`'s randomly keyed hasher (so crafted keys cannot be made to collide) and the
+/// table maps that hash to the key's index; growing the table reuses the stored hash.
+#[derive(Default)]
+struct Keys {
+    seen: HashMap<u64, usize, BuildHasherDefault<Stored>>,
+    hasher: RandomState,
+}
+
+impl Keys {
+    /// Whether `key` is already among `fields`; otherwise remembers that `fields.len()` will
+    /// be its index.
+    fn duplicate<V>(&mut self, fields: &[(String, V)], key: &str) -> bool {
+        if fields.len() < SCAN_KEYS {
+            return fields.iter().any(|(k, _)| k == key);
+        }
+        if self.seen.is_empty() {
+            for (i, (k, _)) in fields.iter().enumerate() {
+                self.seen.insert(self.hasher.hash_one(k.as_str()), i);
+            }
+        }
+        match self.seen.entry(self.hasher.hash_one(key)) {
+            Entry::Vacant(e) => {
+                e.insert(fields.len());
+                false
+            }
+            Entry::Occupied(e) if fields[*e.get()].0 == key => true,
+            // Two keys with one 64-bit hash: as good as never, but stay exact.
+            Entry::Occupied(_) => fields.iter().any(|(k, _)| k == key),
+        }
+    }
+}
+
+/// Hasher for [`Keys`]: its keys already are random 64-bit hashes.
+#[derive(Default)]
+struct Stored(u64);
+
+impl Hasher for Stored {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(b);
+        }
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
+    }
 }
 
 struct Parser<'a> {
@@ -84,7 +143,16 @@ impl Parser<'_> {
     /// A string; the opening quote is already consumed. The input is known to be UTF-8, so
     /// copying non-escape bytes through keeps it UTF-8.
     fn string(&mut self) -> Result<String> {
-        let mut out = Vec::new();
+        // Plain bytes up to the first quote, escape or control character are copied in one go:
+        // byte-at-a-time pushes were most of the parse time (`tests/perf.rs`).
+        let start = self.pos;
+        while let Some(&b) = self.input.get(self.pos) {
+            if b == b'"' || b == b'\\' || b < 0x20 {
+                break;
+            }
+            self.pos += 1;
+        }
+        let mut out = self.input[start..self.pos].to_vec();
         loop {
             match self.next()? {
                 b'"' => break,
@@ -240,6 +308,7 @@ impl Parser<'_> {
         wrap: impl Fn(&str, Error) -> Error,
     ) -> Result<Vec<(String, Value)>> {
         let mut fields: Vec<(String, Value)> = Vec::new();
+        let mut keys = Keys::default();
         self.expect(b'{')?;
         self.skip_ws();
         if self.input.get(self.pos) == Some(&b'}') {
@@ -255,7 +324,7 @@ impl Parser<'_> {
             if key.len() > MAX_KEY {
                 return Err(invalid("key too long"));
             }
-            if fields.iter().any(|(k, _)| *k == key) {
+            if keys.duplicate(&fields, &key) {
                 return Err(wrap(&key, invalid(format!("duplicate key {key:?}"))));
             }
             self.expect(b':').map_err(|e| wrap(&key, e))?;
@@ -272,6 +341,7 @@ impl Parser<'_> {
 
     fn object(mut self) -> Result<Vec<(String, Json)>> {
         let mut fields: Vec<(String, Json)> = Vec::new();
+        let mut keys = Keys::default();
         self.expect(b'{')?;
         self.skip_ws();
         if self.input.get(self.pos) == Some(&b'}') {
@@ -280,7 +350,7 @@ impl Parser<'_> {
             loop {
                 self.expect(b'"')?;
                 let key = self.string()?;
-                if fields.iter().any(|(k, _)| *k == key) {
+                if keys.duplicate(&fields, &key) {
                     return Err(invalid(format!("duplicate key {key:?}")));
                 }
                 self.expect(b':')?;
@@ -340,7 +410,7 @@ pub fn parse_document(input: &[u8], max_len: usize) -> Result<Vec<(String, Value
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_DEPTH, MAX_ITEMS, Value, parse_document, parse_object};
+    use super::{MAX_DEPTH, MAX_ITEMS, SCAN_KEYS, Value, parse_document, parse_object};
     use crate::testutil::Prng;
 
     type Doc = Result<Vec<(String, Value)>, (String, Option<String>)>;
@@ -420,6 +490,33 @@ mod tests {
         let items = |n: usize| format!(r#"{{"a":[{}]}}"#, vec!["1"; n].join(","));
         assert!(doc(&items(MAX_ITEMS)).is_ok());
         assert!(doc(&items(MAX_ITEMS + 1)).is_err());
+    }
+
+    /// Duplicates are found at any position, before and past the plain-scan size, escaped or not.
+    #[test]
+    fn duplicates_in_large_objects() {
+        let keys = |n: usize| (0..n).map(|i| format!(r#""k{i}":1"#)).collect::<Vec<_>>();
+        for n in [2, SCAN_KEYS, SCAN_KEYS + 1, MAX_ITEMS - 1] {
+            for dup in [0, n / 2, n - 1] {
+                let mut k = keys(n);
+                k.push(format!(r#""k{dup}":2"#));
+                let top = format!("{{{}}}", k.join(","));
+                assert_eq!(
+                    doc(&top).unwrap_err().1,
+                    Some(format!("k{dup}")),
+                    "{n} {dup}"
+                );
+                let nested = format!(r#"{{"a":{top}}}"#);
+                assert_eq!(doc(&nested).unwrap_err().1.as_deref(), Some("a"));
+                // The same key written with an escape is the same key.
+                let escaped =
+                    top.replace(&format!(r#""k{dup}":2"#), &format!(r#""\u006b{dup}":2"#));
+                assert!(doc(&escaped).is_err(), "{n} {dup}");
+                let flat = top.replace(":1", r#":"x""#).replace(":2", r#":"y""#);
+                assert!(parse_object(flat.as_bytes(), 1 << 20).is_err(), "{n} {dup}");
+            }
+            assert_eq!(doc(&format!("{{{}}}", keys(n).join(","))).unwrap().len(), n);
+        }
     }
 
     /// Truncations and random mutations of a valid document fail cleanly or parse; never panic.

@@ -48,6 +48,13 @@ fn api_reference() -> String {
             let also: Vec<&str> = r.also.iter().map(|p| p.as_str()).collect();
             let _ = writeln!(o, "also, when the input calls for it: {}", also.join(", "));
         }
+        if !r.session_only_keys.is_empty() {
+            let _ = writeln!(
+                o,
+                "session only (API tokens get 403) for key: {}",
+                r.session_only_keys.join(", ")
+            );
+        }
         let _ = writeln!(
             o,
             "body: {}, limit {} bytes\nanswer: {} {}",
@@ -169,6 +176,11 @@ mod tests {
         assert!(text.contains(
             "body: original, limit 20971520 bytes\nanswer: 201 media\nvariants: admin_encoder\n"
         ));
+        assert_eq!(
+            text.matches("session only (API tokens get 403) for key: origin\n")
+                .count(),
+            2
+        );
         assert!(guide_list().contains("api"));
     }
 

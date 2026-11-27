@@ -26,6 +26,10 @@ pub const MEDIA_MIMES: &[&str] = &[
 pub const MAX_LIMIT: u32 = 100;
 /// `limit` when none is given.
 pub const DEFAULT_LIMIT: u32 = 20;
+/// Settings only a signed-in session may write or clear; an API token gets 403
+/// `auth.forbidden`. The origin is what browser writes and passkeys are checked against, so
+/// changing it can lock the owner out, like the `/api/auth` routes tokens may not use.
+pub const SESSION_ONLY_SETTINGS: &[&str] = &["origin"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
@@ -251,6 +255,8 @@ pub struct Route {
     pub access: Access,
     /// Checked too when the input calls for them (publishing, another author's post).
     pub also: &'static [Permission],
+    /// Values of the `key` path field only a session may use (see [`SESSION_ONLY_SETTINGS`]).
+    pub session_only_keys: &'static [&'static str],
     pub fields: &'static [Field],
     pub max_body: usize,
     pub body: Body,
@@ -357,6 +363,7 @@ const fn route(
         path,
         access,
         also: &[],
+        session_only_keys: &[],
         fields,
         max_body: MAX_BODY,
         body: Body::Json,
@@ -651,24 +658,30 @@ pub const ROUTES: &[Route] = &[
         200,
         "values",
     ),
-    route(
-        RouteId::SettingPut,
-        Method::Put,
-        "/api/v1/settings/{key}",
-        SETTINGS,
-        VALUE,
-        204,
-        "none",
-    ),
-    route(
-        RouteId::SettingDelete,
-        Method::Delete,
-        "/api/v1/settings/{key}",
-        SETTINGS,
-        &[path_name("key")],
-        204,
-        "none",
-    ),
+    Route {
+        session_only_keys: SESSION_ONLY_SETTINGS,
+        ..route(
+            RouteId::SettingPut,
+            Method::Put,
+            "/api/v1/settings/{key}",
+            SETTINGS,
+            VALUE,
+            204,
+            "none",
+        )
+    },
+    Route {
+        session_only_keys: SESSION_ONLY_SETTINGS,
+        ..route(
+            RouteId::SettingDelete,
+            Method::Delete,
+            "/api/v1/settings/{key}",
+            SETTINGS,
+            &[path_name("key")],
+            204,
+            "none",
+        )
+    },
     route(
         RouteId::ThemeOptions,
         Method::Get,
@@ -714,11 +727,12 @@ pub const ROUTES: &[Route] = &[
         204,
         "none",
     ),
+    // Plugin options may hold a plugin's secrets: read like they are written.
     route(
         RouteId::PluginOptions,
         Method::Get,
         "/api/v1/plugins/{name}/options",
-        Access::Read,
+        PLUGINS,
         OWNER,
         200,
         "values",
@@ -843,6 +857,12 @@ mod tests {
             dedup.sort_unstable();
             dedup.dedup();
             assert_eq!(dedup.len(), names.len(), "{}", r.path);
+            // Session-only keys name values of a `key` path field.
+            assert!(
+                r.session_only_keys.is_empty() || segs.contains(&"key"),
+                "{}",
+                r.path
+            );
         }
     }
 

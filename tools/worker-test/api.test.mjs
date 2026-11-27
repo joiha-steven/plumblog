@@ -161,7 +161,10 @@ describe("api v1", () => {
     }
   });
 
-  test("read token: every read answers, every write is 403 and changes nothing", async () => {
+  // Reads a read token may not make: plugin options may hold a plugin's secrets.
+  const OWNER_READS = new Set(["GET /api/v1/plugins/{name}/options"]);
+
+  test("read token: every read answers (owner-only reads aside), every write is 403 and changes nothing", async () => {
     const made = await api(w, "POST", "/api/v1/posts", { as: AS.ownerSession, body: newPost("read-target") });
     assert.equal(made.status, 201, made.text);
     const id = made.json.id;
@@ -170,7 +173,7 @@ describe("api v1", () => {
         const method = methodOf(key);
         const body = method === "POST" ? newPost("from-read") : method === "PATCH" ? { expected_version: 1, title: "x" } : undefined;
         const r = await api(w, method, pathOf(key, id), { as, body });
-        if (method === "GET") {
+        if (method === "GET" && !OWNER_READS.has(key)) {
           assert.ok(r.status === 200 || r.status === 404, `${key}: ${r.text}`);
         } else {
           assertError(r, 403, "auth.forbidden");

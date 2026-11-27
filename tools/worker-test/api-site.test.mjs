@@ -155,6 +155,13 @@ describe("api v1 site", () => {
     assert.equal(put.body, "json");
     assert.equal(put.variants, null);
     assert.ok(put.fields.some((f) => f.name === "value" && f.type === "json"));
+    for (const method of ["PUT", "DELETE"]) {
+      const r2 = r.json.routes.find((x) => x.method === method && x.path === "/api/v1/settings/{key}");
+      assert.deepEqual(r2.session_only_keys, ["origin"], method);
+    }
+    const opts = (kind) => r.json.routes.find((x) => x.method === "GET" && x.path === `/api/v1/${kind}/{name}/options`);
+    assert.equal(opts("plugins").access, "plugin.manage");
+    assert.equal(opts("themes").access, "read");
   });
 
   for (const [label, as] of [["session", AS.writerSession], ["token", AS.writerToken]]) {
@@ -361,17 +368,58 @@ describe("api v1 site", () => {
 
   test("settings: origin passes the sign-in code's own rule", async () => {
     for (const bad of ["http://blog.example", "https://Blog.Example", "https://blog.example/path", "https://u@blog.example", "blog.example", 42]) {
-      const r = await api(w, "PUT", "/api/v1/settings/origin", { as: AS.ownerToken, body: { value: bad } });
+      const r = await api(w, "PUT", "/api/v1/settings/origin", { as: AS.ownerSession, body: { value: bad } });
       assertError(r, 400, "input.invalid", "value");
     }
     assert.equal(settingRow("origin"), undefined);
-    const ok = await api(w, "PUT", "/api/v1/settings/origin", { as: AS.ownerToken, body: { value: "https://blog.example" } });
+    const ok = await api(w, "PUT", "/api/v1/settings/origin", { as: AS.ownerSession, body: { value: "https://blog.example" } });
     assert.equal(ok.status, 204, ok.text);
     assert.equal(settingRow("origin"), '"https://blog.example"');
     // The CSRF check now wants that origin from a session.
     assertError(await api(w, "PUT", "/api/v1/settings/title", { as: AS.ownerSession, body: { value: "x" } }), 403, "auth.forbidden");
-    const back = await api(w, "DELETE", "/api/v1/settings/origin", { as: AS.ownerToken });
+    const back = await api(w, "DELETE", "/api/v1/settings/origin", { as: AS.ownerSession, origin: "https://blog.example" });
     assert.equal(back.status, 204, back.text);
+  });
+
+  test("settings: origin is session only; an owner token cannot set or clear it", async () => {
+    // Changing it breaks browser writes and passkeys, like the /api/auth routes tokens may not use.
+    for (const as of [AS.ownerToken, AS.writerToken, AS.readToken]) {
+      for (const value of ["https://blog.example", "bad"]) {
+        assertError(await api(w, "PUT", "/api/v1/settings/origin", { as, body: { value } }), 403, "auth.forbidden");
+      }
+    }
+    assert.equal(settingRow("origin"), undefined);
+    const set = await api(w, "PUT", "/api/v1/settings/origin", { as: AS.ownerSession, body: { value: "https://blog.example" } });
+    assert.equal(set.status, 204, set.text);
+    for (const as of [AS.ownerToken, AS.writerToken, AS.readToken]) {
+      assertError(await api(w, "DELETE", "/api/v1/settings/origin", { as }), 403, "auth.forbidden");
+    }
+    assert.equal(settingRow("origin"), '"https://blog.example"');
+    // Other settings stay open to an owner token.
+    assert.equal((await api(w, "PUT", "/api/v1/settings/title", { as: AS.ownerToken, body: { value: "T" } })).status, 204);
+    const back = await api(w, "DELETE", "/api/v1/settings/origin", { as: AS.ownerSession, origin: "https://blog.example" });
+    assert.equal(back.status, 204, back.text);
+    assert.equal(settingRow("origin"), undefined);
+  });
+
+  test("plugin options are read by owners only (they may hold plugin secrets); theme options by anyone signed in", async () => {
+    const path = "/api/v1/plugins/reading-time/options";
+    assert.equal((await api(w, "PUT", `${path}/api_key`, { as: AS.ownerToken, body: { value: "s3cret" } })).status, 204);
+    for (const as of [AS.writerSession, AS.writerToken, AS.readToken]) {
+      const r = await api(w, "GET", path, { as });
+      assertError(r, 403, "auth.forbidden");
+      assert.ok(!r.text.includes("s3cret"));
+    }
+    assertError(await api(w, "GET", path), 401, "auth.unauthenticated");
+    for (const as of [AS.ownerSession, AS.ownerToken]) {
+      const r = await api(w, "GET", path, { as });
+      assert.equal(r.status, 200, r.text);
+      assert.deepEqual(r.json.options, { api_key: "s3cret" });
+    }
+    for (const as of [AS.writerSession, AS.readToken]) {
+      assert.equal((await api(w, "GET", "/api/v1/themes/minimal/options", { as })).status, 200);
+    }
+    assert.equal((await api(w, "DELETE", path, { as: AS.ownerToken })).status, 204);
   });
 
   test("theme and plugin options round-trip; plugins enable and disable", async () => {
@@ -379,16 +427,16 @@ describe("api v1 site", () => {
       const base = `/api/v1/${kind}/minimal/options`;
       assert.equal((await api(w, "PUT", `${base}/accent`, { as: AS.ownerToken, body: { value: "#336699" } })).status, 204);
       assert.equal((await api(w, "PUT", `${base}/excerpt_words`, { as: AS.ownerSession, body: { value: 40 } })).status, 204);
-      const got = await api(w, "GET", base, { as: AS.readToken });
+      const got = await api(w, "GET", base, { as: AS.ownerToken });
       assert.deepEqual(got.json.options, { accent: "#336699", excerpt_words: 40 });
       assertError(await api(w, "PUT", `${base}/a.b`, { as: AS.ownerToken, body: { value: 1 } }), 400, "input.invalid", "key");
-      assertError(await api(w, "GET", `/api/v1/${kind}/Mini/options`, { as: AS.readToken }), 400, "input.invalid", "name");
+      assertError(await api(w, "GET", `/api/v1/${kind}/Mini/options`, { as: AS.ownerToken }), 400, "input.invalid", "name");
       assert.equal((await api(w, "DELETE", base, { as: AS.ownerToken })).status, 204);
-      assert.deepEqual((await api(w, "GET", base, { as: AS.readToken })).json.options, {});
+      assert.deepEqual((await api(w, "GET", base, { as: AS.ownerToken })).json.options, {});
     }
     // Options of one owner kind never leak into the other.
     await api(w, "PUT", "/api/v1/themes/minimal/options/only_theme", { as: AS.ownerToken, body: { value: true } });
-    assert.deepEqual((await api(w, "GET", "/api/v1/plugins/minimal/options", { as: AS.readToken })).json.options, {});
+    assert.deepEqual((await api(w, "GET", "/api/v1/plugins/minimal/options", { as: AS.ownerToken })).json.options, {});
     for (const enabled of [true, false]) {
       assert.equal((await api(w, "PUT", "/api/v1/plugins/reading-time", { as: AS.ownerToken, body: { enabled } })).status, 204);
       const list = await api(w, "GET", "/api/v1/plugins", { as: AS.readToken });
@@ -426,7 +474,7 @@ describe("api v1 site", () => {
     for (const [method, path, body] of writes) {
       assertError(await api(w, method, path, { body }), 401, "auth.unauthenticated");
     }
-    // Reads are open to every signed-in caller, internal settings still hidden.
+    // Reads are open to every signed-in caller (plugin options aside), internal settings still hidden.
     for (const as of [AS.writerSession, AS.readToken]) {
       for (const path of ["/api/v1/redirects", "/api/v1/settings", "/api/v1/plugins", "/api/v1/themes/minimal/options"]) {
         const r = await api(w, "GET", path, { as });

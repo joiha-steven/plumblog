@@ -154,12 +154,12 @@ pub async fn dispatch(
         RouteId::SettingList => settings::list(ctx).await,
         RouteId::SettingPut => settings::put(ctx, p, &input).await,
         RouteId::SettingDelete => settings::delete(ctx, p, &input).await,
-        RouteId::ThemeOptions => settings::options(ctx, theme, &input).await,
+        RouteId::ThemeOptions => settings::options(ctx, p, theme, &input).await,
         RouteId::ThemeOptionPut => settings::option_put(ctx, p, theme, &input).await,
         RouteId::ThemeOptionsDelete => settings::options_delete(ctx, p, theme, &input).await,
         RouteId::PluginList => settings::plugins(ctx).await,
         RouteId::PluginPut => settings::plugin_put(ctx, p, &input).await,
-        RouteId::PluginOptions => settings::options(ctx, plugin, &input).await,
+        RouteId::PluginOptions => settings::options(ctx, p, plugin, &input).await,
         RouteId::PluginOptionPut => settings::option_put(ctx, p, plugin, &input).await,
         RouteId::PluginOptionsDelete => settings::options_delete(ctx, p, plugin, &input).await,
     }
@@ -190,6 +190,10 @@ fn route_json(r: &Route) -> String {
         (
             "also",
             list(r.also.iter().map(|p| quote(p.as_str())).collect()),
+        ),
+        (
+            "session_only_keys",
+            list(r.session_only_keys.iter().map(|k| quote(k)).collect()),
         ),
         ("fields", list(r.fields.iter().map(field_json).collect())),
         (

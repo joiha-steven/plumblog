@@ -1,9 +1,10 @@
 //! `/api/v1` site configuration: redirects, settings, theme and plugin options, plugin state.
 //! Owner work (`settings.manage`, `theme.manage`, `plugin.manage`); reads are open to any
-//! signed-in caller, as everything here but internal settings shows on reader pages anyway.
+//! signed-in caller, as everything here but internal settings shows on reader pages anyway,
+//! except plugin options, which may hold a plugin's secrets. The origin is session only.
 //! Values are JSON, stored as re-serialised from the strict parse.
 
-use plumblog_model::{Error, ErrorCode, Permission, Result};
+use plumblog_model::{Error, ErrorCode, Permission, Result, api};
 use plumblog_store::{
     ORIGIN_KEY, OptionOwner, PluginState, RedirectStore, SITE_ID_KEY, SettingsStore,
     is_internal_setting, public_settings,
@@ -119,10 +120,19 @@ fn writable_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Refuses an API token on a key in [`api::SESSION_ONLY_SETTINGS`], before its value is checked.
+fn session_only(p: &Principal, key: &str) -> Result<()> {
+    if api::SESSION_ONLY_SETTINGS.contains(&key) {
+        p.session_user()?;
+    }
+    Ok(())
+}
+
 pub async fn put(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
     p.require(Permission::ManageSettings)?;
     let key = input.str("key").unwrap_or_default();
     writable_key(key)?;
+    session_only(p, key)?;
     let value = input.json("value").unwrap_or_default();
     if key == ORIGIN_KEY {
         // The same rule the sign-in code reads it with, so a stored origin always loads.
@@ -138,6 +148,7 @@ pub async fn delete(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
     p.require(Permission::ManageSettings)?;
     let key = input.str("key").unwrap_or_default();
     writable_key(key)?;
+    session_only(p, key)?;
     ctx.store.delete_setting(key).await?;
     changed(ctx, p, "setting.delete", key).await;
     Ok(Reply::empty())
@@ -158,7 +169,13 @@ fn owner_name(input: &Input) -> Result<&str> {
     Ok(n)
 }
 
-pub async fn options(ctx: &Ctx, owner: OptionOwner, input: &Input) -> Result<Reply> {
+/// Theme options are read by any signed-in caller; plugin options only like they are written,
+/// as a plugin may keep secrets there.
+pub async fn options(ctx: &Ctx, p: &Principal, owner: OptionOwner, input: &Input) -> Result<Reply> {
+    match owner {
+        OptionOwner::Theme => p.require_read()?,
+        OptionOwner::Plugin => p.require(manage(owner))?,
+    };
     let rows = ctx.store.options(owner, owner_name(input)?).await?;
     Ok(Reply::json(200, values_json(ctx, "options", &rows)))
 }
