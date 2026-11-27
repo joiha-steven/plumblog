@@ -4,6 +4,7 @@
 
 pub mod base64url;
 pub mod cbor;
+pub mod json;
 pub mod password;
 pub mod ratelimit;
 pub mod session;

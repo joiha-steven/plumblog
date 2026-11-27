@@ -2,6 +2,8 @@
 
 use plumblog_model::{Result, Role, UserId};
 
+use crate::NewSession;
+
 /// A row of `users`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct User {
@@ -70,6 +72,21 @@ pub trait UserStore {
     async fn update_profile(&self, id: UserId, profile: ProfileUpdate, now: i64) -> Result<()>;
     /// `None` makes the account passkey-only. `UserNotFound`. No version bump.
     async fn set_password(&self, id: UserId, hash: Option<String>, now: i64) -> Result<()>;
+    /// A password change, and with `profile` a login change (the browser's stretch salt
+    /// holds the login, so the two must land together or the user is locked out). In one
+    /// atomic write: sets `password_hash = hash`, writes `profile` if given (bumping the
+    /// content version), deletes every session of the user and creates `session` (the
+    /// caller's rotated one). Returns the new session id. `UserNotFound`; `Conflict` on a
+    /// login or slug held by another user, or a duplicate session hash; `InvalidInput` if
+    /// `session.user_id` is not `id`. On error nothing changed.
+    async fn change_password(
+        &self,
+        id: UserId,
+        hash: String,
+        profile: Option<ProfileUpdate>,
+        session: NewSession,
+        now: i64,
+    ) -> Result<i64>;
     /// `UserNotFound`; `Conflict` when demoting the last active owner. No version bump.
     async fn set_role(&self, id: UserId, role: Role, now: i64) -> Result<()>;
     /// `Some(at)` disables the account and, in the same atomic write, deletes all its

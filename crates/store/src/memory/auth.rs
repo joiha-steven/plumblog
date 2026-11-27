@@ -53,6 +53,16 @@ impl SessionStore for MemoryStore {
         }))
     }
 
+    async fn renew_session(&self, token_hash: &str, expires_at: i64, now: i64) -> Result<bool> {
+        self.write(|s| {
+            let found = s
+                .sessions
+                .values_mut()
+                .find(|x| x.token_hash == token_hash && x.expires_at > now);
+            Ok(found.map(|x| x.expires_at = expires_at).is_some())
+        })
+    }
+
     async fn delete_session(&self, token_hash: &str) -> Result<()> {
         self.write(|s| {
             s.sessions.retain(|_, x| x.token_hash != token_hash);

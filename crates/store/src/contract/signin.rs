@@ -373,3 +373,47 @@ pub async fn setup_creates_first_owner_once<S: Store>(db: &S) -> Check {
     // Readers never see the setup keys or need the first user's pages yet.
     version_is(db, "setup", 1).await
 }
+
+/// The first stored site id wins; later calls get it back and write nothing visible.
+pub async fn site_id_is_set_once<S: Store>(db: &S) -> Check {
+    let first = ok("ensure_site_id", db.ensure_site_id("\"one\"", T0).await)?;
+    eq!("first call stores its value", first.as_str(), "\"one\"")?;
+    let again = ok("ensure_site_id", db.ensure_site_id("\"two\"", T0 + 1).await)?;
+    eq!("second call keeps the first", again.as_str(), "\"one\"")?;
+    let stored = ok("get_setting", db.get_setting(crate::SITE_ID_KEY).await)?;
+    eq!("stored value", stored.as_deref(), Some("\"one\""))?;
+    version_is(db, "ensure_site_id", 1).await
+}
+
+/// Renewal moves the expiry of a live session only; it never revives an expired one.
+pub async fn session_renewal<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let new = |hash: &str, expires_at: i64| crate::NewSession {
+        token_hash: hash.into(),
+        user_id: u,
+        created_at: T0,
+        expires_at,
+    };
+    ok("live", db.create_session(new("live", T0 + 100)).await)?;
+    ok("dead", db.create_session(new("dead", T0 + 10)).await)?;
+    let renewed = ok(
+        "renew live",
+        db.renew_session("live", T0 + 500, T0 + 50).await,
+    )?;
+    eq!("live session renewed", renewed, true)?;
+    let s = ok("find live", db.find_session("live", T0 + 400).await)?;
+    eq!("new expiry holds", s.map(|s| s.expires_at), Some(T0 + 500))?;
+    let revived = ok(
+        "renew dead",
+        db.renew_session("dead", T0 + 500, T0 + 50).await,
+    )?;
+    eq!("expired session not revived", revived, false)?;
+    let absent = ok("renew absent", db.renew_session("nope", T0 + 500, T0).await)?;
+    eq!("absent session", absent, false)?;
+    let s = ok("find dead", db.find_session("dead", T0).await)?;
+    eq!(
+        "expired session keeps its expiry",
+        s.map(|s| s.expires_at),
+        Some(T0 + 10)
+    )
+}

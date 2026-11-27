@@ -24,6 +24,31 @@ pub const SETUP_CODE_HASH_KEY: &str = "setup_code_hash";
 /// Settings key holding when the setup code expires (ms), as a JSON integer.
 pub const SETUP_CODE_EXPIRES_KEY: &str = "setup_code_expires_at";
 
+/// Settings key holding the site's random id (a JSON string), part of the browser's password
+/// stretch salt. Public: the sign-in page needs it before anyone is signed in.
+pub const SITE_ID_KEY: &str = "site_id";
+/// Settings key holding the Turnstile site key (a JSON string); absent = Turnstile off.
+pub const TURNSTILE_SITE_KEY: &str = "turnstile_site_key";
+
+/// Settings that must never leave the Worker (API responses, theme data, exports).
+pub const INTERNAL_SETTING_KEYS: &[&str] = &[SETUP_CODE_HASH_KEY, SETUP_CODE_EXPIRES_KEY];
+
+/// Whether `key` is in [`INTERNAL_SETTING_KEYS`].
+#[must_use]
+pub fn is_internal_setting(key: &str) -> bool {
+    INTERNAL_SETTING_KEYS.contains(&key)
+}
+
+/// `settings` without internal keys: the one filter every path that hands settings to a
+/// client or a theme goes through.
+#[must_use]
+pub fn public_settings(settings: Vec<(String, String)>) -> Vec<(String, String)> {
+    settings
+        .into_iter()
+        .filter(|(k, _)| !is_internal_setting(k))
+        .collect()
+}
+
 /// `value_json` of [`SETUP_CODE_HASH_KEY`] for `code_hash`. Both stores compare this exact
 /// text, so a hash matches only itself.
 #[must_use]
@@ -80,6 +105,10 @@ pub trait ChallengeStore {
 
 #[allow(async_fn_in_trait)]
 pub trait SetupStore {
+    /// Stores `value_json` under [`SITE_ID_KEY`] unless a value is already there, and returns
+    /// the stored value, in one atomic write: two first visitors racing both get the same
+    /// id, so a password stretched with it stays valid. Never overwrites. No version bump.
+    async fn ensure_site_id(&self, value_json: &str, now: i64) -> Result<String>;
     /// Writes [`SETUP_CODE_HASH_KEY`] and [`SETUP_CODE_EXPIRES_KEY`] together, replacing any
     /// earlier code. No version bump (readers never see them).
     async fn put_setup_code(&self, code_hash: &str, expires_at: i64, now: i64) -> Result<()>;

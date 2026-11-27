@@ -9,6 +9,9 @@ stable_codes! {
     pub enum EventKind {
         SignIn => "auth.sign_in",
         SignInFailed => "auth.sign_in_failed",
+        SignInLocked => "auth.sign_in_locked",
+        PasswordChanged => "auth.password_changed",
+        UserCreated => "user.created",
         ContentChanged => "content.changed",
         SettingsChanged => "settings.changed",
         ThemeChanged => "theme.changed",
@@ -55,6 +58,9 @@ mod tests {
             [
                 (EventKind::SignIn, "auth.sign_in"),
                 (EventKind::SignInFailed, "auth.sign_in_failed"),
+                (EventKind::SignInLocked, "auth.sign_in_locked"),
+                (EventKind::PasswordChanged, "auth.password_changed"),
+                (EventKind::UserCreated, "user.created"),
                 (EventKind::ContentChanged, "content.changed"),
                 (EventKind::SettingsChanged, "settings.changed"),
                 (EventKind::ThemeChanged, "theme.changed"),

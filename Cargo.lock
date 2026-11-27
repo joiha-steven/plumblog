@@ -545,6 +545,7 @@ dependencies = [
 name = "plumblog-worker"
 version = "0.1.0"
 dependencies = [
+ "plumblog-auth",
  "plumblog-i18n",
  "plumblog-markdown",
  "plumblog-model",

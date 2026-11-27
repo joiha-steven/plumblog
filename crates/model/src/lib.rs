@@ -54,6 +54,7 @@ stable_codes! {
         TurnstileRequired => "auth.turnstile_required",
         PasskeyInvalid => "auth.passkey_invalid",
         SetupInvalid => "setup.invalid",
+        RouteNotFound => "api.not_found",
     }
 }
 
@@ -208,6 +209,7 @@ mod tests {
                 (ErrorCode::TurnstileRequired, "auth.turnstile_required"),
                 (ErrorCode::PasskeyInvalid, "auth.passkey_invalid"),
                 (ErrorCode::SetupInvalid, "setup.invalid"),
+                (ErrorCode::RouteNotFound, "api.not_found"),
             ]
         );
     }

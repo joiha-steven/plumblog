@@ -1,7 +1,7 @@
 use plumblog_model::{Result, Role, UserId};
 
-use super::{MemoryStore, State, conflict, next_seq, user_not_found};
-use crate::{NewUser, ProfileUpdate, SiteStore, User, UserStore};
+use super::{MemoryStore, State, conflict, invalid, next_rowid, next_seq, user_not_found};
+use crate::{NewSession, NewUser, ProfileUpdate, Session, SiteStore, User, UserStore};
 
 impl State {
     /// `users.login` is `NOCASE` (ASCII only) and `users.slug` is unique.
@@ -131,6 +131,61 @@ impl UserStore for MemoryStore {
             u.password_hash = hash;
             u.updated_at = now;
             Ok(())
+        })
+    }
+
+    async fn change_password(
+        &self,
+        id: UserId,
+        hash: String,
+        profile: Option<ProfileUpdate>,
+        session: NewSession,
+        now: i64,
+    ) -> Result<i64> {
+        self.write(|s| {
+            s.user_mut(id)?;
+            if session.user_id != id {
+                return Err(invalid(format!(
+                    "session for user {} given for user {}",
+                    session.user_id.0, id.0
+                )));
+            }
+            if let Some(p) = &profile {
+                s.check_user_unique(&p.login, &p.slug, Some(id))?;
+            }
+            // sessions.token_hash is UNIQUE; the user's own old sessions go first.
+            s.sessions.retain(|_, x| x.user_id != id);
+            if s.sessions
+                .values()
+                .any(|x| x.token_hash == session.token_hash)
+            {
+                return Err(conflict("session token hash already exists"));
+            }
+            let bump = profile.is_some();
+            let u = s.user_mut(id)?;
+            if let Some(p) = profile {
+                u.login = p.login;
+                u.slug = p.slug;
+                u.display_name = p.display_name;
+                u.bio = p.bio;
+            }
+            u.password_hash = Some(hash);
+            u.updated_at = now;
+            if bump {
+                s.bump();
+            }
+            let sid = next_rowid(&s.sessions);
+            s.sessions.insert(
+                sid,
+                Session {
+                    id: sid,
+                    token_hash: session.token_hash,
+                    user_id: id,
+                    created_at: session.created_at,
+                    expires_at: session.expires_at,
+                },
+            );
+            Ok(sid)
         })
     }
 

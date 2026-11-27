@@ -379,3 +379,107 @@ pub async fn disabled_user_credentials_do_not_resolve<S: Store>(db: &S) -> Check
         None
     )
 }
+
+fn session(user: UserId, hash: &str) -> NewSession {
+    NewSession {
+        token_hash: hash.into(),
+        user_id: user,
+        created_at: T0,
+        expires_at: T0 + 1_000_000,
+    }
+}
+
+/// A password (and login) change ends every session of the user, keeps other users' ones,
+/// creates the rotated session, and on any refusal changes nothing.
+pub async fn change_password_rotates_sessions<S: Store>(db: &S) -> Check {
+    let root = owner(db, "root").await?;
+    let a = owner(db, "alice").await?;
+    ok("session a1", db.create_session(session(a, "a1")).await)?;
+    ok("session a2", db.create_session(session(a, "a2")).await)?;
+    ok("session root", db.create_session(session(root, "r1")).await)?;
+    let before = get(db, a).await?;
+    let v = version(db).await?;
+
+    // Refusals first: each must leave the user, sessions and version as they were.
+    let mut taken = bio(&before, "x");
+    taken.login = "ROOT".into();
+    fails(
+        "change_password onto a taken login",
+        db.change_password(a, "h".into(), Some(taken), session(a, "a3"), T0 + 1)
+            .await,
+        ErrorCode::Conflict,
+    )?;
+    fails(
+        "change_password with a session of another user",
+        db.change_password(a, "h".into(), None, session(root, "a3"), T0 + 1)
+            .await,
+        ErrorCode::InvalidInput,
+    )?;
+    fails(
+        "change_password reusing another user's session hash",
+        db.change_password(a, "h".into(), None, session(a, "r1"), T0 + 1)
+            .await,
+        ErrorCode::Conflict,
+    )?;
+    fails(
+        "change_password of a missing user",
+        db.change_password(
+            UserId(999),
+            "h".into(),
+            None,
+            session(UserId(999), "z"),
+            T0 + 1,
+        )
+        .await,
+        ErrorCode::UserNotFound,
+    )?;
+    eq!(
+        "refused changes leave the user",
+        get(db, a).await?,
+        before.clone()
+    )?;
+    for h in ["a1", "a2", "r1"] {
+        let found = ok("find_session", db.find_session(h, T0).await)?;
+        eq!("refused changes keep sessions", found.is_some(), true)?;
+    }
+    version_is(db, "refused changes", v).await?;
+
+    // Password only: no version bump; a's sessions replaced by the new one; root's kept.
+    let sid = ok(
+        "change_password",
+        db.change_password(a, "p2".into(), None, session(a, "a3"), T0 + 2)
+            .await,
+    )?;
+    let mut want = before.clone();
+    want.password_hash = Some("p2".into());
+    want.updated_at = T0 + 2;
+    eq!("password written", get(db, a).await?, want.clone())?;
+    version_is(db, "password-only change", v).await?;
+    for (h, alive) in [("a1", false), ("a2", false), ("a3", true), ("r1", true)] {
+        let found = ok("find_session", db.find_session(h, T0).await)?;
+        eq!(
+            &format!("session {h} alive after change"),
+            found.is_some(),
+            alive
+        )?;
+    }
+    let s = ok("find_session a3", db.find_session("a3", T0).await)?;
+    eq!("returned id is the new session", s.map(|s| s.id), Some(sid))?;
+
+    // With a profile: login and password land together and the version bumps.
+    let mut p = bio(&want, "b");
+    p.login = "alicia".into();
+    ok(
+        "change_password with profile",
+        db.change_password(a, "p3".into(), Some(p), session(a, "a4"), T0 + 3)
+            .await,
+    )?;
+    want.login = "alicia".into();
+    want.bio = "b".into();
+    want.password_hash = Some("p3".into());
+    want.updated_at = T0 + 3;
+    eq!("login and password written", get(db, a).await?, want)?;
+    let old = ok("find_session a3", db.find_session("a3", T0).await)?;
+    eq!("previous session ended", old.is_some(), false)?;
+    version_is(db, "login change", v + 1).await
+}

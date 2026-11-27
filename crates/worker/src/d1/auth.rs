@@ -106,6 +106,16 @@ impl SessionStore for D1Store {
         self.exec(s).await.map(drop)
     }
 
+    async fn renew_session(&self, token_hash: &str, expires_at: i64, now: i64) -> Result<bool> {
+        let s = self.stmt(
+            "renew_session",
+            "UPDATE sessions SET expires_at = ? WHERE token_hash = ? AND expires_at > ?",
+            &[int(expires_at)?, text(token_hash), bound(now)],
+        )?;
+        let r = self.exec(s).await?;
+        Ok(Self::changes("renew_session", &r)? > 0)
+    }
+
     async fn delete_user_sessions(&self, user: UserId) -> Result<u64> {
         let s = self.stmt(
             "delete_user_sessions",

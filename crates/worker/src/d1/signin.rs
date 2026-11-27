@@ -1,7 +1,7 @@
 use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 use plumblog_store::{
     ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewUser,
-    SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SetupStore, setup_hash_json,
+    SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore, setup_hash_json,
 };
 
 use super::{D1Store, Failure, bound, guard, int, invalid, opt_int, opt_text, storage, text};
@@ -144,6 +144,32 @@ impl ChallengeStore for D1Store {
 }
 
 impl SetupStore for D1Store {
+    async fn ensure_site_id(&self, value_json: &str, now: i64) -> Result<String> {
+        // Insert-or-ignore then read, in one transaction, so a racing first visitor's id wins
+        // for both.
+        let insert = self.stmt(
+            "ensure_site_id",
+            "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) \
+             ON CONFLICT (key) DO NOTHING",
+            &[text(SITE_ID_KEY), text(value_json), int(now)?],
+        )?;
+        let read = self.stmt(
+            "ensure_site_id_read",
+            "SELECT value_json AS v FROM settings WHERE key = ?",
+            &[text(SITE_ID_KEY)],
+        )?;
+        let results = self.batch("ensure_site_id", vec![insert, read]).await?;
+        let rows: Vec<std::collections::HashMap<String, String>> = results
+            .get(1)
+            .ok_or_else(|| storage("ensure_site_id", "batch returned no read result"))?
+            .results()
+            .map_err(|e| storage("ensure_site_id", &format!("{e}")))?;
+        rows.into_iter()
+            .next()
+            .and_then(|mut r| r.remove("v"))
+            .ok_or_else(|| storage("ensure_site_id", "site_id missing after insert"))
+    }
+
     async fn put_setup_code(&self, code_hash: &str, expires_at: i64, now: i64) -> Result<()> {
         let upsert = "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) \
                       ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, \

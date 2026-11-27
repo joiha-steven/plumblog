@@ -3,7 +3,7 @@ use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 use super::{MemoryStore, conflict, count, invalid};
 use crate::{
     ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewUser,
-    SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SetupStore, setup_hash_json,
+    SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore, setup_hash_json,
 };
 
 /// `window_start + window_ms <= now`, overflow-safe.
@@ -129,6 +129,16 @@ fn parse_expiry(value_json: &str) -> Option<i64> {
     reason = "in-memory stand-in for async D1 storage"
 )]
 impl SetupStore for MemoryStore {
+    async fn ensure_site_id(&self, value_json: &str, now: i64) -> Result<String> {
+        self.write(|s| {
+            Ok(s.settings
+                .entry(SITE_ID_KEY.to_owned())
+                .or_insert_with(|| (value_json.to_owned(), now))
+                .0
+                .clone())
+        })
+    }
+
     async fn put_setup_code(&self, code_hash: &str, expires_at: i64, now: i64) -> Result<()> {
         self.write(|s| {
             s.settings.insert(

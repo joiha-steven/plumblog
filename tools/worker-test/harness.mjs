@@ -77,13 +77,22 @@ export function makeStateDir() {
   return { dir: entry.state, remove: () => cleanupSync(entry) };
 }
 
-/** Applies migrations to a fresh local D1 and starts the Worker. Call stop() when done. */
-export async function startWorker() {
+/**
+ * Applies migrations to a fresh local D1 and starts the Worker. Call stop() when done.
+ * `seedSql` runs after the migrations, before the Worker starts (test data only); `vars`
+ * become `--var KEY:VALUE` (wrangler dev's way to set vars and secrets per run).
+ */
+export async function startWorker({ seedSql = null, vars = {} } = {}) {
   const entry = { state: mkdtempSync(join(RUN_DIR, "plumblog-wrangler-")), pgid: null, pgidFile: null };
   live.add(entry);
   const common = ["--config", CONFIG, "--persist-to", entry.state];
   try {
     run(WRANGLER, ["d1", "migrations", "apply", "DB", "--local", ...common]);
+    if (seedSql) {
+      const file = join(entry.state, "seed.sql");
+      writeFileSync(file, seedSql);
+      run(WRANGLER, ["d1", "execute", "DB", "--local", ...common, "--file", file]);
+    }
   } catch (e) {
     cleanupSync(entry);
     throw e;
@@ -95,7 +104,8 @@ export async function startWorker() {
   const child = spawn(
     WRANGLER,
     ["dev", ...common, "--ip", "127.0.0.1", "--port", String(port), "--inspector-port", String(inspector),
-      "--show-interactive-dev-session=false", "--log-level", "warn"],
+      "--show-interactive-dev-session=false", "--log-level", "warn",
+      ...Object.entries(vars).flatMap(([k, v]) => ["--var", `${k}:${v}`])],
     { cwd: ROOT, env: ENV, detached: true, stdio: ["ignore", "pipe", "pipe"] },
   );
   entry.pgid = child.pid;
@@ -134,7 +144,10 @@ export async function startWorker() {
     }
     try {
       await fetch(`${url}/healthz`);
-      return { url, stop };
+      // Reads the running Worker's local D1 (test assertions only).
+      const query = (sql) =>
+        JSON.parse(run(WRANGLER, ["d1", "execute", "DB", "--local", ...common, "--json", "--command", sql]))[0].results;
+      return { url, stop, log: () => log, query };
     } catch {
       await new Promise((r) => setTimeout(r, 200));
     }
