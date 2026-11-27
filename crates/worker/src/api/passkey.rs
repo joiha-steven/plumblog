@@ -273,10 +273,17 @@ pub async fn register_verify(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Re
 /// `POST /api/auth/passkey/login/options`: anyone. The credential is discoverable, so the
 /// browser picks it; the server names no user (nothing to enumerate).
 pub async fn login_options(ctx: &Ctx, body: &[u8]) -> Result<Reply> {
-    no_fields(body)?;
+    let token = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        Fields::parse(body, &["turnstile_token"])?
+            .opt("turnstile_token")?
+            .map(str::to_owned)
+    };
     let site = site::site(ctx).await?;
-    // Anonymous and each call writes a row: counted per address before the write.
-    limit::options(ctx).await?;
+    // Anonymous and each call writes a row: counted site-wide and per address before the
+    // write.
+    limit::options(ctx, token.as_deref()).await?;
     let challenge = new_challenge(ctx, ChallengePurpose::Login, None).await?;
     let public_key = object(&[
         ("challenge", Out::Str(challenge)),
