@@ -95,6 +95,9 @@ for f in "${files[@]}"; do
 done
 [ -z "$bad" ] || fail "uppercase or small-caps styling (see docs/ARCHITECTURE.md, Design language): $bad"
 
+step "admin CSS: raw values only in tokens.css, components defined once"
+scripts/check-admin-css web/admin/css || fail "admin CSS rules (see scripts/check-admin-css for why)"
+
 step "doc length limits"
 # Long docs drift and get skimmed; a hard cap forces saying each thing once.
 bad=""
