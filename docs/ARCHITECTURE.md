@@ -142,6 +142,7 @@ Not built: PWA/offline, newsletter (later), reactions.
   - Styles: **writer** (default; text first like a writing app), **book** and **magazine** (drafts, offered once they reach the writer standard). Options: style, accent, list images (off), excerpt words (55), sidenotes (on).
   - writer home: one row per post, pinned first, in a grid with a narrow mono date column that hangs in the left margin on wide screens and moves under the excerpt on phones; title, excerpt, optional small 4:3 picture. Rows are separated by space, not rules.
   - Code and metadata use **JetBrains Mono** (OFL, one weight, no ligatures so readers see what is typed). No uppercase or small caps anywhere.
+  - Shared tokens at the top of `style.css`: radii (`--r-sm` 4, `--r-md` 6, `--r-lg` 8), `--tap` 44px, `--ctl-sm`, spacing `--s-1`..`--s-7` (rem), shadows `--raised`, `--pressed`, `--inset`, `--pop`. Controls use only these; spacing inside running text stays in em so it follows the text size.
   - Controls follow the admin design language: one state system (hover, pressed, selected, focus ring, disabled) shared by the toggle, copy button, checkboxes and footnote buttons.
   - Sidenotes move into the margin from 76rem (~1216px) wide; narrower screens, folded or unfolded foldables included, get the inline toggle.
 - Footnotes are sidenotes: in the margin beside the sentence on wide screens, an inline toggle under the sentence on narrow screens, classic bottom footnotes when JS is off. About 1 KB JS.
