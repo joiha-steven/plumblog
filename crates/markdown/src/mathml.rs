@@ -139,13 +139,19 @@ pub fn neutralize(tex: &str) -> String {
 /// copy the rest of the formula as raw text and parse it again. So the `*` (limits placement,
 /// which it does not support) is dropped, and a single-token argument (`\\operatorname a`,
 /// as in TeX) gets braces.
+/// Whitespace is skipped before the `*` and before the argument, as TeX does, so a tab or
+/// newline is never taken as the argument.
 fn raw_argument(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>, out: &mut String) {
+    let skip_space = |chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>| {
+        while chars.peek().is_some_and(|&(_, n)| n.is_ascii_whitespace()) {
+            chars.next();
+        }
+    };
+    skip_space(chars);
     if chars.peek().is_some_and(|&(_, n)| n == '*') {
         chars.next();
     }
-    while chars.peek().is_some_and(|&(_, n)| n == ' ') {
-        chars.next();
-    }
+    skip_space(chars);
     match chars.peek().map(|&(_, n)| n) {
         Some('{') => copy_group(chars, out, true),
         Some('\\') => {
@@ -393,6 +399,22 @@ mod tests {
         assert_eq!(neutralize("\\operatorname*{a<b}"), "\\operatorname{a&lt;b}");
         assert_eq!(neutralize("\\operatorname a<b"), "\\operatorname{a}\\lt b");
         assert_eq!(neutralize("\\operatorname*  <b"), "\\operatorname{&lt;}b");
+        // Brace-less `<` and `>` arguments.
+        assert_eq!(neutralize("\\mathop>x"), "\\mathop{&gt;}x");
+        assert_eq!(neutralize("\\mathop<x"), "\\mathop{&lt;}x");
+    }
+
+    /// TeX skips every kind of whitespace before `*` and before the argument (#38).
+    #[test]
+    fn raw_argument_skips_tex_whitespace() {
+        assert_eq!(neutralize("\\operatorname *{lim}"), "\\operatorname{lim}");
+        assert_eq!(
+            neutralize("\\operatorname\t*\n{a<b}"),
+            "\\operatorname{a&lt;b}"
+        );
+        assert_eq!(neutralize("\\mathop\t<x"), "\\mathop{&lt;}x");
+        assert_eq!(neutralize("\\operatorname\nx"), "\\operatorname{x}");
+        assert_eq!(neutralize("\\operatorname\r\n {x}"), "\\operatorname{x}");
     }
 
     #[test]

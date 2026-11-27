@@ -20,15 +20,32 @@ pub struct Link {
     pub url: String,
 }
 
+/// One language version of a page (hreflang). `url` is site-relative on input, absolute in
+/// template data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Alternate {
+    pub lang: String,
+    pub url: String,
+}
+
 /// Site-wide values every page gets as `site`.
 #[derive(Clone, Debug, Serialize)]
 pub struct Site {
     pub title: String,
     pub description: String,
+    /// The site's main language; its versions get `hreflang="x-default"`.
+    pub default_lang: String,
     pub home_url: String,
     pub search_url: Option<String>,
+    /// Atom feed (the main one); `rss_url` and `json_feed_url` are the same posts.
     pub feed_url: String,
+    pub rss_url: String,
+    pub json_feed_url: String,
     pub icon_url: String,
+    /// Social card image when a page has no cover; site-relative or absolute.
+    pub image_url: Option<String>,
+    /// Named as the author in feeds and JSON-LD; the site itself when `None`.
+    pub author: Option<String>,
     pub footer: String,
     pub nav: Vec<NavItem>,
 }
@@ -46,6 +63,9 @@ pub struct PageInfo {
     pub lang: String,
     /// Absolute URL of this page.
     pub canonical: String,
+    /// `https://host`, for making site-relative URLs absolute: the site's configured public
+    /// origin, never the request's Host header in production.
+    pub origin: String,
 }
 
 /// A published post as the reader site needs it. `body` is the HTML stored on save, so reading
@@ -64,6 +84,8 @@ pub struct Post {
     pub tags: Vec<Link>,
     pub cover: Option<Image>,
     pub thumb: Option<Image>,
+    /// Other language versions of this post (hreflang, sitemap).
+    pub translations: Vec<Alternate>,
 }
 
 /// What a page shows; picks the template.
@@ -93,6 +115,13 @@ pub enum Body<'a> {
     },
     NotFound {
         recent: &'a [&'a Post],
+    },
+    /// `query` as the reader typed it (empty: show the form only); `more` when the results
+    /// were cut at the route's cap.
+    Search {
+        query: &'a str,
+        posts: &'a [&'a Post],
+        more: bool,
     },
 }
 

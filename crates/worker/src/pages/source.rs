@@ -16,6 +16,8 @@ pub struct StoredPost {
     pub excerpt: Option<String>,
     pub body: Rendered,
     pub tags: Vec<Tag>,
+    /// Other language versions: `(lang, slug)`. Filled by the translations issue.
+    pub translations: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +33,12 @@ pub struct Settings {
     pub footer: String,
     pub lang: String,
     pub per_page: usize,
+    /// Public origin (`https://example.com`) for canonical URLs, feeds and the sitemap.
+    /// Production must set it: otherwise the request's Host header decides public URLs.
+    pub origin: Option<String>,
+    /// Unix time of the last publish or settings change, at least the site's creation (feed
+    /// date when there are no posts).
+    pub updated_at: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +46,8 @@ pub enum Filter<'a> {
     All,
     Tag(&'a str),
     Year(i32),
+    /// One language, newest first (feeds).
+    Lang(&'a str),
 }
 
 /// One page of posts and whether more follow.
@@ -64,6 +74,8 @@ pub trait ReaderSource {
     async fn posts(&self, filter: Filter<'_>, offset: usize, limit: usize) -> Result<Slice>;
     async fn post(&self, slug: &str) -> Result<Option<Neighbours>>;
     async fn tag(&self, slug: &str) -> Result<Option<Tag>>;
+    /// Every tag with at least one published post (sitemap).
+    async fn tags(&self) -> Result<Vec<Tag>>;
     /// Years that have posts, newest first.
     async fn years(&self) -> Result<Vec<i32>>;
 }
@@ -84,6 +96,10 @@ pub struct SampleSite {
     pub footer: &'static str,
     pub lang: &'static str,
     pub per_page: usize,
+    /// Empty: no configured origin.
+    pub origin: &'static str,
+    /// `YYYY-MM-DD` the sample site was set up: its date even with no posts.
+    pub updated: &'static str,
 }
 
 include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
@@ -96,15 +112,17 @@ pub struct SampleSource {
 impl SampleSource {
     pub fn get() -> &'static Self {
         static SOURCE: OnceLock<SampleSource> = OnceLock::new();
-        SOURCE.get_or_init(|| {
-            let mut posts: Vec<StoredPost> = SAMPLE_POSTS.iter().map(to_post).collect();
-            posts.sort_by(|a, b| {
-                b.pinned
-                    .cmp(&a.pinned)
-                    .then(b.published_at.cmp(&a.published_at))
-            });
-            Self { posts }
-        })
+        SOURCE.get_or_init(|| Self::from_posts(SAMPLE_POSTS.iter().map(to_post).collect()))
+    }
+
+    /// Any set of posts in the sample order (tests build sites the samples do not cover).
+    pub fn from_posts(mut posts: Vec<StoredPost>) -> Self {
+        posts.sort_by(|a, b| {
+            b.pinned
+                .cmp(&a.pinned)
+                .then(b.published_at.cmp(&a.published_at))
+        });
+        Self { posts }
     }
 
     fn by_date(&self) -> Vec<&StoredPost> {
@@ -132,6 +150,7 @@ fn to_post(p: &SamplePost) -> StoredPost {
                 name: (*t).to_owned(),
             })
             .collect(),
+        translations: Vec::new(),
     }
 }
 
@@ -182,6 +201,13 @@ impl ReaderSource for SampleSource {
             footer: SAMPLE_SITE.footer.to_owned(),
             lang: SAMPLE_SITE.lang.to_owned(),
             per_page: SAMPLE_SITE.per_page,
+            origin: (!SAMPLE_SITE.origin.is_empty()).then(|| SAMPLE_SITE.origin.to_owned()),
+            // The site's own date, moved forward by posts; never epoch 0 on an empty site.
+            updated_at: self
+                .posts
+                .iter()
+                .map(|p| p.published_at)
+                .fold(unix_from_date(SAMPLE_SITE.updated), i64::max),
         })
     }
 
@@ -198,6 +224,11 @@ impl ReaderSource for SampleSource {
                 .by_date()
                 .into_iter()
                 .filter(|p| year_of(p.published_at) == y)
+                .collect(),
+            Filter::Lang(lang) => self
+                .by_date()
+                .into_iter()
+                .filter(|p| p.lang == lang)
                 .collect(),
         };
         Ok(Slice {
@@ -230,6 +261,17 @@ impl ReaderSource for SampleSource {
             .flat_map(|p| &p.tags)
             .find(|t| t.slug == slug)
             .cloned())
+    }
+
+    async fn tags(&self) -> Result<Vec<Tag>> {
+        let mut tags: Vec<Tag> = self
+            .posts
+            .iter()
+            .flat_map(|p| p.tags.iter().cloned())
+            .collect();
+        tags.sort_by(|a, b| a.slug.cmp(&b.slug));
+        tags.dedup_by(|a, b| a.slug == b.slug);
+        Ok(tags)
     }
 
     async fn years(&self) -> Result<Vec<i32>> {

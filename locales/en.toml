@@ -9,3 +9,7 @@ page_failed = "This page cannot be shown right now. Please try again in a minute
 [syslog]
 # Shown in the system log wherever a secret or personal value was removed.
 redacted = "[hidden]"
+
+[llms]
+# Heading of the post list in /llms.txt, read by AI tools.
+posts = "Posts"

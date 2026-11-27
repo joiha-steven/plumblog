@@ -3,7 +3,8 @@
 //! `/` and `/page/N` home, `/<slug>` post, `/tag/<slug>` and `/archive/<year>` (each with
 //! `/page/N`). Redirect targets are always built here as `/`-rooted paths with no `//`, so a
 //! request path can never turn into an off-site `Location`.
-//! `page`, `tag`, `archive`, `theme`, `admin` and `api` cannot be post slugs.
+//! `/search?q=`. `page`, `tag`, `archive`, `search`, `theme`, `admin` and `api` cannot be post
+//! slugs.
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Route {
@@ -21,6 +22,16 @@ pub enum Route {
         year: i32,
         page: usize,
     },
+    /// `/feed.xml` (Atom), `/rss.xml`, `/feed.json`; `/<lang>/...` for other languages.
+    Feed {
+        lang: Option<String>,
+        format: FeedFormat,
+    },
+    /// `/search?q=`: the query string is read by the caller, not routed.
+    Search,
+    Sitemap,
+    Robots,
+    Llms,
     /// One canonical URL per page: `/page/1` and trailing slashes redirect.
     Redirect(String),
     NotFound,
@@ -71,6 +82,18 @@ pub fn parse(path: &str) -> Route {
             (Some(year), Some(page)) => Route::Archive { year, page },
             _ => Route::NotFound,
         },
+        ["search"] => Route::Search,
+        ["sitemap.xml"] => Route::Sitemap,
+        ["robots.txt"] => Route::Robots,
+        ["llms.txt"] => Route::Llms,
+        [file] if FeedFormat::from_file(file).is_some() => Route::Feed {
+            lang: None,
+            format: FeedFormat::from_file(file).unwrap_or(FeedFormat::Atom),
+        },
+        [lang, file] if is_lang(lang) && FeedFormat::from_file(file).is_some() => Route::Feed {
+            lang: Some((*lang).to_owned()),
+            format: FeedFormat::from_file(file).unwrap_or(FeedFormat::Atom),
+        },
         [slug] if is_slug(slug) && !RESERVED.contains(slug) => Route::Post {
             slug: (*slug).to_owned(),
         },
@@ -78,7 +101,10 @@ pub fn parse(path: &str) -> Route {
     }
 }
 
-const RESERVED: &[&str] = &["page", "tag", "archive", "theme", "admin", "api"];
+const RESERVED: &[&str] = &["page", "tag", "archive", "search", "theme", "admin", "api"];
+
+/// The search page; results are `?q=` on it.
+pub const SEARCH: &str = "/search";
 
 /// Slugs are lowercase ASCII letters, digits and dashes; anything else is a 404 without a
 /// storage lookup.
@@ -87,6 +113,58 @@ fn is_slug(s: &str) -> bool {
         && s.len() <= 200
         && s.bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedFormat {
+    Atom,
+    Rss,
+    Json,
+}
+
+impl FeedFormat {
+    const ALL: [Self; 3] = [Self::Atom, Self::Rss, Self::Json];
+
+    pub const fn file(self) -> &'static str {
+        match self {
+            Self::Atom => "feed.xml",
+            Self::Rss => "rss.xml",
+            Self::Json => "feed.json",
+        }
+    }
+
+    pub const fn content_type(self) -> &'static str {
+        match self {
+            Self::Atom => "application/atom+xml; charset=utf-8",
+            Self::Rss => "application/rss+xml; charset=utf-8",
+            Self::Json => "application/feed+json; charset=utf-8",
+        }
+    }
+
+    fn from_file(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.file() == name)
+    }
+}
+
+/// `en`, `vi`, `pt-br`, `zh-hant`: BCP 47 language with an optional region or script.
+fn is_lang(s: &str) -> bool {
+    let mut parts = s.split('-');
+    let primary = parts.next().unwrap_or("");
+    (2..=3).contains(&primary.len())
+        && primary.bytes().all(|b| b.is_ascii_lowercase())
+        && parts.all(|p| {
+            (2..=8).contains(&p.len())
+                && p.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
+}
+
+/// The default language's feeds live at the root; others under `/<lang>/`.
+pub fn feed(lang: Option<&str>, format: FeedFormat) -> String {
+    match lang {
+        Some(l) => format!("/{l}/{}", format.file()),
+        None => format!("/{}", format.file()),
+    }
 }
 
 fn year(s: &str) -> Option<i32> {

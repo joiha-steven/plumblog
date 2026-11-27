@@ -7,3 +7,6 @@ page_failed = "Trang này tạm thời chưa hiện được. Bạn thử lại 
 
 [syslog]
 redacted = "[đã ẩn]"
+
+[llms]
+posts = "Bài viết"
