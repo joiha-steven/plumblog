@@ -23,6 +23,9 @@ agent a Cloudflare API token, and the agent sets up, writes, translates, themes 
 4. **Built for AI operators.** If an AI agent can do a job by following a guide, plumblog ships a guide, not a feature.
 5. **No drifting docs.** Fixed list of Markdown files (see Documentation). Anything a machine can generate from code is generated.
 6. **Heavy work happens off the Worker.** The browser (admin) or the user's machine (CLI) does expensive work; the Worker validates, stores and serves.
+7. **No hard-coded text.** Every user-facing string, English included, lives in a locale file (`locales/` for core and admin, the theme's own locale files for theme text). Code and templates only reference keys.
+8. **No hard-coded layout.** Core produces data and semantic content; every reader-facing page structure (what appears, where, in which order) is defined by the theme's templates. Core ships no reader HTML layout of its own beyond the default theme.
+9. **Small core, extensible edges.** Core contains only what a working blog needs. Anything else is added by themes or plugins through stable extension points. The plugin mechanism is still to be designed (constraint: one Worker bundle on the free plan, so no runtime loading of native code; likely candidates are declarative hooks, theme-level JS, and build-time plugins compiled into the Worker).
 
 ## Platform
 
@@ -192,3 +195,4 @@ Each phase is one or more sessions; each ends with `scripts/check` green and evi
 - 2026-11-27 Docs: guides and AGENTS.md short with no repetition (line caps in check); README in plain, honest human voice.
 - 2026-11-27 Reading and writing first; book-like typography tuned per font; foldables first-class.
 - 2026-11-27 minimal theme first, font Inter with unicode-range subsets; footnotes as sidenotes.
+- 2026-11-27 No hard-coded text (all languages incl. English in locale files); no hard-coded layout (themes define page structure); small core, features via themes and plugins.

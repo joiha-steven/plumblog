@@ -16,6 +16,9 @@ Never bypass or weaken `scripts/check`. If a rule is wrong, change it in the sam
 ## Rules
 
 - English everywhere except `locales/`. Comments say why, not what.
+- No user-facing string in code or templates, English included: use locale keys.
+- No reader layout in code: page structure belongs to theme templates.
+- Core stays minimal. A feature that is not essential to a working blog belongs in a theme or plugin.
 - New dependency: only in the workspace `Cargo.toml`, with a `# why` comment that beats writing the code.
 - Never write notes, plans or reports as files. Decisions go in `docs/ARCHITECTURE.md`.
 - Generate references from code; never hand-write them.
