@@ -13,7 +13,9 @@
 //! (`t("a_" ~ x)`, `t(var)`) needs `{# i18n: <every key> #}` on the same or previous line,
 //! checked both ways against `en.toml`.
 //! Admin TypeScript (`web/admin/src`): the same rules for `t("key")`; a key built at runtime is
-//! a template string (`` t(`a.${x}`) ``) with `// i18n: <every key>` on the line above.
+//! a template string (`` t(`a.${x}`) ``) with `// i18n: <every key>` on the line above. Text
+//! must not bypass `t`: no string with letters as an `h()` child or as an `aria-label`,
+//! `title`, `placeholder` or `alt` value, and `t` may not be imported under another name.
 
 use plumblog_i18n::{categories, parse};
 use std::collections::{BTreeMap, BTreeSet};
@@ -380,6 +382,158 @@ fn ts_uses(src: &str) -> Scan {
     (uses, misuse)
 }
 
+/// Admin source with comments blanked (newlines kept) and, per byte, whether it is inside a
+/// string literal. Template literals end at the next backtick; `${...}` nesting is not needed
+/// for the rules that use this.
+fn ts_lex(src: &str) -> (Vec<u8>, Vec<bool>) {
+    let b = src.as_bytes();
+    let mut code = b.to_vec();
+    let mut in_str = vec![false; b.len()];
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    code[i] = b' ';
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                while i < b.len() && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
+                    if b[i] != b'\n' {
+                        code[i] = b' ';
+                    }
+                    i += 1;
+                }
+                for _ in 0..2 {
+                    if i < b.len() {
+                        code[i] = b' ';
+                        i += 1;
+                    }
+                }
+            }
+            q @ (b'"' | b'\'' | b'`') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    in_str[i] = true;
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    in_str.truncate(b.len());
+    (code, in_str)
+}
+
+/// The string literal starting at `i` (a quote), if it holds a letter: user-facing text.
+fn text_literal(code: &[u8], i: usize) -> Option<String> {
+    let q = *code.get(i)?;
+    if !matches!(q, b'"' | b'\'' | b'`') {
+        return None;
+    }
+    let end = code[i + 1..].iter().position(|&c| c == q)? + i + 1;
+    let s = String::from_utf8_lossy(&code[i + 1..end]).into_owned();
+    s.chars().any(char::is_alphabetic).then_some(s)
+}
+
+/// Text in admin TypeScript that bypasses `t`: string literals with letters as `h()`
+/// children or as accessible-text attribute values, and `t` imported under another name.
+fn ts_hardcoded(src: &str) -> Vec<(String, usize)> {
+    let (code, in_str) = ts_lex(src);
+    let line_of = |i: usize| code[..i].split(|&c| c == b'\n').count();
+    let ident =
+        |c: Option<&u8>| c.is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'$');
+    let skip_ws = |mut j: usize| {
+        while code.get(j).is_some_and(u8::is_ascii_whitespace) {
+            j += 1;
+        }
+        j
+    };
+    let mut out = Vec::new();
+    for i in 0..code.len() {
+        if in_str[i] || (i > 0 && ident(code.get(i - 1))) {
+            continue;
+        }
+        // `import { t as tr }`: the renamed function would escape every rule above.
+        if code[i..].starts_with(b"t as ") && !ident(code.get(i + 1).filter(|&&c| c != b' ')) {
+            let line_start = code[..i]
+                .iter()
+                .rposition(|&c| c == b'\n')
+                .map_or(0, |p| p + 1);
+            if code[line_start..].starts_with(b"import") {
+                out.push((
+                    "t imported under another name; import it as t".to_owned(),
+                    line_of(i),
+                ));
+            }
+        }
+        // `"aria-label": "Close"`, `title: "Save"` and the like.
+        for attr in ["aria-label", "title", "placeholder", "alt"] {
+            let quoted = code.get(i).is_some_and(|&c| c == b'"' || c == b'\'');
+            let start = if quoted { i + 1 } else { i };
+            if !code[start..].starts_with(attr.as_bytes())
+                || ident(code.get(start + attr.len())) && !quoted
+            {
+                continue;
+            }
+            let mut j = start + attr.len();
+            if quoted {
+                if code.get(j) != code.get(i) {
+                    continue;
+                }
+                j += 1;
+            }
+            let j = skip_ws(j);
+            if code.get(j) != Some(&b':') {
+                continue;
+            }
+            if let Some(s) = text_literal(&code, skip_ws(j + 1)) {
+                out.push((
+                    format!("{attr} is fixed text {s:?}; use t(\"key\")"),
+                    line_of(i),
+                ));
+            }
+        }
+        // `h("button", {...}, "Save")`: every argument after the attributes.
+        if code[i..].starts_with(b"h(") {
+            let mut depth = 0usize;
+            let mut arg = 0;
+            let mut j = i + 2;
+            let mut at_arg_start = true;
+            while j < code.len() {
+                if in_str[j] {
+                    j += 1;
+                    continue;
+                }
+                if at_arg_start && arg >= 2 && depth == 0 {
+                    let k = skip_ws(j);
+                    if let Some(s) = text_literal(&code, k) {
+                        out.push((
+                            format!("h() child is fixed text {s:?}; use t(\"key\")"),
+                            line_of(k),
+                        ));
+                    }
+                }
+                at_arg_start = false;
+                match code[j] {
+                    b'(' | b'[' | b'{' => depth += 1,
+                    b')' | b']' | b'}' if depth == 0 => break,
+                    b')' | b']' | b'}' => depth -= 1,
+                    b',' if depth == 0 => {
+                        arg += 1;
+                        at_arg_start = true;
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Whether byte `i` sits inside a quoted string on its line.
 fn in_string(line: &[u8], i: usize) -> bool {
     let mut quote = None;
@@ -508,7 +662,7 @@ fn locale_keys_are_complete_and_consistent() {
         }
         let src = fs::read_to_string(&file).unwrap_or_default();
         let (uses, misuse) = ts_uses(&src);
-        for (p, line) in misuse {
+        for (p, line) in misuse.into_iter().chain(ts_hardcoded(&src)) {
             problems.push(format!("{at}:{line}: {p}"));
         }
         check_template(&uses, &at, core.get("en"), "locales/en.toml", &mut problems);
@@ -543,6 +697,22 @@ fn ts_scanner_reads_literal_and_declared_calls() {
     );
     let lines: Vec<usize> = misuse.iter().map(|(_, l)| *l).collect();
     assert_eq!(lines, [6, 7], "{misuse:?}");
+}
+
+#[test]
+fn ts_scanner_rejects_text_that_bypasses_t() {
+    let src = "import { t as tr } from \"./i18n\";\n\
+        h(\"button\", {}, \"Save\");\n\
+        h(\"a\", { \"aria-label\": \"Close\", title: 'Hi' }, icon(\"x\"));\n\
+        const f = { placeholder: `Type`, alt: \"Pic\" };\n\
+        h(\"p\", {},\n  t(\"ok.key\"),\n  \"Late\");\n\
+        h(\"span\", { class: \"k\" }, \"\u{b7}\", n, \"\");\n\
+        // h(\"b\", {}, \"in a comment\")\n\
+        const s = \"h(\\\"b\\\", {}, \\\"in a string\\\")\";\n\
+        h(\"i\", { title: t(\"k\"), \"aria-label\": label });\n\
+        import { t } from \"./i18n\"; const at = { title: x };";
+    let got: Vec<usize> = ts_hardcoded(src).iter().map(|(_, l)| *l).collect();
+    assert_eq!(got, [1, 2, 3, 3, 4, 4, 7], "{:?}", ts_hardcoded(src));
 }
 
 #[test]

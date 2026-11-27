@@ -15,3 +15,6 @@ pub const ADMIN_TITLE: Key = key!("admin.title");
 
 /// Shown when the browser runs no JavaScript.
 pub const ADMIN_NOSCRIPT: Key = key!("admin.noscript");
+
+/// Body of a 404 for a missing admin file (a script, stylesheet or chunk).
+pub const ADMIN_NOT_FOUND: Key = key!("admin.state.not_found_title");

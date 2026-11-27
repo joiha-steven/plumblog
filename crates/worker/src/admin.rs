@@ -58,6 +58,24 @@ pub async fn serve(req: &Request) -> Result<Response> {
         req.headers().get("accept-language")?.as_deref(),
         &site.lang,
     );
+    // A missing file is a 404, never the shell: after a deploy an open tab may still import an
+    // old chunk, and HTML served under a `.js` URL breaks the editor (nosniff) and would be
+    // cached by the service worker as that chunk.
+    if is_file(&path)
+        && !matches!(
+            path.as_str(),
+            "/admin/manifest.webmanifest" | "/admin/icon.svg"
+        )
+    {
+        let h = Headers::new();
+        h.set("content-type", "text/plain; charset=utf-8")?;
+        h.set("cache-control", "no-store")?;
+        return Ok(
+            Response::ok(text(&lang, keys::ADMIN_NOT_FOUND, &site.title))?
+                .with_status(404)
+                .with_headers(h),
+        );
+    }
     let (body, content_type) = match path.as_str() {
         "/admin/manifest.webmanifest" => (
             manifest(&lang, &site.title),
@@ -76,6 +94,16 @@ pub async fn serve(req: &Request) -> Result<Response> {
     h.set("referrer-policy", "same-origin")?;
     h.set("x-robots-tag", "noindex")?;
     Ok(Response::ok(body)?.with_headers(h))
+}
+
+/// Whether `path` names a file (its last segment has an extension, or it is under
+/// `/admin/chunks/`) rather than a client route.
+fn is_file(path: &str) -> bool {
+    path.starts_with("/admin/chunks/")
+        || path
+            .rsplit('/')
+            .next()
+            .is_some_and(|last| last.contains('.'))
 }
 
 /// Languages the admin speaks: every core locale file.
@@ -270,7 +298,28 @@ fn escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{boot_json, icon, manifest, pick_lang, quote, shell};
+    use super::{boot_json, icon, is_file, manifest, pick_lang, quote, shell};
+
+    #[test]
+    fn files_are_told_apart_from_client_routes() {
+        for f in [
+            "/admin/chunks/editor-OLD.js",
+            "/admin/app.js",
+            "/admin/app.css",
+            "/admin/chunks/x",
+            "/admin/a/b.map",
+        ] {
+            assert!(is_file(f), "{f}");
+        }
+        for r in [
+            "/admin/",
+            "/admin/posts",
+            "/admin/posts/12",
+            "/admin/settings/site",
+        ] {
+            assert!(!is_file(r), "{r}");
+        }
+    }
 
     #[test]
     fn language_comes_from_cookie_then_header_then_site() {

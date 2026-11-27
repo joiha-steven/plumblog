@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Builds the admin (web/admin) into target/admin: tsc type-checks, esbuild bundles, then the
-# size budgets (docs/ARCHITECTURE.md, Budgets) are enforced. The output is never committed;
-# releases ship it like the Worker wasm (issue #21).
-#   scripts/admin-build         the real client, talking to the Worker's API
-#   scripts/admin-build --dev   the mock client (web/admin/src/api/mock.ts), for scripts/admin-dev
+# Builds the admin (web/admin): tsc type-checks, esbuild bundles, then the size budgets
+# (docs/ARCHITECTURE.md, Budgets) are enforced. The output is never committed; releases ship
+# it like the Worker wasm (issue #21).
+#   scripts/admin-build         the real client, talking to the Worker's API, in target/admin
+#   scripts/admin-build --dev   the mock client (web/admin/src/api/mock.ts), in target/admin-dev
+#                               (its own dir, so scripts/check never rebuilds under admin-dev)
+# Besides the files the output has `_headers` (cache rules for Workers static assets, moved to
+# the assets root when served) and the service worker knows this build's files by name.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -22,17 +25,37 @@ bin=tools/node_modules/.bin
 "$bin/tsc" -p web/admin/tsconfig.json || fail "type errors in web/admin/src (above)"
 "$bin/tsc" -p web/admin/tsconfig.sw.json || fail "type errors in web/admin/src/sw.ts (above)"
 
-out=target/admin
-rm -rf "$out"
+if $mock; then out=target/admin-dev; else out=target/admin; fi
+meta="$out.meta.json" # beside the output, not in it: it is not served
+rm -rf "$out" "$meta"
 mkdir -p "$out"
 common=(--bundle --minify --target=es2022 --legal-comments=none --log-level=warning --charset=utf8)
 "$bin/esbuild" web/admin/src/main.ts "${common[@]}" --format=esm --splitting \
   --outdir="$out" --entry-names=app --chunk-names='chunks/[name]-[hash]' --define:MOCK="$mock" \
-  || fail "esbuild: admin script"
-"$bin/esbuild" web/admin/src/sw.ts "${common[@]}" --format=iife --outfile="$out/sw.js" \
-  || fail "esbuild: service worker"
+  --metafile="$meta" || fail "esbuild: admin script"
 "$bin/esbuild" web/admin/src/app.css "${common[@]}" --outfile="$out/app.css" \
   || fail "esbuild: admin stylesheet"
+
+# The service worker precaches exactly this build's files, in a cache named after their hash:
+# a new deploy gets a new cache and the old one (with its old chunks) is deleted.
+files=$(cd "$out" && find . -type f \( -name '*.js' -o -name '*.css' \) | sed 's#^\./#/admin/#' | sort)
+build=$(cd "$out" && find . -type f -print0 | sort -z | xargs -0 cat | shasum -a 256 | cut -c1-12)
+list=$(printf '%s\n' $files | sed 's/.*/"&"/' | paste -sd, -)
+"$bin/esbuild" web/admin/src/sw.ts "${common[@]}" --format=iife --outfile="$out/sw.js" \
+  --define:BUILD="\"$build\"" --define:ASSETS="[$list]" || fail "esbuild: service worker"
+
+# Hashed chunks never change: cache them for a year. Everything else revalidates, so a deploy
+# is seen on the next load.
+cat > "$out/_headers" <<'HEADERS'
+/admin/chunks/*
+  Cache-Control: public, max-age=31536000, immutable
+/admin/app.js
+  Cache-Control: no-cache
+/admin/app.css
+  Cache-Control: no-cache
+/admin/sw.js
+  Cache-Control: no-cache
+HEADERS
 
 gz() { gzip -9 -c "$1" | wc -c | tr -d ' '; }
 over=""
@@ -41,7 +64,26 @@ check_size() { # file budget label
   echo "admin-build: $3 $(basename "$1") gzip = $size bytes (budget $2)"
   [ "$size" -le "$2" ] || over+="$3 $(basename "$1") $size > $2; "
 }
-check_size "$out/app.js" "$SHELL_JS_BUDGET" "shell"
-for f in "$out"/chunks/*.js; do [ -e "$f" ] && check_size "$f" "$CHUNK_JS_BUDGET" "chunk"; done
+# The shell is app.js plus every chunk it imports statically (code splitting moves shared code
+# into chunks that load with it); lazy chunks are what only a dynamic import() reaches.
+shell_files=$(node -e '
+  const m = require(process.argv[1]).outputs, seen = new Set(), todo = [process.argv[2]];
+  while (todo.length) {
+    const f = todo.pop();
+    if (seen.has(f)) continue;
+    seen.add(f);
+    for (const i of m[f].imports) if (i.kind === "import-statement") todo.push(i.path);
+  }
+  console.log([...seen].join("\n"));
+' "$PWD/$meta" "$out/app.js") || fail "reading $meta"
+shell_size=0
+for f in $shell_files; do shell_size=$((shell_size + $(gz "$f"))); done
+echo "admin-build: shell ($(echo $shell_files | wc -w | tr -d ' ') files) gzip = $shell_size bytes (budget $SHELL_JS_BUDGET)"
+[ "$shell_size" -le "$SHELL_JS_BUDGET" ] || over+="shell $shell_size > $SHELL_JS_BUDGET; "
+for f in "$out"/chunks/*.js; do
+  [ -e "$f" ] || continue
+  case " $(echo $shell_files) " in *" $f "*) continue ;; esac
+  check_size "$f" "$CHUNK_JS_BUDGET" "chunk"
+done
 check_size "$out/app.css" "$CSS_BUDGET" "css"
 [ -z "$over" ] || fail "over budget: $over"

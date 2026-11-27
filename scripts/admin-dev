@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The admin with its mock API on the real local Worker, to click through:
-# http://localhost:8790/admin/ (PORT=... to change). Flags for review: ?mock=loading|error|offline,
+# http://localhost:8790/admin/ (PORT=... to change; served from target/worker-dev). Flags for review: ?mock=loading|error|offline,
 # ?role=writer. Contributor-only (needs Node, like scripts/worker-test).
 set -euo pipefail
 cd "$(dirname "$0")/.."

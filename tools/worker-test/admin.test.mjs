@@ -68,6 +68,18 @@ test("the built client, its stylesheet and service worker are static assets", as
     const res = await fetch(worker.url + path);
     assert.equal(res.status, 200, path);
     assert.match(res.headers.get("content-type"), type, path);
+    // Not hashed: revalidated on every load, so a deploy is picked up (_headers from admin-build).
+    assert.equal(res.headers.get("cache-control"), "no-cache", path);
+  }
+});
+
+test("a missing admin file is a 404, never the shell under a script URL", async () => {
+  // An open tab after a deploy still asks for the old chunk; HTML here would break it.
+  for (const path of ["/admin/chunks/editor-OLDHASH.js", "/admin/app.js.map", "/admin/old.css"]) {
+    const res = await fetch(worker.url + path);
+    assert.equal(res.status, 404, path);
+    assert.match(res.headers.get("content-type"), /^text\/plain/, path);
+    assert.equal(res.headers.get("cache-control"), "no-store", path);
   }
 });
 
