@@ -51,6 +51,13 @@ roxmltree = "0.21.2"
 # webpki roots), so no async runtime and no system OpenSSL; far smaller than reqwest. TLS and
 # HTTP/1.1 are not code to own. Default features off: no gzip decoder.
 ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
+# `blog setup` makes WEBHOOK_KEY, the site id and the setup code from the OS random source;
+# already in the lock through ring, so no new code.
+getrandom = "0.2.17"
+# Tests only: the fake Cloudflare D1 (crates/cli/tests/fake_cf) runs the repo's migrations and
+# setup's SQL in real SQLite, so tests assert the rows the Worker reads. Bundled: no system
+# SQLite, and FTS5 is compiled in. Never linked into `blog` or the Worker.
+rusqlite = { version = "0.39", features = ["bundled"] }
 # Internal module crates; allowed edges between them are enforced by scripts/check.
 plumblog-model = { path = "crates/model" }
 plumblog-markdown = { path = "crates/markdown" }

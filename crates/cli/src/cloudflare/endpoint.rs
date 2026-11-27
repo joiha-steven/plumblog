@@ -203,6 +203,9 @@ endpoints! {
     ScriptSubdomainSet => Post "/accounts/{account_id}/workers/scripts/{script_name}/subdomain",
         Some(WorkersScriptsEdit), ApiToken, key!("cli.call.script_subdomain_set"),
         "https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/subdomain/methods/create/";
+    ScriptSubdomainGet => Get "/accounts/{account_id}/workers/scripts/{script_name}/subdomain",
+        Some(WorkersScriptsEdit), ApiToken, key!("cli.call.script_subdomain_get"),
+        "https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/subdomain/methods/get/";
     DomainList => Get "/accounts/{account_id}/workers/domains", Some(WorkersScriptsEdit),
         ApiToken, key!("cli.call.domain_list"),
         "https://developers.cloudflare.com/api/resources/workers/subresources/domains/methods/list/";

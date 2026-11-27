@@ -49,6 +49,20 @@ codes! {
     Internal => "cli.internal",
     ArgsInvalid => "cli.args_invalid",
     GuideUnknown => "cli.guide_unknown",
+    NoTurnstileUnconfirmed => "setup.no_turnstile_unconfirmed",
+    NameInvalid => "setup.name_invalid",
+    DomainInvalid => "setup.domain_invalid",
+    ZoneNotFound => "setup.zone_not_found",
+    DomainTaken => "setup.domain_taken",
+    WorkersDevMissing => "setup.workers_dev_missing",
+    MigrationFailed => "setup.migration_failed",
+    StateUnreadable => "setup.state_unreadable",
+    StateUnwritable => "setup.state_unwritable",
+    StateMismatch => "setup.state_mismatch",
+    OriginChangeUnconfirmed => "setup.origin_change_unconfirmed",
+    MigrationRestorePending => "setup.migration_restore_pending",
+    DatabaseForeign => "setup.database_foreign",
+    TurnstileAmbiguous => "setup.turnstile_ambiguous",
 }
 
 /// One language's `[cli]` text, English behind it.

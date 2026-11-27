@@ -16,6 +16,16 @@ plumblog-render.workspace = true
 ureq.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+plumblog-auth.workspace = true
+plumblog-store.workspace = true
+getrandom.workspace = true
+# Writing site.local.toml needs the serializer, which the Worker's crates do not.
+toml = { workspace = true, features = ["display", "serde"] }
+
+[dev-dependencies]
+rusqlite.workspace = true
+# WEBHOOK_KEY must parse exactly as the Worker reads it.
+plumblog-webhook.workspace = true
 
 [lints]
 workspace = true

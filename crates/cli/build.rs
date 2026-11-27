@@ -1,4 +1,4 @@
-//! Embeds guides/*.md and locales/*.toml into the binary so `blog` works offline, with no
+//! Embeds guides/*.md, locales/*.toml and migrations/*.sql into the binary so `blog` works offline, with no
 //! extra crate.
 use std::{env, fmt::Write, fs, path::PathBuf};
 
@@ -76,6 +76,35 @@ fn main() {
     out.push_str("];\n");
     fs::write(
         PathBuf::from(env::var("OUT_DIR").unwrap()).join("locales.rs"),
+        out,
+    )
+    .unwrap();
+
+    // D1 migrations `(file name, sql)` in file-name order, the order wrangler applies them in;
+    // users get no repo, so `blog setup` carries the schema.
+    let migrations =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../migrations");
+    println!("cargo:rerun-if-changed={}", migrations.display());
+    let mut files: Vec<PathBuf> = fs::read_dir(&migrations)
+        .expect("migrations/ directory is missing")
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "sql"))
+        .collect();
+    files.sort();
+    let mut out = String::from("pub const MIGRATIONS: &[(&str, &str)] = &[\n");
+    for path in files {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let abs = path.canonicalize().unwrap();
+        writeln!(
+            out,
+            "    ({name:?}, include_str!({:?})),",
+            abs.to_str().unwrap()
+        )
+        .unwrap();
+    }
+    out.push_str("];\n");
+    fs::write(
+        PathBuf::from(env::var("OUT_DIR").unwrap()).join("migrations.rs"),
         out,
     )
     .unwrap();

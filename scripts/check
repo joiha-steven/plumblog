@@ -75,6 +75,9 @@ cli      clap                   # argument parsing for the `blog` binary
 cli      ureq                   # blocking HTTPS to the Cloudflare REST API (setup, deploy)
 cli      serde                  # typed Cloudflare API responses
 cli      serde_json             # Cloudflare API bodies are JSON
+cli      getrandom              # WEBHOOK_KEY, site id and setup code randomness
+cli      toml                   # site.local.toml (read and write)
+cli      rusqlite               # tests only: the fake D1 runs real SQLite
 markdown unicode-normalization  # NFC before heading ids (pure Rust, no I/O)
 render   minijinja              # theme templates (pure Rust, no I/O)
 render   toml                   # theme.toml and theme locales (pure Rust, no I/O)
@@ -254,7 +257,8 @@ for f in "${manifests[@]}"; do
       }
       v = line; gsub(/"[^"]*"/, "\"\"", v); gsub(/\x27[^\x27]*\x27/, "\x27\x27", v)
       if (v ~ /^[A-Za-z0-9_-]+\.workspace=true$/) next
-      if (v ~ /^[A-Za-z0-9_-]+=\{.*[{,]workspace=true[,}].*\}$/ || v ~ /^[A-Za-z0-9_-]+=\{workspace=true\}$/) next
+      # workspace=true anywhere in an inline table: first, middle, last or alone.
+      if (v ~ /^[A-Za-z0-9_-]+=\{(.*,)?workspace=true(,.*)?\}$/) next
       print file ":" NR ": " $0
     }
     END { flush() }

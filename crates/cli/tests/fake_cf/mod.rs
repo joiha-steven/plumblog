@@ -2,9 +2,12 @@
 //! HTTP/1.1 (one request per connection), in-memory state, every request recorded.
 //!
 //! Extend it by adding fields to [`State`] and arms to [`route`]; each arm checks the
-//! request shape and returns the Cloudflare envelope.
+//! request shape and returns the Cloudflare envelope. D1 query runs the SQL in a real
+//! in-memory SQLite per database (rusqlite), so tests can read the rows the Worker would.
 
-use serde_json::{Value, json};
+use rusqlite::Connection;
+use rusqlite::types::ValueRef;
+use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -53,6 +56,8 @@ pub enum Failure {
     EchoBody,
     /// 502 with an HTML body holding the bearer value from character `n` on.
     HtmlWithToken(usize),
+    /// Do the request, then close the connection without a reply (a lost reply).
+    DropAfter,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +79,23 @@ impl Recorded {
     }
 }
 
+/// A Worker script.
+#[derive(Clone, Debug, Default)]
+pub struct Script {
+    pub secrets: HashMap<String, String>,
+    pub workers_dev: bool,
+    pub uploads: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct Widget {
+    pub sitekey: String,
+    pub secret: String,
+    pub name: String,
+    pub domains: Vec<String>,
+    pub mode: String,
+}
+
 #[derive(Default)]
 pub struct State {
     /// `(id, name)`; user tokens see them all.
@@ -86,6 +108,24 @@ pub struct State {
     pub requests: Vec<Recorded>,
     /// `(n, failure)`: the n-th request (1-based, counting every request) fails.
     pub failures: Vec<(usize, Failure)>,
+    /// `(pattern, failure)`: the first request whose `METHOD /path` contains `pattern`
+    /// fails, once.
+    pub fail_on: Vec<(String, Failure)>,
+    /// `(id, sqlite)` per D1 database.
+    pub sqlite: HashMap<String, Connection>,
+    /// Bookmarks handed out, in order.
+    pub bookmarks: Vec<String>,
+    /// The account's workers.dev subdomain.
+    pub subdomain: Option<String>,
+    pub scripts: HashMap<String, Script>,
+    /// Zones: `{id, name, account: {id}}`.
+    pub zones: Vec<Value>,
+    /// Worker custom domains: `{id, hostname, service, zone_id}`.
+    pub domains: Vec<Value>,
+    pub widgets: Vec<Widget>,
+    /// `(trigger, sql)`: after the first D1 query whose body contains `trigger`, run `sql`
+    /// in that database, once (another client acting between two of ours).
+    pub after_query: Vec<(String, String)>,
 }
 
 pub struct Fake {
@@ -118,6 +158,28 @@ impl Fake {
 
     pub fn fail(&self, nth: usize, failure: Failure) {
         self.state().failures.push((nth, failure));
+    }
+
+    /// The next request matching `pattern` (`METHOD /path` substring) fails once.
+    pub fn fail_on(&self, pattern: &str, failure: Failure) {
+        self.state().fail_on.push((pattern.to_string(), failure));
+    }
+
+    /// Rows of `sql` in database `id`, as JSON objects.
+    pub fn sql(&self, id: &str, sql: &str) -> Vec<Map<String, Value>> {
+        let st = self.state();
+        let conn = st.sqlite.get(id).expect("no such database");
+        run_rows(conn, sql, &[]).expect("query failed")
+    }
+
+    /// Runs `sql` (several statements allowed) in database `id`.
+    pub fn exec(&self, id: &str, sql: &str) {
+        let st = self.state();
+        st.sqlite
+            .get(id)
+            .expect("no such database")
+            .execute_batch(sql)
+            .unwrap();
     }
 }
 
@@ -172,9 +234,22 @@ fn serve(stream: &TcpStream, state: &Mutex<State>) {
     let mut st = state.lock().unwrap();
     st.requests.push(req.clone());
     let n = st.requests.len();
-    let failure = st.failures.iter().find(|(i, _)| *i == n).map(|(_, f)| *f);
+    let mut failure = st.failures.iter().find(|(i, _)| *i == n).map(|(_, f)| *f);
+    let line = format!("{} {}", req.method, req.path);
+    if failure.is_none()
+        && let Some(i) = st
+            .fail_on
+            .iter()
+            .position(|(p, _)| line.contains(p.as_str()))
+    {
+        failure = Some(st.fail_on.remove(i).1);
+    }
     let (status, body) = match failure {
         Some(Failure::Drop) => return,
+        Some(Failure::DropAfter) => {
+            let _ = route(&mut st, &req);
+            return;
+        }
         Some(Failure::Malformed) => (200, "<html>not json".to_string()),
         Some(Failure::Status(s)) => (s, err(s, 10013, "injected failure").1.to_string()),
         Some(Failure::EchoToken) => {
@@ -280,10 +355,27 @@ fn route(st: &mut State, req: &Recorded) -> (u16, Value) {
         (_, ["accounts", a, ..]) if !can_see(a) => {
             err(403, 9109, "Unauthorized to access requested resource")
         }
+        (_, ["accounts", _, "d1", ..]) => route_d1(st, req, &segs, &need),
+        (_, ["accounts", _, "r2", ..]) => route_r2(st, req, &segs, &need),
+        (_, ["accounts", _, "workers", ..]) => route_workers(st, req, &segs, &need),
+        (_, ["zones", ..]) => route_zones(st, req, &segs, &need),
+        (_, ["accounts", _, "challenges", ..]) => route_turnstile(st, req, &segs, &need),
+        _ => err(404, 7003, "Could not route to this path"),
+    }
+}
+
+/// D1: databases, query (real SQLite), Time Travel bookmarks.
+fn route_d1(
+    st: &mut State,
+    req: &Recorded,
+    segs: &[&str],
+    need: &dyn Fn(&str) -> bool,
+) -> (u16, Value) {
+    match (req.method.as_str(), segs) {
         (_, ["accounts", _, "d1", ..]) if !need("Account | D1 | Edit") => {
             err(403, 10000, "Authentication error")
         }
-        ("GET", ["accounts", _, "d1", "database"]) => ok(&json!(st.d1)),
+        ("GET", ["accounts", _, "d1", "database"]) => paged(&st.d1, &req.query),
         ("POST", ["accounts", _, "d1", "database"]) => {
             if req.header("content-type") != Some("application/json") {
                 return err(400, 1001, "expected application/json");
@@ -292,10 +384,62 @@ fn route(st: &mut State, req: &Recorded) -> (u16, Value) {
             let Some(name) = body.get("name").and_then(Value::as_str) else {
                 return err(400, 1001, "name is required");
             };
-            let db = json!({"uuid": format!("db-{}", st.d1.len() + 1), "name": name});
+            if st.d1.iter().any(|d| d["name"] == name) {
+                return err(400, 7502, "A database with that name already exists");
+            }
+            let id = format!("db-{}", st.d1.len() + 1);
+            let db = json!({"uuid": id, "name": name});
             st.d1.push(db.clone());
+            st.sqlite.insert(id, Connection::open_in_memory().unwrap());
             ok(&db)
         }
+        (
+            "GET",
+            [
+                "accounts",
+                _,
+                "d1",
+                "database",
+                id,
+                "time_travel",
+                "bookmark",
+            ],
+        ) => {
+            if !st.sqlite.contains_key(*id) {
+                return err(404, 7404, "database not found");
+            }
+            let b = format!("bm-{}-{}", id, st.bookmarks.len() + 1);
+            st.bookmarks.push(b.clone());
+            ok(&json!({"bookmark": b}))
+        }
+        ("POST", ["accounts", _, "d1", "database", id, "query"]) => {
+            let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
+            let Some(conn) = st.sqlite.get(*id) else {
+                return err(404, 7404, "database not found");
+            };
+            let reply = d1_query(conn, &body);
+            if let Some(i) = st
+                .after_query
+                .iter()
+                .position(|(t, _)| req.body.contains(t.as_str()))
+            {
+                let (_, sql) = st.after_query.remove(i);
+                st.sqlite[*id].execute_batch(&sql).unwrap();
+            }
+            reply
+        }
+        _ => err(404, 7003, "Could not route to this path"),
+    }
+}
+
+/// R2 buckets, listed by cursor as R2 does.
+fn route_r2(
+    st: &mut State,
+    req: &Recorded,
+    segs: &[&str],
+    need: &dyn Fn(&str) -> bool,
+) -> (u16, Value) {
+    match (req.method.as_str(), segs) {
         (_, ["accounts", _, "r2", ..]) if !need("Account | Workers R2 Storage | Edit") => {
             err(403, 10000, "Authentication error")
         }
@@ -322,11 +466,289 @@ fn route(st: &mut State, req: &Recorded) -> (u16, Value) {
             (
                 200,
                 json!({"success": true, "errors": [], "messages": [], "result": {"buckets": page},
-                       "result_info": {"cursor": cursor, "per_page": per}}),
+                   "result_info": {"cursor": cursor, "per_page": per}}),
             )
+        }
+        ("POST", ["accounts", _, "r2", "buckets"]) => {
+            let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
+            let Some(name) = body.get("name").and_then(Value::as_str) else {
+                return err(400, 10005, "name is required");
+            };
+            if st.r2.iter().any(|b| b == name) {
+                return err(409, 10004, "The bucket you tried to create already exists");
+            }
+            st.r2.push(name.to_string());
+            ok(&json!({"name": name}))
         }
         _ => err(404, 7003, "Could not route to this path"),
     }
+}
+
+/// Worker scripts, secrets, workers.dev and custom domains.
+fn route_workers(
+    st: &mut State,
+    req: &Recorded,
+    segs: &[&str],
+    need: &dyn Fn(&str) -> bool,
+) -> (u16, Value) {
+    match (req.method.as_str(), segs) {
+        (_, ["accounts", _, "workers", ..]) if !need("Account | Workers Scripts | Edit") => {
+            err(403, 10000, "Authentication error")
+        }
+        ("GET", ["accounts", _, "workers", "subdomain"]) => match &st.subdomain {
+            Some(s) => ok(&json!({"subdomain": s})),
+            None => err(
+                404,
+                10007,
+                "This account does not have a workers.dev subdomain",
+            ),
+        },
+        ("PUT", ["accounts", _, "workers", "scripts", name]) => {
+            let ctype = req.header("content-type").unwrap_or("");
+            let Some(boundary) = ctype.strip_prefix("multipart/form-data; boundary=") else {
+                return err(400, 10021, "expected multipart/form-data");
+            };
+            let b = &req.body;
+            let shaped = b.contains(&format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"metadata\""
+            )) && b.contains("\"main_module\":\"worker.js\"")
+                && b.contains("name=\"worker.js\"; filename=\"worker.js\"")
+                && b.contains("Content-Type: application/javascript+module")
+                && b.contains("status: 503")
+                && b.ends_with(&format!("--{boundary}--\r\n"));
+            if !shaped {
+                return err(400, 10021, "bad multipart upload");
+            }
+            let script = st.scripts.entry((*name).to_string()).or_default();
+            script.uploads += 1;
+            ok(&json!({"id": name}))
+        }
+        (_, ["accounts", _, "workers", "scripts", name, ..]) if !st.scripts.contains_key(*name) => {
+            err(404, 10007, "workers.api.error.script_not_found")
+        }
+        ("GET", ["accounts", _, "workers", "scripts", name, "secrets"]) => {
+            let mut names: Vec<&String> = st.scripts[*name].secrets.keys().collect();
+            names.sort();
+            ok(&json!(
+                names
+                    .iter()
+                    .map(|n| json!({"name": n, "type": "secret_text"}))
+                    .collect::<Vec<_>>()
+            ))
+        }
+        ("PUT", ["accounts", _, "workers", "scripts", name, "secrets"]) => {
+            let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
+            let (Some(n), Some(t), Some("secret_text")) = (
+                body["name"].as_str(),
+                body["text"].as_str(),
+                body["type"].as_str(),
+            ) else {
+                return err(400, 10021, "secret needs name, text and type secret_text");
+            };
+            let script = st.scripts.get_mut(*name).unwrap();
+            script.secrets.insert(n.to_string(), t.to_string());
+            ok(&json!({"name": n, "type": "secret_text"}))
+        }
+        ("GET", ["accounts", _, "workers", "scripts", name, "subdomain"]) => {
+            let on = st.scripts[*name].workers_dev;
+            ok(&json!({"enabled": on, "previews_enabled": false}))
+        }
+        ("POST", ["accounts", _, "workers", "scripts", name, "subdomain"]) => {
+            let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
+            let Some(on) = body["enabled"].as_bool() else {
+                return err(400, 10021, "enabled is required");
+            };
+            st.scripts.get_mut(*name).unwrap().workers_dev = on;
+            ok(&json!({"enabled": on}))
+        }
+        // Paged, and any hostname filter ignored: the client must filter itself.
+        ("GET", ["accounts", _, "workers", "domains"]) => paged(&st.domains, &req.query),
+        ("PUT", ["accounts", _, "workers", "domains"]) => {
+            let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
+            let (Some(h), Some(svc), Some(zone)) = (
+                body["hostname"].as_str(),
+                body["service"].as_str(),
+                body["zone_id"].as_str(),
+            ) else {
+                return err(400, 100_101, "hostname, service and zone_id are required");
+            };
+            if !st.zones.iter().any(|z| z["id"] == zone) || !st.scripts.contains_key(svc) {
+                return err(400, 100_102, "unknown zone or service");
+            }
+            st.domains.retain(|d| d["hostname"] != h);
+            let d = json!({"id": format!("dom-{}", st.domains.len() + 1), "hostname": h,
+                       "service": svc, "zone_id": zone, "environment": body["environment"]});
+            st.domains.push(d.clone());
+            ok(&d)
+        }
+        _ => err(404, 7003, "Could not route to this path"),
+    }
+}
+
+/// Zones, filtered by name and account.
+fn route_zones(
+    st: &mut State,
+    req: &Recorded,
+    segs: &[&str],
+    need: &dyn Fn(&str) -> bool,
+) -> (u16, Value) {
+    match (req.method.as_str(), segs) {
+        (_, ["zones", ..]) if !need("Zone | Zone | Read") => {
+            err(403, 9109, "Unauthorized to access requested resource")
+        }
+        ("GET", ["zones"]) => {
+            let name = query(&req.query, "name");
+            let acct = query(&req.query, "account.id");
+            let list: Vec<Value> = st
+                .zones
+                .iter()
+                .filter(|z| name.is_some_and(|n| z["name"] == n))
+                .filter(|z| acct.is_some_and(|a| z["account"]["id"] == a))
+                .cloned()
+                .collect();
+            ok(&json!(list))
+        }
+        _ => err(404, 7003, "Could not route to this path"),
+    }
+}
+
+/// Turnstile widgets; the list has no secrets, GET one has.
+fn route_turnstile(
+    st: &mut State,
+    req: &Recorded,
+    segs: &[&str],
+    need: &dyn Fn(&str) -> bool,
+) -> (u16, Value) {
+    match (req.method.as_str(), segs) {
+        (_, ["accounts", _, "challenges", ..]) if !need("Account | Turnstile | Edit") => {
+            err(403, 10000, "Authentication error")
+        }
+        ("GET", ["accounts", _, "challenges", "widgets"]) => {
+            let list: Vec<Value> = st
+                .widgets
+                .iter()
+                .map(|w| {
+                    json!({"sitekey": w.sitekey, "name": w.name, "domains": w.domains,
+                            "mode": w.mode})
+                })
+                .collect();
+            paged(&list, &req.query)
+        }
+        ("POST", ["accounts", _, "challenges", "widgets"]) => {
+            let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
+            let domains: Vec<String> = body["domains"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|d| d.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (Some(name), Some(mode)) = (body["name"].as_str(), body["mode"].as_str()) else {
+                return err(400, 10001, "name and mode are required");
+            };
+            if domains.is_empty() || domains.len() > 10 {
+                return err(400, 10001, "domains: 1 to 10");
+            }
+            let n = st.widgets.len() + 1;
+            let w = Widget {
+                sitekey: format!("0x4AAAAAAAsitekey{n}"),
+                secret: format!("0x4AAAAAAAsecret{n}SECRETvalue"),
+                name: name.to_string(),
+                domains,
+                mode: mode.to_string(),
+            };
+            let reply = json!({"sitekey": w.sitekey, "secret": w.secret, "name": w.name,
+                           "domains": w.domains, "mode": w.mode});
+            st.widgets.push(w);
+            ok(&reply)
+        }
+        ("GET", ["accounts", _, "challenges", "widgets", key]) => {
+            match st.widgets.iter().find(|w| w.sitekey == *key) {
+                Some(w) => ok(&json!({"sitekey": w.sitekey, "secret": w.secret,
+                                  "name": w.name, "domains": w.domains, "mode": w.mode})),
+                None => err(404, 10404, "widget not found"),
+            }
+        }
+        _ => err(404, 7003, "Could not route to this path"),
+    }
+}
+
+fn to_json(v: ValueRef) -> Value {
+    match v {
+        ValueRef::Null => Value::Null,
+        ValueRef::Integer(i) => json!(i),
+        ValueRef::Real(f) => json!(f),
+        ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
+        ValueRef::Blob(b) => json!(b),
+    }
+}
+
+/// One statement: rows if it returns columns, else the change count.
+fn run_rows(
+    conn: &Connection,
+    sql: &str,
+    params: &[String],
+) -> rusqlite::Result<Vec<Map<String, Value>>> {
+    let mut stmt = conn.prepare(sql)?;
+    let names: Vec<String> = stmt
+        .column_names()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let mut rows = stmt.query(rusqlite::params_from_iter(params.iter()))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let mut m = Map::new();
+        for (i, n) in names.iter().enumerate() {
+            m.insert(n.clone(), to_json(row.get_ref(i)?));
+        }
+        out.push(m);
+    }
+    Ok(out)
+}
+
+fn one(conn: &Connection, sql: &str, params: &[String]) -> rusqlite::Result<Value> {
+    let before = conn.total_changes();
+    let rows = match run_rows(conn, sql, params) {
+        // rusqlite prepares only one statement (and may fail checking the rest, which can
+        // name tables made earlier in the same text): `{sql}` without params runs all of
+        // them in order, like D1, and not atomically.
+        Err(_) if params.is_empty() => {
+            conn.execute_batch(sql)?;
+            Vec::new()
+        }
+        other => other?,
+    };
+    let changes = conn.total_changes() - before;
+    Ok(json!({"results": rows, "success": true, "meta": {"changes": changes}}))
+}
+
+/// `{sql, params?}` or `{batch: [{sql, params?}]}`. D1 params are strings.
+fn d1_query(conn: &Connection, body: &Value) -> (u16, Value) {
+    let stmts: Vec<&Value> = match body.get("batch").and_then(Value::as_array) {
+        Some(b) => b.iter().collect(),
+        None => vec![body],
+    };
+    let mut results = Vec::new();
+    for s in stmts {
+        let Some(sql) = s.get("sql").and_then(Value::as_str) else {
+            return err(400, 7400, "sql is required");
+        };
+        let params: Option<Vec<String>> = match s.get("params") {
+            None => Some(Vec::new()),
+            Some(Value::Array(a)) => a.iter().map(|p| p.as_str().map(str::to_string)).collect(),
+            Some(_) => None,
+        };
+        let Some(params) = params else {
+            return err(400, 7400, "params must be strings");
+        };
+        match one(conn, sql, &params) {
+            Ok(r) => results.push(r),
+            Err(e) => return err(400, 7500, &format!("{e}: SQLITE_ERROR")),
+        }
+    }
+    ok(&json!(results))
 }
 
 fn query<'a>(q: &'a str, name: &str) -> Option<&'a str> {

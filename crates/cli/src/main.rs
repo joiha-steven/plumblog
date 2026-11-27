@@ -2,6 +2,7 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use plumblog_cli::cloudflare::{Client, Credentials, TokenError, TokenKind, endpoint, token};
 use plumblog_cli::help;
 use plumblog_cli::text::{Code, Text, pick_lang};
+use plumblog_cli::{migrations, setup};
 use plumblog_i18n::{Key, key};
 use std::{fmt::Write, path::Path, process::ExitCode};
 
@@ -51,8 +52,20 @@ enum Command {
         topic: Option<String>,
     },
     Setup {
-        #[arg(long, required = true)]
+        #[arg(long, conflicts_with_all = ["name", "domain", "no_turnstile", "change_origin", "clear_failed_migration"])]
         check_token: bool,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        domain: Option<String>,
+        #[arg(long)]
+        no_turnstile: bool,
+        #[arg(long, requires = "no_turnstile")]
+        yes_i_understand: bool,
+        #[arg(long)]
+        change_origin: bool,
+        #[arg(long)]
+        clear_failed_migration: bool,
     },
 }
 
@@ -83,6 +96,26 @@ fn command(text: &Text) -> clap::Command {
             c.about(t(key!("cli.setup.about")))
                 .mut_arg("check_token", |a| {
                     a.help(t(key!("cli.setup.check_token_help")))
+                })
+                .mut_arg("name", |a| {
+                    a.help(t(key!("cli.setup.name_help")))
+                        .value_name(leak(t(key!("cli.setup.name_value"))))
+                })
+                .mut_arg("domain", |a| {
+                    a.help(t(key!("cli.setup.domain_help")))
+                        .value_name(leak(t(key!("cli.setup.domain_value"))))
+                })
+                .mut_arg("no_turnstile", |a| {
+                    a.help(t(key!("cli.setup.no_turnstile_help")))
+                })
+                .mut_arg("yes_i_understand", |a| {
+                    a.help(t(key!("cli.setup.yes_help")))
+                })
+                .mut_arg("change_origin", |a| {
+                    a.help(t(key!("cli.setup.change_origin_help")))
+                })
+                .mut_arg("clear_failed_migration", |a| {
+                    a.help(t(key!("cli.setup.clear_failed_migration_help")))
                 })
         })
 }
@@ -163,6 +196,35 @@ fn check_token(text: &Text) -> Result<String, (Code, String)> {
     Ok(format!("{ok}\n{account}\n"))
 }
 
+/// `blog setup`: progress goes to stdout as each step finishes, so a failure shows what
+/// was already done.
+fn setup_site(text: &Text, opts: &setup::Options) -> Result<String, (Code, String)> {
+    let fail = |f: setup::Failure| (f.code, f.message);
+    setup::check_options(opts, text).map_err(fail)?;
+    let creds = Credentials::load(Path::new(".")).map_err(|e| (e.code(), e.message(text)))?;
+    let mut client = Client::from_env(creds.token).map_err(|e| (e.code(), e.message(text)))?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let migrations = migrations::bundled();
+    let cx = setup::Context {
+        dir: Path::new("."),
+        migrations: &migrations,
+        now_ms,
+        text,
+    };
+    let mut out = std::io::stdout().lock();
+    setup::run(
+        &mut client,
+        creds.account_id.as_deref(),
+        opts,
+        &cx,
+        &mut out,
+    )
+    .map_err(fail)?;
+    Ok(String::new())
+}
+
 /// Parses `args`; a clap error becomes our own line (code + sentence + the argument).
 fn parse(text: &Text, args: &[String]) -> Result<Cli, (Code, String)> {
     command(text)
@@ -182,7 +244,7 @@ enum Outcome {
 fn run(text: &Text, args: &[String]) -> Outcome {
     let has = |flags: &[&str]| args.iter().skip(1).any(|a| flags.contains(&a.as_str()));
     let cmd = command(text);
-    // Before parsing: `blog setup --help` must show help, not "missing --check-token".
+    // Before parsing: `--help` must show help even next to an incomplete command line.
     if has(&["-h", "--help"]) {
         return Outcome::Out(help::render(&cmd, &help::target(&cmd, args), text));
     }
@@ -199,7 +261,27 @@ fn run(text: &Text, args: &[String]) -> Outcome {
     };
     let result = match cli.command {
         Some(Command::Guide { topic }) => guide_output(text, topic.as_deref()),
-        Some(Command::Setup { check_token: _ }) => check_token(text),
+        Some(Command::Setup {
+            check_token: true, ..
+        }) => check_token(text),
+        Some(Command::Setup {
+            name,
+            domain,
+            no_turnstile,
+            yes_i_understand,
+            change_origin,
+            clear_failed_migration,
+            ..
+        }) => setup_site(
+            text,
+            &setup::Options {
+                name,
+                domain,
+                turnstile: setup::Turnstile::from_flags(no_turnstile, yes_i_understand),
+                change_origin,
+                clear_failed_migration,
+            },
+        ),
         None => return Outcome::Help(help::render(&cmd, &[], text)),
     };
     match result {
@@ -456,9 +538,9 @@ mod tests {
                     "--lang",
                 ),
                 (
-                    &["blog", "setup"][..],
+                    &["blog", "setup", "--yes-i-understand"][..],
                     key!("cli.args.missing_required"),
-                    "--check-token",
+                    "--no-turnstile",
                 ),
             ] {
                 let Outcome::Fail(code, msg) = run(&text, &argv(args)) else {
@@ -509,7 +591,9 @@ mod tests {
                 panic!("setup -h");
             };
             assert!(
-                h.contains("--check-token") && h.contains(&text.t(key!("cli.setup.about"), &[]))
+                h.contains("--check-token")
+                    && h.contains("--no-turnstile")
+                    && h.contains(&text.t(key!("cli.setup.about"), &[]))
             );
             assert!(matches!(run(&text, &argv(&["blog"])), Outcome::Help(_)));
         }
