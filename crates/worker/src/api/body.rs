@@ -6,8 +6,8 @@ use std::fmt::Write as _;
 use plumblog_auth::json::{self, Json};
 use plumblog_model::{Error, ErrorCode, Result};
 
-/// Largest accepted request body; auth bodies are a few hundred bytes.
-pub const MAX_BODY: usize = 8 * 1024;
+/// Largest accepted request body outside post routes (the route table's default).
+pub const MAX_BODY: usize = plumblog_model::api::MAX_BODY;
 
 /// The fields of a request body. Unknown keys are refused, so a client typo fails loudly
 /// instead of being silently ignored.
@@ -93,6 +93,7 @@ pub fn quote(s: &str) -> String {
 pub enum Out {
     Str(String),
     Int(i64),
+    Bool(bool),
     Null,
     /// Already-encoded JSON (a nested object from [`object`]).
     Raw(String),
@@ -107,6 +108,7 @@ pub fn object(fields: &[(&str, Out)]) -> String {
             let v = match v {
                 Out::Str(s) => quote(s),
                 Out::Int(n) => n.to_string(),
+                Out::Bool(b) => b.to_string(),
                 Out::Null => "null".to_owned(),
                 Out::Raw(r) => r.clone(),
             };

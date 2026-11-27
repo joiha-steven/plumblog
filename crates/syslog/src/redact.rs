@@ -516,6 +516,8 @@ fn looks_secret(v: &str, entropy: bool) -> bool {
         return true; // JWT
     }
     if [
+        // plumblog's own API tokens (crates/auth api_token::PREFIX).
+        "plb_",
         "sk-",
         "sk_",
         "rk_",
@@ -708,6 +710,7 @@ mod tests {
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig",
             "sk-live-123",
             "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "plb_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
             "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8",
             "Zm9vYmFy/YmF6cXV4+cXV1eDEyMzQ1Njc4OTA=",
             "dGhpc0lzQVRva2VuMTIz",

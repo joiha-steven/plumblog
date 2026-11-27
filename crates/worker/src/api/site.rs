@@ -25,7 +25,7 @@ const LOCAL_HOSTS: &[&str] = &["localhost", "127.0.0.1", "[::1]"];
 /// A stored origin, strictly: `https://host[:port]` (or `http` for a local host), lowercase,
 /// nothing after it but an optional `/`. The text must already be in canonical form, so what
 /// is stored is exactly what browsers report as `origin`.
-fn parse(text: &str) -> std::result::Result<Site, String> {
+pub(super) fn parse(text: &str) -> std::result::Result<Site, String> {
     let url = worker::Url::parse(text).map_err(|e| e.to_string())?;
     let host = url.host_str().unwrap_or_default().to_owned();
     match url.scheme() {

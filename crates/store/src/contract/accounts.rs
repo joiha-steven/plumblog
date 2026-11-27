@@ -1,6 +1,6 @@
 //! Users, sessions, passkeys, API tokens and invites.
 
-use plumblog_model::{ErrorCode, Role, UserId};
+use plumblog_model::{ErrorCode, Role, TokenScope, UserId};
 use plumblog_syslog::EventKind;
 
 use super::kit::{
@@ -309,7 +309,7 @@ fn token(user: UserId, hash: &str, expires_at: Option<i64>) -> NewToken {
         user_id: user,
         name: "ci".into(),
         token_hash: hash.into(),
-        scope: Role::Writer,
+        scope: TokenScope::Writer,
         created_at: T0,
         expires_at,
     }
@@ -590,7 +590,7 @@ pub async fn tokens<S: Store>(db: &S) -> Check {
     eq!(
         "token before expiry",
         before.map(|t| t.scope),
-        Some(Role::Writer),
+        Some(TokenScope::Writer),
     )?;
     eq!(
         "token at exactly expires_at",
@@ -620,6 +620,30 @@ pub async fn tokens<S: Store>(db: &S) -> Check {
         "revoke_token missing",
         db.revoke_token(t1.max(t2) + 1000, 1).await,
         ErrorCode::NotFound,
+    )
+}
+
+/// Every scope (read included, allowed by migration 0005) is stored and read back as
+/// itself, through create, find and list; the user's role does not change the stored scope.
+pub async fn token_scopes_round_trip<S: Store>(db: &S) -> Check {
+    let w = user(db, "wanda").await?;
+    let mut ids = Vec::new();
+    for scope in TokenScope::ALL {
+        let hash = format!("scope-{}", scope.as_str());
+        let mut t = token(w, &hash, None);
+        t.scope = *scope;
+        ids.push(ok("create_token", db.create_token(t).await)?);
+        let found = ok("find_token", db.find_token(&hash, T0).await)?;
+        eq!("find_token scope", found.map(|t| t.scope), Some(*scope))?;
+    }
+    let list = ok("list_tokens", db.list_tokens(w).await)?;
+    eq!(
+        "list_tokens scopes",
+        list.iter().map(|t| (t.id, t.scope)).collect::<Vec<_>>(),
+        ids.iter()
+            .copied()
+            .zip(TokenScope::ALL.iter().copied())
+            .collect::<Vec<_>>(),
     )
 }
 

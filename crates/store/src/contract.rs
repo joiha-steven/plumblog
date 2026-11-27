@@ -56,6 +56,7 @@ cases! {
     accounts::passkey_sign_count,
     accounts::delete_own_passkey,
     accounts::tokens,
+    accounts::token_scopes_round_trip,
     accounts::invites,
     accounts::accept_invite_conflict_is_atomic,
     signin::login_failures_count_and_restart,
