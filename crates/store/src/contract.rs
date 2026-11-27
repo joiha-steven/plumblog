@@ -9,6 +9,7 @@ mod kit;
 mod library;
 mod listing;
 mod posts;
+mod signin;
 mod site;
 mod user_writes;
 
@@ -53,6 +54,13 @@ cases! {
     accounts::tokens,
     accounts::invites,
     accounts::accept_invite_conflict_is_atomic,
+    signin::login_failures_count_and_restart,
+    signin::login_failures_multi_key_read,
+    signin::challenges_are_single_use,
+    signin::challenges_expire,
+    signin::challenges_cascade_on_user_delete,
+    signin::setup_refuses_bad_codes,
+    signin::setup_creates_first_owner_once,
     library::media_round_trip,
     library::media_paging,
     library::media_usage_tracks_saves,

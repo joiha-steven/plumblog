@@ -1,0 +1,92 @@
+//! Sign-in protection (`login_failures`, `auth_challenges`) and first-owner setup.
+//!
+//! The store only ever sees hashes: the caller hashes logins, IPs, challenges and setup
+//! codes before calling, so a database dump reveals none of them.
+
+use plumblog_model::{Result, UserId, stable_codes};
+
+use crate::NewUser;
+
+stable_codes! {
+    /// Stored in `auth_challenges.purpose`.
+    pub enum ChallengePurpose {
+        Register => "register",
+        Login => "login",
+    }
+}
+
+/// Most keys one [`LoginLimitStore::failures`] call may read (one attempt checks a login and
+/// an IP; the cap keeps the query within D1's parameter limit).
+pub const MAX_FAILURE_KEYS: usize = 16;
+
+/// Settings key holding the setup code hash, as a JSON string.
+pub const SETUP_CODE_HASH_KEY: &str = "setup_code_hash";
+/// Settings key holding when the setup code expires (ms), as a JSON integer.
+pub const SETUP_CODE_EXPIRES_KEY: &str = "setup_code_expires_at";
+
+/// `value_json` of [`SETUP_CODE_HASH_KEY`] for `code_hash`. Both stores compare this exact
+/// text, so a hash matches only itself.
+#[must_use]
+pub fn setup_hash_json(code_hash: &str) -> String {
+    format!("\"{code_hash}\"")
+}
+
+// Workers are single-threaded, so futures need not be `Send` (see plumblog_auth::Crypto).
+#[allow(async_fn_in_trait)]
+pub trait LoginLimitStore {
+    /// Counts one failed sign-in for `key_hash`, in one atomic upsert, and returns
+    /// `(count, window_start)` after it. A window covers `[window_start, window_start +
+    /// window_ms)`: a failure at or after its end restarts it at count 1 with
+    /// `window_start = now`; otherwise the count goes up by one.
+    async fn record_failure(&self, key_hash: &str, now: i64, window_ms: i64) -> Result<(i64, i64)>;
+    /// `(count, window_start)` per key, in the order given, in one query. A missing key or
+    /// one whose window ended (`window_start + window_ms <= now`) reads as `(0, 0)`.
+    /// `InvalidInput` for more than [`MAX_FAILURE_KEYS`] keys. Never writes.
+    async fn failures(
+        &self,
+        key_hashes: &[&str],
+        now: i64,
+        window_ms: i64,
+    ) -> Result<Vec<(i64, i64)>>;
+    /// Forgets `key_hash` (after a successful sign-in). Absent is Ok.
+    async fn clear_failures(&self, key_hash: &str) -> Result<()>;
+}
+
+#[allow(async_fn_in_trait)]
+pub trait ChallengeStore {
+    /// `Conflict` if the hash exists; `InvalidInput` if `user` does not exist. A user's
+    /// challenges go when the user is deleted.
+    async fn put_challenge(
+        &self,
+        challenge_hash: &str,
+        purpose: ChallengePurpose,
+        user: Option<UserId>,
+        expires_at: i64,
+    ) -> Result<()>;
+    /// Single use: atomically deletes the challenge with this hash and purpose and returns
+    /// `Some(user)` if it was still valid (`expires_at > now`). An expired one is deleted too
+    /// and gives `None`; one with another purpose is left alone and gives `None`; a second
+    /// take of the same hash gives `None`.
+    async fn take_challenge(
+        &self,
+        challenge_hash: &str,
+        purpose: ChallengePurpose,
+        now: i64,
+    ) -> Result<Option<Option<UserId>>>;
+    /// Deletes challenges with `expires_at <= now`; returns how many. Lazy cleanup: callers
+    /// may run it before each put.
+    async fn delete_expired_challenges(&self, now: i64) -> Result<u64>;
+}
+
+#[allow(async_fn_in_trait)]
+pub trait SetupStore {
+    /// Writes [`SETUP_CODE_HASH_KEY`] and [`SETUP_CODE_EXPIRES_KEY`] together, replacing any
+    /// earlier code. No version bump (readers never see them).
+    async fn put_setup_code(&self, code_hash: &str, expires_at: i64, now: i64) -> Result<()>;
+    /// Creates the first user, always as owner (`user.role` is ignored), and deletes both
+    /// setup keys, in one atomic write, only if the stored hash equals `code_hash` exactly,
+    /// the code has not expired (`expires_at > now`) and no user exists. Otherwise
+    /// `SetupInvalid` and nothing changes. Two setups racing: at most one succeeds.
+    /// Comparing in constant time is the caller's job. No version bump.
+    async fn create_first_owner(&self, code_hash: &str, user: NewUser, now: i64) -> Result<UserId>;
+}

@@ -181,6 +181,7 @@ impl UserStore for MemoryStore {
             s.passkeys.retain(|_, x| x.user_id != id);
             s.tokens.retain(|_, x| x.user_id != id);
             s.invites.retain(|_, x| x.created_by != id);
+            s.challenges.retain(|_, x| x.1 != Some(id));
             // ON DELETE SET NULL
             for i in s.invites.values_mut().filter(|i| i.used_by == Some(id)) {
                 i.used_by = None;

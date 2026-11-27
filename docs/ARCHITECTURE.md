@@ -100,6 +100,11 @@ Users do not need Rust: releases ship the built Worker and `blog` binaries for m
 - Recovery: `blog admin reset` (whoever holds the Cloudflare token owns the blog). No email recovery.
 - Writers join through a one-time invite link the owner copies from the admin.
 - Login rate limited; Turnstile after repeated failures. Audit log of sign-ins and privileged actions.
+- Passwords are stretched in the browser (PBKDF2-SHA256, 600 000 iterations, salt `plumblog:<site id>:<lowercase login>`, so there is no salt lookup to enumerate users); the server stores PBKDF2-SHA256 of that value with a per-user salt and 1 000 iterations, inside the 10 ms budget. Changing a login needs the password, because the salt changes.
+- Rate limit: failures per hashed login and hashed IP (IPv6 /64) in a 15-minute window, one D1 write per failed attempt only; 5 failures ask for Turnstile (or lock if Turnstile is not set up), 20 lock for 15 minutes. Unknown logins cost and answer the same as wrong passwords. Old rows are reused lazily, no cron.
+- Sessions: random 32-byte token, only its hash stored; cookie `__Host-plumblog_session` (HttpOnly, Secure, SameSite=Strict), 30 days, renewed only on API requests when less than half remains. The id rotates on sign-in and on password or role change; a password change or disable ends the user's other sessions. Every non-GET API request must carry the site's `Origin`.
+- Passkeys: attestation `none`, ES256, RS256 and Ed25519 verified with WebCrypto; a small CBOR reader of our own; single-use challenges that expire in 5 minutes; a sign counter that does not increase refuses the sign-in.
+- The first owner is created with the setup code (hash and 24 h expiry in settings), atomically, only while no user exists. API tokens (Bearer) plug into the same permission middleware later. Logs never hold passwords, stretched values, codes, challenges, tokens or IPs.
 
 ## Content
 
@@ -307,3 +312,4 @@ Work is tracked as GitHub Issues grouped in one milestone per phase; this list o
 - 2026-11-27 Worker integration tests: Node tools pinned in `tools/` (keeps repo root Rust-only), real wasm via pinned worker-build under `wrangler dev` with a dev-only `tools/wrangler.dev.toml`; run by `scripts/worker-test`, part of `scripts/check`.
 - 2026-11-27 Markdown: raw HTML dropped (inline text kept), GitHub alert callouts, title as figure caption, MathML at save time via pulldown-latex.
 - 2026-11-27 Storage: D1 schema v1, store traits with in-memory and D1 implementations checked by one contract suite; atomic batches; FTS5 search with app-side d-stroke folding; keyset paging.
+- 2026-11-27 Auth: browser-stretched passwords, hashed-key D1 rate limit with Turnstile step, rotating SameSite=Strict sessions with Origin check, passkeys (none attestation, ES256/RS256/Ed25519, own CBOR reader), setup code in settings.
