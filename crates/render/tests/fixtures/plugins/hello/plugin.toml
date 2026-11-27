@@ -1,0 +1,25 @@
+# Test fixture: the smallest plugin that uses every part of the format (docs/ARCHITECTURE.md,
+# Plugins and options). Not bundled; crates/render/tests/extensions.rs loads it.
+name = "hello"
+version = "0.1.0"
+slots = ["head", "footer"]
+css = ["assets/hello.css"]
+js = ["assets/hello.js"]
+
+[groups.main]
+label = "options.group_main"
+icon = "sparkles"
+
+[options.greeting]
+type = "short_text"
+group = "main"
+label = "options.greeting"
+help = "options.greeting_help"
+default = "Hello"
+max_len = 40
+
+[options.cover]
+type = "image"
+group = "main"
+label = "options.cover"
+default = ""

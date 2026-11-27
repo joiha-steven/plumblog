@@ -16,7 +16,7 @@ use plumblog_auth::base64url;
 use plumblog_model::UserId;
 use plumblog_model::{Error, ErrorCode, RequestId, Result};
 use plumblog_store::LogStore;
-use plumblog_syslog::{Event, EventKind};
+use plumblog_syslog::{Event, EventKind, Scope};
 use worker::{Env, Method, Request, Response};
 
 use crate::d1::D1Store;
@@ -40,17 +40,16 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// An event of this request, by `actor`. Built through [`Scope`] so the request id is
+    /// always set; subject and fields are redacted by the event builder.
+    pub fn event(&self, kind: EventKind, actor: Option<UserId>) -> Event {
+        Scope::new(self.request_id.clone(), actor).event(kind, u64::try_from(self.now).unwrap_or(0))
+    }
+
     /// Appends one system log entry. A failing log never fails the request; it goes to the
     /// Worker log instead.
-    pub async fn syslog(&self, kind: EventKind, actor: Option<UserId>, detail: &str) {
-        let event = Event {
-            at_ms: u64::try_from(self.now).unwrap_or(0),
-            request_id: self.request_id.clone(),
-            kind,
-            actor,
-            error: None,
-            detail: detail.to_owned(),
-        };
+    pub async fn syslog(&self, event: Event) {
+        let kind = event.kind();
         if let Err(e) = self.store.append(event).await {
             worker::console_error!(
                 "[{}] syslog append {} failed: {e}",

@@ -1,0 +1,8 @@
+[hello]
+line = "{name} tu plugin"
+
+[options]
+group_main = "Chinh"
+greeting = "Loi chao"
+greeting_help = "Hien o chan trang."
+cover = "Anh bia"

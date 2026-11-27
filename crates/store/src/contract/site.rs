@@ -498,7 +498,7 @@ pub async fn log_query_and_cursor<S: Store>(db: &S) -> Check {
     ] {
         let mut e = event(t, kind, actor)?;
         if kind == EventKind::Deploy {
-            e.error = Some(ErrorCode::Storage);
+            e = e.error(ErrorCode::Storage);
         }
         let id = ok("append", db.append(e.clone()).await)?;
         rows.push(((t, id), e));
@@ -520,8 +520,12 @@ pub async fn log_query_and_cursor<S: Store>(db: &S) -> Check {
         pick(&|_| true),
     )?;
 
-    let kind_of = |id: i64| rows.iter().find(|r| r.0.1 == id).map(|r| r.1.kind);
-    let actor_of = |id: i64| rows.iter().find(|r| r.0.1 == id).and_then(|r| r.1.actor);
+    let kind_of = |id: i64| rows.iter().find(|r| r.0.1 == id).map(|r| r.1.kind());
+    let actor_of = |id: i64| {
+        rows.iter()
+            .find(|r| r.0.1 == id)
+            .and_then(|r| r.1.actor_id())
+    };
     let mut q = log_query();
     q.kind = Some(EventKind::SignIn);
     eq!(
@@ -551,7 +555,7 @@ pub async fn log_query_and_cursor<S: Store>(db: &S) -> Check {
     for _ in 0..10 {
         let page = ok("query_log", db.query_log(q).await)?;
         let Some(last) = page.last() else { break };
-        q.before = Some((last.event.at_ms, last.id));
+        q.before = Some((last.event.at_ms(), last.id));
         paged.extend(page.iter().map(|e| e.id));
     }
     eq!("cursor pages", paged, pick(&|_| true))?;
@@ -571,14 +575,27 @@ pub async fn log_prune<S: Store>(db: &S) -> Check {
             )?,
         ));
     }
+    // Bounded: one row per call, oldest first; the next call continues.
     eq!(
-        "prune by age (at_ms < 30)",
-        ok("prune_log", db.prune_log(30, 100).await)?,
-        2,
+        "limit 1 deletes one",
+        ok("prune_log", db.prune_log(30, 100, 1).await)?,
+        1,
+    )?;
+    let after_one = log_ids(db, log_query()).await?;
+    eq!(
+        "the oldest went first",
+        after_one.contains(&ids[0].1),
+        false
+    )?;
+    eq!("the next stays", after_one.contains(&ids[1].1), true)?;
+    eq!(
+        "prune by age (at_ms < 30) continues",
+        ok("prune_log", db.prune_log(30, 100, 100).await)?,
+        1,
     )?;
     eq!(
         "prune by count keeps the newest 2",
-        ok("prune_log", db.prune_log(0, 2).await)?,
+        ok("prune_log", db.prune_log(0, 2, 100).await)?,
         2,
     )?;
     let newest = desc(&ids);
@@ -589,14 +606,144 @@ pub async fn log_prune<S: Store>(db: &S) -> Check {
     )?;
     eq!(
         "nothing to prune",
-        ok("prune_log", db.prune_log(0, 2).await)?,
+        ok("prune_log", db.prune_log(0, 2, 100).await)?,
         0,
     )?;
     eq!(
         "keep 0 empties",
-        ok("prune_log", db.prune_log(0, 0).await)?,
+        ok("prune_log", db.prune_log(0, 0, 100).await)?,
         2,
     )
+}
+
+/// Subject and fields survive storage byte for byte (newlines, tabs, backslashes), and what
+/// redaction removed before the write is still gone after the read.
+pub async fn log_detail_redacted<S: Store>(db: &S) -> Check {
+    let r = plumblog_syslog::REDACTED;
+    let e = event(1, EventKind::SettingsChanged, None)?
+        .subject("line1\nline2\ttab \\n")
+        .field("from", "a\\b")
+        .field("setupCode", "K7QX-29PL")
+        .field("x-forwarded-for", "203.0.113.9, 198.51.100.7")
+        .field(
+            "note",
+            "reach me at reader@example.com from 203.0.113.9:443",
+        )
+        .field("body", r#"{"password":"hunter2","lang":"vi"}"#)
+        .field("url", "https://example.com/cb?token=abc123&page=2")
+        .field("to", "");
+    let id = ok("append", db.append(e.clone()).await)?;
+    let got = ok("query_log", db.query_log(log_query()).await)?;
+    let stored = got.iter().find(|x| x.id == id).ok_or("entry missing")?;
+    eq!("detail round trip", &stored.event, &e)?;
+    let values: Vec<String> = stored.event.fields().iter().map(|f| f.1.clone()).collect();
+    eq!(
+        "secrets stay redacted",
+        values,
+        vec![
+            "a\\b".to_owned(),
+            r.to_owned(),
+            r.to_owned(),
+            format!("reach me at {r} from {r}:443"),
+            format!(r#"{{"password":"{r}","lang":"vi"}}"#),
+            format!("https://example.com/cb?token={r}&page=2"),
+            String::new(),
+        ],
+    )
+}
+
+/// The daily job applies both caps and leaves one `job.run` entry saying what it did.
+pub async fn log_retention_job<S: Store>(db: &S) -> Check {
+    const DAY: u64 = 24 * 60 * 60 * 1000;
+    let now = 100 * DAY;
+    // Two rows older than 30 days, four within; the cap of 3 then drops the oldest recent one.
+    let mut recent = Vec::new();
+    for t in [10 * DAY, 60 * DAY, 80 * DAY, 90 * DAY, 95 * DAY, 99 * DAY] {
+        let id = ok(
+            "append",
+            db.append(event(t, EventKind::Deploy, None)?).await,
+        )?;
+        if t >= 90 * DAY {
+            recent.push((t, id));
+        }
+    }
+    let retention = plumblog_syslog::Retention {
+        max_age_days: 30,
+        max_rows: 3,
+        per_run: 100,
+    };
+    let scope = plumblog_syslog::Scope::new(
+        plumblog_model::RequestId::parse("job-1").ok_or("request id rejected")?,
+        None,
+    );
+    eq!(
+        "deleted by age and by count",
+        ok(
+            "retention_job",
+            crate::retention_job(db, &scope, retention, now, |_| ()).await,
+        )?,
+        3,
+    )?;
+    let log = ok("query_log", db.query_log(log_query()).await)?;
+    let job = log.first().ok_or("job event missing")?;
+    eq!("job event kind", job.event.kind(), EventKind::ScheduledJob)?;
+    eq!(
+        "job event subject",
+        job.event.subject_text(),
+        crate::RETENTION_JOB
+    )?;
+    eq!(
+        "job event request id",
+        job.event.request_id().as_str(),
+        "job-1"
+    )?;
+    eq!(
+        "job event fields",
+        job.event.fields(),
+        &[("deleted".to_owned(), "3".to_owned())][..],
+    )?;
+    eq!(
+        "rows kept: the newest 3, then the job event",
+        log.iter().skip(1).map(|e| e.id).collect::<Vec<_>>(),
+        desc(&recent).iter().map(|x| x.1).collect::<Vec<_>>(),
+    )
+}
+
+/// A failure to record the job's own entry never undoes or stops the prune: the rows are
+/// gone, the job succeeds, and the failure is reported once with the job's request id.
+pub async fn log_retention_job_record_failure<S: Store>(db: &S) -> Check {
+    ok(
+        "append",
+        db.append(event(1, EventKind::Deploy, None)?).await,
+    )?;
+    let ghost = plumblog_model::UserId(999_999);
+    let scope = plumblog_syslog::Scope::new(
+        plumblog_model::RequestId::parse("job-2").ok_or("request id rejected")?,
+        Some(ghost),
+    );
+    let retention = plumblog_syslog::Retention {
+        max_age_days: 1,
+        ..plumblog_syslog::Retention::default()
+    };
+    let mut reports = Vec::new();
+    eq!(
+        "the job still succeeds",
+        ok(
+            "retention_job",
+            crate::retention_job(db, &scope, retention, 10 * 24 * 60 * 60 * 1000, |m| {
+                reports.push(m.to_owned());
+            })
+            .await,
+        )?,
+        1,
+    )?;
+    eq!("one report", reports.len(), 1)?;
+    eq!(
+        "report names the request",
+        reports[0].starts_with("[req=job-2] syslog.record_failed kind=job.run"),
+        true,
+    )?;
+    eq!("pruned anyway", log_ids(db, log_query()).await?, Vec::new())
 }
 
 pub async fn site_starts_at_version_1<S: Store>(db: &S) -> Check {

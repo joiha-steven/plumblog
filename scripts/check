@@ -69,6 +69,7 @@ markdown unicode-normalization  # NFC before heading ids (pure Rust, no I/O)
 render   minijinja              # theme templates (pure Rust, no I/O)
 render   toml                   # theme.toml and theme locales (pure Rust, no I/O)
 render   serde                  # typed theme.toml and template data
+render   serde_json             # stored option values are JSON
 markdown pulldown-cmark         # CommonMark + GFM parser
 markdown pulldown-latex         # LaTeX to MathML at save time
 i18n     toml                   # locale files are TOML

@@ -11,6 +11,10 @@ compatibility_date = "2026-11-01"
 directory = "../target/worker-dev/assets"
 
 # Binding names are provisional until the store adapters land; keep them in sync with crates/worker.
+# Daily system log retention (crates/worker jobs). Tests fire it through /__scheduled.
+[triggers]
+crons = ["17 3 * * *"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "plumblog-dev"

@@ -276,7 +276,8 @@ pub async fn failed(ctx: &Ctx, attempt: &Attempt, actor: Option<UserId>, how: &s
         locked = turnstile_secret(ctx).await?.is_none();
     }
     if locked {
-        ctx.syslog(EventKind::SignInLocked, actor, how).await;
+        ctx.syslog(ctx.event(EventKind::SignInLocked, actor).subject(how))
+            .await;
     }
     Ok(())
 }

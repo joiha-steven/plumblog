@@ -7,11 +7,14 @@ mod data;
 pub mod feeds;
 mod json;
 mod keys;
+pub mod options;
+mod plugin;
 mod seo;
 mod theme;
 
 pub use data::{Alternate, Body, Image, Link, NavItem, PageInfo, Post, Site};
-pub use theme::{Theme, ThemeError, ThemeFiles};
+pub use plugin::Plugin;
+pub use theme::{Report, Theme, ThemeError, ThemeFiles};
 
 /// Flattens a locale TOML file into `section.key` strings (core `locales/` use the same shape).
 ///

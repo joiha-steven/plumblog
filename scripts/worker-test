@@ -44,6 +44,13 @@ contract_target="$PWD/target/contract-tests"
 rm -rf target/worker-dev/assets
 mkdir -p target/worker-dev/assets/theme
 cp -R themes/minimal/assets target/worker-dev/assets/theme/minimal
+# Bundled plugins' assets at PLUGIN_ASSETS_URL (/plugin/<name>/).
+for dir in plugins/*/; do
+  [ -d "$dir/assets" ] || continue
+  name=$(basename "$dir")
+  mkdir -p target/worker-dev/assets/plugin
+  cp -R "$dir/assets" "target/worker-dev/assets/plugin/$name"
+done
 
 # The harness cleans up after itself, even on Ctrl-C. This trap is the second line of
 # defence: kill any wrangler process group it recorded and remove its temp state.

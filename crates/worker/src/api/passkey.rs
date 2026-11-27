@@ -208,8 +208,11 @@ pub async fn register_verify(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Re
             created_at: ctx.now,
         })
         .await?;
-    ctx.syslog(EventKind::PasskeyAdded, Some(user.id), name)
-        .await;
+    ctx.syslog(
+        ctx.event(EventKind::PasskeyAdded, Some(user.id))
+            .subject(name),
+    )
+    .await;
     let added = ctx
         .store
         .list_passkeys(user.id)
@@ -374,9 +377,9 @@ pub async fn verify(ctx: &Ctx, f: &Fields, want_user: Option<UserId>, how: &str)
         Err(Ok(r)) => {
             limit::failed(ctx, &attempt, r.actor, how).await?;
             ctx.syslog(
-                EventKind::SignInFailed,
-                r.actor,
-                &format!("{how}: {}", r.reason),
+                ctx.event(EventKind::SignInFailed, r.actor)
+                    .subject(how)
+                    .field("reason", r.reason),
             )
             .await;
             Err(invalid(format!("{}: {}", r.reason, r.detail)))
@@ -435,7 +438,10 @@ pub async fn delete(ctx: &Ctx, p: &Principal, id: &str) -> Result<Reply> {
     // The store refuses another user's id (NotFound) and, inside the same write, the last
     // passkey of an account without a password (Conflict).
     ctx.store.delete_own_passkey(user.id, id).await?;
-    ctx.syslog(EventKind::PasskeyRemoved, Some(user.id), &name)
-        .await;
+    ctx.syslog(
+        ctx.event(EventKind::PasskeyRemoved, Some(user.id))
+            .subject(&name),
+    )
+    .await;
     Ok(Reply::empty())
 }

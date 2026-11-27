@@ -1,6 +1,7 @@
 use plumblog_model::{ErrorCode, RequestId, Result, UserId};
 use plumblog_store::{LogEntry, LogQuery, LogStore};
-use plumblog_syslog::{Event, EventKind, Logger};
+use plumblog_syslog::{Event, EventKind, LogSink};
+use worker::console_log;
 use worker::wasm_bindgen::JsValue;
 
 use super::{D1Store, Row, bound, limit, opt_int, opt_text, storage, text, ubound, uint};
@@ -11,16 +12,13 @@ fn read_entry(r: &mut Row) -> Result<LogEntry> {
     let raw_request = r.text()?;
     let request_id = RequestId::parse(&raw_request)
         .ok_or_else(|| storage("query_log", &format!("bad request id {raw_request:?}")))?;
+    let kind = r.code("event kind", EventKind::parse)?;
+    let actor = r.opt_int()?.map(UserId);
+    let error = r.opt_code("error", ErrorCode::parse)?;
+    let detail = r.text()?;
     Ok(LogEntry {
         id,
-        event: Event {
-            at_ms,
-            request_id,
-            kind: r.code("event kind", EventKind::parse)?,
-            actor: r.opt_int()?.map(UserId),
-            error: r.opt_code("error", ErrorCode::parse)?,
-            detail: r.text()?,
-        },
+        event: Event::restore(at_ms, request_id, kind, actor, error, &detail),
     })
 }
 
@@ -32,12 +30,12 @@ impl LogStore for D1Store {
             "INSERT INTO system_log (at_ms, request_id, kind, actor_id, error_code, detail) \
              VALUES (?, ?, ?, ?, ?, ?)",
             &[
-                uint(e.at_ms)?,
-                text(e.request_id.as_str()),
-                text(e.kind.as_str()),
-                opt_int(e.actor.map(|a| a.0))?,
-                opt_text(e.error.map(ErrorCode::as_str)),
-                text(&e.detail),
+                uint(e.at_ms())?,
+                text(e.request_id().as_str()),
+                text(e.kind().as_str()),
+                opt_int(e.actor_id().map(|a| a.0))?,
+                opt_text(e.error_code().map(ErrorCode::as_str)),
+                text(&e.detail()),
             ],
         )?;
         let r = self.exec(s).await?;
@@ -70,26 +68,36 @@ impl LogStore for D1Store {
         self.rows(s).await?.iter_mut().map(read_entry).collect()
     }
 
-    async fn prune_log(&self, older_than_ms: u64, keep_max: u32) -> Result<u64> {
-        let old = self.stmt(
-            "prune_log_age",
-            "DELETE FROM system_log WHERE at_ms < ?",
-            &[ubound(older_than_ms)],
+    // 1 query. Oldest first, so a run cut short by `limit` leaves the newest rows and the
+    // next run continues where this one stopped.
+    async fn prune_log(&self, older_than_ms: u64, keep_max: u32, limit: u32) -> Result<u64> {
+        let s = self.stmt(
+            "prune_log",
+            "DELETE FROM system_log WHERE id IN (SELECT id FROM system_log \
+             WHERE at_ms < ?1 OR id NOT IN \
+             (SELECT id FROM system_log ORDER BY at_ms DESC, id DESC LIMIT ?2) \
+             ORDER BY at_ms, id LIMIT ?3)",
+            &[
+                ubound(older_than_ms),
+                JsValue::from(keep_max),
+                JsValue::from(limit),
+            ],
         )?;
-        let extra = self.stmt(
-            "prune_log_count",
-            "DELETE FROM system_log WHERE id NOT IN \
-             (SELECT id FROM system_log ORDER BY at_ms DESC, id DESC LIMIT ?)",
-            &[JsValue::from(keep_max)],
-        )?;
-        let results = self.batch("prune_log", vec![old, extra]).await?;
-        Ok(Self::changes("prune_log_age", &results[0])?
-            + Self::changes("prune_log_count", &results[1])?)
+        let r = self.exec(s).await?;
+        let deleted = Self::changes("prune_log", &r)?;
+        // What the free plan's daily write budget sees: each row once per table and index.
+        if let Ok(Some(meta)) = r.meta() {
+            console_log!(
+                "prune_log deleted={deleted} rows_written={}",
+                meta.rows_written.unwrap_or_default()
+            );
+        }
+        Ok(deleted)
     }
 }
 
-impl Logger for D1Store {
-    async fn record(&self, event: Event) -> Result<()> {
+impl LogSink for D1Store {
+    async fn store_event(&self, event: Event) -> Result<()> {
         self.append(event).await.map(drop)
     }
 }

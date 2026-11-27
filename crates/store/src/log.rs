@@ -1,7 +1,7 @@
 //! The owner's timeline (`system_log`).
 
 use plumblog_model::{Result, UserId};
-use plumblog_syslog::{Event, EventKind};
+use plumblog_syslog::{Event, EventKind, LogSink, Retention, Scope};
 
 /// A stored event with its row id.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,7 +32,43 @@ pub trait LogStore {
     async fn append(&self, event: Event) -> Result<i64>;
     /// A stored code this version does not know is `Storage`.
     async fn query_log(&self, query: LogQuery) -> Result<Vec<LogEntry>>;
-    /// Deletes entries with `at_ms < older_than_ms`, then all but the newest `keep_max`;
-    /// returns how many were deleted in total.
-    async fn prune_log(&self, older_than_ms: u64, keep_max: u32) -> Result<u64>;
+    /// Deletes at most `limit` entries, oldest first (`at_ms`, id), among those with
+    /// `at_ms < older_than_ms` or outside the newest `keep_max`; returns how many went.
+    async fn prune_log(&self, older_than_ms: u64, keep_max: u32, limit: u32) -> Result<u64>;
+}
+
+/// Subject of the retention job's own `job.run` event, so the timeline shows when it ran.
+pub const RETENTION_JOB: &str = "system_log.retention";
+
+/// The daily retention job (docs/ARCHITECTURE.md, System log): deletes up to
+/// `retention.per_run` rows past the age or row cap, then records one `job.run` event with
+/// how many went, or the error code if pruning failed. The event is written after the
+/// prune, so the log may hold `max_rows + 1` rows until the next run. Recording goes
+/// through [`plumblog_syslog::record`]: its failure reaches `report`, never the result.
+///
+/// # Errors
+/// The prune's error.
+pub async fn retention_job<S: LogStore + LogSink>(
+    store: &S,
+    scope: &Scope,
+    retention: Retention,
+    now_ms: u64,
+    report: impl FnOnce(&str),
+) -> Result<u64> {
+    let pruned = store
+        .prune_log(
+            retention.age_cut_ms(now_ms),
+            retention.max_rows,
+            retention.per_run,
+        )
+        .await;
+    let event = scope
+        .event(EventKind::ScheduledJob, now_ms)
+        .subject(RETENTION_JOB);
+    let event = match &pruned {
+        Ok(n) => event.field("deleted", &n.to_string()),
+        Err(e) => event.error(e.code),
+    };
+    plumblog_syslog::record(store, event, report).await;
+    pruned
 }

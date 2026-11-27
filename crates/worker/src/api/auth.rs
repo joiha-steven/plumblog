@@ -124,7 +124,8 @@ pub(super) async fn sign_in(
             ctx.request_id.as_str()
         );
     }
-    ctx.syslog(EventKind::SignIn, Some(user.id), how).await;
+    ctx.syslog(ctx.event(EventKind::SignIn, Some(user.id)).subject(how))
+        .await;
     Ok(user_reply(status, user).with_cookie(cookie))
 }
 
@@ -174,7 +175,8 @@ const NEW_ACCOUNT_FIELDS: &[&str] = &[
 /// sign-ins (same thresholds, Turnstile, lock), and are logged.
 async fn code_failed(ctx: &Ctx, attempt: &limit::Attempt, how: &str) -> Result<()> {
     limit::failed(ctx, attempt, None, how).await?;
-    ctx.syslog(EventKind::SignInFailed, None, how).await;
+    ctx.syslog(ctx.event(EventKind::SignInFailed, None).subject(how))
+        .await;
     Ok(())
 }
 
@@ -213,8 +215,11 @@ pub async fn setup(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
     limit::succeeded(ctx, &keys).await?;
     // The page normally created the id already (params); make sure it exists.
     site_id(ctx).await?;
-    ctx.syslog(EventKind::UserCreated, Some(id), "setup: first owner")
-        .await;
+    ctx.syslog(
+        ctx.event(EventKind::UserCreated, Some(id))
+            .subject("setup: first owner"),
+    )
+    .await;
     let user = ctx.store.get_user(id).await?;
     sign_in(ctx, p, &user, 201, "setup").await
 }
@@ -237,8 +242,11 @@ pub async fn accept_invite(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Repl
     };
     // The code was right: this attempt was not a guess.
     limit::succeeded(ctx, &keys).await?;
-    ctx.syslog(EventKind::UserCreated, Some(id), "invite accepted")
-        .await;
+    ctx.syslog(
+        ctx.event(EventKind::UserCreated, Some(id))
+            .subject("invite accepted"),
+    )
+    .await;
     let user = ctx.store.get_user(id).await?;
     sign_in(ctx, p, &user, 201, "invite").await
 }
@@ -257,7 +265,11 @@ pub async fn login(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
         other => {
             let actor = other.as_ref().map(|u| u.id);
             limit::failed(ctx, &attempt, actor, "password").await?;
-            ctx.syslog(EventKind::SignInFailed, actor, "password").await;
+            ctx.syslog(
+                ctx.event(EventKind::SignInFailed, actor)
+                    .subject("password"),
+            )
+            .await;
             // One answer for unknown login, wrong password and disabled account.
             return Err(wrong_credentials(match other {
                 None => "unknown login",
@@ -277,8 +289,11 @@ pub async fn logout(ctx: &Ctx, p: &Principal) -> Result<Reply> {
     }
     // Only a live session is a sign-out; a stale cookie is just cleared.
     if let Ok(user) = p.user() {
-        ctx.syslog(EventKind::SignOut, Some(user.id), "sign-out")
-            .await;
+        ctx.syslog(
+            ctx.event(EventKind::SignOut, Some(user.id))
+                .subject("sign-out"),
+        )
+        .await;
     }
     Ok(Reply::empty().with_cookie(session::clear_cookie()))
 }
@@ -293,8 +308,11 @@ async fn check_current(ctx: &Ctx, user: &User, f: &Fields) -> Result<()> {
         limit::succeeded(ctx, &keys).await
     } else {
         limit::failed(ctx, &attempt, Some(user.id), "current password").await?;
-        ctx.syslog(EventKind::SignInFailed, Some(user.id), "current password")
-            .await;
+        ctx.syslog(
+            ctx.event(EventKind::SignInFailed, Some(user.id))
+                .subject("current password"),
+        )
+        .await;
         Err(wrong_credentials("current password does not match"))
     }
 }
@@ -314,8 +332,11 @@ async fn write_password(
     ctx.store
         .change_password(user.id, hash, profile, session, ctx.now)
         .await?;
-    ctx.syslog(EventKind::PasswordChanged, Some(user.id), detail)
-        .await;
+    ctx.syslog(
+        ctx.event(EventKind::PasswordChanged, Some(user.id))
+            .subject(detail),
+    )
+    .await;
     Ok(cookie)
 }
 
@@ -388,8 +409,11 @@ pub async fn update_me(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
         ctx.store
             .change_password(user.id, None, Some(profile), session, ctx.now)
             .await?;
-        ctx.syslog(EventKind::PasswordChanged, Some(user.id), "login (passkey)")
-            .await;
+        ctx.syslog(
+            ctx.event(EventKind::PasswordChanged, Some(user.id))
+                .subject("login (passkey)"),
+        )
+        .await;
         return Ok(user_reply(200, &ctx.store.get_user(user.id).await?).with_cookie(cookie));
     }
     if has_assertion {

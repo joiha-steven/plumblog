@@ -107,7 +107,9 @@ export async function startWorker({ seedSql = null, vars = {} } = {}) {
   const child = spawn(
     WRANGLER,
     ["dev", ...common, "--ip", "127.0.0.1", "--port", String(port), "--inspector-port", String(inspector),
-      "--show-interactive-dev-session=false", "--log-level", "warn",
+      "--show-interactive-dev-session=false", "--log-level", "log",
+      // Serves /__scheduled so tests can fire the cron trigger.
+      "--test-scheduled",
       ...Object.entries(vars).flatMap(([k, v]) => ["--var", `${k}:${v}`])],
     { cwd: ROOT, env: ENV, detached: true, stdio: ["ignore", "pipe", "pipe"] },
   );
@@ -149,7 +151,8 @@ export async function startWorker({ seedSql = null, vars = {} } = {}) {
       // Reads the running Worker's local D1 (test assertions only).
       const query = (sql) =>
         JSON.parse(run(WRANGLER, ["d1", "execute", "DB", "--local", ...common, "--json", "--command", sql]))[0].results;
-      return { url, stop, log: () => log, query };
+      // state: the --persist-to dir, for reading the local D1 with `wrangler d1 execute`.
+      return { url, stop, state: entry.state, log: () => log, query };
     } catch {
       await new Promise((r) => setTimeout(r, 200));
     }

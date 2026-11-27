@@ -1,0 +1,8 @@
+[hello]
+line = "{name} from a plugin"
+
+[options]
+group_main = "Main"
+greeting = "Greeting"
+greeting_help = "Shown in the footer."
+cover = "Cover"

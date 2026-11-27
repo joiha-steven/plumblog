@@ -491,6 +491,7 @@ name = "plumblog-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "plumblog-render",
 ]
 
 [[package]]
@@ -522,6 +523,7 @@ dependencies = [
  "plumblog-i18n",
  "plumblog-markdown",
  "serde",
+ "serde_json",
  "toml",
 ]
 
@@ -538,6 +540,7 @@ dependencies = [
 name = "plumblog-syslog"
 version = "0.1.0"
 dependencies = [
+ "plumblog-i18n",
  "plumblog-model",
 ]
 

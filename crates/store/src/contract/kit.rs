@@ -156,14 +156,9 @@ pub fn media(key: &str, created_at: i64) -> NewMedia {
 
 pub fn event(at_ms: u64, kind: EventKind, actor: Option<UserId>) -> Got<Event> {
     let request_id = RequestId::parse("contract-1").ok_or("request id rejected")?;
-    Ok(Event {
-        at_ms,
-        request_id,
-        kind,
-        actor,
-        error: None,
-        detail: format!("at {at_ms}"),
-    })
+    Ok(Event::new(kind, request_id, at_ms)
+        .actor(actor)
+        .subject(&format!("at {at_ms}")))
 }
 
 /// `ids` sorted descending, the order of every "newest first" list with equal keys.

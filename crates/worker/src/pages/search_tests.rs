@@ -3,7 +3,8 @@
 //! ASCII): duong = "d\u{01B0}\u{1EDD}ng" with d-stroke "\u{0111}", Da Lat = "\u{0110}\u{00E0}
 //! L\u{1EA1}t", Nguoi Viet = "Ng\u{01B0}\u{1EDD}i Vi\u{1EC7}t".
 
-use super::search::{MAX_QUERY_CHARS, RESULT_LIMIT, StoreSearch};
+use super::db::Db;
+use super::search::{MAX_QUERY_CHARS, RESULT_LIMIT};
 use super::source::SampleSource;
 use super::tests_support::run;
 use super::{Outcome, render, seed};
@@ -16,7 +17,7 @@ fn store() -> MemoryStore {
 }
 
 fn search(db: &MemoryStore, q: &str) -> String {
-    match run(render(SampleSource::get(), &StoreSearch(db), "/search", q)).unwrap() {
+    match run(render(SampleSource::get(), &Db(db), &Db(db), "/search", q)).unwrap() {
         Outcome::Page { status, body, .. } => {
             assert_eq!(status, 200, "{q:?}");
             body
@@ -155,8 +156,24 @@ fn a_store_failure_is_an_error_not_an_empty_page() {
             std::future::ready(Err("d1 down".to_owned()))
         }
     }
-    let r = run(render(SampleSource::get(), &Broken, "/search", "duong"));
+    let db = MemoryStore::default();
+    let r = run(render(
+        SampleSource::get(),
+        &Db(&db),
+        &Broken,
+        "/search",
+        "duong",
+    ));
     assert_eq!(r.unwrap_err(), "d1 down");
     // A query with no words never reaches the store.
-    assert!(run(render(SampleSource::get(), &Broken, "/search", "**")).is_ok());
+    assert!(
+        run(render(
+            SampleSource::get(),
+            &Db(&db),
+            &Broken,
+            "/search",
+            "**"
+        ))
+        .is_ok()
+    );
 }
