@@ -34,9 +34,9 @@ const settle = (page, sel) =>
   page.waitForFunction((q) => [...document.querySelectorAll(q)].every((el) => el.getAnimations().every((a) => a.playState === "finished")), sel);
 // Pictures in the post must have loaded before the shot.
 const pictures = (page) => page.waitForFunction(() => [...document.querySelectorAll(".cm-img img")].every((i) => i.complete));
-// The preview frame is sandboxed (opaque origin): wait for its navigation, not its DOM.
+// Each preview refresh loads into a new frame (pb-preview-N) that replaces the shown one.
 const previewIn = async (page, click) => {
-  const nav = page.waitForEvent("framenavigated", (f) => f.name() === "pb-preview" && f.url() !== "about:blank");
+  const nav = page.waitForEvent("framenavigated", (f) => f.name().startsWith("pb-preview") && f.url() !== "about:blank");
   await click();
   const frame = await nav;
   await frame.waitForSelector("h1");
