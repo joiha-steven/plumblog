@@ -3,8 +3,8 @@
  * strip of drafts that exist only in this browser. Screens: screens.ts; data: api.posts.
  */
 
-import type { Api, ApiError } from "./api/client";
-import type { PostKind, PostStatus, PostSummary } from "./api/model.gen";
+import type { Api, ApiError, Result } from "./api/client";
+import type { PostKind, PostListQuery, PostPage, PostStatus, PostSummary } from "./api/model.gen";
 import { h } from "./dom";
 import { type DraftEntry, listDrafts } from "./editor/drafts";
 import { lang, t } from "./i18n";
@@ -21,6 +21,28 @@ const PAGE = 20;
 const MAX_EXTRA = 5;
 /** Drafts kept on this device that the posts list shows. */
 const STRIP = 3;
+
+/** The first request a list makes for a filter, before any "Load more". */
+const firstQuery = (kind: PostKind, filter: Filter): PostListQuery => ({ kind, limit: PAGE, ...(filter === "all" ? {} : { status: filter }) });
+
+/** A first page asked for at boot, used once by the list that asks the same. */
+let early: { key: string; page: Promise<Result<PostPage>> } | undefined;
+
+/**
+ * Starts the list's first request at boot, beside the signed-in check, instead of after it:
+ * one round trip less before the rows show (the excerpts are the largest paint on phones).
+ */
+export function prefetch(api: Api, kind: PostKind, search: string): void {
+  const q = firstQuery(kind, kind === "post" ? filterOf(search) : "all");
+  early = { key: JSON.stringify(q), page: api.posts(q) };
+}
+
+/** The prefetched page when `q` is the request it made; each prefetch serves once. */
+function ask(api: Api, q: PostListQuery): Promise<Result<PostPage>> {
+  const hit = early?.key === JSON.stringify(q) ? early : undefined;
+  early = undefined;
+  return hit ? hit.page : api.posts(q);
+}
 
 /** The filter in `?status=`; anything else is "all". */
 export function filterOf(search: string): Filter {
@@ -126,8 +148,8 @@ function pager(api: Api, kind: PostKind, filter: Filter, emptyState: () => HTMLE
     let err: ApiError | undefined;
     let added = 0;
     for (let asked = 0; ; asked++) {
-      const q = { kind, limit: PAGE, ...(filter === "all" ? {} : { status: filter }), ...(cursor === null ? {} : { cursor }) };
-      const r = await api.posts(q);
+      const q = { ...firstQuery(kind, filter), ...(cursor === null ? {} : { cursor }) };
+      const r = await ask(api, q);
       if (!r.ok) {
         err = r.error;
         break;

@@ -6,6 +6,7 @@ import { mockApi } from "./api/mock";
 import { loadText, readBoot } from "./boot";
 import { h } from "./dom";
 import { initI18n, t } from "./i18n";
+import { prefetch } from "./lists";
 import { type Route, current, isAuth, start } from "./router";
 import { screen } from "./screens";
 import { shell } from "./shell";
@@ -125,6 +126,8 @@ if (isAuth(first)) {
   });
   addEventListener("online", render);
   addEventListener("offline", render);
+  if (first === "posts") prefetch(api, "post", location.search);
+  else if (first === "pages") prefetch(api, "page", "");
   void load();
 }
 
