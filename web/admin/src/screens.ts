@@ -74,7 +74,10 @@ export function screen(name: Screen, me: Me, api: Api): Child[] {
       return [head(t("admin.nav.settings")), building()];
     case "new":
     case "edit":
-      // Drawn by the editor chunk (main.ts); never reached.
+    case "signin":
+    case "setup":
+    case "invite":
+      // Drawn by the editor chunk and the sign-in chunk (main.ts); never reached.
       return [];
     case "missing":
       return [

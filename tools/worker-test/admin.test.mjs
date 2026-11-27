@@ -46,7 +46,7 @@ test("only the sign-in, setup and invite pages admit Turnstile in their CSP", as
     assert.match(csp, /frame-src https:\/\/challenges\.cloudflare\.com;/, path);
     assert.match(csp, /frame-ancestors 'none'/, path);
   }
-  for (const path of ["/admin/", "/admin/settings", "/admin/signin/x", "/admin/posts/1"]) {
+  for (const path of ["/admin/", "/admin/settings", "/admin/signin/x", "/admin/posts/1", "/admin/signin//", "/admin/setup///"]) {
     const csp = (await fetch(worker.url + path)).headers.get("content-security-policy");
     assert.ok(!csp.includes("challenges.cloudflare.com"), path);
   }
@@ -130,10 +130,10 @@ test("a missing admin file is a 404, never the shell under a script URL", async 
   }
 });
 
-test("the client runs under the CSP and shows the shell with a plain error while the API is missing", async () => {
+test("signed out, the client runs under the CSP and sends the writer to a plain sign-in page", async () => {
   const browser = await chromium.launch({ channel: "chrome", headless: true });
   try {
-    // A fixed browser language, so the shell is English on every machine.
+    // A fixed browser language, so the page is English on every machine.
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, locale: "en-US" });
     const problems = [];
     page.on("pageerror", (e) => problems.push(`page error: ${e}`));
@@ -141,14 +141,16 @@ test("the client runs under the CSP and shows the shell with a plain error while
       // A failed API call logs; that is the client doing its job. CSP violations are not.
       if (/Content Security Policy|Refused to/.test(m.text())) problems.push(`csp: ${m.text()}`);
     });
-    await page.goto(`${worker.url}/admin/`, { waitUntil: "networkidle" });
-    await page.waitForSelector("main [role=alert], main h1");
+    await page.goto(`${worker.url}/admin/settings?tab=x`, { waitUntil: "networkidle" });
+    // A full page load to the sign-in page (its CSP differs), remembering where the writer was.
+    await page.waitForSelector("form #login");
+    const url = new URL(page.url());
+    assert.equal(url.pathname, "/admin/signin");
+    assert.equal(url.searchParams.get("next"), "/admin/settings?tab=x");
+    assert.equal(await page.locator("h1").innerText(), "Sign in");
+    assert.equal(await page.locator("#password").getAttribute("autocomplete"), "current-password");
+    assert.equal(await page.locator("nav.side").count(), 0);
     assert.deepEqual(problems, []);
-    const nav = await page.locator("nav.side a").allTextContents();
-    assert.deepEqual(nav.slice(0, 3), ["Posts", "Pages", "Media"]);
-    // No signed-in user yet: no role, so no Settings link, and a retry button, not a blank page.
-    assert.equal(await page.locator('nav.side a[href="/admin/settings"]').count(), 0);
-    assert.equal(await page.locator("main [role=alert] button").count(), 1);
   } finally {
     await browser.close();
   }

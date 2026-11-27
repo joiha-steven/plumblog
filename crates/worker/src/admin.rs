@@ -47,8 +47,12 @@ fn csp(nonce: &str, turnstile: bool) -> String {
 const TURNSTILE_ORIGIN: &str = "https://challenges.cloudflare.com";
 
 /// The pages a signed-out visitor uses; the only ones whose CSP admits Turnstile.
+/// At most one trailing slash, the same rule as the service worker's (`web/admin/src/sw.ts`):
+/// a looser match here would hand the Turnstile policy to a path the service worker treats as
+/// an ordinary page, and keep it as the offline shell.
 fn is_auth_page(path: &str) -> bool {
-    matches!(path, "/admin/signin" | "/admin/setup" | "/admin/invite")
+    let p = path.strip_suffix('/').unwrap_or(path);
+    matches!(p, "/admin/signin" | "/admin/setup" | "/admin/invite")
 }
 
 /// 16 bytes from the platform's cryptographic RNG, hex. A nonce must not be guessable, so
@@ -135,10 +139,7 @@ pub async fn serve(req: &Request) -> Result<Response> {
     // Small and language-dependent: revalidate every time rather than serve a stale shell.
     h.set("cache-control", "no-cache")?;
     h.set("vary", "cookie, accept-language")?;
-    h.set(
-        "content-security-policy",
-        &csp(&nonce, is_auth_page(path.trim_end_matches('/'))),
-    )?;
+    h.set("content-security-policy", &csp(&nonce, is_auth_page(&path)))?;
     h.set("x-content-type-options", "nosniff")?;
     h.set("referrer-policy", "same-origin")?;
     h.set("x-robots-tag", "noindex")?;
@@ -387,7 +388,10 @@ mod tests {
         for p in ["/admin/signin", "/admin/setup", "/admin/invite"] {
             assert!(is_auth_page(p), "{p}");
         }
+        assert!(is_auth_page("/admin/signin/"));
         for p in [
+            "/admin/signin//",
+            "/admin/setup///",
             "/admin/",
             "/admin/posts/1",
             "/admin/signin/x",

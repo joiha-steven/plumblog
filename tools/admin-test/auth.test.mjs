@@ -326,6 +326,14 @@ test("signInPasskey: options, browser prompt, verify with the assertion fields",
   assert.deepEqual(api.calls[1].body, assertion(fakeAssertion("u1")));
 });
 
+test("signInPasskey sends a Turnstile token to options only (#63: tokens are single use)", async () => {
+  fakeCredentials({ get: fakeAssertion("u1") });
+  const api = fakeApi({ "POST /api/auth/passkey/login/options": LOGIN_OPTS, "POST /api/auth/passkey/login/verify": { ok: true, value: { user: ME } } });
+  await flows.signInPasskey(api, "tok");
+  assert.deepEqual(api.calls[0].body, { turnstile_token: "tok" });
+  assert.equal(api.calls[1].body.turnstile_token, undefined);
+});
+
 test("a dismissed or timed-out passkey prompt is cancelled, other failures bad_response", async () => {
   for (const [name, code] of [["NotAllowedError", "cancelled"], ["AbortError", "cancelled"], ["SecurityError", "bad_response"]]) {
     fakeCredentials({ get: new DOMException("x", name) });
@@ -399,6 +407,12 @@ test("removePasskey sends DELETE with the re-auth fields of either kind", async 
   const api2 = fakeApi({ "POST /api/auth/passkey/login/options": LOGIN_OPTS });
   assert.equal((await flows.removePasskey(api2, 9, "passkey")).ok, true);
   assert.deepEqual(api2.calls.at(-1), { method: "DELETE", path: "/api/auth/passkey/9", body: assertion(fakeAssertion(), "reauth_") });
+});
+
+test("a Turnstile token rides with the re-auth proof (REAUTH_FIELDS has turnstile_token)", async () => {
+  const api = fakeApi({ "GET /api/auth/params": PARAMS });
+  assert.equal((await flows.removePasskey(api, 9, { login: "olga", password: "pw" }, "tok")).ok, true);
+  assert.deepEqual(api.calls.at(-1).body, { current_password: expected("olga", "pw"), turnstile_token: "tok" });
 });
 
 test("listPasskeys unwraps the list", async () => {

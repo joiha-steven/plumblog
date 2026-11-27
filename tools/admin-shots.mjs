@@ -56,6 +56,18 @@ const line = async (page, text) => {
   }, text);
   return page.locator(".cm-line", { hasText: text }).first();
 };
+// Signed-out pages: type into the form, press the key, wait for the answer in the alert region.
+const typed = async (page, values) => {
+  for (const [id, v] of Object.entries(values)) await page.fill(`#${id}`, v);
+};
+const answered = (page) => page.waitForFunction(() => document.querySelector(".auth-alert")?.textContent);
+const SIGN = { login: "lan", password: "correct horse battery" };
+const ACCOUNT = { login: "lan", slug: "lan", "display-name": "Lan Nguyen", password: "correct horse battery", "password-repeat": "correct horse battery" };
+const submitWith = (values, click = "button[type=submit]") => async (page) => {
+  await typed(page, values);
+  await page.click(click);
+  await answered(page);
+};
 // [name, path, element to wait for, action before the shot, widths it applies to]
 const STATES = [
   ["posts", "/admin/"],
@@ -137,6 +149,27 @@ const STATES = [
   ],
   ["preview", "/admin/posts/1", EDITOR, (page) => previewIn(page, () => page.click(".seg button:last-child"))],
   ["new", "/admin/posts/new", EDITOR],
+  ["signin", "/admin/signin"],
+  ["signin-wrong", "/admin/signin?auth=wrong", null, submitWith(SIGN)],
+  ["signin-locked", "/admin/signin?auth=locked", null, submitWith(SIGN)],
+  [
+    "signin-turnstile",
+    "/admin/signin?auth=turnstile_hold",
+    null,
+    async (page) => {
+      await typed(page, SIGN);
+      await page.click("button[type=submit]");
+      // The always-pass widget solves itself, then the page sends the token by itself: busy again.
+      await page.waitForSelector("button[type=submit]:disabled", { timeout: 15000 });
+      await page.waitForTimeout(600);
+    },
+  ],
+  ["signin-passkey-origin", "/admin/signin?auth=origin", null, submitWith({}, "button[type=button]")],
+  ["setup", "/admin/setup?code=7f3a-91c2"],
+  ["setup-short", "/admin/setup?code=7f3a-91c2", null, submitWith({ ...ACCOUNT, password: "short", "password-repeat": "short" })],
+  ["setup-invalid", "/admin/setup?auth=setup_invalid&code=0000-0000", null, submitWith(ACCOUNT)],
+  ["invite", "/admin/invite?code=b2d8-44e0"],
+  ["invite-invalid", "/admin/invite?auth=invite_invalid&code=0000-0000", null, submitWith(ACCOUNT)],
 ];
 
 const only = process.env.ONLY?.split(",");
@@ -149,7 +182,7 @@ try {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const english = ["posts", "no-permission", "editor", "slash"];
+        const english = ["posts", "no-permission", "editor", "slash", "signin-wrong", "setup-short"];
         const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
         const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);

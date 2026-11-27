@@ -132,14 +132,14 @@ export function signIn(api: Api, login: string, password: string, token?: string
 }
 
 /**
- * Passkey sign-in. The token goes to both calls: below the site-wide cap options ignores it
- * and verify spends it.
+ * Passkey sign-in. A Turnstile token goes to options only: the challenge it returns carries
+ * the proof to verify (issue #63), because a token is single use.
  */
 export function signInPasskey(api: Api, token?: string): Promise<Result<{ user: Me }>> {
   return guard("passkey sign-in", async () => {
     const a = await passkeyAssertion(api, "", token);
     if (!a.ok) return failed(a.error);
-    return api.call<{ user: Me }>("POST", "/api/auth/passkey/login/verify", withToken(a.value, token));
+    return api.call<{ user: Me }>("POST", "/api/auth/passkey/login/verify", a.value);
   });
 }
 
@@ -181,7 +181,7 @@ async function reauthFields(api: Api, how: Reauth): Promise<Result<Body>> {
  * Adds a passkey. Proof first: if the writer drops out of it, no key has been made on the
  * device yet (a key made but never registered would sit there unusable).
  */
-export function addPasskey(api: Api, name: string, how: Reauth): Promise<Result<{ passkey: Passkey }>> {
+export function addPasskey(api: Api, name: string, how: Reauth, token?: string): Promise<Result<{ passkey: Passkey }>> {
   return guard("passkey add", async () => {
     if (!supported()) return fail("unsupported", 0);
     const proof = await reauthFields(api, how);
@@ -192,19 +192,20 @@ export function addPasskey(api: Api, name: string, how: Reauth): Promise<Result<
       navigator.credentials.create({ publicKey: createOptions(opts.value.publicKey) }),
     );
     if (!cred.ok) return failed(cred.error);
-    return api.call<{ passkey: Passkey }>("POST", "/api/auth/passkey/register/verify", {
-      name,
-      ...attestation(cred.value),
-      ...proof.value,
-    });
+    // The proof's request carries the Turnstile token when wrong proofs have asked for one.
+    return api.call<{ passkey: Passkey }>(
+      "POST",
+      "/api/auth/passkey/register/verify",
+      withToken({ name, ...attestation(cred.value), ...proof.value }, token),
+    );
   });
 }
 
-export function removePasskey(api: Api, id: number, how: Reauth): Promise<Result<void>> {
+export function removePasskey(api: Api, id: number, how: Reauth, token?: string): Promise<Result<void>> {
   return guard("passkey remove", async () => {
     const proof = await reauthFields(api, how);
     if (!proof.ok) return failed(proof.error);
-    return api.call<void>("DELETE", `/api/auth/passkey/${id}`, proof.value);
+    return api.call<void>("DELETE", `/api/auth/passkey/${id}`, withToken(proof.value, token));
   });
 }
 

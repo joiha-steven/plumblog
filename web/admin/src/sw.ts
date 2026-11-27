@@ -48,7 +48,10 @@ async function fresh(req: Request, path: string): Promise<Response> {
   const key = req.mode === "navigate" ? "/admin/" : KEEP.has(path) ? path : undefined;
   try {
     const res = await fetch(req);
-    if (res.ok && key && !signin) await cache.put(key, res.clone());
+    // Also judged by the answer itself, so a path the Worker treats as a sign-in page that
+    // this pattern misses can still never become the shell.
+    const turnstile = res.headers.get("content-security-policy")?.includes("challenges.cloudflare.com") ?? false;
+    if (res.ok && key && !signin && !turnstile) await cache.put(key, res.clone());
     return res;
   } catch (err) {
     const hit = key ? await cache.match(key) : undefined;
