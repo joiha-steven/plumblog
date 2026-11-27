@@ -9,12 +9,14 @@
 pub mod archive;
 pub mod fetch;
 pub mod minisign;
+pub mod reason;
 pub mod update;
 
 use crate::setup::{Failure, Run};
 use crate::text::{Code, Text};
 use fetch::{FetchError, Source};
 use plumblog_i18n::key;
+use reason::Reason;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -126,7 +128,7 @@ pub fn baked(text: &Text) -> Result<Option<Release>, Failure> {
                     }
                     .into(),
                 ),
-                ("reason", "not set".into()),
+                ("reason", Reason::NotSet.render(text)),
             ],
         )
     })?;
@@ -178,7 +180,7 @@ pub(crate) fn archive_failure(e: &archive::Bad, text: &Text) -> Failure {
         Code::ReleaseArchiveInvalid,
         text,
         key!("cli.error.release_archive_invalid"),
-        &[("path", e.path.clone()), ("reason", e.reason.clone())],
+        &[("path", e.path.clone()), ("reason", e.reason.render(text))],
     )
 }
 
@@ -220,25 +222,25 @@ pub fn unpack_bundle(gz: &[u8], want: Version, text: &Text) -> Result<archive::F
         (p == BUNDLE_JSON && !dir) || BUNDLE_TOP.contains(&p.split('/').next().unwrap_or(""))
     };
     let mut files = archive::untar(&tar, &allowed).map_err(|e| archive_failure(&e, text))?;
-    let invalid = |path: &str, reason: &str| {
+    let invalid = |path: &str, reason: Reason| {
         archive_failure(
             &archive::Bad {
                 path: path.into(),
-                reason: reason.into(),
+                reason,
             },
             text,
         )
     };
     let manifest = files
         .remove(BUNDLE_JSON)
-        .ok_or_else(|| invalid(BUNDLE_JSON, "missing"))?;
+        .ok_or_else(|| invalid(BUNDLE_JSON, Reason::Missing))?;
     let raw_manifest = manifest;
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&raw_manifest).map_err(|e| invalid(BUNDLE_JSON, &e.to_string()))?;
+    let manifest: serde_json::Value = serde_json::from_slice(&raw_manifest)
+        .map_err(|e| invalid(BUNDLE_JSON, Reason::Detail(e.to_string())))?;
     let version = manifest
         .get("version")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| invalid(BUNDLE_JSON, "no \"version\""))?;
+        .ok_or_else(|| invalid(BUNDLE_JSON, Reason::ManifestField("version")))?;
     if Version::parse(version) != Some(want) || version.starts_with('v') {
         return Err(Failure::new(
             Code::ReleaseVersionMismatch,
@@ -260,21 +262,18 @@ pub fn unpack_bundle(gz: &[u8], want: Version, text: &Text) -> Result<archive::F
     let listed = manifest
         .get("files")
         .and_then(|v| v.as_object())
-        .ok_or_else(|| invalid(BUNDLE_JSON, "no \"files\""))?;
+        .ok_or_else(|| invalid(BUNDLE_JSON, Reason::ManifestField("files")))?;
     for (path, bytes) in &files {
         let want = listed
             .get(path)
             .and_then(|v| v.as_str())
-            .ok_or_else(|| invalid(path, "not listed in bundle.json"))?;
+            .ok_or_else(|| invalid(path, Reason::NotListed))?;
         if !want.eq_ignore_ascii_case(&sha256_hex(bytes)) {
-            return Err(invalid(path, "SHA-256 differs from bundle.json"));
+            return Err(invalid(path, Reason::HashDiffers));
         }
     }
     if let Some(missing) = listed.keys().find(|p| !files.contains_key(*p)) {
-        return Err(invalid(
-            missing,
-            "listed in bundle.json but not in the archive",
-        ));
+        return Err(invalid(missing, Reason::ListedNotInArchive));
     }
     // Kept with the unpacked bundle: it says which release the folder is.
     files.insert(BUNDLE_JSON.into(), raw_manifest);

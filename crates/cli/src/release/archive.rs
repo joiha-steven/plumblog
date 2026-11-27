@@ -4,19 +4,20 @@
 //! refuse anything that could write outside the target: `..`, absolute or drive paths,
 //! symlinks, hard links, devices and FIFOs. Nothing is written to disk in this module.
 
+use super::reason::Reason;
 use std::collections::BTreeMap;
 
-/// Why an archive cannot be used (not translated; shown as the reason).
+/// Why an archive cannot be used: the entry and the [`Reason`] (translated when shown).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Bad {
     pub path: String,
-    pub reason: String,
+    pub reason: Reason,
 }
 
-fn bad(path: &str, reason: impl Into<String>) -> Bad {
+fn bad(path: &str, reason: Reason) -> Bad {
     Bad {
         path: path.chars().filter(|c| !c.is_control()).collect(),
-        reason: reason.into(),
+        reason,
     }
 }
 
@@ -55,7 +56,7 @@ pub fn crc32(data: &[u8]) -> u32 {
 
 fn inflate(raw: &[u8], limit: usize, what: &str) -> Result<Vec<u8>, Bad> {
     miniz_oxide::inflate::decompress_to_vec_with_limit(raw, limit)
-        .map_err(|e| bad(what, format!("cannot decompress ({:?})", e.status)))
+        .map_err(|e| bad(what, Reason::Inflate(format!("{:?}", e.status))))
 }
 
 /// One gzip member; `limit` caps the decompressed size.
@@ -65,16 +66,16 @@ fn inflate(raw: &[u8], limit: usize, what: &str) -> Result<Vec<u8>, Bad> {
 pub fn gunzip(data: &[u8], limit: usize) -> Result<Vec<u8>, Bad> {
     const W: &str = "gzip";
     if data.len() < 18 || data[..3] != [0x1f, 0x8b, 8] {
-        return Err(bad(W, "not a gzip file"));
+        return Err(bad(W, Reason::NotGzip));
     }
     let flags = data[3];
     if flags & 0xe0 != 0 {
-        return Err(bad(W, "reserved header flags"));
+        return Err(bad(W, Reason::GzipFlags));
     }
     let mut pos = 10;
     let need = |pos: usize, n: usize| {
         if pos + n > data.len() - 8 {
-            Err(bad(W, "truncated header"))
+            Err(bad(W, Reason::GzipHeaderTruncated))
         } else {
             Ok(())
         }
@@ -90,7 +91,7 @@ pub fn gunzip(data: &[u8], limit: usize) -> Result<Vec<u8>, Bad> {
             let end = data[pos..data.len() - 8]
                 .iter()
                 .position(|b| *b == 0)
-                .ok_or_else(|| bad(W, "truncated header"))?;
+                .ok_or_else(|| bad(W, Reason::GzipHeaderTruncated))?;
             pos += end + 1;
         }
     }
@@ -104,7 +105,7 @@ pub fn gunzip(data: &[u8], limit: usize) -> Result<Vec<u8>, Bad> {
     let size = u32::from_le_bytes([t[4], t[5], t[6], t[7]]);
     #[allow(clippy::cast_possible_truncation)]
     if crc32(&out) != crc || out.len() as u32 != size {
-        return Err(bad(W, "checksum mismatch (corrupt or concatenated)"));
+        return Err(bad(W, Reason::GzipChecksum));
     }
     Ok(out)
 }
@@ -151,8 +152,8 @@ fn octal(field: &[u8], path: &str) -> Result<u64, Bad> {
     if s.is_empty() {
         return Ok(0);
     }
-    let s = std::str::from_utf8(&s).map_err(|_| bad(path, "bad number field"))?;
-    u64::from_str_radix(s, 8).map_err(|_| bad(path, "bad number field"))
+    let s = std::str::from_utf8(&s).map_err(|_| bad(path, Reason::BadNumber))?;
+    u64::from_str_radix(s, 8).map_err(|_| bad(path, Reason::BadNumber))
 }
 
 fn cstr(field: &[u8]) -> &[u8] {
@@ -161,7 +162,7 @@ fn cstr(field: &[u8]) -> &[u8] {
 }
 
 fn utf8(b: &[u8]) -> Result<String, Bad> {
-    String::from_utf8(b.to_vec()).map_err(|_| bad("?", "a path is not UTF-8"))
+    String::from_utf8(b.to_vec()).map_err(|_| bad("?", Reason::PathNotUtf8))
 }
 
 /// pax extended header records `"<len> <key>=<value>\n"`; returns `path` and `size`.
@@ -172,20 +173,20 @@ fn pax(data: &[u8]) -> Result<(Option<String>, Option<u64>), Bad> {
         let sp = rest
             .iter()
             .position(|b| *b == b' ')
-            .ok_or_else(|| bad("pax", "bad record"))?;
+            .ok_or_else(|| bad("pax", Reason::PaxRecord))?;
         let len: usize = std::str::from_utf8(&rest[..sp])
             .ok()
             .and_then(|s| s.parse().ok())
             .filter(|n| *n > sp + 1 && *n <= rest.len())
-            .ok_or_else(|| bad("pax", "bad record length"))?;
+            .ok_or_else(|| bad("pax", Reason::PaxLength))?;
         let rec = &rest[sp + 1..len];
         let rec = rec
             .strip_suffix(b"\n")
-            .ok_or_else(|| bad("pax", "bad record"))?;
+            .ok_or_else(|| bad("pax", Reason::PaxRecord))?;
         let eq = rec
             .iter()
             .position(|b| *b == b'=')
-            .ok_or_else(|| bad("pax", "bad record"))?;
+            .ok_or_else(|| bad("pax", Reason::PaxRecord))?;
         let (k, v) = (&rec[..eq], &rec[eq + 1..]);
         match k {
             b"path" => path = Some(utf8(v)?),
@@ -194,10 +195,10 @@ fn pax(data: &[u8]) -> Result<(Option<String>, Option<u64>), Bad> {
                     std::str::from_utf8(v)
                         .ok()
                         .and_then(|s| s.parse().ok())
-                        .ok_or_else(|| bad("pax", "bad size"))?,
+                        .ok_or_else(|| bad("pax", Reason::PaxSize))?,
                 );
             }
-            b"linkpath" => return Err(bad("pax", "a link")),
+            b"linkpath" => return Err(bad("pax", Reason::PaxLink)),
             _ => {}
         }
         rest = &rest[len..];
@@ -221,14 +222,11 @@ fn entry_is_dir(kind: u8, path: &str) -> Result<bool, Bad> {
     match kind {
         b'0' | 0 | b'7' => Ok(false),
         b'5' => Ok(true),
-        b'1' => Err(bad(path, "a hard link")),
-        b'2' => Err(bad(path, "a symlink")),
-        b'3' | b'4' => Err(bad(path, "a device file")),
-        b'6' => Err(bad(path, "a FIFO")),
-        _ => Err(bad(
-            path,
-            format!("unsupported entry type {:?}", char::from(kind)),
-        )),
+        b'1' => Err(bad(path, Reason::HardLink)),
+        b'2' => Err(bad(path, Reason::Symlink)),
+        b'3' | b'4' => Err(bad(path, Reason::DeviceFile)),
+        b'6' => Err(bad(path, Reason::Fifo)),
+        _ => Err(bad(path, Reason::EntryType(char::from(kind)))),
     }
 }
 
@@ -244,7 +242,7 @@ pub fn untar(data: &[u8], allowed: &dyn Fn(&str, bool) -> bool) -> Result<Files,
     let (mut long_path, mut pax_size): (Option<String>, Option<u64>) = (None, None);
     loop {
         let Some(h) = data.get(pos..pos + 512) else {
-            return Err(bad("tar", "no end-of-archive marker"));
+            return Err(bad("tar", Reason::NoEndMarker));
         };
         if h.iter().all(|b| *b == 0) {
             break;
@@ -263,19 +261,19 @@ pub fn untar(data: &[u8], allowed: &dyn Fn(&str, bool) -> bool) -> Result<Files,
         let name_raw = cstr(&h[..100]);
         let shown = String::from_utf8_lossy(name_raw).into_owned();
         if octal(&h[148..156], &shown)? != sum {
-            return Err(bad(&shown, "header checksum mismatch"));
+            return Err(bad(&shown, Reason::HeaderChecksum));
         }
         if h[124] & 0x80 != 0 {
-            return Err(bad(&shown, "binary size field"));
+            return Err(bad(&shown, Reason::BinarySize));
         }
         let size = pax_size
             .take()
             .map_or_else(|| octal(&h[124..136], &shown), Ok)?;
         let start = pos + 512;
-        let size_us = usize::try_from(size).map_err(|_| bad(&shown, "too large"))?;
+        let size_us = usize::try_from(size).map_err(|_| bad(&shown, Reason::TooLarge))?;
         let body = data
             .get(start..start.saturating_add(size_us))
-            .ok_or_else(|| bad(&shown, "truncated"))?;
+            .ok_or_else(|| bad(&shown, Reason::Truncated))?;
         pos = start + size_us.div_ceil(512) * 512;
         let kind = h[156];
         match kind {
@@ -299,25 +297,25 @@ pub fn untar(data: &[u8], allowed: &dyn Fn(&str, bool) -> bool) -> Result<Files,
             None => header_path(h)?,
         };
         let is_dir = entry_is_dir(kind, &raw)?;
-        let path = clean_path(&raw).ok_or_else(|| bad(&raw, "unsafe path"))?;
+        let path = clean_path(&raw).ok_or_else(|| bad(&raw, Reason::UnsafePath))?;
         if path.is_empty() {
             if is_dir {
                 continue;
             }
-            return Err(bad(&raw, "unsafe path"));
+            return Err(bad(&raw, Reason::UnsafePath));
         }
         if !allowed(&path, is_dir) {
-            return Err(bad(&path, "not allowed in this archive"));
+            return Err(bad(&path, Reason::NotAllowed));
         }
         if is_dir {
             if files.contains_key(&path) {
-                return Err(bad(&path, "both a file and a directory"));
+                return Err(bad(&path, Reason::FileAndDirectory));
             }
             dirs.insert(path);
             continue;
         }
         if dirs.contains(&path) || files.contains_key(&path) {
-            return Err(bad(&path, "duplicate entry"));
+            return Err(bad(&path, Reason::Duplicate));
         }
         files.insert(path, body.to_vec());
     }
@@ -326,7 +324,7 @@ pub fn untar(data: &[u8], allowed: &dyn Fn(&str, bool) -> bool) -> Result<Files,
         let mut parent = p.as_str();
         while let Some((up, _)) = parent.rsplit_once('/') {
             if files.contains_key(up) {
-                return Err(bad(p, "inside a file"));
+                return Err(bad(p, Reason::InsideFile));
             }
             parent = up;
         }
@@ -348,19 +346,20 @@ fn le32(b: &[u8], at: usize) -> u32 {
 /// [`Bad`] for a malformed archive, zip64, encryption, an unknown method, a CRC mismatch.
 pub fn unzip_one(data: &[u8], name: &str, limit: usize) -> Result<Option<Vec<u8>>, Bad> {
     const W: &str = "zip";
-    let short = |what: &str| bad(W, format!("truncated ({what})"));
     // End of central directory: 22 bytes plus a comment of up to 65535.
     let floor = data.len().saturating_sub(22 + 65535);
     let eocd = (floor..=data.len().saturating_sub(22))
         .rev()
         .find(|i| data[*i..].starts_with(&[0x50, 0x4b, 5, 6]))
-        .ok_or_else(|| bad(W, "not a zip file"))?;
+        .ok_or_else(|| bad(W, Reason::NotZip))?;
     let count = le16(data, eocd + 10);
     let mut at = le32(data, eocd + 16) as usize;
     for _ in 0..count {
-        let h = data.get(at..at + 46).ok_or_else(|| short("directory"))?;
+        let h = data
+            .get(at..at + 46)
+            .ok_or_else(|| bad(W, Reason::ZipTruncatedDirectory))?;
         if h[..4] != [0x50, 0x4b, 1, 2] {
-            return Err(bad(W, "bad central directory"));
+            return Err(bad(W, Reason::ZipDirectory));
         }
         let (flags, method) = (le16(h, 8), le16(h, 10));
         let crc = le32(h, 16);
@@ -369,42 +368,39 @@ pub fn unzip_one(data: &[u8], name: &str, limit: usize) -> Result<Option<Vec<u8>
         let local = le32(h, 42) as usize;
         let entry = data
             .get(at + 46..at + 46 + nlen)
-            .ok_or_else(|| short("name"))?;
+            .ok_or_else(|| bad(W, Reason::ZipTruncatedName))?;
         at += 46 + nlen + xlen + clen;
         if entry != name.as_bytes() {
             continue;
         }
         if flags & 1 != 0 {
-            return Err(bad(name, "encrypted"));
+            return Err(bad(name, Reason::Encrypted));
         }
         if csize == 0xffff_ffff || usize_ == 0xffff_ffff || local == 0xffff_ffff {
-            return Err(bad(name, "zip64 is not supported"));
+            return Err(bad(name, Reason::Zip64));
         }
         if usize_ > limit {
-            return Err(bad(name, "too large"));
+            return Err(bad(name, Reason::TooLarge));
         }
         let lh = data
             .get(local..local + 30)
-            .ok_or_else(|| short("local header"))?;
+            .ok_or_else(|| bad(W, Reason::ZipTruncatedHeader))?;
         if lh[..4] != [0x50, 0x4b, 3, 4] {
-            return Err(bad(name, "bad local header"));
+            return Err(bad(name, Reason::BadLocalHeader));
         }
         let start = local + 30 + le16(lh, 26) + le16(lh, 28);
         let raw = data
             .get(start..start + csize)
-            .ok_or_else(|| short("data"))?;
+            .ok_or_else(|| bad(W, Reason::ZipTruncatedData))?;
         let out = match method {
             0 => raw.to_vec(),
             8 => inflate(raw, limit, name)?,
             m => {
-                return Err(bad(
-                    name,
-                    format!("compression method {m} is not supported"),
-                ));
+                return Err(bad(name, Reason::ZipMethod(m)));
             }
         };
         if out.len() != usize_ || crc32(&out) != crc {
-            return Err(bad(name, "checksum mismatch"));
+            return Err(bad(name, Reason::Checksum));
         }
         return Ok(Some(out));
     }
@@ -507,7 +503,7 @@ pub(crate) mod tests {
         corrupt[0] = b'b';
         assert_eq!(
             untar(&corrupt, ANY).unwrap_err().reason,
-            "header checksum mismatch"
+            Reason::HeaderChecksum
         );
         assert!(
             untar(&entry("a", b'0', b"1"), ANY).is_err(),

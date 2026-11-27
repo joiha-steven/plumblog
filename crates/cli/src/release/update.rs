@@ -4,6 +4,7 @@
 
 use super::fetch::{FetchError, RELEASES_PAGE, Source};
 use super::minisign::{KeyError, PublicKey, SigError, key_id_hex};
+use super::reason::Reason;
 use super::{Version, archive, archive_failure, fetch_failure, sha256_hex, temp_name};
 use crate::setup::Failure;
 use crate::text::{Code, Text};
@@ -47,24 +48,24 @@ fn latest(src: &Source, text: &Text) -> Result<Version, Failure> {
     let body = src
         .get(src.latest_url(), "application/vnd.github+json", SMALL)
         .map_err(|e| fetch_failure(&e, text))?;
-    let invalid = |detail: &str| {
+    let invalid = |detail: Reason| {
         fail(
             Code::ReleaseReplyInvalid,
             text,
             key!("cli.error.release_reply_invalid"),
-            &[("detail", detail.into())],
+            &[("detail", detail.render(text))],
         )
     };
     let v: serde_json::Value =
-        serde_json::from_slice(&body).map_err(|e| invalid(&e.to_string()))?;
+        serde_json::from_slice(&body).map_err(|e| invalid(Reason::Detail(e.to_string())))?;
     let tag = v
         .get("tag_name")
         .and_then(|t| t.as_str())
-        .ok_or_else(|| invalid("no tag_name"))?;
+        .ok_or_else(|| invalid(Reason::NoTagName))?;
     tag.starts_with('v')
         .then(|| Version::parse(tag))
         .flatten()
-        .ok_or_else(|| invalid("tag_name is not vX.Y.Z"))
+        .ok_or_else(|| invalid(Reason::TagNotVersion))
 }
 
 /// The release archive for `target`, and the binary's name inside it.
@@ -102,19 +103,19 @@ fn verify_sums(key: &PublicKey, tag: &str, src: &Source, text: &Text) -> Result<
         }
         Err(e) => return Err(fetch_failure(&e, text)),
     };
-    let invalid = |reason: &str| {
+    let invalid = |reason: Reason| {
         fail(
             Code::UpdateSignatureInvalid,
             text,
             key!("cli.error.update_signature_invalid"),
             &[
                 ("tag", tag.into()),
-                ("reason", reason.into()),
+                ("reason", reason.render(text)),
                 ("page", RELEASES_PAGE.into()),
             ],
         )
     };
-    let sig = String::from_utf8(sig).map_err(|_| invalid("not text"))?;
+    let sig = String::from_utf8(sig).map_err(|_| invalid(Reason::SignatureNotText))?;
     key.verify(&sig, &sums).map_err(|e| match e {
         SigError::KeyMismatch { want, got } => fail(
             Code::UpdateKeyMismatch,
@@ -127,11 +128,11 @@ fn verify_sums(key: &PublicKey, tag: &str, src: &Source, text: &Text) -> Result<
                 ("page", RELEASES_PAGE.into()),
             ],
         ),
-        SigError::Prehashed => invalid("prehashed signature; releases use the legacy algorithm"),
+        SigError::Prehashed => invalid(Reason::SignaturePrehashed),
         SigError::Malformed(why) => invalid(why),
-        SigError::Invalid => invalid("bad signature"),
+        SigError::Invalid => invalid(Reason::SignatureBad),
     })?;
-    String::from_utf8(sums).map_err(|_| invalid("SHA256SUMS is not text"))
+    String::from_utf8(sums).map_err(|_| invalid(Reason::SumsNotText))
 }
 
 /// Writes `bytes` next to `exe`, then renames it over `exe` (Windows: moves the running exe
@@ -343,7 +344,7 @@ fn download_binary(
         archive_failure(
             &archive::Bad {
                 path: format!("{name}/{inner}"),
-                reason: "missing".into(),
+                reason: Reason::Missing,
             },
             text,
         )

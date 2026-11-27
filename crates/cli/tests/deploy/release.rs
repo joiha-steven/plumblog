@@ -8,6 +8,7 @@ use crate::fake_release::{FakeRelease, bundle_json, files_under, gzip, tar, tar_
 use plumblog_cli::deploy::Options;
 use plumblog_cli::migrations;
 use plumblog_cli::release::fetch::{RELEASES_PAGE, Source};
+use plumblog_cli::release::reason::Reason;
 use plumblog_cli::release::{Release, Version, sha256_hex};
 use plumblog_cli::text::{Code, Text};
 use std::path::{Path, PathBuf};
@@ -188,6 +189,11 @@ fn hostile(entries: Vec<Vec<u8>>, files: &[(String, Vec<u8>)], version: &str) ->
     gzip(&tar(&all))
 }
 
+/// A reason as the user reads it in English.
+fn said(r: &Reason) -> String {
+    r.render(&en())
+}
+
 fn refused(gz: &[u8], want: Code) -> String {
     let (fake, dir, _) = set_up(&migrations::bundled());
     let gh = FakeRelease::start();
@@ -210,45 +216,42 @@ fn extraction_refuses_escapes_links_and_extra_paths() {
     for (entry, reason) in [
         (
             tar_entry("worker/../../evil", b'0', "", b"x"),
-            "unsafe path",
+            Reason::UnsafePath,
         ),
         (
             tar_entry("/tmp/plumblog-evil", b'0', "", b"x"),
-            "unsafe path",
+            Reason::UnsafePath,
         ),
         (
             tar_entry("worker/link", b'2', "/etc/passwd", b""),
-            "a symlink",
+            Reason::Symlink,
         ),
         (
             tar_entry("worker/hard", b'1', "worker/index.js", b""),
-            "a hard link",
+            Reason::HardLink,
         ),
-        (tar_entry("worker/dev", b'3', "", b""), "a device file"),
-        (
-            tar_entry("extra.txt", b'0', "", b"x"),
-            "not allowed in this archive",
-        ),
+        (tar_entry("worker/dev", b'3', "", b""), Reason::DeviceFile),
+        (tar_entry("extra.txt", b'0', "", b"x"), Reason::NotAllowed),
     ] {
         let msg = refused(
             &hostile(vec![ok_entry(), entry], &js, &v),
             Code::ReleaseArchiveInvalid,
         );
-        assert!(msg.contains(reason), "{reason}: {msg}");
+        assert!(msg.contains(&said(&reason)), "{reason:?}: {msg}");
     }
     // A file the manifest does not list, and a listed file that is missing.
     let msg = refused(
         &hostile(vec![ok_entry()], &[], &v),
         Code::ReleaseArchiveInvalid,
     );
-    assert!(msg.contains("not listed in bundle.json"), "{msg}");
+    assert!(msg.contains(&said(&Reason::NotListed)), "{msg}");
     let mut two = js.clone();
     two.push(("assets/a.css".into(), b"a".to_vec()));
     let msg = refused(
         &hostile(vec![ok_entry()], &two, &v),
         Code::ReleaseArchiveInvalid,
     );
-    assert!(msg.contains("not in the archive"), "{msg}");
+    assert!(msg.contains(&said(&Reason::ListedNotInArchive)), "{msg}");
 }
 
 #[test]

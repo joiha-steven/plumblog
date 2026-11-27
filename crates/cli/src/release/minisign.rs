@@ -10,6 +10,7 @@
 //! The secret is our own compact form for one CI secret: base64(`Ed` || key id || seed (32) ||
 //! public key (32)), unencrypted.
 
+use super::reason::Reason;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 
 /// The marker `release/minisign.pub` holds until the owner generates the real key.
@@ -35,7 +36,7 @@ pub enum KeyError {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SigError {
-    Malformed(&'static str),
+    Malformed(Reason),
     /// A prehashed (`ED`) signature; releases are signed with the legacy algorithm.
     Prehashed,
     /// Signed by another key: hex key ids, minisign's way (`want` is ours).
@@ -120,33 +121,33 @@ impl PublicKey {
     /// [`SigError`].
     pub fn verify(&self, minisig: &str, data: &[u8]) -> Result<String, SigError> {
         let mut lines = minisig.lines();
-        let first = lines.next().ok_or(SigError::Malformed("empty"))?;
+        let first = lines.next().ok_or(SigError::Malformed(Reason::SigEmpty))?;
         if !first.starts_with(UNTRUSTED) {
-            return Err(SigError::Malformed("no untrusted comment line"));
+            return Err(SigError::Malformed(Reason::SigNoCommentLine));
         }
         let sig = lines
             .next()
             .and_then(b64_decode)
-            .ok_or(SigError::Malformed("signature line is not base64"))?;
+            .ok_or(SigError::Malformed(Reason::SigNotBase64))?;
         if sig.len() != 74 {
-            return Err(SigError::Malformed("signature has the wrong length"));
+            return Err(SigError::Malformed(Reason::SigWrongLength));
         }
         let comment = lines
             .next()
             .and_then(|l| l.strip_prefix(TRUSTED))
-            .ok_or(SigError::Malformed("no trusted comment line"))?;
+            .ok_or(SigError::Malformed(Reason::SigNoTrustedComment))?;
         let global = lines
             .next()
             .and_then(b64_decode)
-            .ok_or(SigError::Malformed("global signature is not base64"))?;
+            .ok_or(SigError::Malformed(Reason::SigGlobalNotBase64))?;
         if global.len() != 64 {
-            return Err(SigError::Malformed("global signature has the wrong length"));
+            return Err(SigError::Malformed(Reason::SigGlobalWrongLength));
         }
         if &sig[..2] == ALG_PREHASHED {
             return Err(SigError::Prehashed);
         }
         if &sig[..2] != ALG_LEGACY {
-            return Err(SigError::Malformed("unknown signature algorithm"));
+            return Err(SigError::Malformed(Reason::SigUnknownAlgorithm));
         }
         if sig[2..10] != self.key_id {
             let mut got = [0; 8];

@@ -6,6 +6,7 @@ use crate::fake_release::{FakeRelease, gzip, tar, tar_entry};
 use plumblog_cli::release::Version;
 use plumblog_cli::release::fetch::Source;
 use plumblog_cli::release::minisign::SecretKey;
+use plumblog_cli::release::reason::Reason;
 use plumblog_cli::release::sha256_hex;
 use plumblog_cli::release::update::{Update, archive_name, run};
 use plumblog_cli::setup::Failure;
@@ -121,11 +122,22 @@ fn a_good_signature_updates_the_binary() {
         out.contains("git pull") && out.contains("blog deploy"),
         "{out}"
     );
-    assert_eq!(
-        std::fs::read_dir(&s.dir.0).unwrap().count(),
-        1,
-        "no temp file left"
-    );
+    // Windows moves the running exe aside to `blog.old.exe` for a later run to delete; it is the
+    // only file besides the new binary. Elsewhere the new binary is the only file.
+    let mut names: Vec<_> = std::fs::read_dir(&s.dir.0)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    names.sort();
+    #[cfg(windows)]
+    {
+        let old = s.dir.0.join(plumblog_cli::release::update::OLD_EXE);
+        assert_eq!(std::fs::read(&old).unwrap(), OLD, "the old binary is kept");
+        assert_eq!(names.len(), 2, "{names:?}");
+    }
+    #[cfg(not(windows))]
+    assert_eq!(names.len(), 1, "no temp file left: {names:?}");
     for seen in s.gh.seen() {
         assert!(seen.headers.iter().all(|(k, _)| k != "authorization"));
     }
@@ -147,7 +159,10 @@ fn a_bad_signature_is_refused() {
     let forged = s.key.sign(b"another file list", "t");
     s.gh.file(&tag, "SHA256SUMS.minisig", forged.as_bytes());
     let msg = failed(&update(&s, None, false, "en"), Code::UpdateSignatureInvalid);
-    assert!(msg.contains("bad signature"), "{msg}");
+    assert!(
+        msg.contains(&Reason::SignatureBad.render(&Text::new("en"))),
+        "{msg}"
+    );
     unchanged(&s);
 }
 
