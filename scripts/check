@@ -28,6 +28,13 @@ cargo clippy -q -p plumblog-worker --target wasm32-unknown-unknown --all-targets
 step "test (all crates)"
 cargo test -q --workspace || fail "tests failed"
 
+# --- locale keys (issue #5) ---
+step "locale keys"
+# Keys used by templates and code exist in en.toml; every language has the same messages.
+cargo test -q -p plumblog-i18n --test locale_keys \
+  || fail "locale keys (missing, extra or wrong plural forms; list above)"
+# --- end locale keys ---
+
 # --- markdown CPU budget (issue #4) ---
 step "markdown render CPU budget (release)"
 # Debug builds measure the compiler, not the renderer; the budget is in tests/perf.rs.
@@ -57,6 +64,7 @@ cli      clap                   # argument parsing for the `blog` binary
 markdown unicode-normalization  # NFC before heading ids (pure Rust, no I/O)
 markdown pulldown-cmark         # CommonMark + GFM parser
 markdown pulldown-latex         # LaTeX to MathML at save time
+i18n     toml                   # locale files are TOML
 '
 meta=$(cargo metadata -q --format-version 1 --no-deps) || fail "cargo metadata failed"
 graph_errors=$(jq -r --arg order "$order" --arg allow "$external_allowlist" '

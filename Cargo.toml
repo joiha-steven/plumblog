@@ -32,6 +32,8 @@ unicode-normalization = "0.1.26"
 pulldown-cmark = { version = "0.13.6", default-features = false }
 # LaTeX math to MathML at save time, so readers need no math JS (~70 KB gzip in wasm, measured).
 pulldown-latex = "0.8.0"
+# theme.toml and theme locale files are TOML; parse-only, no writer.
+toml = { version = "1.2.1", default-features = false, features = ["std", "parse", "serde"] }
 # Internal module crates; allowed edges between them are enforced by scripts/check.
 plumblog-model = { path = "crates/model" }
 plumblog-markdown = { path = "crates/markdown" }
