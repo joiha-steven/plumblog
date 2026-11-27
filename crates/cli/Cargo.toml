@@ -32,6 +32,7 @@ toml = { workspace = true, features = ["display", "serde"] }
 # Release signatures and archives (`blog update`, `blog deploy` downloads, `blog-release`).
 ring.workspace = true
 miniz_oxide.workspace = true
+md-5.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true

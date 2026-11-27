@@ -105,6 +105,15 @@ codes! {
     ScriptForeign => "setup.script_foreign",
     MigrationUnrecorded => "setup.migration_unrecorded",
     RollbackOlder => "rollback.older",
+    BackupKeyUnsafe => "backup.key_unsafe",
+    BackupSizeMismatch => "backup.size_mismatch",
+    BackupChecksumMismatch => "backup.checksum_mismatch",
+    BackupObjectMissing => "backup.object_missing",
+    BackupObjectFailed => "backup.object_failed",
+    BackupObjectTooBig => "backup.object_too_big",
+    BackupRowInvalid => "backup.row_invalid",
+    BackupMediaUnwritable => "backup.media_unwritable",
+    BackupIncomplete => "backup.incomplete",
 }
 
 /// One language's `[cli]` text, English behind it.

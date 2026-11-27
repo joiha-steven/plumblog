@@ -27,6 +27,10 @@ pub const SETUP_CODE_EXPIRES_KEY: &str = "setup_code_expires_at";
 /// Settings key holding the site's random id (a JSON string), part of the browser's password
 /// stretch salt. Public: the sign-in page needs it before anyone is signed in.
 pub const SITE_ID_KEY: &str = "site_id";
+/// Settings key `blog backup` writes (JSON `{at, database, media, complete}`): when the data
+/// was last copied off Cloudflare. Read-only to the API, like [`SITE_ID_KEY`]: only `blog`
+/// says what it backed up.
+pub const LAST_BACKUP_KEY: &str = "last_backup";
 /// Settings key holding the Turnstile site key (a JSON string); absent = Turnstile off.
 pub const TURNSTILE_SITE_KEY: &str = "turnstile_site_key";
 

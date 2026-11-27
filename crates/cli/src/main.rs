@@ -3,7 +3,7 @@ use plumblog_cli::cloudflare::{Client, Credentials, TokenError, TokenKind, endpo
 use plumblog_cli::help;
 use plumblog_cli::release::{self, Version, fetch::Source};
 use plumblog_cli::text::{Code, Text, pick_lang};
-use plumblog_cli::{deploy, migrations, setup};
+use plumblog_cli::{backup, deploy, migrations, setup};
 use plumblog_i18n::{Key, key};
 use std::{fmt::Write, path::Path, process::ExitCode};
 
@@ -138,6 +138,12 @@ enum Command {
         #[arg(long)]
         allow_older: bool,
     },
+    Backup {
+        #[arg(long)]
+        no_media: bool,
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
     Update {
         #[arg(long, conflicts_with = "check")]
         to: Option<String>,
@@ -219,6 +225,14 @@ fn command(text: &Text) -> clap::Command {
                 .mut_arg("build", |a| a.help(t(key!("cli.deploy.build_help"))))
                 .mut_arg("allow_older", |a| {
                     a.help(t(key!("cli.deploy.allow_older_help")))
+                })
+        })
+        .mut_subcommand("backup", |c| {
+            c.about(t(key!("cli.backup.about")))
+                .mut_arg("no_media", |a| a.help(t(key!("cli.backup.no_media_help"))))
+                .mut_arg("out", |a| {
+                    a.help(t(key!("cli.backup.out_help")))
+                        .value_name(leak(t(key!("cli.backup.out_value"))))
                 })
         })
         .mut_subcommand("update", |c| {
@@ -400,6 +414,31 @@ fn deploy_or_rollback(
     Ok(String::new())
 }
 
+/// `blog backup`: progress to stdout as each step finishes.
+fn backup(text: &Text, opts: &backup::Options) -> Result<String, (Code, String)> {
+    let creds = Credentials::load(Path::new(".")).map_err(|e| (e.code(), e.message(text)))?;
+    let mut client = Client::from_env(creds.token).map_err(|e| (e.code(), e.message(text)))?;
+    let migrations = migrations::bundled();
+    let cx = setup::Context {
+        dir: Path::new("."),
+        migrations: &migrations,
+        now_ms: now_ms(),
+        text,
+    };
+    let clock = deploy::RealClock::new();
+    let mut out = std::io::stdout().lock();
+    backup::run(
+        &mut client,
+        creds.account_id.as_deref(),
+        opts,
+        &cx,
+        &clock,
+        &mut out,
+    )
+    .map_err(|f| (f.code, f.message))?;
+    Ok(String::new())
+}
+
 /// The running executable with symlinks resolved: the file update replaces and `clean_old`
 /// looks beside.
 fn real_exe() -> std::io::Result<std::path::PathBuf> {
@@ -519,6 +558,7 @@ fn run(text: &Text, args: &[String]) -> Outcome {
                 release: None,
             }),
         ),
+        Some(Command::Backup { no_media, out }) => backup(text, &backup::Options { no_media, out }),
         Some(Command::Update {
             to,
             check,

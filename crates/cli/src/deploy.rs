@@ -157,24 +157,24 @@ fn malformed(endpoint: Endpoint, detail: &str) -> ApiError {
     }
 }
 
-fn str_at<'v>(v: &'v Value, key: &str) -> Option<&'v str> {
+pub(crate) fn str_at<'v>(v: &'v Value, key: &str) -> Option<&'v str> {
     v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
 /// The site as `blog setup` left it.
-struct Site {
-    account: String,
-    worker: String,
-    origin: String,
-    db_name: String,
-    db_id: String,
-    bucket: String,
-    turnstile: bool,
+pub(crate) struct Site {
+    pub(crate) account: String,
+    pub(crate) worker: String,
+    pub(crate) origin: String,
+    pub(crate) db_name: String,
+    pub(crate) db_id: String,
+    pub(crate) bucket: String,
+    pub(crate) turnstile: bool,
     /// Custom domain host, if any.
-    domain: Option<String>,
+    pub(crate) domain: Option<String>,
 }
 
-fn site(state: Option<&SiteState>, cx: &Context) -> Result<Site, Failure> {
+pub(crate) fn site(state: Option<&SiteState>, cx: &Context) -> Result<Site, Failure> {
     let not_set_up = || {
         Failure::new(
             Code::NotSetUp,
@@ -202,7 +202,7 @@ fn site(state: Option<&SiteState>, cx: &Context) -> Result<Site, Failure> {
 }
 
 /// Loads the state, verifies the token and checks the account is the site's.
-fn start(
+pub(crate) fn start(
     client: &mut Client,
     account_id: Option<&str>,
     cx: &Context,
@@ -354,22 +354,45 @@ impl Drop for Lock {
     }
 }
 
-/// D1 export into `backups/<utc>-<db>.sql` (0600). Polling as the docs say: re-POST with
-/// `current_bookmark` until `status` is `complete` (an export nobody polls is cancelled),
-/// then download `result.signed_url` (valid 1 h), without the API token.
+/// What the export is for: only the wording of its failures differs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Purpose {
+    Deploy,
+    Backup,
+}
+
+/// D1 export into `<dir>/<utc>-<db>.sql` (0600), `dir` relative to the site folder or
+/// absolute. Polling as the docs say: re-POST with `current_bookmark` until `status` is
+/// `complete` (an export nobody polls is cancelled), then download `result.signed_url`
+/// (valid 1 h), without the API token. Returns the file as shown to the owner.
 /// <https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/export/>
-fn export(run: &mut Run, site: &Site, rt: &Runtime, stamp: &str) -> Result<String, Failure> {
-    run.line(key!("cli.deploy.exporting"), &[]);
+pub(crate) fn export(
+    run: &mut Run,
+    site: &Site,
+    clock: &dyn Clock,
+    stamp: &str,
+    dir: &str,
+    purpose: Purpose,
+) -> Result<String, Failure> {
+    if purpose == Purpose::Deploy {
+        run.line(key!("cli.deploy.exporting"), &[]);
+    } else {
+        run.line(key!("cli.backup.exporting"), &[("dir", dir.to_string())]);
+    }
     let text = run.cx.text;
     let fail = |detail: String| {
         Failure::new(
             Code::ExportFailed,
             text,
-            key!("cli.error.export_failed"),
+            if purpose == Purpose::Deploy {
+                key!("cli.error.export_failed")
+            } else {
+                key!("cli.error.backup_export_failed")
+            },
             &[("detail", detail)],
         )
     };
-    let started = rt.clock.elapsed();
+    let started = clock.elapsed();
     let mut current: Option<String> = None;
     let url = loop {
         let mut body = json!({"output_format": "polling"});
@@ -394,22 +417,33 @@ fn export(run: &mut Run, site: &Site, rt: &Runtime, stamp: &str) -> Result<Strin
             _ => {}
         }
         current = str_at(&r, "at_bookmark").map(str::to_string).or(current);
-        if rt.clock.elapsed().saturating_sub(started) > EXPORT_BUDGET {
+        if clock.elapsed().saturating_sub(started) > EXPORT_BUDGET {
             return Err(fail(format!("{} s", EXPORT_BUDGET.as_secs())));
         }
-        rt.clock.sleep(EXPORT_POLL_WAIT);
+        clock.sleep(EXPORT_POLL_WAIT);
     };
-    let rel = format!("{BACKUP_DIR}/{stamp}-{}.sql", site.db_name);
+    let rel = format!("{dir}/{stamp}-{}.sql", site.db_name);
     let path = run.cx.dir.join(&rel);
     download(&url, &path, run.client.is_local()).map_err(|reason| {
         Failure::new(
             Code::BackupUnwritable,
             text,
-            key!("cli.error.backup_unwritable"),
+            if purpose == Purpose::Deploy {
+                key!("cli.error.backup_unwritable")
+            } else {
+                key!("cli.error.backup_file_unwritable")
+            },
             &[("path", path.display().to_string()), ("reason", reason)],
         )
     })?;
-    run.line(key!("cli.deploy.exported"), &[("file", rel.clone())]);
+    run.line(
+        if purpose == Purpose::Deploy {
+            key!("cli.deploy.exported")
+        } else {
+            key!("cli.backup.exported")
+        },
+        &[("file", rel.clone())],
+    );
     Ok(rel)
 }
 
@@ -1129,7 +1163,14 @@ fn steps(
     flow: &Flow,
 ) -> Result<(), Failure> {
     if flow.pending || flow.export {
-        rec.export = Some(export(run, site, flow.rt, &flow.stamp)?);
+        rec.export = Some(export(
+            run,
+            site,
+            flow.rt.clock,
+            &flow.stamp,
+            BACKUP_DIR,
+            Purpose::Deploy,
+        )?);
         put_record(run, rec)?;
     }
     // Migrations; a failure stops before any code is uploaded.

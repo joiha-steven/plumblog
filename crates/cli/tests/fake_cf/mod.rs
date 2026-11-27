@@ -140,6 +140,8 @@ pub struct State {
     pub d1: Vec<Value>,
     /// R2 bucket names; listed with a cursor, as R2 does.
     pub r2: Vec<String>,
+    /// `<bucket>/<key>` -> object, read with `GET .../r2/buckets/<bucket>/objects/<key>`.
+    pub objects: HashMap<String, Object>,
     pub requests: Vec<Recorded>,
     /// `(n, failure)`: the n-th request (1-based, counting every request) fails.
     pub failures: Vec<(usize, Failure)>,
@@ -189,6 +191,13 @@ pub struct State {
     /// `(pattern, action)`: before answering the first request whose `METHOD /path` contains
     /// `pattern`, run `action` once (e.g. someone editing site.local.toml meanwhile).
     pub on_request: Vec<(String, Box<dyn FnOnce() + Send>)>,
+}
+
+/// An R2 object: bytes (text, for the tests) and the `ETag` header it answers with.
+#[derive(Clone, Debug)]
+pub struct Object {
+    pub body: String,
+    pub etag: Option<String>,
 }
 
 pub struct Fake {
@@ -296,10 +305,6 @@ fn read_request(stream: &TcpStream) -> Option<Recorded> {
         headers,
         body: String::from_utf8_lossy(&body).into_owned(),
     })
-}
-
-fn write_reply(stream: &TcpStream, status: u16, body: &str) {
-    write_reply_with(stream, status, body, "");
 }
 
 /// `extra`: more header lines, each ending in `\r\n`.
@@ -426,6 +431,7 @@ fn serve(stream: &TcpStream, state: &Mutex<State>) {
     {
         failure = Some(st.fail_on.remove(i).1);
     }
+    let mut extra = String::new();
     let (status, body) = match failure {
         Some(Failure::Drop) => return,
         Some(Failure::DropAfter) => {
@@ -455,12 +461,17 @@ fn serve(stream: &TcpStream, state: &Mutex<State>) {
             (502, format!("{}{bearer}</pre></html>", "x".repeat(n)))
         }
         None => {
-            let (s, v) = route(&mut st, &req);
-            (s, v.to_string())
+            if let Some((s, b, e)) = r2_object(&st, &req) {
+                extra = e;
+                (s, b)
+            } else {
+                let (s, v) = route(&mut st, &req);
+                (s, v.to_string())
+            }
         }
     };
     drop(st);
-    write_reply(stream, status, &body);
+    write_reply_with(stream, status, &body, &extra);
 }
 
 fn ok(result: &Value) -> (u16, Value) {
@@ -669,6 +680,69 @@ fn d1_restore(st: &mut State, req: &Recorded, id: &str) -> (u16, Value) {
     let prev = format!("bm-{}-before-restore-{}", id, st.restores.len());
     ok(&json!({"bookmark": b, "previous_bookmark": prev,
                "message": "Restored"}))
+}
+
+/// `GET /accounts/<a>/r2/buckets/<bucket>/objects/<key>`: the object's bytes with an `ETag`,
+/// or a JSON 404 (R2 code 10007). Keys keep their slashes and arrive percent-encoded.
+fn r2_object(st: &State, req: &Recorded) -> Option<(u16, String, String)> {
+    let segs: Vec<&str> = req.path.split('/').skip(1).collect();
+    let ["accounts", _, "r2", "buckets", bucket, "objects", key @ ..] = segs.as_slice() else {
+        return None;
+    };
+    if req.method != "GET" {
+        return None;
+    }
+    let token = req
+        .header("authorization")
+        .and_then(|a| a.strip_prefix("Bearer "))
+        .and_then(|t| st.tokens.get(t));
+    let json = |(s, v): (u16, Value)| Some((s, v.to_string(), String::new()));
+    let Some(token) = token else {
+        return json(err(401, 10000, "Authentication error"));
+    };
+    if !token
+        .permissions
+        .contains(&"Account | Workers R2 Storage | Edit")
+    {
+        return json(err(403, 10000, "Authentication error"));
+    }
+    let key = key
+        .iter()
+        .map(|s| unescape(s))
+        .collect::<Vec<_>>()
+        .join("/");
+    match st.objects.get(&format!("{bucket}/{key}")) {
+        Some(o) => {
+            let etag = o
+                .etag
+                .as_ref()
+                .map(|e| format!("ETag: \"{e}\"\r\n"))
+                .unwrap_or_default();
+            Some((200, o.body.clone(), etag))
+        }
+        None => json(err(404, 10007, "The specified object does not exist")),
+    }
+}
+
+/// `%XX` escapes of a path segment (UTF-8).
+fn unescape(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let Some(v) = s
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// R2 buckets, listed by cursor as R2 does.

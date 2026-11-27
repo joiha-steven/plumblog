@@ -96,6 +96,31 @@ pub struct RollbackRecord {
     pub smoke: Option<String>,
 }
 
+/// What the media part of a backup run copied.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupMedia {
+    /// Objects in the backup folder, verified (copied now or by an earlier run).
+    pub objects: u64,
+    pub bytes: u64,
+    /// Rows whose object is not in R2.
+    pub missing: u64,
+    /// Objects refused or not copied: an unsafe key, a wrong size or checksum, a failed read.
+    pub failed: u64,
+}
+
+/// The last `blog backup`: the same record goes to the site's `last_backup` setting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupRecord {
+    /// Unix seconds.
+    pub at: i64,
+    pub database: bool,
+    /// `None`: `--no-media`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<BackupMedia>,
+    /// The database and every media object were copied (so `--no-media` is never complete).
+    pub complete: bool,
+}
+
 /// Records kept per list; older ones are dropped.
 pub const MAX_RECORDS: usize = 20;
 
@@ -130,6 +155,8 @@ pub struct SiteState {
     pub d1: Option<D1State>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub r2: Option<R2State>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_backup: Option<BackupRecord>,
     #[serde(default)]
     pub migrations: MigrationsState,
     /// Newest last.

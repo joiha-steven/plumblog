@@ -167,6 +167,12 @@ endpoints! {
         ApiToken, key!("cli.call.r2_create"),
         "https://developers.cloudflare.com/api/resources/r2/subresources/buckets/methods/create/";
 
+    // Raw bytes, not the JSON envelope (a miss is a bare 404). The REST docs do not list this
+    // call; the source is wrangler 4.160.0 `getR2Object`, which sends the key with its slashes.
+    R2ObjectGet => Get "/accounts/{account_id}/r2/buckets/{bucket_name}/objects/{object_key}",
+        Some(WorkersR2StorageEdit), ApiToken, key!("cli.call.r2_object_get"),
+        "https://developers.cloudflare.com/api/resources/r2/subresources/buckets/";
+
     // The first upload of a new script; versions cannot be the first upload.
     ScriptUpload => Put "/accounts/{account_id}/workers/scripts/{script_name}",
         Some(WorkersScriptsEdit), ApiToken, key!("cli.call.script_upload"),
