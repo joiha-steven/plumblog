@@ -281,7 +281,7 @@ Node.js is a contributor-only tool (wrangler, Playwright, Lighthouse). Users nev
 
 | Item | Budget |
 |---|---|
-| Worker wasm, gzip | <= 1 MiB |
+| Worker wasm, gzip, as deployed (after wasm-bindgen and wasm-opt; `scripts/check` builds it with the pinned worker-build) | <= 1 MiB |
 | Reader page JS | 0 KB by default, <= 5 KB with theme toggle and TOC |
 | Reader page CSS (inlined) | <= 15 KB |
 | Admin shell JS (every admin page: `app.js`, the chunks it imports statically and the largest UI text module), gzip | <= 35 KB |
@@ -338,3 +338,4 @@ Work is tracked as GitHub Issues grouped in one milestone per phase; this list o
 - 2026-11-27 Theme and plugin options at runtime: JSON values checked against the declaration, defaults on any mismatch (logged); `image` as a media id read via `.id`, `list` as short strings; plugins are bundled folders (`plugin.toml`, `partials/`, `assets/`, `locales/`) whose partials only fill theme-declared slots; plugin CSS inlined and JS deferred only when enabled; broken plugins skipped and logged; `blog guide options` generated from the Rust types.
 - 2026-11-27 Admin stack: no framework, TypeScript + esbuild (dev tools pinned in `tools/`), built output not committed (releases ship it), Worker-served shell with boot JSON and strict CSP (UI text built into the admin bundle, not the wasm), generated model types via an own emitter, mock client over shared fixtures, server-side preview; budgets 35 / 110 / 20 KB gzip.
 - 2026-11-27 Auth: browser-stretched passwords, hashed-key D1 rate limit with Turnstile step, rotating SameSite=Strict sessions with Origin check, passkeys (none attestation, ES256/RS256/Ed25519, own CBOR reader), setup code in settings.
+- 2026-11-27 The wasm budget is measured on what a deploy ships (worker-build with wasm-opt), not the raw cargo output (879 KB shipped vs 1,041 KB raw today). The release profile stays at `opt-level = "s"`: "z" saves 110 KB but doubles markdown render time, and CPU per request is the scarcer budget.
