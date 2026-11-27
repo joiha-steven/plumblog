@@ -6,9 +6,9 @@ use plumblog_model::{PostId, Result};
 
 use super::{MemoryStore, State, count};
 use crate::{
-    Post, PostKind, PostStatus, PostSummary, READER_MAX_OFFSET, ReaderFilter, ReaderLink,
-    ReaderNeighbours, ReaderPage, ReaderPost, ReaderRow, ReaderStore, ReaderTag, Tag, page_len,
-    year_bounds, year_of,
+    Post, PostKind, PostStatus, PostSummary, READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderFilter,
+    ReaderLink, ReaderNeighbours, ReaderPage, ReaderPost, ReaderRow, ReaderSitemapRow, ReaderStore,
+    ReaderTag, Tag, page_len, year_bounds, year_of,
 };
 
 fn listed(p: &Post) -> bool {
@@ -145,11 +145,51 @@ impl ReaderStore for MemoryStore {
                 .values()
                 .filter(|p| listed(p))
                 .filter_map(|p| p.published_at)
-                .filter_map(|at| i32::try_from(year_of(at)).ok())
+                .map(year_of)
+                .filter(|y| (1..=9999).contains(y))
+                .filter_map(|y| i32::try_from(y).ok())
                 .collect();
             years.sort_unstable_by(|a, b| b.cmp(a));
             years.dedup();
             years
+        }))
+    }
+
+    async fn reader_feed(&self, lang: &str, limit: u32) -> Result<Vec<ReaderPost>> {
+        Ok(self.read(|s| {
+            let mut rows: Vec<&Post> = s
+                .posts
+                .values()
+                .filter(|p| listed(p) && p.lang == lang)
+                .collect();
+            rows.sort_by_key(|p| Reverse(date_key(p)));
+            rows.into_iter()
+                .take(page_len(limit))
+                .map(|p| ReaderPost {
+                    post: p.clone(),
+                    tags: s.reader_tags_of(p),
+                })
+                .collect()
+        }))
+    }
+
+    async fn reader_sitemap(&self, limit: u32) -> Result<Vec<ReaderSitemapRow>> {
+        Ok(self.read(|s| {
+            let mut rows: Vec<&Post> = s
+                .posts
+                .values()
+                .filter(|p| p.status == PostStatus::Published)
+                .collect();
+            rows.sort_by_key(|p| Reverse(date_key(p)));
+            rows.into_iter()
+                .take(usize::try_from(limit.min(READER_SITEMAP_MAX)).unwrap_or(0))
+                .map(|p| ReaderSitemapRow {
+                    lang: p.lang.clone(),
+                    slug: p.slug.clone(),
+                    updated_at: p.updated_at,
+                    translation_group: p.translation_group,
+                })
+                .collect()
         }))
     }
 

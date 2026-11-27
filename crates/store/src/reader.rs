@@ -13,6 +13,10 @@ use crate::{Post, PostSummary, Tag};
 /// `/page/9999999` gets an empty page after one count, never a deep scan.
 pub const READER_MAX_OFFSET: u32 = 10_000;
 
+/// Most rows [`ReaderStore::reader_sitemap`] returns: the sitemap protocol's limit for one
+/// file.
+pub const READER_SITEMAP_MAX: u32 = 50_000;
+
 /// Which published posts (kind `post`) a reader listing covers, and in which order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReaderFilter<'a> {
@@ -63,6 +67,17 @@ pub struct ReaderLink {
     pub lang: String,
     pub slug: String,
     pub title: String,
+}
+
+/// One sitemap entry: a published post or page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReaderSitemapRow {
+    pub lang: String,
+    pub slug: String,
+    /// Unix ms.
+    pub updated_at: i64,
+    /// Rows sharing it are translations of each other.
+    pub translation_group: PostId,
 }
 
 /// The posts around one post in date order.
@@ -129,6 +144,12 @@ pub trait ReaderStore {
     /// Tags with at least one published post (kind `post`), ordered by name then id.
     /// 1 query.
     async fn reader_tags(&self) -> Result<Vec<Tag>>;
+    /// The newest published posts of kind `post` in one language with their bodies: what a
+    /// feed needs. `published_at` DESC, id DESC; `limit` is capped at `MAX_PAGE`. 1 query.
+    async fn reader_feed(&self, lang: &str, limit: u32) -> Result<Vec<ReaderPost>>;
+    /// Every published post and page, newest first (`published_at` DESC, id DESC), at most
+    /// `limit` capped at [`READER_SITEMAP_MAX`]: the sitemap in one query, without bodies.
+    async fn reader_sitemap(&self, limit: u32) -> Result<Vec<ReaderSitemapRow>>;
 }
 
 #[cfg(test)]

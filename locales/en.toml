@@ -5,6 +5,8 @@ title_fallback = "Untitled site"
 [error]
 # Shown as plain text when the theme itself cannot render a page.
 page_failed = "This page cannot be shown right now. Please try again in a minute."
+# Plain text for a comment form posted to something that is not a public post.
+page_not_found = "This page does not exist."
 
 [error.input]
 # A JSON body with more values in all than the API takes (4096).

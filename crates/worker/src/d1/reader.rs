@@ -3,8 +3,8 @@
 
 use plumblog_model::{PostId, Result, TagId};
 use plumblog_store::{
-    READER_MAX_OFFSET, ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage, ReaderPost,
-    ReaderRow, ReaderStore, ReaderTag, Tag, year_bounds,
+    READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage,
+    ReaderPost, ReaderRow, ReaderSitemapRow, ReaderStore, ReaderTag, Tag, year_bounds,
 };
 use worker::js_sys::{Array, JSON};
 use worker::wasm_bindgen::{JsCast, JsValue};
@@ -218,15 +218,19 @@ impl ReaderStore for D1Store {
     }
 
     // 1 query: a covering scan of posts_by_date. '%Y' of ms / 1000.0 is the UTC year,
-    // agreeing with plumblog_store::year_of at the Jan 1 edges (contract case).
+    // agreeing with plumblog_store::year_of at the Jan 1 edges (contract case). Posts outside
+    // years 1..=9999 are left out (strftime answers NULL there), as ReaderFilter::Year does.
     async fn reader_years(&self) -> Result<Vec<i32>> {
+        let (from, _) = year_bounds(1).ok_or_else(|| storage("reader_years", "year 1"))?;
+        let (_, to) = year_bounds(9999).ok_or_else(|| storage("reader_years", "year 9999"))?;
         let s = self.stmt(
             "reader_years",
             &format!(
                 "SELECT DISTINCT CAST(strftime('%Y', p.published_at / 1000.0, 'unixepoch') \
-                 AS INTEGER) AS y FROM posts p WHERE {LISTED} ORDER BY y DESC"
+                 AS INTEGER) AS y FROM posts p WHERE {LISTED} \
+                 AND p.published_at >= ? AND p.published_at < ? ORDER BY y DESC"
             ),
-            &[],
+            &[int(from)?, int(to)?],
         )?;
         self.rows(s)
             .await?
@@ -234,6 +238,50 @@ impl ReaderStore for D1Store {
             .map(|r| {
                 let y = r.int()?;
                 i32::try_from(y).map_err(|_| storage("reader_years", &format!("year {y}")))
+            })
+            .collect()
+    }
+
+    // 1 query: the newest posts of one language on posts_listing, bodies and tags included.
+    async fn reader_feed(&self, lang: &str, limit_n: u32) -> Result<Vec<ReaderPost>> {
+        let s = self.stmt(
+            "reader_feed",
+            &format!(
+                "SELECT {POST_COLS}, {TAGS_COL} FROM posts p WHERE {LISTED} AND p.lang = ? \
+                 ORDER BY p.published_at DESC, p.id DESC LIMIT ?"
+            ),
+            &[text(lang), limit(limit_n)],
+        )?;
+        self.rows(s)
+            .await?
+            .iter_mut()
+            .map(|r| {
+                Ok(ReaderPost {
+                    post: read_post(r)?,
+                    tags: read_tags("reader_feed", r)?,
+                })
+            })
+            .collect()
+    }
+
+    // 1 query: the date index alone, no bodies.
+    async fn reader_sitemap(&self, limit_n: u32) -> Result<Vec<ReaderSitemapRow>> {
+        let s = self.stmt(
+            "reader_sitemap",
+            "SELECT p.lang, p.slug, p.updated_at, p.translation_group FROM posts p \
+             WHERE p.status = 'published' ORDER BY p.published_at DESC, p.id DESC LIMIT ?",
+            &[JsValue::from(limit_n.min(READER_SITEMAP_MAX))],
+        )?;
+        self.rows(s)
+            .await?
+            .iter_mut()
+            .map(|r| {
+                Ok(ReaderSitemapRow {
+                    lang: r.text()?,
+                    slug: r.text()?,
+                    updated_at: r.int()?,
+                    translation_group: PostId(r.int()?),
+                })
             })
             .collect()
     }

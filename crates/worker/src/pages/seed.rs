@@ -1,16 +1,51 @@
-//! Test and dev builds only: copies the sample posts into a store, so search (which reads the
-//! store) finds the same posts the sample pages show. Saved through `save_post`, the same
-//! path the editor will use, so the search index is built (and d-stroke folded) for real.
+//! Test and dev builds only: copies the sample site (settings, posts, tags, translations)
+//! into a store, so reader pages and search read the same site the sample pages show. Posts
+//! are saved through `save_post`, the same path the editor will use, so the search index is
+//! built (and d-stroke folded) for real.
 
-use super::source::{Filter, ReaderSource, SampleSource};
-use plumblog_model::Role;
-use plumblog_store::{NewUser, PostKind, PostStatus, PostStore, SavePost, UserStore};
+use super::reader_db::{
+    SITE_DESCRIPTION_KEY, SITE_FOOTER_KEY, SITE_LANG_KEY, SITE_LANGUAGES_KEY, SITE_PER_PAGE_KEY,
+    SITE_TITLE_KEY,
+};
+use super::sample::{SAMPLE_SITE, SampleSource};
+use super::source::{Filter, ReaderSource};
+use crate::api::body::quote;
+use plumblog_model::{PostId, Role};
+use plumblog_store::{
+    NewUser, ORIGIN_KEY, PostKind, PostStatus, PostStore, SavePost, SettingsStore, TaxonomyStore,
+    UserStore,
+};
+use std::collections::HashMap;
 
-/// Saves every sample post as published, by one owner.
+/// Writes the sample site's settings, as `PUT /api/v1/settings/<key>` would.
+async fn sample_settings<S: SettingsStore>(db: &S) -> Result<(), String> {
+    let languages: Vec<String> = SAMPLE_SITE.languages.iter().map(|l| quote(l)).collect();
+    let rows = [
+        (SITE_TITLE_KEY, quote(SAMPLE_SITE.title)),
+        (SITE_DESCRIPTION_KEY, quote(SAMPLE_SITE.description)),
+        (SITE_FOOTER_KEY, quote(SAMPLE_SITE.footer)),
+        (SITE_LANG_KEY, quote(SAMPLE_SITE.lang)),
+        (SITE_LANGUAGES_KEY, format!("[{}]", languages.join(","))),
+        (SITE_PER_PAGE_KEY, SAMPLE_SITE.per_page.to_string()),
+        (ORIGIN_KEY, quote(SAMPLE_SITE.origin)),
+    ];
+    for (key, value) in rows {
+        db.put_setting(key, &value, 0)
+            .await
+            .map_err(|e| format!("put_setting {key}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Saves the sample site's settings and every sample post as published, by one owner, with
+/// its tags and translation links.
 ///
 /// # Errors
 /// The store call that failed, as a detail for the log.
-pub async fn sample_posts<S: UserStore + PostStore>(db: &S) -> Result<usize, String> {
+pub async fn sample_posts<S: UserStore + PostStore + SettingsStore + TaxonomyStore>(
+    db: &S,
+) -> Result<usize, String> {
+    sample_settings(db).await?;
     let src = SampleSource::get();
     let posts = src
         .posts(Filter::All, 0, usize::MAX)
@@ -29,39 +64,56 @@ pub async fn sample_posts<S: UserStore + PostStore>(db: &S) -> Result<usize, Str
         })
         .await
         .map_err(|e| format!("create_user: {e}"))?;
+    let mut saved: HashMap<(String, String), PostId> = HashMap::new();
     for p in &posts {
         // The store keeps milliseconds; sample dates are seconds.
         let at = p.published_at * 1000;
-        db.save_post(SavePost {
-            id: None,
-            expected_version: None,
-            translation_group: None,
-            kind: PostKind::Post,
-            lang: p.lang.clone(),
-            slug: p.slug.clone(),
-            status: PostStatus::Published,
-            published_at: Some(at),
-            author_id: owner,
-            title: p.title.clone(),
-            markdown: String::new(),
-            html: p.body.html.clone(),
-            toc_json: "[]".to_owned(),
-            excerpt: p.excerpt.clone().unwrap_or_else(|| p.body.excerpt.clone()),
-            word_count: 0,
-            reading_minutes: i64::from(p.body.reading_minutes),
-            pinned: p.pinned,
-            comments_enabled: false,
-            cover_media_id: None,
-            series_id: None,
-            series_position: None,
-            tag_ids: Vec::new(),
-            media_ids: Vec::new(),
-            search_text: text_of(&p.body.html),
-            revision: None,
-            now: at,
-        })
-        .await
-        .map_err(|e| format!("save_post {}: {e}", p.slug))?;
+        let mut tag_ids = Vec::new();
+        for t in &p.tags {
+            tag_ids.push(
+                db.ensure_tag(&t.slug, &t.name)
+                    .await
+                    .map_err(|e| format!("ensure_tag {}: {e}", t.slug))?,
+            );
+        }
+        // Joins the group of a translation saved earlier; the first of a pair starts it.
+        let group = p
+            .translations
+            .iter()
+            .find_map(|key| saved.get(key))
+            .copied();
+        let id = db
+            .save_post(SavePost {
+                id: None,
+                expected_version: None,
+                translation_group: group,
+                kind: PostKind::Post,
+                lang: p.lang.clone(),
+                slug: p.slug.clone(),
+                status: PostStatus::Published,
+                published_at: Some(at),
+                author_id: owner,
+                title: p.title.clone(),
+                markdown: String::new(),
+                html: p.body.html.clone(),
+                toc_json: "[]".to_owned(),
+                excerpt: p.excerpt.clone().unwrap_or_else(|| p.body.excerpt.clone()),
+                word_count: 0,
+                reading_minutes: i64::from(p.body.reading_minutes),
+                pinned: p.pinned,
+                comments_enabled: false,
+                cover_media_id: None,
+                series_id: None,
+                series_position: None,
+                tag_ids,
+                media_ids: Vec::new(),
+                search_text: text_of(&p.body.html),
+                revision: None,
+                now: at,
+            })
+            .await
+            .map_err(|e| format!("save_post {}: {e}", p.slug))?;
+        saved.insert((p.lang.clone(), p.slug.clone()), id);
     }
     Ok(posts.len())
 }

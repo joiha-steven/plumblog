@@ -4,7 +4,10 @@
 mod cache;
 mod db;
 mod docs;
+pub(crate) mod reader_db;
 pub(crate) mod routes;
+#[cfg(any(test, feature = "contract-tests"))]
+pub mod sample;
 mod search;
 pub mod source;
 
@@ -14,10 +17,10 @@ use db::{Db, ExtSource};
 use plumblog_i18n::{Catalog, Key};
 use plumblog_model::VERSION;
 use plumblog_render::{Body, Link, PageInfo, Plugin, Post, Site, Theme, ThemeError};
-use plumblog_store::{PostStore, SettingsStore, comment};
+use plumblog_store::{PostKind, PostStatus, PostStore, READER_MAX_OFFSET, SettingsStore, comment};
 use routes::Route;
 use search::SearchSource;
-use source::{Filter, ReaderSource, SampleSource, Settings, StoredPost};
+use source::{Filter, ReaderSource, Settings, StoredPost};
 use std::cell::Cell;
 use std::sync::OnceLock;
 use worker::{Context, Env, Headers, Request, Response, Result, console_error};
@@ -123,12 +126,12 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
     let url = req.url()?;
     let path = url.path().to_owned();
     let origin = url.origin().ascii_serialization();
-    let src = SampleSource::get();
     let d1 = match env.d1("DB") {
         Ok(d) => D1Store::new(d),
         Err(e) => return Ok(failure(&format!("D1 binding DB: {e}"))),
     };
     let db = Db(&d1);
+    let src = &db;
     // Search results depend on the query string and on the store, neither of which is in
     // the cache key or the ETag, so they skip both.
     if path == routes::SEARCH {
@@ -277,14 +280,13 @@ pub async fn render(
     Ok(out)
 }
 
-/// Store reads for pages, over D1, for routes outside this module (`crate::contract`).
-#[cfg_attr(not(feature = "contract-tests"), allow(dead_code))]
+/// Store reads for pages, over D1, for routes outside this module (admin, `crate::contract`).
 pub(crate) fn db_source(store: &D1Store) -> Db<'_, D1Store> {
     Db(store)
 }
 
 /// The page a draft would publish as, rendered with the site's theme and options: the admin
-/// preview. The real route lives with the posts API (#10); test builds serve it as
+/// preview. `now` is the date it shows, Unix seconds. The real route lives with the posts API (#10); test builds serve it as
 /// `/__preview` (`crate::contract`) so the admin is built against the real renderer.
 ///
 /// # Errors
@@ -296,6 +298,7 @@ pub async fn preview(
     title: &str,
     markdown: &str,
     lang: &str,
+    now: i64,
 ) -> std::result::Result<String, String> {
     let (theme, _) = configured(ext).await?;
     let settings = src.settings().await.map_err(err)?;
@@ -321,7 +324,7 @@ pub async fn preview(
         } else {
             lang.to_owned()
         },
-        published_at: settings.updated_at,
+        published_at: now,
         pinned: false,
         excerpt: None,
         body: plumblog_markdown::render(markdown, plumblog_markdown::Options::default()),
@@ -385,7 +388,15 @@ async fn route(
     let page = match routes::parse(path) {
         Route::Redirect(to) => return Ok(Outcome::Redirect(to)),
         Route::Home { page } => p.home(page).await?,
-        Route::Post { slug } => p.post(&slug, ext).await?,
+        // The default language lives at the root: its `/<lang>/` form has one URL, the root.
+        Route::Post {
+            lang: Some(l),
+            slug,
+        } if l == settings.lang => return Ok(Outcome::Redirect(routes::post(&slug))),
+        Route::Post { lang, slug } => {
+            p.post(lang.as_deref().unwrap_or(&settings.lang), &slug, ext)
+                .await?
+        }
         Route::Tag { slug, page } => p.tag(&slug, page).await?,
         Route::Archive { year, page } => p.archive(year, page).await?,
         Route::Search => p.search(search, query).await?,
@@ -425,18 +436,22 @@ fn doc(content_type: &'static str, body: String) -> Outcome {
 /// ids, and plainly not the real site, so the warning below gets noticed.
 pub const UNSET_ORIGIN: &str = "http://localhost";
 
-/// A post's public URL for webhook payloads, by the same origin rule as reader pages.
-pub async fn post_url(lang: &str, slug: &str) -> String {
-    let origin = match SampleSource::get().settings().await {
-        Ok(s) => public_origin(&s).to_owned(),
+/// A post's public URL for webhook payloads, by the same origin and language rules as reader
+/// pages. 1 query.
+pub async fn post_url(store: &D1Store, lang: &str, slug: &str) -> String {
+    match Db(store).settings().await {
+        Ok(s) => format!(
+            "{}{}",
+            public_origin(&s),
+            routes::post_in(lang, &s.lang, slug)
+        ),
         Err(e) => {
             warn(&format!(
                 "webhook.post_url: settings unreadable ({e}); using {UNSET_ORIGIN}"
             ));
-            UNSET_ORIGIN.to_owned()
+            format!("{UNSET_ORIGIN}/{lang}/{slug}")
         }
-    };
-    format!("{origin}/{lang}/{slug}")
+    }
 }
 
 fn public_origin(settings: &Settings) -> &str {
@@ -513,34 +528,58 @@ impl<S: ReaderSource> Pages<'_, S> {
         Ok(report.html)
     }
 
+    /// Where page `n` of a listing starts, or `None` when that is past the offset cap: such a
+    /// page is a 404 before any query runs.
+    fn offset(&self, n: usize) -> Option<usize> {
+        let offset = (n - 1).checked_mul(self.per)?;
+        (offset < READER_MAX_OFFSET as usize).then_some(offset)
+    }
+
+    fn render_posts(&self, posts: &[StoredPost]) -> Vec<Post> {
+        posts.iter().map(|p| self.to_render(p)).collect()
+    }
+
+    /// A stored post as the theme shows it: URLs follow the language rule (the default
+    /// language at the root), and the hreflang alternates are its translations.
+    fn to_render(&self, p: &StoredPost) -> Post {
+        to_render(p, &self.settings.lang)
+    }
+
     async fn home(&self, n: usize) -> PageResult {
+        let Some(offset) = self.offset(n) else {
+            return Ok(None);
+        };
         let slice = self
             .src
-            .posts(Filter::All, (n - 1) * self.per, self.per)
+            .posts(Filter::All, offset, self.per)
             .await
             .map_err(err)?;
-        if slice.posts.is_empty() && n > 1 {
+        // Decided from the count: a page past the last one is a 404 (page 1 of an empty
+        // site is the empty home).
+        if n > 1 && offset >= slice.total {
             return Ok(None);
         }
-        let posts: Vec<Post> = slice.posts.iter().map(to_render).collect();
+        let posts = self.render_posts(&slice.posts);
         let refs: Vec<&Post> = posts.iter().collect();
         self.show(&Body::Home {
             posts: &refs,
-            older_url: slice.more.then(|| routes::home_page(n + 1)),
+            older_url: (offset + slice.posts.len() < slice.total).then(|| routes::home_page(n + 1)),
             newer_url: (n > 1).then(|| routes::home_page(n - 1)),
         })
     }
 
-    async fn post(&self, slug: &str, ext: &impl ExtSource) -> PageResult {
-        let Some(n) = self.src.post(slug).await.map_err(err)? else {
+    async fn post(&self, lang: &str, slug: &str, ext: &impl ExtSource) -> PageResult {
+        let Some(n) = self.src.post(lang, slug).await.map_err(err)? else {
             return Ok(None);
         };
-        let post = to_render(&n.post);
-        let older = n.older.as_ref().map(to_render);
-        let newer = n.newer.as_ref().map(to_render);
+        let post = self.to_render(&n.post);
+        let older = n.older.as_ref().map(|p| self.to_render(p));
+        let newer = n.newer.as_ref().map(|p| self.to_render(p));
         // A failed read shows the post without its comments rather than failing the page;
         // the page is then not cached (see `complete`).
-        let comments = match ext.comments(&n.post.lang, slug).await {
+        // Comments are for posts: a static page shows no form (the comment route refuses it).
+        let comments = match ext.comments(&n.post, &self.settings.lang).await {
+            Ok(_) if n.post.is_page => None,
             Ok(c) => c,
             Err(e) => {
                 warn(&format!("comments.read_failed slug={slug} detail={e}"));
@@ -557,18 +596,21 @@ impl<S: ReaderSource> Pages<'_, S> {
     }
 
     async fn tag(&self, slug: &str, n: usize) -> PageResult {
+        let Some(offset) = self.offset(n) else {
+            return Ok(None);
+        };
         let Some(tag) = self.src.tag(slug).await.map_err(err)? else {
             return Ok(None);
         };
         let slice = self
             .src
-            .posts(Filter::Tag(slug), (n - 1) * self.per, self.per)
+            .posts(Filter::Tag(&tag), offset, self.per)
             .await
             .map_err(err)?;
         if slice.posts.is_empty() {
             return Ok(None);
         }
-        let posts: Vec<Post> = slice.posts.iter().map(to_render).collect();
+        let posts = self.render_posts(&slice.posts);
         let refs: Vec<&Post> = posts.iter().collect();
         let link = Link {
             name: tag.name,
@@ -577,22 +619,26 @@ impl<S: ReaderSource> Pages<'_, S> {
         self.show(&Body::Tag {
             tag: &link,
             posts: &refs,
-            older_url: slice.more.then(|| routes::tag_page(slug, n + 1)),
+            older_url: (offset + slice.posts.len() < slice.total)
+                .then(|| routes::tag_page(slug, n + 1)),
             newer_url: (n > 1).then(|| routes::tag_page(slug, n - 1)),
         })
     }
 
     async fn archive(&self, year: i32, n: usize) -> PageResult {
+        let Some(offset) = self.offset(n) else {
+            return Ok(None);
+        };
         // Paged like home: storage work per request stays bounded however busy a year was.
         let slice = self
             .src
-            .posts(Filter::Year(year), (n - 1) * self.per, self.per)
+            .posts(Filter::Year(year), offset, self.per)
             .await
             .map_err(err)?;
         if slice.posts.is_empty() {
             return Ok(None);
         }
-        let posts: Vec<Post> = slice.posts.iter().map(to_render).collect();
+        let posts = self.render_posts(&slice.posts);
         let refs: Vec<&Post> = posts.iter().collect();
         let years = self
             .src
@@ -609,7 +655,8 @@ impl<S: ReaderSource> Pages<'_, S> {
             year,
             posts: &refs,
             years,
-            older_url: slice.more.then(|| routes::archive(year, n + 1)),
+            older_url: (offset + slice.posts.len() < slice.total)
+                .then(|| routes::archive(year, n + 1)),
             newer_url: (n > 1).then(|| routes::archive(year, n - 1)),
         })
     }
@@ -620,7 +667,7 @@ impl<S: ReaderSource> Pages<'_, S> {
             .posts(Filter::All, 0, NOT_FOUND_SUGGESTIONS)
             .await
             .map_err(err)?;
-        let posts: Vec<Post> = recent.posts.iter().map(to_render).collect();
+        let posts = self.render_posts(&recent.posts);
         let refs: Vec<&Post> = posts.iter().collect();
         self.render(&Body::NotFound { recent: &refs })
     }
@@ -635,21 +682,28 @@ impl<S: ReaderSource> Pages<'_, S> {
     }
 }
 
-/// The stored post behind the reader page `/<slug>` and whether readers may comment on it
-/// now, for the comment route. The language comes from the reader source, as on the page.
+/// The stored post behind the reader page `/<slug>` (`lang` `None`) or `/<lang>/<slug>` and
+/// whether readers may comment on it now, for the comment route. Only what the page shows
+/// takes comments: a published post, the default language at the root only. 2 queries.
 ///
 /// # Errors
 /// A store read, as a detail for the log.
 pub(crate) async fn comment_target<S: PostStore + SettingsStore>(
     store: &S,
+    lang: Option<&str>,
     slug: &str,
 ) -> std::result::Result<Option<(plumblog_model::PostId, bool)>, String> {
-    let Some(page) = SampleSource::get().post(slug).await.map_err(err)? else {
+    let settings = reader_db::parse_settings(&store.all_settings().await.map_err(err)?);
+    if lang == Some(settings.lang.as_str()) {
+        return Ok(None);
+    }
+    let lang = lang.unwrap_or(&settings.lang);
+    let Some(post) = store.find_post(lang, slug).await.map_err(err)? else {
         return Ok(None);
     };
-    let Some(post) = store.find_post(&page.post.lang, slug).await.map_err(err)? else {
+    if post.status != PostStatus::Published || post.kind != PostKind::Post {
         return Ok(None);
-    };
+    }
     let site = comment::site_enabled(store).await.map_err(err)?;
     Ok(Some((post.id, comment::is_open(site, &post))))
 }
@@ -676,9 +730,9 @@ fn site(s: &Settings, lang: &str) -> Site {
     }
 }
 
-fn to_render(p: &StoredPost) -> Post {
+fn to_render(p: &StoredPost, default_lang: &str) -> Post {
     Post {
-        url: routes::post(&p.slug),
+        url: routes::post_in(&p.lang, default_lang, &p.slug),
         title: p.title.clone(),
         lang: p.lang.clone(),
         published_at: p.published_at,
@@ -700,7 +754,7 @@ fn to_render(p: &StoredPost) -> Post {
             .iter()
             .map(|(lang, slug)| plumblog_render::Alternate {
                 lang: lang.clone(),
-                url: routes::post(slug),
+                url: routes::post_in(lang, default_lang, slug),
             })
             .collect(),
     }
@@ -710,6 +764,8 @@ fn to_render(p: &StoredPost) -> Post {
 mod docs_tests;
 #[cfg(test)]
 mod options_tests;
+#[cfg(test)]
+mod reader_tests;
 #[cfg(test)]
 mod search_tests;
 #[cfg(any(test, feature = "contract-tests"))]

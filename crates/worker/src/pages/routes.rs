@@ -1,6 +1,6 @@
 //! Reader URLs, in one place: parsing a path and building the links pages point to.
 //!
-//! `/` and `/page/N` home, `/<slug>` post, `/tag/<slug>` and `/archive/<year>` (each with
+//! `/` and `/page/N` home, `/<slug>` post in the default language, `/<lang>/<slug>` in another, `/tag/<slug>` and `/archive/<year>` (each with
 //! `/page/N`). Redirect targets are always built here as `/`-rooted paths with no `//`, so a
 //! request path can never turn into an off-site `Location`.
 //! `/search?q=`. `page`, `tag`, `archive`, `search`, `theme`, `admin` and `api` cannot be post
@@ -11,7 +11,9 @@ pub enum Route {
     Home {
         page: usize,
     },
+    /// `lang` is `None` for `/<slug>` (the default language, which only the page knows).
     Post {
+        lang: Option<String>,
         slug: String,
     },
     Tag {
@@ -95,22 +97,32 @@ pub fn parse(path: &str) -> Route {
             format: FeedFormat::from_file(file).unwrap_or(FeedFormat::Atom),
         },
         [slug] if is_slug(slug) && !RESERVED.contains(slug) => Route::Post {
+            lang: None,
+            slug: (*slug).to_owned(),
+        },
+        [lang, slug] if is_lang(lang) && !RESERVED.contains(lang) && is_slug(slug) => Route::Post {
+            lang: Some((*lang).to_owned()),
             slug: (*slug).to_owned(),
         },
         _ => Route::NotFound,
     }
 }
 
-/// The slug of `/<slug>/comments`, where a post's comment form posts (POST only; GET there
-/// is a 404 like any unknown path).
-pub fn comment_form(path: &str) -> Option<&str> {
-    let slug = path.strip_prefix('/')?.strip_suffix("/comments")?;
-    (is_slug(slug) && !RESERVED.contains(&slug)).then_some(slug)
+/// The language (`None`: the default) and slug of `/<slug>/comments` or
+/// `/<lang>/<slug>/comments`, where a post's comment form posts (POST only; GET there is a
+/// 404 like any unknown path).
+pub fn comment_form(path: &str) -> Option<(Option<&str>, &str)> {
+    let rest = path.strip_prefix('/')?.strip_suffix("/comments")?;
+    match rest.split_once('/') {
+        None => (is_slug(rest) && !RESERVED.contains(&rest)).then_some((None, rest)),
+        Some((lang, slug)) => (is_lang(lang) && !RESERVED.contains(&lang) && is_slug(slug))
+            .then_some((Some(lang), slug)),
+    }
 }
 
 /// Where a post's comment form posts.
-pub fn comments(slug: &str) -> String {
-    format!("{}/comments", post(slug))
+pub fn comments(lang: &str, default_lang: &str, slug: &str) -> String {
+    format!("{}/comments", post_in(lang, default_lang, slug))
 }
 
 const RESERVED: &[&str] = &["page", "tag", "archive", "search", "theme", "admin", "api"];
@@ -159,7 +171,7 @@ impl FeedFormat {
 }
 
 /// `en`, `vi`, `pt-br`, `zh-hant`: BCP 47 language with an optional region or script.
-fn is_lang(s: &str) -> bool {
+pub(super) fn is_lang(s: &str) -> bool {
     let mut parts = s.split('-');
     let primary = parts.next().unwrap_or("");
     (2..=3).contains(&primary.len())
@@ -201,6 +213,15 @@ pub fn home_page(n: usize) -> String {
 
 pub fn post(slug: &str) -> String {
     format!("/{slug}")
+}
+
+/// A post's URL: the default language at the root, any other under `/<lang>/`.
+pub fn post_in(lang: &str, default_lang: &str, slug: &str) -> String {
+    if lang == default_lang {
+        post(slug)
+    } else {
+        format!("/{lang}/{slug}")
+    }
 }
 
 pub fn tag_page(slug: &str, n: usize) -> String {

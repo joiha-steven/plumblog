@@ -46,8 +46,8 @@ pub use posts::{
     PostSummary, Revision, SavePost,
 };
 pub use reader::{
-    READER_MAX_OFFSET, ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage, ReaderPost,
-    ReaderRow, ReaderStore, ReaderTag, year_bounds, year_of,
+    READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage,
+    ReaderPost, ReaderRow, ReaderSitemapRow, ReaderStore, ReaderTag, year_bounds, year_of,
 };
 pub use redirects::{Redirect, RedirectStore};
 pub use settings::{OptionOwner, PluginState, SettingsStore};

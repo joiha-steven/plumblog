@@ -265,6 +265,17 @@ pub async fn reader_years_at_the_edges<S: Store>(db: &S) -> Check {
     let first24 = save(db, at(u, "vi", "first24", y24)).await?;
     let last24 = save(db, at(u, "vi", "last24", y25 - 1)).await?;
     let first25 = save(db, at(u, "en", "first25", y25)).await?;
+    // Year 10000 is outside 1..=9999: no year, in every store (SQLite's strftime says NULL).
+    save(
+        db,
+        at(
+            u,
+            "vi",
+            "far-future",
+            year_bounds(9999).ok_or("year_bounds(9999)")?.1,
+        ),
+    )
+    .await?;
     let mut d = post(u, "vi", "draft", PostStatus::Draft);
     d.published_at = None;
     save(db, d).await?;
@@ -375,4 +386,56 @@ pub async fn reader_neighbours_by_date<S: Store>(db: &S) -> Check {
     eq!("a draft", around(draft).await?, (None, None))?;
     eq!("a page", around(page_id).await?, (None, None))?;
     eq!("missing post", around(PostId(999_999)).await?, (None, None))
+}
+
+/// Feed rows (one language, bodies) and sitemap rows (every published post and page).
+pub async fn reader_feed_and_sitemap<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let pa = save(db, at(u, "en", "a", 100)).await?;
+    let pb = save(db, at(u, "en", "b", 300)).await?;
+    let pc = save(db, at(u, "vi", "c", 200)).await?;
+    let mut pg = at(u, "en", "about", 400);
+    pg.kind = PostKind::Page;
+    let pd = save(db, pg).await?;
+    save(db, post(u, "en", "draft", PostStatus::Draft)).await?;
+    let mut sched = post(u, "en", "sched", PostStatus::Scheduled);
+    sched.published_at = Some(500);
+    save(db, sched).await?;
+    let gone = save(db, at(u, "en", "gone", 600)).await?;
+    ok("trash_post", db.trash_post(gone, 700).await)?;
+
+    let feed = |lang: &'static str, n: u32| async move {
+        let rows = ok("reader_feed", db.reader_feed(lang, n).await)?;
+        Ok::<_, String>(rows.iter().map(|r| r.post.id).collect::<Vec<_>>())
+    };
+    eq!(
+        "feed en: posts only, newest first",
+        feed("en", 10).await?,
+        vec![pb, pa]
+    )?;
+    eq!("feed en limit 1", feed("en", 1).await?, vec![pb])?;
+    eq!("feed vi", feed("vi", 10).await?, vec![pc])?;
+    eq!(
+        "feed with no posts",
+        feed("fr", 10).await?,
+        Vec::<PostId>::new()
+    )?;
+
+    let map = ok("reader_sitemap", db.reader_sitemap(10).await)?;
+    eq!(
+        "sitemap: posts and pages, newest first",
+        map.iter()
+            .map(|r| format!("{}/{}", r.lang, r.slug))
+            .collect::<Vec<_>>(),
+        ["en/about", "en/b", "vi/c", "en/a"]
+            .map(str::to_owned)
+            .to_vec()
+    )?;
+    eq!(
+        "sitemap rows carry the translation group",
+        map.iter().map(|r| r.translation_group).collect::<Vec<_>>(),
+        vec![pd, pb, pc, pa]
+    )?;
+    let two = ok("reader_sitemap limit", db.reader_sitemap(2).await)?;
+    eq!("sitemap limit", two.len(), 2)
 }

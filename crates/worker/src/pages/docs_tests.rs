@@ -255,7 +255,12 @@ fn robots_and_llms_txt() {
 fn feeds_per_language_and_one_url_each() {
     // The default language lives at the root only; a language with no posts has no feed.
     assert_eq!(get_typed("/en/feed.xml").0, 404);
-    assert_eq!(get_typed("/vi/rss.xml").0, 404);
+    assert_eq!(get_typed("/fr/rss.xml").0, 404);
+    assert_eq!(
+        get_typed("/vi/rss.xml").0,
+        200,
+        "the sample has one vi post"
+    );
     assert_eq!(get_typed("/feed.json").0, 200);
 }
 
@@ -292,7 +297,7 @@ fn each_feed_has_its_own_id_and_pages_link_their_language_feeds() {
     assert_eq!(all(&vi, "id")[0], "https://blog.test/vi/feed.xml");
     assert_eq!(vi.matches("<entry>").count(), 1);
 
-    let (_, _, vi_page) = get("/doc-tren-man-hinh");
+    let (_, _, vi_page) = get("/vi/doc-tren-man-hinh");
     assert!(vi_page.starts_with("<!doctype html>\n<html lang=\"vi\""));
     for feed in ["/vi/feed.xml", "/vi/rss.xml", "/vi/feed.json"] {
         assert!(vi_page.contains(&format!("href=\"{feed}\"")), "{feed}");
@@ -308,7 +313,7 @@ fn each_feed_has_its_own_id_and_pages_link_their_language_feeds() {
 fn x_default_points_at_the_default_language_version() {
     let src = translated();
     let x_default = "hreflang=\"x-default\" href=\"https://blog.test/reading-on-screens\"";
-    for path in ["/reading-on-screens", "/doc-tren-man-hinh"] {
+    for path in ["/reading-on-screens", "/vi/doc-tren-man-hinh"] {
         let (_, _, html) = get_from(&src, path);
         assert!(html.contains(x_default), "{path}");
     }

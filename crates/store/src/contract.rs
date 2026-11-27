@@ -106,6 +106,7 @@ cases! {
     reader::reader_years_at_the_edges,
     reader::reader_translations_published_only,
     reader::reader_neighbours_by_date,
+    reader::reader_feed_and_sitemap,
     find::search_vietnamese,
     find::search_scope_and_order,
     find::search_hostile_input,

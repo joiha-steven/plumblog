@@ -4,6 +4,7 @@ title_fallback = "Trang chưa đặt tên"
 
 [error]
 page_failed = "Trang này tạm thời chưa hiện được. Bạn thử lại sau một phút nhé."
+page_not_found = "Trang này không tồn tại."
 
 [error.input]
 too_complex = "Yêu cầu này chứa quá nhiều mục. Bạn gửi ít hơn mỗi lần nhé."

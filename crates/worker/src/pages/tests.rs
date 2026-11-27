@@ -1,7 +1,8 @@
 use super::db::Db;
 use super::routes::{Route, parse};
+use super::sample::SampleSource;
 use super::source::{
-    Filter, Neighbours, ReaderSource, SampleSource, Settings, Slice, StoredPost, Tag,
+    Filter, Neighbours, ReaderSource, Settings, SitemapPost, Slice, StoredPost, Tag,
 };
 use super::{Outcome, render};
 use plumblog_model::Result;
@@ -60,6 +61,12 @@ impl Fixture {
         let sample = SampleSource::get();
         let mut posts = run(sample.posts(Filter::All, 0, usize::MAX)).unwrap().posts;
         let mut settings = run(sample.settings()).unwrap();
+        // The sample's own translated pair is covered by the worker tests; these fixtures
+        // build their own languages from a single-language site.
+        posts.retain(|p| p.lang == settings.lang);
+        for p in &mut posts {
+            p.translations.clear();
+        }
         edit(&mut posts, &mut settings);
         let posts = SampleSource::from_posts(posts);
         // The sample's own rule for the site date, applied to the edited posts.
@@ -75,8 +82,14 @@ impl ReaderSource for Fixture {
     async fn posts(&self, filter: Filter<'_>, offset: usize, limit: usize) -> Result<Slice> {
         self.posts.posts(filter, offset, limit).await
     }
-    async fn post(&self, slug: &str) -> Result<Option<Neighbours>> {
-        self.posts.post(slug).await
+    async fn post(&self, lang: &str, slug: &str) -> Result<Option<Neighbours>> {
+        self.posts.post(lang, slug).await
+    }
+    async fn feed(&self, lang: &str, limit: usize) -> Result<Vec<StoredPost>> {
+        self.posts.feed(lang, limit).await
+    }
+    async fn sitemap_posts(&self, limit: usize) -> Result<Vec<SitemapPost>> {
+        self.posts.sitemap_posts(limit).await
     }
     async fn tag(&self, slug: &str) -> Result<Option<Tag>> {
         self.posts.tag(slug).await
@@ -103,6 +116,7 @@ fn routes_parse_to_one_canonical_url() {
     assert_eq!(
         parse("/hello-world"),
         Route::Post {
+            lang: None,
             slug: "hello-world".into()
         }
     );
@@ -331,7 +345,13 @@ fn comment_without_stored_html_is_rendered_from_markdown() {
     };
     add("*a*", None, 1);
     add("*b*", Some("<p>stored</p>\n"), 2);
-    let c = run(Db(&db).comments("en", "first-post")).unwrap().unwrap();
+    let mut shown = run(SampleSource::get().post("en", "first-post"))
+        .unwrap()
+        .unwrap()
+        .post;
+    shown.id = post.id;
+    shown.comments_enabled = true;
+    let c = run(Db(&db).comments(&shown, "en")).unwrap().unwrap();
     let html: Vec<&str> = c.items.iter().map(|i| i.html.as_str()).collect();
     assert_eq!(
         html,
