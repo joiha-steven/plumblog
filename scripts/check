@@ -28,6 +28,12 @@ cargo clippy -q -p plumblog-worker --target wasm32-unknown-unknown --all-targets
 step "test (all crates)"
 cargo test -q --workspace || fail "tests failed"
 
+# --- markdown CPU budget (issue #4) ---
+step "markdown render CPU budget (release)"
+# Debug builds measure the compiler, not the renderer; the budget is in tests/perf.rs.
+cargo test -q --release -p plumblog-markdown --test perf || fail "markdown render over its CPU budget"
+# --- end markdown CPU budget ---
+
 step "worker wasm build + size budget"
 cargo build -q -p plumblog-worker --target wasm32-unknown-unknown --release \
   || fail "worker wasm build failed"
@@ -49,6 +55,8 @@ external_allowlist='
 worker   worker                 # the Cloudflare runtime; the only crate that does I/O
 cli      clap                   # argument parsing for the `blog` binary
 markdown unicode-normalization  # NFC before heading ids (pure Rust, no I/O)
+markdown pulldown-cmark         # CommonMark + GFM parser
+markdown pulldown-latex         # LaTeX to MathML at save time
 '
 meta=$(cargo metadata -q --format-version 1 --no-deps) || fail "cargo metadata failed"
 graph_errors=$(jq -r --arg order "$order" --arg allow "$external_allowlist" '
@@ -91,6 +99,8 @@ for f in "${files[@]}"; do
     README.md|AGENTS.md|CLAUDE.md|CHANGELOG.md|docs/ARCHITECTURE.md) ;;
     guides/*/*) case "$f" in *.md) bad+="$f "; echo "  guides must be top level: $f" ;; esac ;;
     guides/*.md) ;;
+    # Renderer fixtures are Markdown input, not docs; byte-exact output needs real .md files.
+    crates/markdown/tests/fixtures/*.md) ;;
     # Repeated workflows (3+ times) become skills; one SKILL.md per skill folder, nothing else.
     .claude/skills/*/*/*) case "$f" in *.md) bad+="$f "; echo "  skills are one folder deep: $f" ;; esac ;;
     .claude/skills/*/SKILL.md) ;;
@@ -118,7 +128,8 @@ step "english-only source"
 bad=""
 for f in "${files[@]}"; do
   # Themes ship their own UI text (themes/<name>/locales/), so a theme zip is self-contained.
-  case "$f" in locales/*|guides/*|themes/*/locales/*|LICENSE) continue ;; esac
+  # Renderer fixtures must hold real Vietnamese, Russian and Chinese text to test it.
+  case "$f" in locales/*|guides/*|themes/*/locales/*|crates/markdown/tests/fixtures/*|LICENSE) continue ;; esac
   rc=0
   # -I skips binary files; the class allows printable ASCII plus whitespace.
   hits=$(LC_ALL=C grep -nI '[^ -~[:space:]]' "$f") || rc=$?

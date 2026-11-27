@@ -27,6 +27,11 @@ clap = { version = "4.6.7", features = ["derive"] }
 # NFC before slugging so the same heading typed on macOS (NFD) and elsewhere (NFC) gets one id;
 # composition tables are too large to hand-write correctly.
 unicode-normalization = "0.1.26"
+# CommonMark + GFM parser for rendering posts on save; a correct CommonMark parser is far
+# too much code to own. Default features off: we write our own HTML, so no `html` module.
+pulldown-cmark = { version = "0.13.6", default-features = false }
+# LaTeX math to MathML at save time, so readers need no math JS (~70 KB gzip in wasm, measured).
+pulldown-latex = "0.8.0"
 # Internal module crates; allowed edges between them are enforced by scripts/check.
 plumblog-model = { path = "crates/model" }
 plumblog-markdown = { path = "crates/markdown" }
