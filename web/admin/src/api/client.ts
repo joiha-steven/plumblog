@@ -5,8 +5,12 @@
 
 import { ERROR_CODES, type ErrorCode, type Role } from "./model.gen";
 
-/** Failures the server cannot name: no answer at all, or an answer that is not ours. */
-export type ClientCode = "network" | "bad_response";
+/**
+ * Failures the server cannot name: no answer at all, or an answer that is not ours; the
+ * writer dismissed a passkey prompt (`cancelled`), or this browser has no passkeys
+ * (`unsupported`).
+ */
+export type ClientCode = "network" | "bad_response" | "cancelled" | "unsupported";
 
 export interface ApiError {
   code: ErrorCode | ClientCode;
@@ -62,7 +66,21 @@ export interface Api {
    * has no preview route for this build.
    */
   previewUrl: string | undefined;
+  /**
+   * Any API route: a flat JSON body (the Worker refuses unknown keys), a Result back. A 204
+   * or empty answer resolves to `undefined`.
+   */
+  call<T>(method: Method, path: string, body?: Record<string, string | boolean>): Promise<Result<T>>;
 }
+
+export type Method = "GET" | "POST" | "PATCH" | "DELETE";
+
+/**
+ * Set by the sign-in screens: runs when a call outside `/api/auth/` answers 401
+ * `auth.unauthenticated`, so an expired session sends the writer to sign in again instead of
+ * failing screen by screen. Auth routes answer 401 as part of their own flow.
+ */
+export const session = { expired: (): void => undefined };
 
 export const fail = <T>(code: ApiError["code"], status: number): Result<T> => ({
   ok: false,
@@ -72,28 +90,50 @@ export const fail = <T>(code: ApiError["code"], status: number): Result<T> => ({
 const isCode = (c: unknown): c is ErrorCode =>
   typeof c === "string" && (ERROR_CODES as readonly string[]).includes(c);
 
-async function getJson<T>(path: string): Promise<Result<T>> {
+async function request<T>(
+  method: Method,
+  path: string,
+  body: Record<string, string | boolean> | undefined,
+  emptyOk: boolean,
+): Promise<Result<T>> {
+  const headers: Record<string, string> = { accept: "application/json" };
+  const init: RequestInit = { method, credentials: "same-origin", headers };
+  if (body !== undefined) {
+    headers["content-type"] = "application/json";
+    init.body = JSON.stringify(body);
+  }
   let res: Response;
   try {
-    res = await fetch(path, { credentials: "same-origin", headers: { accept: "application/json" } });
+    res = await fetch(path, init);
   } catch (e) {
-    console.error(`api: GET ${path}: no response`, e);
+    console.error(`api: ${method} ${path}: no response`, e);
     return fail("network", 0);
   }
-  let body: unknown;
+  let parsed: unknown;
   try {
-    body = await res.json();
+    const text = await res.text();
+    if (text.trim() === "" && emptyOk && res.ok) return { ok: true, value: undefined as T };
+    parsed = JSON.parse(text);
   } catch (e) {
-    console.error(`api: GET ${path}: ${res.status}, body is not JSON`, e);
+    console.error(`api: ${method} ${path}: ${res.status}, body is not JSON`, e);
     return fail("bad_response", res.status);
   }
   if (!res.ok) {
-    const code = (body as { error?: unknown } | null)?.error;
-    console.warn(`api: GET ${path}: ${res.status} ${String(code)}`);
+    const code = (parsed as { error?: unknown } | null)?.error;
+    console.warn(`api: ${method} ${path}: ${res.status} ${String(code)}`);
+    if (res.status === 401 && code === "auth.unauthenticated" && !path.startsWith("/api/auth/")) {
+      try {
+        session.expired();
+      } catch (e) {
+        console.error("api: session.expired hook failed", e);
+      }
+    }
     return fail(isCode(code) ? code : "bad_response", res.status);
   }
-  return { ok: true, value: body as T };
+  return { ok: true, value: parsed as T };
 }
+
+const getJson = <T>(path: string): Promise<Result<T>> => request<T>("GET", path, undefined, false);
 
 export function httpApi(): Api {
   return {
@@ -105,5 +145,6 @@ export function httpApi(): Api {
     posts: () => getJson<PostSummary[]>("/api/posts"),
     post: (id) => getJson<PostDraft>(`/api/posts/${id}`),
     previewUrl: undefined,
+    call: (method, path, body) => request(method, path, body, true),
   };
 }

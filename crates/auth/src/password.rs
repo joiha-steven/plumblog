@@ -8,7 +8,7 @@
 use crate::{Crypto, base64url, constant_time_eq};
 use plumblog_model::{Error, ErrorCode, Result};
 
-/// Browser-side PBKDF2-SHA256 iterations. `web/admin/js/stretch.js` must use the same value.
+/// Browser-side PBKDF2-SHA256 iterations. `web/admin/src/auth/stretch.ts` must use the same value.
 pub const STRETCH_ITERATIONS: u32 = 600_000;
 /// Length of the stretched value the browser sends (base64url, see [`parse_stretched`]).
 pub const STRETCHED_LEN: usize = 32;

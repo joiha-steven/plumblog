@@ -1,4 +1,4 @@
-// web/admin/js/stretch.js against node:crypto and the constants in crates/auth (no Worker
+// web/admin/src/auth/stretch.ts against node:crypto and the constants in crates/auth (no Worker
 // needed). The in-Worker Rust side of the same vector is checked in auth.test.mjs.
 import assert from "node:assert/strict";
 import { pbkdf2Sync } from "node:crypto";
@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { ITERATIONS, LENGTH_BYTES, salt, stretch } from "../../web/admin/js/stretch.js";
+import { ITERATIONS, LENGTH_BYTES, salt, stretch } from "../../web/admin/src/auth/stretch.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -27,18 +27,18 @@ function rustConst(name) {
   return Number(m[1].replaceAll("_", ""));
 }
 
-test("stretch.js parameters equal the Rust constants", () => {
+test("stretch.ts parameters equal the Rust constants", () => {
   assert.equal(ITERATIONS, rustConst("STRETCH_ITERATIONS"));
   assert.equal(LENGTH_BYTES, rustConst("STRETCHED_LEN"));
   assert.equal(salt(VECTOR.siteId, VECTOR.login), VECTOR.salt);
 });
 
-test("stretch.js equals node:crypto PBKDF2 on the fixed vector (and timing)", async () => {
+test("stretch.ts equals node:crypto PBKDF2 on the fixed vector (and timing)", async () => {
   const t0 = performance.now();
   const got = await stretch(VECTOR.siteId, VECTOR.login, VECTOR.password);
   const ms = performance.now() - t0;
   const want = pbkdf2Sync(VECTOR.password, VECTOR.salt, ITERATIONS, LENGTH_BYTES, "sha256").toString("base64url");
   assert.equal(got, want);
   assert.match(got, /^[A-Za-z0-9_-]{43}$/);
-  console.log(`stretch.js: ${ITERATIONS} PBKDF2-SHA256 iterations in Node took ${ms.toFixed(0)} ms`);
+  console.log(`stretch.ts: ${ITERATIONS} PBKDF2-SHA256 iterations in Node took ${ms.toFixed(0)} ms`);
 });

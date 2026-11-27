@@ -41,5 +41,7 @@ export function mockApi(params: URLSearchParams): Api {
     },
     // The dev Worker's real renderer (crates/worker/src/contract.rs, test builds only).
     previewUrl: "/__preview",
+    // Not served yet: the sign-in screens give the mock its auth routes.
+    call: async () => fail("bad_response", 501),
   };
 }

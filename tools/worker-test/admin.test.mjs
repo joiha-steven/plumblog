@@ -39,6 +39,19 @@ test("every admin path gets the same shell, with a strict CSP and no caching", a
   }
 });
 
+test("only the sign-in, setup and invite pages admit Turnstile in their CSP", async () => {
+  for (const path of ["/admin/signin", "/admin/setup", "/admin/invite", "/admin/signin/"]) {
+    const csp = (await fetch(worker.url + path)).headers.get("content-security-policy");
+    assert.match(csp, /script-src 'self' https:\/\/challenges\.cloudflare\.com;/, path);
+    assert.match(csp, /frame-src https:\/\/challenges\.cloudflare\.com;/, path);
+    assert.match(csp, /frame-ancestors 'none'/, path);
+  }
+  for (const path of ["/admin/", "/admin/settings", "/admin/signin/x", "/admin/posts/1"]) {
+    const csp = (await fetch(worker.url + path)).headers.get("content-security-policy");
+    assert.ok(!csp.includes("challenges.cloudflare.com"), path);
+  }
+});
+
 test("/admin redirects to /admin/", async () => {
   const res = await fetch(`${worker.url}/admin`, { redirect: "manual" });
   assert.equal(res.status, 301);
