@@ -17,6 +17,8 @@ pub struct FeedMeta<'a> {
     pub rss_path: &'a str,
     pub json_path: &'a str,
     pub author: Option<&'a str>,
+    /// Unix time the site last changed; the feed date when there are no posts yet.
+    pub updated: i64,
 }
 
 /// One `<url>` of the sitemap. `alternates` lists every language version, this one included
@@ -52,8 +54,9 @@ pub fn atom(m: &FeedMeta<'_>, posts: &[&Post]) -> String {
         "<link href=\"{}\" rel=\"self\" type=\"application/atom+xml\"/>",
         x(&abs(m.origin, m.atom_path))
     );
-    let _ = writeln!(o, "<id>{}</id>", x(&home));
-    let _ = writeln!(o, "<updated>{}</updated>", rfc3339(newest(posts)));
+    // The feed's own URL: unique per language and format, unlike the home page.
+    let _ = writeln!(o, "<id>{}</id>", x(&abs(m.origin, m.atom_path)));
+    let _ = writeln!(o, "<updated>{}</updated>", rfc3339(newest(m, posts)));
     // Atom requires an author on the feed or on every entry.
     let _ = writeln!(
         o,
@@ -110,7 +113,7 @@ pub fn rss(m: &FeedMeta<'_>, posts: &[&Post]) -> String {
     let _ = writeln!(
         o,
         "<lastBuildDate>{}</lastBuildDate>",
-        rfc822(newest(posts))
+        rfc822(newest(m, posts))
     );
     let _ = writeln!(
         o,
@@ -258,8 +261,35 @@ fn excerpt(p: &Post) -> &str {
     }
 }
 
-fn newest(posts: &[&Post]) -> i64 {
-    posts.iter().map(|p| p.published_at).max().unwrap_or(0)
+/// Newest post, else the site's last change: never 1970 for an empty feed.
+fn newest(m: &FeedMeta<'_>, posts: &[&Post]) -> i64 {
+    posts
+        .iter()
+        .map(|p| p.published_at)
+        .max()
+        .unwrap_or(m.updated)
+}
+
+/// hreflang set for a post (site-relative URLs): every language version, this one included,
+/// plus `x-default` for the default language's version. Empty when there is only one.
+#[must_use]
+pub fn alternates(post: &Post, default_lang: &str) -> Vec<Alternate> {
+    if post.translations.is_empty() {
+        return Vec::new();
+    }
+    let mut all = vec![Alternate {
+        lang: post.lang.clone(),
+        url: post.url.clone(),
+    }];
+    all.extend(post.translations.iter().cloned());
+    if let Some(d) = all.iter().find(|a| a.lang == default_lang) {
+        let url = d.url.clone();
+        all.push(Alternate {
+            lang: "x-default".to_owned(),
+            url,
+        });
+    }
+    all
 }
 
 /// One line of Markdown text: line breaks would start new blocks.
@@ -306,12 +336,18 @@ pub(crate) fn x(s: &str) -> String {
             '>' => o.push_str("&gt;"),
             '"' => o.push_str("&quot;"),
             '\'' => o.push_str("&apos;"),
-            // Not allowed in XML 1.0 at all; dropping them keeps the feed parseable.
-            c if (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r') => {}
-            c => o.push(c),
+            c if xml_char(c) => o.push(c),
+            // Not allowed in XML 1.0 even as a reference; dropping them keeps the feed parseable.
+            _ => {}
         }
     }
     o
+}
+
+/// XML 1.0 `Char`: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF].
+/// Rust `char` is never a surrogate, so the gap between #xD7FF and #xE000 needs no check.
+fn xml_char(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{FFFD}' | '\u{10000}'..)
 }
 
 /// `2026-10-02T12:00:00Z` (Atom, JSON Feed, sitemap, JSON-LD).
@@ -349,7 +385,31 @@ pub fn rfc822(unix: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{absolutize, rfc822, rfc3339, x};
+    use super::{FeedMeta, absolutize, atom, rfc822, rfc3339, rss, x};
+
+    #[test]
+    fn an_empty_feed_is_dated_by_the_site_not_1970() {
+        let m = FeedMeta {
+            title: "T",
+            description: "",
+            lang: "en",
+            origin: "https://b.test",
+            home_path: "/",
+            atom_path: "/feed.xml",
+            rss_path: "/rss.xml",
+            json_path: "/feed.json",
+            author: None,
+            updated: 1_790_942_400,
+        };
+        let a = atom(&m, &[]);
+        assert!(a.contains("<updated>2026-10-02T12:00:00Z</updated>"), "{a}");
+        let r = rss(&m, &[]);
+        assert!(
+            r.contains("<lastBuildDate>Fri, 02 Oct 2026 12:00:00 +0000</lastBuildDate>"),
+            "{r}"
+        );
+        assert!(!a.contains("1970") && !r.contains("1970"));
+    }
 
     #[test]
     fn dates_in_both_formats() {
@@ -372,5 +432,9 @@ mod tests {
     #[test]
     fn xml_escaping_drops_forbidden_controls() {
         assert_eq!(x("a&b<c>\"'\u{1}\n"), "a&amp;b&lt;c&gt;&quot;&apos;\n");
+        assert_eq!(
+            x("\u{FFFE}\u{FFFF}\u{7F}\u{D7FF}\u{E000}\u{FFFD}\u{1F600}\u{10FFFF}\t\r"),
+            "\u{7F}\u{D7FF}\u{E000}\u{FFFD}\u{1F600}\u{10FFFF}\t\r"
+        );
     }
 }

@@ -15,5 +15,8 @@ plumblog-markdown.workspace = true
 plumblog-render.workspace = true
 plumblog-i18n.workspace = true
 
+[dev-dependencies]
+roxmltree.workspace = true
+
 [lints]
 workspace = true

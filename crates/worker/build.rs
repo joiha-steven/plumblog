@@ -94,12 +94,13 @@ fn main() {
     };
     writeln!(
         out,
-        "pub static SAMPLE_SITE: SampleSite = SampleSite {{ title: {:?}, description: {:?}, footer: {:?}, lang: {:?}, per_page: {} }};",
+        "pub static SAMPLE_SITE: SampleSite = SampleSite {{ title: {:?}, description: {:?}, footer: {:?}, lang: {:?}, per_page: {}, origin: {:?} }};",
         get("title"),
         get("description"),
         get("footer"),
         get("lang"),
         get("per_page").parse::<usize>().expect("sample/site.txt: per_page must be a number"),
+        get("origin"),
     )
     .unwrap();
 

@@ -40,6 +40,7 @@ fn site() -> Site {
     Site {
         title: "Plum Notes".into(),
         description: "A test blog.".into(),
+        default_lang: "en".into(),
         home_url: "/".into(),
         search_url: None,
         feed_url: "/feed.xml".into(),
@@ -449,8 +450,25 @@ fn post_seo_uses_cover_translations_and_absolute_urls() {
     assert!(html.contains(
         "<link rel=\"alternate\" hreflang=\"vi\" href=\"https://example.com/vi/xin-chao\">"
     ));
+    // The default language's version is also the fallback for every other language.
+    assert!(html.contains(
+        "<link rel=\"alternate\" hreflang=\"x-default\" href=\"https://example.com/hello\">"
+    ));
     assert!(html.contains("\"image\":[\"https://example.com/media/cover.avif\"]"));
     assert!(html.contains("\"@type\":\"BlogPosting\""));
+    assert!(html.contains("<meta property=\"og:locale\" content=\"en\">"));
+    let br = theme
+        .render(
+            &site(),
+            &page("pt-br"),
+            &Body::Home {
+                posts: &[],
+                older_url: None,
+                newer_url: None,
+            },
+        )
+        .unwrap();
+    assert!(br.contains("<meta property=\"og:locale\" content=\"pt_BR\">"));
 }
 
 #[test]

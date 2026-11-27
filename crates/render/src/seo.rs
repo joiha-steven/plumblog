@@ -2,7 +2,7 @@
 //! (schema.org). Templates decide which tags to print; this builds the values.
 
 use crate::data::{Alternate, Body, PageInfo, Post, Site};
-use crate::feeds::{abs, rfc3339};
+use crate::feeds::{abs, alternates, rfc3339};
 use crate::json::J;
 use serde::Serialize;
 
@@ -16,8 +16,11 @@ pub struct Seo {
     pub image: Option<String>,
     /// RFC 3339, posts only.
     pub published: Option<String>,
-    /// Every language version, this page included; empty when there is only one.
+    /// Every language version, this page included, plus `x-default`; empty when there is
+    /// only one.
     pub alternates: Vec<Alternate>,
+    /// `og:locale`: `pt_BR` form (language lowercase, region uppercase).
+    pub locale: String,
     /// A complete JSON document, safe to print inside `<script type="application/ld+json">`.
     pub json_ld: String,
 }
@@ -149,6 +152,7 @@ pub fn build(
         image: site_image,
         published: None,
         alternates: Vec::new(),
+        locale: og_locale(&page.lang),
         json_ld: String::new(),
     };
     let graph = match body {
@@ -159,7 +163,7 @@ pub fn build(
             let date = rfc3339(post.published_at);
             seo.title.clone_from(&post.title);
             seo.og_type = "article";
-            seo.alternates = alternates_of(post)
+            seo.alternates = alternates(post, &site.default_lang)
                 .into_iter()
                 .map(|a| Alternate {
                     lang: a.lang,
@@ -191,15 +195,33 @@ pub fn build(
     seo
 }
 
-/// hreflang set for a post with translations: every version including this one.
-fn alternates_of(post: &Post) -> Vec<Alternate> {
-    if post.translations.is_empty() {
-        return Vec::new();
+/// BCP 47 (`pt-br`, `zh-Hant-TW`) to Open Graph's `language_TERRITORY` (`pt_BR`, `zh_TW`):
+/// scripts and variants have no place in it.
+fn og_locale(lang: &str) -> String {
+    let mut parts = lang.split(['-', '_']);
+    let mut out = parts.next().unwrap_or_default().to_ascii_lowercase();
+    let region = parts.find(|p| {
+        (p.len() == 2 && p.bytes().all(|b| b.is_ascii_alphabetic()))
+            || (p.len() == 3 && p.bytes().all(|b| b.is_ascii_digit()))
+    });
+    if let Some(r) = region {
+        out.push('_');
+        out.push_str(&r.to_ascii_uppercase());
     }
-    let mut all = vec![Alternate {
-        lang: post.lang.clone(),
-        url: post.url.clone(),
-    }];
-    all.extend(post.translations.iter().cloned());
-    all
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::og_locale;
+
+    #[test]
+    fn og_locale_is_language_underscore_region() {
+        assert_eq!(og_locale("pt-br"), "pt_BR");
+        assert_eq!(og_locale("EN-us"), "en_US");
+        assert_eq!(og_locale("zh-Hant-TW"), "zh_TW");
+        assert_eq!(og_locale("zh-hant"), "zh");
+        assert_eq!(og_locale("es-419"), "es_419");
+        assert_eq!(og_locale("vi"), "vi");
+    }
 }

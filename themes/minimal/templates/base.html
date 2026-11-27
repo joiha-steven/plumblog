@@ -19,7 +19,7 @@
 <meta property="og:title" content="{{ page.seo.title }}">
 <meta property="og:description" content="{{ page.description }}">
 <meta property="og:url" content="{{ page.canonical }}">
-<meta property="og:locale" content="{{ page.lang | replace("-", "_") }}">
+<meta property="og:locale" content="{{ page.seo.locale }}">
 {%- if page.seo.image %}
 <meta property="og:image" content="{{ page.seo.image }}">
 {%- endif %}

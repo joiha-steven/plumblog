@@ -33,6 +33,11 @@ pub struct Settings {
     pub footer: String,
     pub lang: String,
     pub per_page: usize,
+    /// Public origin (`https://example.com`) for canonical URLs, feeds and the sitemap.
+    /// Production must set it: otherwise the request's Host header decides public URLs.
+    pub origin: Option<String>,
+    /// Unix time of the last publish or settings change (feed date when there are no posts).
+    pub updated_at: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +95,8 @@ pub struct SampleSite {
     pub footer: &'static str,
     pub lang: &'static str,
     pub per_page: usize,
+    /// Empty: no configured origin (local development).
+    pub origin: &'static str,
 }
 
 include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
@@ -102,15 +109,17 @@ pub struct SampleSource {
 impl SampleSource {
     pub fn get() -> &'static Self {
         static SOURCE: OnceLock<SampleSource> = OnceLock::new();
-        SOURCE.get_or_init(|| {
-            let mut posts: Vec<StoredPost> = SAMPLE_POSTS.iter().map(to_post).collect();
-            posts.sort_by(|a, b| {
-                b.pinned
-                    .cmp(&a.pinned)
-                    .then(b.published_at.cmp(&a.published_at))
-            });
-            Self { posts }
-        })
+        SOURCE.get_or_init(|| Self::from_posts(SAMPLE_POSTS.iter().map(to_post).collect()))
+    }
+
+    /// Any set of posts in the sample order (tests build sites the samples do not cover).
+    pub fn from_posts(mut posts: Vec<StoredPost>) -> Self {
+        posts.sort_by(|a, b| {
+            b.pinned
+                .cmp(&a.pinned)
+                .then(b.published_at.cmp(&a.published_at))
+        });
+        Self { posts }
     }
 
     fn by_date(&self) -> Vec<&StoredPost> {
@@ -189,6 +198,8 @@ impl ReaderSource for SampleSource {
             footer: SAMPLE_SITE.footer.to_owned(),
             lang: SAMPLE_SITE.lang.to_owned(),
             per_page: SAMPLE_SITE.per_page,
+            origin: (!SAMPLE_SITE.origin.is_empty()).then(|| SAMPLE_SITE.origin.to_owned()),
+            updated_at: self.posts.iter().map(|p| p.published_at).max().unwrap_or(0),
         })
     }
 

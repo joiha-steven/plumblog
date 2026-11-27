@@ -33,6 +33,8 @@ pub struct Alternate {
 pub struct Site {
     pub title: String,
     pub description: String,
+    /// The site's main language; its versions get `hreflang="x-default"`.
+    pub default_lang: String,
     pub home_url: String,
     pub search_url: Option<String>,
     /// Atom feed (the main one); `rss_url` and `json_feed_url` are the same posts.
@@ -61,7 +63,8 @@ pub struct PageInfo {
     pub lang: String,
     /// Absolute URL of this page.
     pub canonical: String,
-    /// `https://host`, for making site-relative URLs absolute.
+    /// `https://host`, for making site-relative URLs absolute: the site's configured public
+    /// origin, never the request's Host header in production.
     pub origin: String,
 }
 

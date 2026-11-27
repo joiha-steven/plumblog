@@ -3,17 +3,18 @@
 
 use super::routes::{self, FeedFormat};
 use super::source::{Filter, ReaderSource, Settings};
-use super::{Pages, core_text, err, to_render};
+use super::{Pages, core_text, err, to_render, warn};
 use crate::keys;
+use plumblog_render::Post;
 use plumblog_render::feeds::{self, FeedMeta, SitemapUrl};
-use plumblog_render::{Alternate, Post};
 
 pub const XML: &str = "application/xml; charset=utf-8";
 pub const TEXT: &str = "text/plain; charset=utf-8";
 
 /// Newest posts per feed; readers poll often, so feeds stay small.
 const FEED_LIMIT: usize = 20;
-/// The sitemap protocol's limit for one file; a bigger site needs a sitemap index.
+/// The sitemap protocol's limit for one file, counting every URL; a bigger site needs a
+/// sitemap index (not built yet: past this, the oldest URLs are left out and logged).
 const SITEMAP_LIMIT: usize = 50_000;
 /// llms.txt is a summary for language models, not a full index.
 const LLMS_LIMIT: usize = 200;
@@ -39,6 +40,7 @@ impl<S: ReaderSource> Pages<'_, S> {
             rss_path: &paths[1],
             json_path: &paths[2],
             author: self.site.author.as_deref(),
+            updated: s.updated_at,
         }
     }
 
@@ -74,35 +76,24 @@ impl<S: ReaderSource> Pages<'_, S> {
     }
 
     /// Home, every post (with its language versions), tag and year pages.
-    pub(super) async fn sitemap(&self) -> std::result::Result<String, String> {
-        let posts = self
+    pub(super) async fn sitemap(&self, s: &Settings) -> std::result::Result<String, String> {
+        let slice = self
             .src
             .posts(Filter::All, 0, SITEMAP_LIMIT)
             .await
-            .map_err(err)?
-            .posts;
-        let newest = posts.iter().map(|p| p.published_at).max();
+            .map_err(err)?;
+        let newest = slice.posts.iter().map(|p| p.published_at).max();
         let mut urls = vec![SitemapUrl {
             path: self.site.home_url.clone(),
             lastmod: newest,
             alternates: Vec::new(),
         }];
-        for p in &posts {
+        for p in &slice.posts {
             let r = to_render(p);
-            let alternates = if r.translations.is_empty() {
-                Vec::new()
-            } else {
-                let mut all = vec![Alternate {
-                    lang: r.lang.clone(),
-                    url: r.url.clone(),
-                }];
-                all.extend(r.translations.iter().cloned());
-                all
-            };
             urls.push(SitemapUrl {
+                alternates: feeds::alternates(&r, &s.lang),
                 path: r.url,
                 lastmod: Some(p.published_at),
-                alternates,
             });
         }
         for t in self.src.tags().await.map_err(err)? {
@@ -119,6 +110,7 @@ impl<S: ReaderSource> Pages<'_, S> {
                 alternates: Vec::new(),
             });
         }
+        let urls = capped(urls, slice.more, SITEMAP_LIMIT);
         Ok(feeds::sitemap(&self.info.origin, &urls))
     }
 
@@ -134,5 +126,44 @@ impl<S: ReaderSource> Pages<'_, S> {
             [FeedFormat::Atom, FeedFormat::Rss, FeedFormat::Json].map(|f| routes::feed(None, f));
         let heading = core_text(&s.lang, keys::LLMS_POSTS);
         Ok(feeds::llms(&self.meta(s, None, &paths), &heading, &refs))
+    }
+}
+
+/// At most `limit` URLs; anything left out (including posts past the query limit, `more`) is
+/// logged so the owner learns the site needs a sitemap index.
+fn capped(mut urls: Vec<SitemapUrl>, more: bool, limit: usize) -> Vec<SitemapUrl> {
+    if urls.len() > limit || more {
+        let dropped = urls.len().saturating_sub(limit);
+        urls.truncate(limit);
+        warn(&format!(
+            "sitemap.truncated limit={limit} dropped={dropped} more_posts={more}: a sitemap index is needed"
+        ));
+    }
+    urls
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SitemapUrl, capped};
+
+    #[test]
+    fn sitemap_never_exceeds_the_limit() {
+        let urls = |n: usize| {
+            (0..n)
+                .map(|i| SitemapUrl {
+                    path: format!("/{i}"),
+                    lastmod: None,
+                    alternates: Vec::new(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(capped(urls(3), false, 3).len(), 3);
+        let cut = capped(urls(5), false, 3);
+        assert_eq!(
+            cut.iter().map(|u| u.path.as_str()).collect::<Vec<_>>(),
+            ["/0", "/1", "/2"],
+            "home and newest posts are kept"
+        );
+        assert_eq!(capped(urls(3), true, 3).len(), 3);
     }
 }

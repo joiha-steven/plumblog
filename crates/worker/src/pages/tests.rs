@@ -1,6 +1,9 @@
 use super::routes::{Route, parse};
-use super::source::SampleSource;
+use super::source::{
+    Filter, Neighbours, ReaderSource, SampleSource, Settings, Slice, StoredPost, Tag,
+};
 use super::{Outcome, render};
+use plumblog_model::Result;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
@@ -20,13 +23,65 @@ fn get(path: &str) -> (u16, String) {
 }
 
 pub(super) fn get_typed(path: &str) -> (u16, &'static str, String) {
-    match run(render(SampleSource::get(), "https://blog.test", path)).unwrap() {
+    get_from(SampleSource::get(), "https://blog.test", path)
+}
+
+/// `origin` is what the request says (its Host header).
+pub(super) fn get_from(
+    src: &impl ReaderSource,
+    origin: &str,
+    path: &str,
+) -> (u16, &'static str, String) {
+    match run(render(src, origin, path)).unwrap() {
         Outcome::Page {
             status,
             content_type,
             body,
         } => (status, content_type, body),
         Outcome::Redirect(to) => panic!("{path} redirected to {to}"),
+    }
+}
+
+/// The sample posts with changes: other languages, hostile titles, a configured origin.
+pub(super) struct Fixture {
+    posts: SampleSource,
+    settings: Settings,
+}
+
+impl Fixture {
+    pub(super) fn new(edit: impl FnOnce(&mut Vec<StoredPost>, &mut Settings)) -> Self {
+        let sample = SampleSource::get();
+        let mut posts = run(sample.posts(Filter::All, 0, usize::MAX)).unwrap().posts;
+        let mut settings = run(sample.settings()).unwrap();
+        edit(&mut posts, &mut settings);
+        Self {
+            posts: SampleSource::from_posts(posts),
+            settings,
+        }
+    }
+}
+
+impl ReaderSource for Fixture {
+    async fn content_version(&self) -> Result<u64> {
+        self.posts.content_version().await
+    }
+    fn settings(&self) -> impl Future<Output = Result<Settings>> {
+        std::future::ready(Ok(self.settings.clone()))
+    }
+    async fn posts(&self, filter: Filter<'_>, offset: usize, limit: usize) -> Result<Slice> {
+        self.posts.posts(filter, offset, limit).await
+    }
+    async fn post(&self, slug: &str) -> Result<Option<Neighbours>> {
+        self.posts.post(slug).await
+    }
+    async fn tag(&self, slug: &str) -> Result<Option<Tag>> {
+        self.posts.tag(slug).await
+    }
+    async fn tags(&self) -> Result<Vec<Tag>> {
+        self.posts.tags().await
+    }
+    async fn years(&self) -> Result<Vec<i32>> {
+        self.posts.years().await
     }
 }
 

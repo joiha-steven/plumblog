@@ -1,7 +1,8 @@
 //! Feed and sitemap rules that validators (W3C Feed Validator, JSON Feed spec, sitemaps.org)
 //! check, encoded as tests against the sample posts.
 
-use super::tests_support::get_typed;
+use super::source::StoredPost;
+use super::tests_support::{Fixture, get_from, get_typed};
 
 /// Strict enough to catch what breaks feed readers: balanced tags, quoted attributes, only
 /// the five XML entities or numeric references, nothing after the root element.
@@ -256,4 +257,132 @@ fn feeds_per_language_and_one_url_each() {
     assert_eq!(get_typed("/en/feed.xml").0, 404);
     assert_eq!(get_typed("/vi/rss.xml").0, 404);
     assert_eq!(get_typed("/feed.json").0, 200);
+}
+
+/// The sample site plus a Vietnamese version of one post.
+fn translated() -> Fixture {
+    Fixture::new(|posts, _| {
+        let en = posts
+            .iter_mut()
+            .find(|p| p.slug == "reading-on-screens")
+            .unwrap();
+        en.translations = vec![("vi".into(), "doc-tren-man-hinh".into())];
+        let vi = StoredPost {
+            slug: "doc-tren-man-hinh".into(),
+            title: "Doc tren man hinh".into(),
+            lang: "vi".into(),
+            translations: vec![("en".into(), "reading-on-screens".into())],
+            ..en.clone()
+        };
+        posts.push(vi);
+    })
+}
+
+#[test]
+fn each_feed_has_its_own_id_and_pages_link_their_language_feeds() {
+    let src = translated();
+    let get = |path| get_from(&src, "https://blog.test", path);
+    let (_, _, en) = get("/feed.xml");
+    assert_eq!(all(&en, "id")[0], "https://blog.test/feed.xml");
+    assert!(en.contains("<link href=\"https://blog.test/\" rel=\"alternate\""));
+    let (status, _, vi) = get("/vi/feed.xml");
+    assert_eq!(status, 200);
+    well_formed(&vi).unwrap();
+    assert!(vi.contains("xml:lang=\"vi\""));
+    assert_eq!(all(&vi, "id")[0], "https://blog.test/vi/feed.xml");
+    assert_eq!(vi.matches("<entry>").count(), 1);
+
+    let (_, _, vi_page) = get("/doc-tren-man-hinh");
+    assert!(vi_page.starts_with("<!doctype html>\n<html lang=\"vi\""));
+    for feed in ["/vi/feed.xml", "/vi/rss.xml", "/vi/feed.json"] {
+        assert!(vi_page.contains(&format!("href=\"{feed}\"")), "{feed}");
+    }
+    let (_, _, en_page) = get("/reading-on-screens");
+    assert!(
+        en_page.contains("type=\"application/atom+xml\" title=\"Plum Notes\" href=\"/feed.xml\"")
+    );
+    assert!(!en_page.contains("/vi/feed"));
+}
+
+#[test]
+fn x_default_points_at_the_default_language_version() {
+    let src = translated();
+    let x_default = "hreflang=\"x-default\" href=\"https://blog.test/reading-on-screens\"";
+    for path in ["/reading-on-screens", "/doc-tren-man-hinh"] {
+        let (_, _, html) = get_from(&src, "https://blog.test", path);
+        assert!(html.contains(x_default), "{path}");
+    }
+    let (_, _, sitemap) = get_from(&src, "https://blog.test", "/sitemap.xml");
+    well_formed(&sitemap).unwrap();
+    // Both versions carry the whole set: vi, en and x-default.
+    assert_eq!(sitemap.matches(x_default).count(), 2);
+    assert_eq!(sitemap.matches("hreflang=\"vi\"").count(), 2);
+}
+
+#[test]
+fn a_spoofed_host_never_reaches_public_urls() {
+    let src = Fixture::new(|_, s| s.origin = Some("https://blog.example/".into()));
+    for path in [
+        "/",
+        "/reading-on-screens",
+        "/tag/tools",
+        "/archive/2025",
+        "/feed.xml",
+        "/rss.xml",
+        "/feed.json",
+        "/sitemap.xml",
+        "/robots.txt",
+        "/llms.txt",
+        "/no-such-page",
+    ] {
+        let (_, _, body) = get_from(&src, "https://evil.test", path);
+        assert!(!body.contains("evil.test"), "{path} used the Host header");
+        assert!(body.contains("https://blog.example/"), "{path}");
+        assert!(
+            !body.contains("blog.example//"),
+            "{path}: trailing slash kept"
+        );
+    }
+    let (_, _, home) = get_from(&src, "https://evil.test", "/");
+    assert!(home.contains("<link rel=\"canonical\" href=\"https://blog.example/\">"));
+}
+
+#[test]
+fn hostile_titles_still_parse_as_xml() {
+    // C0 controls, the XML 1.0 non-characters U+FFFE/U+FFFF, a CDATA end, markup and emoji.
+    let hostile = "a\u{1}\u{8}\u{1B}b \u{FFFE}\u{FFFF}]]> <i>&amp;</i> \u{1F600}";
+    let clean = "ab ]]> <i>&amp;</i> \u{1F600}";
+    let src = Fixture::new(|posts, _| {
+        let p = &mut posts[0];
+        p.title = hostile.into();
+        p.excerpt = Some(hostile.into());
+        p.tags[0].name = hostile.into();
+        p.lang = "vi".into();
+    });
+    for path in ["/vi/feed.xml", "/vi/rss.xml", "/feed.xml", "/sitemap.xml"] {
+        let (status, _, xml) = get_from(&src, "https://blog.test", path);
+        assert_eq!(status, 200, "{path}");
+        let doc = roxmltree::Document::parse(&xml).unwrap_or_else(|e| panic!("{path}: {e}"));
+        if path.starts_with("/vi/") {
+            let item = if path.ends_with("rss.xml") {
+                "item"
+            } else {
+                "entry"
+            };
+            let titles: Vec<&str> = doc
+                .descendants()
+                .filter(|n| {
+                    n.has_tag_name("title") && n.parent().is_some_and(|p| p.has_tag_name(item))
+                })
+                .filter_map(|n| n.text())
+                .collect();
+            assert_eq!(titles, [clean], "{path}");
+            let tags: Vec<String> = doc
+                .descendants()
+                .filter(|n| n.has_tag_name("category"))
+                .filter_map(|n| n.attribute("term").or(n.text()).map(str::to_owned))
+                .collect();
+            assert!(tags.iter().any(|t| t == clean), "{path}: {tags:?}");
+        }
+    }
 }

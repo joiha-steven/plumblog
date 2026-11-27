@@ -153,16 +153,23 @@ pub async fn render(
 ) -> std::result::Result<Outcome, String> {
     let theme = theme().map_err(|e| format!("theme: {e}"))?;
     let settings = src.settings().await.map_err(err)?;
+    // The Host header is the client's to choose: public URLs come from the configured origin,
+    // and the request's only when none is set (local development).
+    let origin = settings
+        .origin
+        .as_deref()
+        .map_or(origin, |o| o.trim_end_matches('/'));
     let p = Pages {
         src,
         theme,
-        site: site(&settings),
+        site: site(&settings, &settings.lang),
         info: PageInfo {
             lang: settings.lang.clone(),
             canonical: format!("{origin}{path}"),
             origin: origin.to_owned(),
         },
         per: settings.per_page.max(1),
+        settings: &settings,
     };
     let page = match routes::parse(path) {
         Route::Redirect(to) => return Ok(Outcome::Redirect(to)),
@@ -176,7 +183,7 @@ pub async fn render(
                 None => p.not_found_page().await?,
             });
         }
-        Route::Sitemap => return Ok(doc(docs::XML, p.sitemap().await?)),
+        Route::Sitemap => return Ok(doc(docs::XML, p.sitemap(&settings).await?)),
         Route::Robots => return Ok(doc(docs::TEXT, docs::robots(origin))),
         Route::Llms => return Ok(doc(docs::TEXT, p.llms(&settings).await?)),
         Route::NotFound => None,
@@ -197,6 +204,14 @@ fn doc(content_type: &'static str, body: String) -> Outcome {
     }
 }
 
+/// A Worker log warning. `console_warn!` only exists in wasm, so host tests print to stderr.
+fn warn(line: &str) {
+    #[cfg(target_arch = "wasm32")]
+    console_warn!("{line}");
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("{line}");
+}
+
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -205,9 +220,11 @@ fn err(e: impl std::fmt::Display) -> String {
 struct Pages<'a, S> {
     src: &'a S,
     theme: &'a Theme,
+    /// Site and page facts in the default language; a post in another language swaps both.
     site: Site,
     info: PageInfo,
     per: usize,
+    settings: &'a Settings,
 }
 
 type PageResult = std::result::Result<Option<String>, String>;
@@ -221,10 +238,20 @@ impl<S: ReaderSource> Pages<'_, S> {
     /// the system log: this happens while serving a page view, and the system log never
     /// writes per view (docs/ARCHITECTURE.md, System log).
     fn render(&self, body: &Body<'_>) -> std::result::Result<String, String> {
-        let (html, missing) = self
-            .theme
-            .render_reporting(&self.site, &self.info, body)
-            .map_err(err)?;
+        let other = match body {
+            Body::Post { post, .. } if post.lang != self.info.lang => Some((
+                site(self.settings, &post.lang),
+                PageInfo {
+                    lang: post.lang.clone(),
+                    ..self.info.clone()
+                },
+            )),
+            _ => None,
+        };
+        let (site, info) = other
+            .as_ref()
+            .map_or((&self.site, &self.info), |(s, i)| (s, i));
+        let (html, missing) = self.theme.render_reporting(site, info, body).map_err(err)?;
         for (lang, key) in missing {
             console_warn!("i18n.missing_key lang={lang} key={key}");
         }
@@ -341,16 +368,19 @@ impl<S: ReaderSource> Pages<'_, S> {
     }
 }
 
-fn site(s: &Settings) -> Site {
+/// Site facts for a page in `lang`: its feed links are that language's feeds.
+fn site(s: &Settings, lang: &str) -> Site {
+    let feed_lang = (lang != s.lang).then_some(lang);
     Site {
         title: s.title.clone(),
         description: s.description.clone(),
+        default_lang: s.lang.clone(),
         home_url: "/".to_owned(),
         // Search lands with its own issue (#16).
         search_url: None,
-        feed_url: routes::feed(None, routes::FeedFormat::Atom),
-        rss_url: routes::feed(None, routes::FeedFormat::Rss),
-        json_feed_url: routes::feed(None, routes::FeedFormat::Json),
+        feed_url: routes::feed(feed_lang, routes::FeedFormat::Atom),
+        rss_url: routes::feed(feed_lang, routes::FeedFormat::Rss),
+        json_feed_url: routes::feed(feed_lang, routes::FeedFormat::Json),
         image_url: None,
         author: None,
         // No site icon yet (issue: installable web apps); `data:,` stops the browser from
