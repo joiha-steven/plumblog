@@ -1,23 +1,27 @@
-use clap::{CommandFactory, Parser, Subcommand};
-use std::{fmt::Write, process::ExitCode};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use plumblog_cli::cloudflare::{Client, Credentials, TokenError, TokenKind, endpoint, token};
+use plumblog_cli::help;
+use plumblog_cli::text::{Code, Text, pick_lang};
+use plumblog_cli::{deploy, migrations, setup};
+use plumblog_i18n::{Key, key};
+use std::{fmt::Write, path::Path, process::ExitCode};
 
 include!(concat!(env!("OUT_DIR"), "/guides.rs"));
 
-/// `(topic, summary, build)`.
-type Generated = (&'static str, &'static str, fn() -> String);
+/// `(topic, summary key, build)`.
+type Generated = (&'static str, Key, fn(&Text) -> String);
 
 /// References built from code at run time, so they can never drift from what the blog
 /// accepts.
 const GENERATED: &[Generated] = &[
+    ("api", key!("cli.guide.api_summary"), |_| api_reference()),
+    ("options", key!("cli.guide.options_summary"), |_| {
+        plumblog_render::options::reference()
+    }),
     (
-        "api",
-        "HTTP API v1 routes (generated from code)",
-        api_reference,
-    ),
-    (
-        "options",
-        "Theme and plugin option schema (generated from code)",
-        plumblog_render::options::reference,
+        "token",
+        key!("cli.guide.token_summary"),
+        endpoint::token_guide,
     ),
 ];
 
@@ -80,66 +84,407 @@ fn api_reference() -> String {
     o
 }
 
+// Help text is set from locale keys in `command()`, never from doc comments here: clap would
+// print doc comments as English help.
+// clap's help and version flags and help subcommand print English, so ours replace them.
 #[derive(Parser)]
-#[command(name = "blog", version, about = "plumblog command line")]
+#[command(
+    name = "blog",
+    disable_help_flag = true,
+    disable_version_flag = true,
+    disable_help_subcommand = true
+)]
 struct Cli {
+    #[arg(long, global = true)]
+    lang: Option<String>,
+    // Handled before parsing (see `main`); declared so help lists them.
+    #[arg(short = 'h', long, global = true)]
+    help: bool,
+    #[arg(short = 'V', long)]
+    version: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// List guides, or print one by topic
     Guide {
-        /// Guide topic (file name without .md)
         topic: Option<String>,
+    },
+    Setup {
+        #[arg(long, conflicts_with_all = ["name", "domain", "no_turnstile", "change_origin", "clear_failed_migration"])]
+        check_token: bool,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        domain: Option<String>,
+        #[arg(long)]
+        no_turnstile: bool,
+        #[arg(long, requires = "no_turnstile")]
+        yes_i_understand: bool,
+        #[arg(long)]
+        change_origin: bool,
+        #[arg(long)]
+        clear_failed_migration: bool,
+    },
+    Deploy {
+        #[arg(long)]
+        export: bool,
+        #[arg(long)]
+        bundle: Option<std::path::PathBuf>,
+        #[arg(long)]
+        allow_older: bool,
+    },
+    Rollback {
+        #[arg(long, conflicts_with = "db")]
+        to: Option<String>,
+        #[arg(long)]
+        db: Option<String>,
+        #[arg(long, requires = "db")]
+        yes: bool,
+        #[arg(long, requires = "db")]
+        clear_failed_migration: bool,
+        #[arg(long, conflicts_with = "db")]
+        allow_older: bool,
     },
 }
 
-fn guide_list() -> String {
-    let mut out = String::from("Guides (run `blog guide <topic>`):\n");
+/// clap takes value names only as `&'static str` without its `string` feature; a few bytes,
+/// once per run.
+fn leak(s: String) -> &'static str {
+    s.leak()
+}
+
+/// The clap command with every help text in `text`'s language.
+fn command(text: &Text) -> clap::Command {
+    let t = |k: Key| text.t(k, &[]);
+    Cli::command()
+        .about(t(key!("cli.about")))
+        .mut_arg("lang", |a| {
+            a.help(t(key!("cli.lang_help")))
+                .value_name(leak(t(key!("cli.lang_value"))))
+        })
+        .mut_arg("help", |a| a.help(t(key!("cli.help.help_help"))))
+        .mut_arg("version", |a| a.help(t(key!("cli.help.version_help"))))
+        .mut_subcommand("guide", |c| {
+            c.about(t(key!("cli.guide.about"))).mut_arg("topic", |a| {
+                a.help(t(key!("cli.guide.topic_help")))
+                    .value_name(leak(t(key!("cli.guide.topic_value"))))
+            })
+        })
+        .mut_subcommand("setup", |c| {
+            c.about(t(key!("cli.setup.about")))
+                .mut_arg("check_token", |a| {
+                    a.help(t(key!("cli.setup.check_token_help")))
+                })
+                .mut_arg("name", |a| {
+                    a.help(t(key!("cli.setup.name_help")))
+                        .value_name(leak(t(key!("cli.setup.name_value"))))
+                })
+                .mut_arg("domain", |a| {
+                    a.help(t(key!("cli.setup.domain_help")))
+                        .value_name(leak(t(key!("cli.setup.domain_value"))))
+                })
+                .mut_arg("no_turnstile", |a| {
+                    a.help(t(key!("cli.setup.no_turnstile_help")))
+                })
+                .mut_arg("yes_i_understand", |a| {
+                    a.help(t(key!("cli.setup.yes_help")))
+                })
+                .mut_arg("change_origin", |a| {
+                    a.help(t(key!("cli.setup.change_origin_help")))
+                })
+                .mut_arg("clear_failed_migration", |a| {
+                    a.help(t(key!("cli.setup.clear_failed_migration_help")))
+                })
+        })
+        .mut_subcommand("deploy", |c| {
+            c.about(t(key!("cli.deploy.about")))
+                .mut_arg("export", |a| a.help(t(key!("cli.deploy.export_help"))))
+                .mut_arg("bundle", |a| {
+                    a.help(t(key!("cli.deploy.bundle_help")))
+                        .value_name(leak(t(key!("cli.deploy.bundle_value"))))
+                })
+                .mut_arg("allow_older", |a| {
+                    a.help(t(key!("cli.deploy.allow_older_help")))
+                })
+        })
+        .mut_subcommand("rollback", |c| {
+            c.about(t(key!("cli.rollback.about")))
+                .mut_arg("to", |a| {
+                    a.help(t(key!("cli.rollback.to_help")))
+                        .value_name(leak(t(key!("cli.rollback.to_value"))))
+                })
+                .mut_arg("db", |a| {
+                    a.help(t(key!("cli.rollback.db_help")))
+                        .value_name(leak(t(key!("cli.rollback.db_value"))))
+                })
+                .mut_arg("yes", |a| a.help(t(key!("cli.rollback.yes_help"))))
+                .mut_arg("clear_failed_migration", |a| {
+                    a.help(t(key!("cli.rollback.clear_failed_help")))
+                })
+                .mut_arg("allow_older", |a| {
+                    a.help(t(key!("cli.rollback.allow_older_help")))
+                })
+        })
+}
+
+/// `--lang` from the raw arguments, read before clap so its own messages use the language.
+fn lang_arg(args: &[String]) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--lang" {
+            return it.next().cloned();
+        }
+        if let Some(v) = a.strip_prefix("--lang=") {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+fn guide_list(text: &Text) -> String {
+    let mut out = text.t(key!("cli.guide.list_head"), &[]);
+    out.push('\n');
     for (name, summary, _) in GUIDES {
         writeln!(out, "  {name:<20} {summary}").unwrap();
     }
     for (name, summary, _) in GENERATED {
-        writeln!(out, "  {name:<20} {summary}").unwrap();
+        writeln!(out, "  {name:<20} {}", text.t(*summary, &[])).unwrap();
     }
     out
 }
 
-fn guide_output(topic: Option<&str>) -> Result<String, String> {
+/// Guides (`guides/*.md`) are AI instructions and stay English; generated ones follow `text`.
+fn guide_output(text: &Text, topic: Option<&str>) -> Result<String, (Code, String)> {
     match topic {
-        None => Ok(guide_list()),
+        None => Ok(guide_list(text)),
         Some(t) => GUIDES
             .iter()
             .find(|(name, _, _)| *name == t)
-            .map(|(_, _, text)| (*text).to_string())
+            .map(|(_, _, body)| (*body).to_string())
             .or_else(|| {
                 GENERATED
                     .iter()
                     .find(|(name, _, _)| *name == t)
-                    .map(|(_, _, build)| build())
+                    .map(|(_, _, build)| build(text))
             })
-            .ok_or_else(|| format!("unknown guide topic: {t}\n{}", guide_list())),
+            .ok_or_else(|| {
+                let msg = text.t(key!("cli.error.guide_unknown"), &[("topic", t.to_string())]);
+                (Code::GuideUnknown, format!("{msg}\n{}", guide_list(text)))
+            }),
+    }
+}
+
+/// `blog setup --check-token`: credentials from env or `.env` in the current folder.
+fn check_token(text: &Text) -> Result<String, (Code, String)> {
+    let fail = |e: &TokenError| (e.code(), e.message(text));
+    let creds = Credentials::load(Path::new(".")).map_err(|e| fail(&e))?;
+    let mut client = Client::from_env(creds.token).map_err(|e| (e.code(), e.message(text)))?;
+    let v = token::verify(&mut client, creds.account_id.as_deref()).map_err(|e| fail(&e))?;
+    let kind = text.t(
+        match v.kind {
+            TokenKind::User => key!("cli.setup.kind_user"),
+            TokenKind::Account => key!("cli.setup.kind_account"),
+        },
+        &[],
+    );
+    let ok = match v.expires_on {
+        Some(date) => text.t(
+            key!("cli.setup.token_ok_expires"),
+            &[("kind", kind), ("date", date)],
+        ),
+        None => text.t(key!("cli.setup.token_ok"), &[("kind", kind)]),
+    };
+    // Names come from Cloudflare; no terminal control characters.
+    let name: String = v.account.name.chars().filter(|c| !c.is_control()).collect();
+    let account = text.t(
+        key!("cli.setup.account"),
+        &[("name", name), ("id", v.account.id)],
+    );
+    Ok(format!("{ok}\n{account}\n"))
+}
+
+/// `blog setup`: progress goes to stdout as each step finishes, so a failure shows what
+/// was already done.
+fn setup_site(text: &Text, opts: &setup::Options) -> Result<String, (Code, String)> {
+    let fail = |f: setup::Failure| (f.code, f.message);
+    setup::check_options(opts, text).map_err(fail)?;
+    let creds = Credentials::load(Path::new(".")).map_err(|e| (e.code(), e.message(text)))?;
+    let mut client = Client::from_env(creds.token).map_err(|e| (e.code(), e.message(text)))?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let migrations = migrations::bundled();
+    let cx = setup::Context {
+        dir: Path::new("."),
+        migrations: &migrations,
+        now_ms,
+        text,
+    };
+    let mut out = std::io::stdout().lock();
+    setup::run(
+        &mut client,
+        creds.account_id.as_deref(),
+        opts,
+        &cx,
+        &mut out,
+    )
+    .map_err(fail)?;
+    Ok(String::new())
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// `blog deploy` and `blog rollback`: progress to stdout as each step finishes.
+fn deploy_or_rollback(
+    text: &Text,
+    action: Result<deploy::Options, deploy::RollbackOptions>,
+) -> Result<String, (Code, String)> {
+    let creds = Credentials::load(Path::new(".")).map_err(|e| (e.code(), e.message(text)))?;
+    let mut client = Client::from_env(creds.token).map_err(|e| (e.code(), e.message(text)))?;
+    let migrations = migrations::bundled();
+    let cx = setup::Context {
+        dir: Path::new("."),
+        migrations: &migrations,
+        now_ms: now_ms(),
+        text,
+    };
+    let clock = deploy::RealClock::new();
+    let rt = deploy::Runtime {
+        clock: &clock,
+        smoke_base: std::env::var(deploy::SMOKE_BASE_ENV)
+            .ok()
+            .filter(|v| !v.is_empty()),
+        smoke_budget: deploy::SMOKE_BUDGET,
+    };
+    let mut out = std::io::stdout().lock();
+    let account = creds.account_id.as_deref();
+    match action {
+        Ok(opts) => deploy::run(&mut client, account, &opts, &cx, &rt, &mut out),
+        Err(opts) => deploy::rollback(&mut client, account, &opts, &cx, &rt, &mut out),
+    }
+    .map_err(|f| (f.code, f.message))?;
+    Ok(String::new())
+}
+
+/// Parses `args`; a clap error becomes our own line (code + sentence + the argument).
+fn parse(text: &Text, args: &[String]) -> Result<Cli, (Code, String)> {
+    command(text)
+        .try_get_matches_from(args)
+        .and_then(|m| Cli::from_arg_matches(&m))
+        .map_err(|e| help::args_error(&e, text))
+}
+
+/// What a run prints, and how it ends.
+enum Outcome {
+    Out(String),
+    /// Bare `blog`: help, but a failure, since nothing was done.
+    Help(String),
+    Fail(Code, String),
+}
+
+fn run(text: &Text, args: &[String]) -> Outcome {
+    let has = |flags: &[&str]| args.iter().skip(1).any(|a| flags.contains(&a.as_str()));
+    let cmd = command(text);
+    // Before parsing: `--help` must show help even next to an incomplete command line.
+    if has(&["-h", "--help"]) {
+        return Outcome::Out(help::render(&cmd, &help::target(&cmd, args), text));
+    }
+    if has(&["-V", "--version"]) {
+        return Outcome::Out(format!(
+            "{} {}\n",
+            cmd.get_name(),
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+    let cli = match parse(text, args) {
+        Ok(cli) => cli,
+        Err((code, msg)) => return Outcome::Fail(code, msg),
+    };
+    let result = match cli.command {
+        Some(Command::Guide { topic }) => guide_output(text, topic.as_deref()),
+        Some(Command::Setup {
+            check_token: true, ..
+        }) => check_token(text),
+        Some(Command::Setup {
+            name,
+            domain,
+            no_turnstile,
+            yes_i_understand,
+            change_origin,
+            clear_failed_migration,
+            ..
+        }) => setup_site(
+            text,
+            &setup::Options {
+                name,
+                domain,
+                turnstile: setup::Turnstile::from_flags(no_turnstile, yes_i_understand),
+                change_origin,
+                clear_failed_migration,
+            },
+        ),
+        Some(Command::Deploy {
+            export,
+            bundle,
+            allow_older,
+        }) => deploy_or_rollback(
+            text,
+            Ok(deploy::Options {
+                export,
+                bundle,
+                allow_older,
+            }),
+        ),
+        Some(Command::Rollback {
+            to,
+            db,
+            yes,
+            clear_failed_migration,
+            allow_older,
+        }) => deploy_or_rollback(
+            text,
+            Err(deploy::RollbackOptions {
+                to,
+                db,
+                yes,
+                clear_failed_migration,
+                allow_older,
+            }),
+        ),
+        None => return Outcome::Help(help::render(&cmd, &[], text)),
+    };
+    match result {
+        Ok(out) => Outcome::Out(out),
+        Err((code, msg)) => Outcome::Fail(code, msg),
     }
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match cli.command {
-        Some(Command::Guide { topic }) => match guide_output(topic.as_deref()) {
-            Ok(text) => {
-                print!("{text}");
-                ExitCode::SUCCESS
-            }
-            Err(msg) => {
-                eprint!("error: {msg}");
-                ExitCode::FAILURE
-            }
-        },
-        None => {
-            // Bare `blog` shows help instead of silently doing nothing.
-            let _ = Cli::command().print_help();
+    let args: Vec<String> = std::env::args().collect();
+    let lang = pick_lang(lang_arg(&args).as_deref(), &|k| std::env::var(k).ok());
+    let text = Text::new(&lang);
+    match run(&text, &args) {
+        Outcome::Out(out) => {
+            print!("{out}");
+            ExitCode::SUCCESS
+        }
+        Outcome::Help(out) => {
+            print!("{out}");
+            ExitCode::FAILURE
+        }
+        // Exit 2 for bad arguments, as clap and most CLIs do.
+        Outcome::Fail(Code::ArgsInvalid, msg) => {
+            eprintln!("{}", text.error_line(Code::ArgsInvalid, &msg));
+            ExitCode::from(2)
+        }
+        Outcome::Fail(code, msg) => {
+            eprintln!("{}", text.error_line(code, &msg));
             ExitCode::FAILURE
         }
     }
@@ -151,17 +496,26 @@ mod tests {
     use clap::error::ErrorKind;
     use std::path::Path;
 
+    fn en() -> Text {
+        Text::new("en")
+    }
+
     #[test]
     fn unknown_topic_errors_and_lists() {
-        let err = guide_output(Some("no-such-topic")).unwrap_err();
-        assert!(err.contains("unknown guide topic: no-such-topic"));
+        let (code, err) = guide_output(&en(), Some("no-such-topic")).unwrap_err();
+        assert_eq!(code, Code::GuideUnknown);
+        assert!(err.contains("Unknown guide topic: no-such-topic"));
         assert!(err.contains("getting-started"));
     }
 
     #[test]
     fn api_reference_lists_every_route() {
-        let text = guide_output(Some("api")).unwrap();
-        assert_eq!(text, guide_output(Some("api")).unwrap(), "deterministic");
+        let text = guide_output(&en(), Some("api")).unwrap();
+        assert_eq!(
+            text,
+            guide_output(&en(), Some("api")).unwrap(),
+            "deterministic"
+        );
         for r in plumblog_model::api::ROUTES {
             let head = format!("\n## {} {}\n", r.method.as_str(), r.path);
             assert_eq!(text.matches(&head).count(), 1, "{head}");
@@ -183,12 +537,12 @@ mod tests {
             .count(),
             2
         );
-        assert!(guide_list().contains("api"));
+        assert!(guide_list(&en()).contains("api"));
     }
 
     #[test]
     fn options_reference_is_generated_from_the_schema() {
-        let text = guide_output(Some("options")).unwrap();
+        let text = guide_output(&en(), Some("options")).unwrap();
         assert_eq!(text, plumblog_render::options::reference());
         for t in plumblog_render::options::FieldType::ALL {
             assert!(
@@ -197,13 +551,58 @@ mod tests {
                 t.name()
             );
         }
-        assert!(guide_list().contains("options"));
+        assert!(guide_list(&en()).contains("options"));
+    }
+
+    #[test]
+    fn token_guide_is_generated_from_the_endpoint_table() {
+        use plumblog_cli::cloudflare::{Endpoint, Permission};
+        let text = guide_output(&en(), Some("token")).unwrap();
+        assert_eq!(text, endpoint::token_guide(&en()));
+        assert!(guide_list(&en()).contains("token"));
+        assert!(text.contains("Never use the Global API Key"));
+        // Every endpoint has a complete row, and every permission it needs is in the guide.
+        for e in Endpoint::ALL {
+            let s = e.spec();
+            assert!(s.path.starts_with('/'), "{e:?}");
+            assert!(
+                s.doc.starts_with("https://developers.cloudflare.com/"),
+                "{e:?}"
+            );
+            let summary = en().t(s.summary, &[]);
+            assert!(!summary.starts_with("cli."), "{e:?}: missing locale text");
+            if let Some(p) = s.permission {
+                let (scope, group, access) = p.parts();
+                let row = format!("| {} | {group} | {access} | ", scope.label());
+                assert!(text.contains(&row), "{e:?}: {row}");
+                assert!(text.contains(&summary), "{e:?}");
+            }
+        }
+        // The labels the owner must pick, exactly as the dashboard shows them.
+        for (p, label) in [
+            (Permission::D1Edit, "Account | D1 | Edit"),
+            (
+                Permission::WorkersScriptsEdit,
+                "Account | Workers Scripts | Edit",
+            ),
+            (
+                Permission::WorkersR2StorageEdit,
+                "Account | Workers R2 Storage | Edit",
+            ),
+            (Permission::TurnstileEdit, "Account | Turnstile | Edit"),
+            (Permission::ZoneRead, "Zone | Zone | Read"),
+        ] {
+            assert_eq!(p.label(), label);
+            assert!(text.contains(&format!("| {label} |")), "{label}");
+        }
+        // Account rows come before the custom-domain-only Zone rows.
+        assert!(text.find("| Account |").unwrap() < text.find("| Zone |").unwrap());
     }
 
     #[test]
     fn known_topic_prints_guide() {
         assert!(
-            guide_output(Some("getting-started"))
+            guide_output(&en(), Some("getting-started"))
                 .unwrap()
                 .starts_with("# ")
         );
@@ -242,7 +641,7 @@ mod tests {
                         };
                         let argv: Vec<&str> = cmd.split_whitespace().collect();
                         assert_eq!(argv[0], "blog");
-                        let accepted = match Cli::command().try_get_matches_from(&argv) {
+                        let accepted = match command(&en()).try_get_matches_from(&argv) {
                             Ok(_) => true,
                             Err(e) => matches!(
                                 e.kind(),
@@ -251,9 +650,12 @@ mod tests {
                         };
                         assert!(accepted, "{}: not a valid command: {cmd}", path.display());
                         if let ["blog", "guide", topic] = argv[..] {
-                            // A `<placeholder>` stands for any topic; real names must exist.
+                            // A `<placeholder>` stands for any topic; real names must exist,
+                            // as a file or a generated reference.
                             assert!(
-                                topic.starts_with('<') || GUIDES.iter().any(|g| g.0 == topic),
+                                topic.starts_with('<')
+                                    || GUIDES.iter().any(|g| g.0 == topic)
+                                    || GENERATED.iter().any(|g| g.0 == topic),
                                 "{}: unknown guide topic in example: {cmd}",
                                 path.display()
                             );
@@ -265,5 +667,149 @@ mod tests {
             }
             assert!(checked > 0, "{}: no `blog` command example", path.display());
         }
+    }
+
+    /// Every help text comes from the locale files, in every language: nothing clap could
+    /// take from a doc comment, and nothing left as a bare key.
+    #[test]
+    fn help_text_comes_from_locale_keys() {
+        for lang in ["en", "vi"] {
+            let text = Text::new(lang);
+            let mut cmd = command(&text);
+            cmd.build();
+            let mut seen = 0;
+            let mut stack = vec![cmd];
+            while let Some(c) = stack.pop() {
+                if c.get_name() != "help" {
+                    let about = c.get_about().map(ToString::to_string).unwrap_or_default();
+                    assert!(
+                        !about.is_empty() && !about.starts_with("cli."),
+                        "{lang}: {}",
+                        c.get_name()
+                    );
+                    for a in c.get_arguments() {
+                        let help = a.get_help().map(ToString::to_string).unwrap_or_default();
+                        assert!(
+                            !help.is_empty() && !help.starts_with("cli."),
+                            "{lang}: {}",
+                            a.get_id()
+                        );
+                        seen += 1;
+                    }
+                }
+                stack.extend(c.get_subcommands().cloned());
+            }
+            assert!(seen >= 3, "{lang}: {seen}");
+        }
+        assert_ne!(
+            command(&Text::new("vi")).get_about().unwrap().to_string(),
+            command(&en()).get_about().unwrap().to_string()
+        );
+    }
+
+    #[test]
+    fn lang_flag_is_read_before_clap() {
+        let a = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            lang_arg(&a(&["blog", "--lang", "vi", "guide"])).as_deref(),
+            Some("vi")
+        );
+        assert_eq!(
+            lang_arg(&a(&["blog", "guide", "--lang=vi"])).as_deref(),
+            Some("vi")
+        );
+        assert_eq!(lang_arg(&a(&["blog", "guide"])), None);
+        // The token guide follows the language; permission names stay the dashboard's.
+        let vi = guide_output(&Text::new("vi"), Some("token")).unwrap();
+        assert!(vi.contains("Global API Key") && vi.contains("| Account | D1 | Edit |"));
+        assert!(vi.contains("API token Cloudflare"));
+    }
+
+    fn argv(v: &[&str]) -> Vec<String> {
+        v.iter().map(ToString::to_string).collect()
+    }
+
+    /// Unknown flags and missing values give our line with the argument as data, in each
+    /// language, with no clap prose; the run ends with code 2.
+    #[test]
+    fn bad_arguments_get_our_message_in_each_language() {
+        let mut seen = Vec::new();
+        for lang in ["en", "vi"] {
+            let text = Text::new(lang);
+            for (args, sentence, arg) in [
+                (
+                    &["blog", "--bogus"][..],
+                    key!("cli.args.unknown"),
+                    "--bogus",
+                ),
+                (
+                    &["blog", "guide", "--lang"][..],
+                    key!("cli.args.missing_value"),
+                    "--lang",
+                ),
+                (
+                    &["blog", "setup", "--yes-i-understand"][..],
+                    key!("cli.args.missing_required"),
+                    "--no-turnstile",
+                ),
+            ] {
+                let Outcome::Fail(code, msg) = run(&text, &argv(args)) else {
+                    panic!("{lang} {args:?}: not a failure");
+                };
+                assert_eq!(code, Code::ArgsInvalid);
+                let head = text.t(sentence, &[("arg", String::new())]);
+                let head = head
+                    .split("{arg}")
+                    .next()
+                    .unwrap_or(&head)
+                    .trim_end_matches('.');
+                assert!(msg.starts_with(head.trim_end()), "{lang}: {msg}");
+                assert!(msg.contains(arg), "{lang}: {msg}");
+                for prose in [
+                    "unexpected argument",
+                    "a value is required",
+                    "tip:",
+                    "Usage:",
+                ] {
+                    assert!(!msg.contains(prose), "{lang}: clap prose in {msg}");
+                }
+                seen.push(msg);
+            }
+        }
+        // English and Vietnamese differ for every case.
+        assert!((0..3).all(|i| seen[i] != seen[i + 3]));
+    }
+
+    #[test]
+    fn help_and_version_are_ours() {
+        for lang in ["en", "vi"] {
+            let text = Text::new(lang);
+            let Outcome::Out(h) = run(&text, &argv(&["blog", "--help"])) else {
+                panic!("--help");
+            };
+            for k in [
+                key!("cli.about"),
+                key!("cli.help.commands"),
+                key!("cli.help.options"),
+            ] {
+                assert!(h.contains(&text.t(k, &[])), "{lang}: {h}");
+            }
+            assert!(h.contains("  guide  ") && h.contains("--lang") && h.contains("-h, --help"));
+            // Help for a subcommand works even without its required flag.
+            let Outcome::Out(h) = run(&text, &argv(&["blog", "--lang", lang, "setup", "-h"]))
+            else {
+                panic!("setup -h");
+            };
+            assert!(
+                h.contains("--check-token")
+                    && h.contains("--no-turnstile")
+                    && h.contains(&text.t(key!("cli.setup.about"), &[]))
+            );
+            assert!(matches!(run(&text, &argv(&["blog"])), Outcome::Help(_)));
+        }
+        let Outcome::Out(v) = run(&en(), &argv(&["blog", "-V"])) else {
+            panic!("-V");
+        };
+        assert_eq!(v.trim(), format!("blog {}", env!("CARGO_PKG_VERSION")));
     }
 }

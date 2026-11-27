@@ -76,6 +76,12 @@ worker   worker                 # the Cloudflare runtime; the only crate that do
 worker   idna_adapter           # pins the IDNA back end of url, for size (see Cargo.toml)
 worker   roxmltree              # tests only: feeds and sitemap parse as real XML
 cli      clap                   # argument parsing for the `blog` binary
+cli      ureq                   # blocking HTTPS to the Cloudflare REST API (setup, deploy)
+cli      serde                  # typed Cloudflare API responses
+cli      serde_json             # Cloudflare API bodies are JSON
+cli      getrandom              # WEBHOOK_KEY, site id and setup code randomness
+cli      toml                   # site.local.toml (read and write)
+cli      rusqlite               # tests only: the fake D1 runs real SQLite
 markdown unicode-normalization  # NFC before heading ids (pure Rust, no I/O)
 render   minijinja              # theme templates (pure Rust, no I/O)
 render   toml                   # theme.toml and theme locales (pure Rust, no I/O)
@@ -128,6 +134,18 @@ git -c core.quotePath=false ls-files -z --cached --others --exclude-standard > "
   || fail "git ls-files failed"
 files=()
 while IFS= read -r -d '' f; do [ -f "$f" ] && files+=("$f"); done < "$list_file"
+
+step "site secrets and state stay out of git"
+# The API token (.env), resource names (site.local.toml) and database backups are per site;
+# committed, they would leak or make every pull conflict (docs/ARCHITECTURE.md, Site-specific state).
+# .env.example (names only, no values) is the one allowed .env file, as in .gitignore.
+tracked=$(git -c core.quotePath=false ls-files -- ':(glob)**/.env' ':(glob)**/.env.*' \
+  ':(exclude,glob)**/.env.example' ':(glob)**/site.local.toml' ':(glob)**/backups/**') \
+  || fail "git ls-files failed"
+if [ -n "$tracked" ]; then echo "$tracked" | sed 's/^/  /'; fail "tracked site files; git rm --cached them"; fi
+for p in .env .env.local site.local.toml backups/x.sql; do
+  git check-ignore -q --no-index "$p" || fail "$p is not ignored by .gitignore"
+done
 
 step "markdown allowlist"
 bad=""
@@ -247,7 +265,8 @@ for f in "${manifests[@]}"; do
       }
       v = line; gsub(/"[^"]*"/, "\"\"", v); gsub(/\x27[^\x27]*\x27/, "\x27\x27", v)
       if (v ~ /^[A-Za-z0-9_-]+\.workspace=true$/) next
-      if (v ~ /^[A-Za-z0-9_-]+=\{.*[{,]workspace=true[,}].*\}$/ || v ~ /^[A-Za-z0-9_-]+=\{workspace=true\}$/) next
+      # workspace=true anywhere in an inline table: first, middle, last or alone.
+      if (v ~ /^[A-Za-z0-9_-]+=\{(.*,)?workspace=true(,.*)?\}$/) next
       print file ":" NR ": " $0
     }
     END { flush() }

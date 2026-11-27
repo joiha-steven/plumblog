@@ -5,9 +5,11 @@ target/
 .dev.vars
 .dev.vars*
 site.local.toml
+backups/
 wrangler.toml
 wrangler.json
 wrangler.jsonc
 node_modules/
 .wrangler/
 .DS_Store
+.blog-deploy.lock

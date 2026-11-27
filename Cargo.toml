@@ -51,6 +51,17 @@ pulldown-latex = "0.8.0"
 # Tests only: a real XML parser proves feeds and the sitemap parse; the hand checker can share
 # blind spots with the writer it tests. Not linked into the Worker.
 roxmltree = "0.21.2"
+# `blog` talks to the Cloudflare REST API (issue #7): blocking HTTP over rustls (ring, bundled
+# webpki roots), so no async runtime and no system OpenSSL; far smaller than reqwest. TLS and
+# HTTP/1.1 are not code to own. Default features off: no gzip decoder.
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
+# `blog setup` makes WEBHOOK_KEY, the site id and the setup code from the OS random source;
+# already in the lock through ring, so no new code.
+getrandom = "0.2.17"
+# Tests only: the fake Cloudflare D1 (crates/cli/tests/fake_cf) runs the repo's migrations and
+# setup's SQL in real SQLite, so tests assert the rows the Worker reads. Bundled: no system
+# SQLite, and FTS5 is compiled in. Never linked into `blog` or the Worker.
+rusqlite = { version = "0.39", features = ["bundled"] }
 # Pinned to the stub back end of `idna` (via `url`, only through `worker`): no Unicode tables, so
 # 48 KB gzip less in the wasm. Costs: a non-ASCII host is refused ("invalid international domain
 # name"; we ask for the `xn--` form), and `xn--` labels are accepted without the UTS 46 checks
