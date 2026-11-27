@@ -26,6 +26,10 @@ copied = "Copied"
 show_note = "Show note {n}"
 
 [search]
+placeholder = "Search posts"
+close = "Close search"
+error = "Search failed. Check your connection and try again."
+see_all = "See all results"
 title = "Search"
 submit = "Search"
 hint = "Search titles and text of every post."

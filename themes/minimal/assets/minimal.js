@@ -1,4 +1,4 @@
-// minimal theme: light/dark toggle, comment form helpers, copy-code buttons and sidenotes. Every page works fully without this file.
+// minimal theme: light/dark toggle, search panel, comment form helpers, copy-code buttons and sidenotes. Every page works fully without this file.
 (() => {
   const d = document, root = d.documentElement;
 
@@ -41,6 +41,91 @@
       s.async = true;
       s.onerror = fail;
       d.head.append(s);
+    });
+  }
+
+  // Search panel. The magnifier is a link to the search page; with JS it opens a field under the
+  // header instead, and results are read from that same page, so core needs no second endpoint.
+  const opener = d.querySelector(".search-open"), panel = d.getElementById("search-panel");
+  if (opener && panel) {
+    const form = panel.querySelector("form"), input = form.q, live = panel.querySelector(".search-live");
+    let timer = 0, ctrl = null;
+    const open = () => {
+      panel.hidden = false;
+      opener.setAttribute("aria-expanded", "true");
+      input.focus();
+      input.select();
+    };
+    const close = (back) => {
+      if (panel.hidden) return;
+      panel.hidden = true;
+      opener.setAttribute("aria-expanded", "false");
+      if (back) opener.focus();
+    };
+    const el = (tag, cls, text) => {
+      const n = d.createElement(tag);
+      if (cls) n.className = cls;
+      if (text) n.textContent = text;
+      return n;
+    };
+    const search = async () => {
+      const q = input.value.trim();
+      if (ctrl) ctrl.abort();
+      if (q.length < 2) { live.replaceChildren(); return; }
+      ctrl = new AbortController();
+      const url = new URL(form.action, location.href);
+      url.searchParams.set("q", q);
+      try {
+        const res = await fetch(url, { signal: ctrl.signal });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const page = new DOMParser().parseFromString(await res.text(), "text/html");
+        const list = el("ol", "live-list");
+        for (const a of [...page.querySelectorAll(".posts .entry")].slice(0, 6)) {
+          const item = el("a");
+          item.href = new URL(a.getAttribute("href"), url).href;
+          item.append(el("span", "live-title", a.querySelector(".entry-title").textContent));
+          const time = a.querySelector("time");
+          if (time) item.append(el("span", "meta", time.textContent));
+          const li = el("li");
+          li.append(item);
+          list.append(li);
+        }
+        // The count line ("3 posts for ...", or "nothing found") is the search page's own text.
+        const count = page.querySelector(".search-count");
+        const foot = el("p", list.children.length ? "live-foot" : "live-note", count ? count.textContent.trim() : "");
+        if (list.children.length) {
+          const all = el("a", "", panel.dataset.all);
+          all.href = url.href;
+          foot.append(all);
+        }
+        live.replaceChildren(...(list.children.length ? [list] : []), foot);
+      } catch (err) {
+        if (err.name === "AbortError") return;
+        console.error("search: live results failed", err);
+        live.replaceChildren(el("p", "live-note", panel.dataset.error));
+      }
+    };
+    opener.addEventListener("click", (e) => {
+      e.preventDefault();
+      panel.hidden ? open() : close(true);
+    });
+    panel.querySelector(".search-close").addEventListener("click", () => close(true));
+    input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(search, 180); });
+    d.addEventListener("keydown", (e) => {
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
+      if (e.key === "/" && !typing && panel.hidden) { e.preventDefault(); open(); return; }
+      if (panel.hidden) return;
+      if (e.key === "Escape") { close(true); return; }
+      // Arrow keys walk from the field through the results.
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+      const items = [input, ...live.querySelectorAll(".live-list a")];
+      const i = items.indexOf(d.activeElement);
+      if (i < 0) return;
+      e.preventDefault();
+      items[Math.max(0, Math.min(items.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))].focus();
+    });
+    d.addEventListener("click", (e) => {
+      if (!panel.contains(e.target) && !opener.contains(e.target)) close(false);
     });
   }
 

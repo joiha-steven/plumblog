@@ -24,6 +24,10 @@ copied = "Đã chép"
 show_note = "Xem chú thích {n}"
 
 [search]
+placeholder = "Tìm bài viết"
+close = "Đóng tìm kiếm"
+error = "Chưa tìm được. Kiểm tra mạng rồi thử lại."
+see_all = "Xem tất cả kết quả"
 title = "Tìm kiếm"
 submit = "Tìm"
 hint = "Tìm trong tiêu đề và nội dung mọi bài viết."
