@@ -74,7 +74,6 @@ done
 step "english-only source"
 bad=""
 for f in "${files[@]}"; do
-  # Top-level docs may use typographic symbols (arrows, dashes); code and config may not.
   case "$f" in locales/*|guides/*|LICENSE) continue ;; esac
   rc=0
   # -I skips binary files; the class allows printable ASCII plus whitespace.
@@ -83,6 +82,25 @@ for f in "${files[@]}"; do
   if [ "$rc" -eq 0 ]; then bad+="$f "; echo "$hits" | sed "s|^|  $f:|" | cut -c1-120; fi
 done
 [ -z "$bad" ] || fail "non-ASCII characters outside locales/ and guides/: $bad"
+
+step "doc length limits"
+# Long docs drift and get skimmed; a hard cap forces saying each thing once.
+bad=""
+limit_for() {
+  case "$1" in
+    AGENTS.md|guides/*.md) echo 60 ;;
+    README.md) echo 80 ;;
+    CLAUDE.md) echo 1 ;;
+    *) echo "" ;;
+  esac
+}
+for f in "${files[@]}"; do
+  max=$(limit_for "$f")
+  [ -n "$max" ] || continue
+  n=$(wc -l < "$f" | tr -d " ")
+  if [ "$n" -gt "$max" ]; then bad+="$f "; echo "  $f: $n lines (max $max)"; fi
+done
+[ -z "$bad" ] || fail "docs over their line limit; cut repetition: $bad"
 
 step "dependencies only via workspace"
 manifests=()

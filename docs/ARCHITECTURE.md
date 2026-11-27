@@ -154,7 +154,7 @@ Not built: PWA/offline, newsletter (later), reactions.
 
 ## Documentation
 
-Allowed Markdown files, enforced by `scripts/check`: `README.md` (humans), `AGENTS.md` (AI contributors, short), `CLAUDE.md` (points to AGENTS.md), `CHANGELOG.md`, `docs/ARCHITECTURE.md` (this file), `guides/*.md` (AI operators). Generated references (CLI, API, theme variables, settings) come from code.
+Which Markdown files may exist, and how long each may be, is enforced by `scripts/check` (the list lives there, not here). `README.md` is for people; `AGENTS.md` and `guides/` are for AI agents. Generated references (CLI, API, theme variables, settings) come from code.
 
 ## Roadmap
 
@@ -181,3 +181,4 @@ Each phase is one or more sessions; each ends with `scripts/check` green and evi
 - 2026-11-27 Import, export, backup, translation, analytics: AI guides, not features. Analytics via Cloudflare Web Analytics.
 - 2026-11-27 Comments built, off by default. Email/newsletter deferred.
 - 2026-11-27 Raw HTML in Markdown forbidden for now.
+- 2026-11-27 Docs: guides and AGENTS.md short with no repetition (line caps in check); README in plain, honest human voice.
