@@ -25,7 +25,7 @@ const LOCAL_HOSTS: &[&str] = &["localhost", "127.0.0.1", "[::1]"];
 /// A stored origin, strictly: `https://host[:port]` (or `http` for a local host), lowercase,
 /// nothing after it but an optional `/`. The text must already be in canonical form, so what
 /// is stored is exactly what browsers report as `origin`.
-fn parse(text: &str) -> std::result::Result<Site, String> {
+pub(super) fn parse(text: &str) -> std::result::Result<Site, String> {
     // The `url` crate here has no Unicode IDNA tables (workspace `Cargo.toml`, idna_adapter), so
     // say what to do instead of its bare "invalid international domain name".
     let authority = text.split_once("://").map_or("", |(_, r)| {

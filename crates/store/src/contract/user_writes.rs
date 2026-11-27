@@ -2,7 +2,7 @@
 //! other, and the site always keeps an active owner. Races are run as their sequential
 //! outcome: the second write lands after the first.
 
-use plumblog_model::{ErrorCode, Role, UserId};
+use plumblog_model::{ErrorCode, Role, TokenScope, UserId};
 
 use super::kit::{Check, Got, T0, eq, fails, new_user, ok, user, version, version_is};
 use crate::{NewSession, NewToken, ProfileUpdate, Store, User};
@@ -306,7 +306,7 @@ fn token(user: UserId, hash: &str, expires_at: Option<i64>) -> NewToken {
         user_id: user,
         name: "ci".into(),
         token_hash: hash.into(),
-        scope: Role::Writer,
+        scope: TokenScope::Writer,
         created_at: T0,
         expires_at,
     }

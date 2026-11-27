@@ -387,6 +387,7 @@ name = "plumblog-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "plumblog-model",
  "plumblog-render",
 ]
 
