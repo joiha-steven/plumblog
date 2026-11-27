@@ -63,11 +63,30 @@ fn update(
     update_with_key(s, &s.key.public().to_file(), to, check, lang)
 }
 
+fn update_older(
+    s: &Setup,
+    to: Option<Version>,
+    allow_older: bool,
+) -> (Result<(), Failure>, String) {
+    run_update(s, &s.key.public().to_file(), to, false, allow_older, "en")
+}
+
 fn update_with_key(
     s: &Setup,
     key: &str,
     to: Option<Version>,
     check: bool,
+    lang: &str,
+) -> (Result<(), Failure>, String) {
+    run_update(s, key, to, check, false, lang)
+}
+
+fn run_update(
+    s: &Setup,
+    key: &str,
+    to: Option<Version>,
+    check: bool,
+    allow_older: bool,
     lang: &str,
 ) -> (Result<(), Failure>, String) {
     let u = Update {
@@ -78,6 +97,7 @@ fn update_with_key(
         source: Source::local(&s.gh.base).unwrap(),
         to,
         check,
+        allow_older,
     };
     let mut out = Vec::new();
     let r = run(&u, &Text::new(lang), &mut out);
@@ -212,11 +232,26 @@ fn an_archive_that_does_not_match_the_signed_list_is_refused() {
 fn a_downgrade_is_refused_unless_asked_for() {
     let s = setup(Version(0, 0, 9));
     let msg = failed(&update(&s, None, false, "en"), Code::UpdateDowngrade);
-    assert!(msg.contains("--to v0.0.9"), "{msg}");
+    assert!(msg.contains("--to v0.0.9 --allow-older"), "{msg}");
     unchanged(&s);
-    let (r, out) = update(&s, Some(Version(0, 0, 9)), false, "en");
+    let (r, out) = update_older(&s, None, true);
     r.unwrap();
     assert!(out.contains("to 0.0.9"), "{out}");
+    assert_eq!(std::fs::read(&s.exe).unwrap(), NEW);
+}
+
+#[test]
+fn naming_an_older_version_is_refused_without_allow_older() {
+    let s = setup(Version(0, 0, 9));
+    let msg = failed(
+        &update_older(&s, Some(Version(0, 0, 9)), false),
+        Code::UpdateDowngrade,
+    );
+    assert!(msg.contains("--allow-older"), "{msg}");
+    unchanged(&s);
+    let (r, out) = update_older(&s, Some(Version(0, 0, 9)), true);
+    r.unwrap();
+    assert!(out.contains("older") && out.contains("to 0.0.9"), "{out}");
     assert_eq!(std::fs::read(&s.exe).unwrap(), NEW);
 }
 

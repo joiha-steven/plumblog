@@ -55,6 +55,6 @@ change may already be applied: look before you retry.
 ## Update
 
 Run `blog update` (`--check` only asks), then `git pull` for the guides, then `blog deploy`. It
-installs a release only if its signed `SHA256SUMS` checks out; `--to vX.Y.Z` picks one, even an
-older one. A `release.*` or `update.*` error about a hash or signature means a download was not
+installs a release only if its signed `SHA256SUMS` checks out; `--to vX.Y.Z` picks one; an older one
+is refused unless you add `--allow-older`. A `release.*` or `update.*` error about a hash or signature means a download was not
 the official file: follow the message, never work around it.

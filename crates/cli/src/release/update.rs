@@ -34,6 +34,8 @@ pub struct Update {
     pub to: Option<Version>,
     /// Only report whether a newer release exists.
     pub check: bool,
+    /// Install a release older than this blog (`--allow-older`).
+    pub allow_older: bool,
 }
 
 fn line(out: &mut dyn Write, text: &Text, k: Key, args: &[(&str, String)]) {
@@ -222,24 +224,33 @@ pub fn run(u: &Update, text: &Text, out: &mut dyn Write) -> Result<(), Failure> 
             &[("detail", format!("embedded release key: {why}"))],
         ),
     })?;
-    let target = if let Some(v) = u.to {
-        v
-    } else {
-        let newest = latest(&u.source, text)?;
-        if newest < u.current {
+    let target = match u.to {
+        Some(v) => v,
+        None => latest(&u.source, text)?,
+    };
+    if target < u.current {
+        if !u.allow_older {
             return Err(fail(
                 Code::UpdateDowngrade,
                 text,
                 key!("cli.error.update_downgrade"),
                 &[
-                    ("latest", newest.to_string()),
+                    ("target", target.to_string()),
                     ("current", u.current.to_string()),
-                    ("tag", newest.tag()),
+                    ("tag", target.tag()),
                 ],
             ));
         }
-        newest
-    };
+        line(
+            out,
+            text,
+            key!("cli.update.older_allowed"),
+            &[
+                ("target", target.to_string()),
+                ("current", u.current.to_string()),
+            ],
+        );
+    }
     if target == u.current {
         let args = [
             ("current", u.current.to_string()),

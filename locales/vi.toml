@@ -177,9 +177,11 @@ verified = "Gói phát hành {file} khớp với bản blog này (SHA-256 {hash}
 
 [cli.update]
 about = "Cập nhật chính blog lên bản phát hành mới nhất, sau khi kiểm chữ ký"
-to_help = "Cài bản phát hành này thay cho bản mới nhất, kể cả bản cũ hơn"
+to_help = "Cài bản phát hành này thay cho bản mới nhất"
 to_value = "PHIÊN_BẢN"
 check_help = "Chỉ cho biết có bản mới hơn hay không"
+allow_older_help = "Cài một bản phát hành cũ hơn blog này (quay về bản cũ)"
+older_allowed = "Lưu ý: {target} cũ hơn blog này ({current}). Vẫn cài (--allow-older)."
 newer = "Đã có blog mới hơn: {latest} (bạn đang dùng {current}). Chạy blog update để cài."
 up_to_date = "Không có blog nào mới hơn {current} (bản phát hành mới nhất: {latest})."
 signature_ok = "{file} được ký bằng khoá phát hành của plumblog {key_id}."
@@ -350,7 +352,7 @@ update_signature_missing = "Bản phát hành {tag} không có chữ ký (SHA256
 update_signature_invalid = "Chữ ký trên danh sách file của bản phát hành {tag} không hợp lệ ({reason}): các file này không phải thứ nhóm plumblog đã ký. Chưa có gì thay đổi. Đừng tự cài chúng; hãy báo lại ở {page}."
 update_key_mismatch = "Danh sách file của bản phát hành {tag} được ký bằng khoá {got}, nhưng blog này chỉ tin khoá {want}. Chưa có gì thay đổi. Hãy tự tải blog từ {page} và đọc ghi chú phát hành."
 update_hash_mismatch = "{file} không khớp với danh sách file đã ký (mã SHA-256 của nó là {got}, cần {want}): file tải về bị hỏng hoặc không phải file chính thức. Chưa có gì thay đổi. Chạy lại blog update; nếu vẫn bị, hãy tải blog từ {page}."
-update_downgrade = "Bản phát hành mới nhất ({latest}) cũ hơn blog này ({current}), nên blog update không quay về bản cũ. Nếu vẫn muốn cài: blog update --to {tag}"
+update_downgrade = "Bản phát hành {target} cũ hơn blog này ({current}), nên blog update không quay về bản cũ. Chưa thay đổi gì. Nếu vẫn muốn cài: blog update --to {tag} --allow-older"
 update_version_invalid = "\"{value}\" không phải số phiên bản. Hãy viết dạng vX.Y.Z, ví dụ v0.2.0."
 update_no_build = "Bản phát hành {tag} không có blog cho máy này ({target}). Chưa có gì thay đổi. Xem {page}."
 update_replace_failed = "Không thay được {path}: {reason}. Blog hiện tại vẫn chạy và không bị đổi. Hãy chuyển blog sang thư mục bạn có quyền ghi, hoặc chạy blog update với quyền sửa file đó."

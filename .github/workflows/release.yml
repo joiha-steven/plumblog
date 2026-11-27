@@ -217,7 +217,8 @@ jobs:
           PLUMBLOG_RELEASE_KEY: ${{ secrets.PLUMBLOG_RELEASE_KEY }}
         run: |
           [ -n "$PLUMBLOG_RELEASE_KEY" ] || { echo "::error::secret PLUMBLOG_RELEASE_KEY is not set in environment release"; exit 1; }
-          cargo run -q -p plumblog-cli --bin blog-release --locked -- sign dist/SHA256SUMS
+          # The binary built above, never cargo: a rebuild would run build scripts with the secret.
+          target/debug/blog-release sign dist/SHA256SUMS
       - name: Verify the signature with minisign (independent implementation, pinned)
         env:
           MINISIGN_VERSION: "0.12"

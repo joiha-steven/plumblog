@@ -143,6 +143,8 @@ enum Command {
         to: Option<String>,
         #[arg(long)]
         check: bool,
+        #[arg(long)]
+        allow_older: bool,
     },
     Rollback {
         #[arg(long, conflicts_with = "db")]
@@ -226,6 +228,9 @@ fn command(text: &Text) -> clap::Command {
                         .value_name(leak(t(key!("cli.update.to_value"))))
                 })
                 .mut_arg("check", |a| a.help(t(key!("cli.update.check_help"))))
+                .mut_arg("allow_older", |a| {
+                    a.help(t(key!("cli.update.allow_older_help")))
+                })
         })
         .mut_subcommand("rollback", |c| {
             c.about(t(key!("cli.rollback.about")))
@@ -395,8 +400,19 @@ fn deploy_or_rollback(
     Ok(String::new())
 }
 
+/// The running executable with symlinks resolved: the file update replaces and `clean_old`
+/// looks beside.
+fn real_exe() -> std::io::Result<std::path::PathBuf> {
+    std::env::current_exe().and_then(std::fs::canonicalize)
+}
+
 /// `blog update`: the running executable, the embedded key, GitHub (or the loopback test base).
-fn update(text: &Text, to: Option<&str>, check: bool) -> Result<String, (Code, String)> {
+fn update(
+    text: &Text,
+    to: Option<&str>,
+    check: bool,
+    allow_older: bool,
+) -> Result<String, (Code, String)> {
     let to = match to {
         Some(v) => Some(Version::parse(v).ok_or_else(|| {
             let msg = text.t(
@@ -412,12 +428,10 @@ fn update(text: &Text, to: Option<&str>, check: bool) -> Result<String, (Code, S
         (f.code, f.message)
     })?;
     // The real file, not a symlink to it: that is what must be replaced.
-    let exe = std::env::current_exe()
-        .and_then(std::fs::canonicalize)
-        .map_err(|e| {
-            let msg = text.t(key!("cli.error.internal"), &[("detail", e.to_string())]);
-            (Code::Internal, msg)
-        })?;
+    let exe = real_exe().map_err(|e| {
+        let msg = text.t(key!("cli.error.internal"), &[("detail", e.to_string())]);
+        (Code::Internal, msg)
+    })?;
     let u = release::update::Update {
         current: Version::current(),
         target: release::TARGET.into(),
@@ -426,6 +440,7 @@ fn update(text: &Text, to: Option<&str>, check: bool) -> Result<String, (Code, S
         source,
         to,
         check,
+        allow_older,
     };
     let mut out = std::io::stdout().lock();
     release::update::run(&u, text, &mut out).map_err(|f| (f.code, f.message))?;
@@ -504,7 +519,11 @@ fn run(text: &Text, args: &[String]) -> Outcome {
                 release: None,
             }),
         ),
-        Some(Command::Update { to, check }) => update(text, to.as_deref(), check),
+        Some(Command::Update {
+            to,
+            check,
+            allow_older,
+        }) => update(text, to.as_deref(), check, allow_older),
         Some(Command::Rollback {
             to,
             db,
@@ -531,7 +550,7 @@ fn run(text: &Text, args: &[String]) -> Outcome {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    if let Ok(exe) = std::env::current_exe() {
+    if let Ok(exe) = real_exe().or_else(|_| std::env::current_exe()) {
         release::update::clean_old(&exe);
     }
     let lang = pick_lang(lang_arg(&args).as_deref(), &|k| std::env::var(k).ok());
