@@ -6,13 +6,14 @@
 //! Wall time on a shared CI runner is a poor clock, so `scripts/check` does not gate on that
 //! budget. It gates on how the best time grows with the input (a 4x smaller document must
 //! cost at least 1/10 as much: linear work takes about 1/4, quadratic 1/16), on a refused
-//! document costing about what an accepted one does, and on an absolute bound about 8x CI-normal
-//! normal. Work cannot be counted here: the workspace forbids `unsafe`, so no counting
+//! document costing about what an accepted one does, and on a bound relative to a reference workload measured in the same run (a
+//! serial hash of the same bytes), so a slow runner does not trip it. Work cannot be counted here: the workspace forbids `unsafe`, so no counting
 //! allocator, and the parser has no hook. The real budget is printed as `perf ...` lines
 //! (`scripts/perf` shows them) and enforced when `PLUMBLOG_PERF_STRICT` is set, on a machine
 //! that is not shared.
-//! Release builds only (`scripts/check` runs this test with `--release`); debug builds are
-//! 10-30x slower and would only measure the compiler.
+//! The ratio is enforced in the release run only (`scripts/check` runs this test with
+//! `--release`); the debug workspace run keeps the scaling checks, since a debug build is
+//! 10-30x slower and its ratio would only measure the compiler.
 
 use plumblog_auth::json::{MAX_DEPTH, MAX_ITEMS, MAX_KEY, MAX_VALUES, parse_document};
 use plumblog_model::ErrorCode;
@@ -23,11 +24,12 @@ use std::time::{Duration, Instant};
 
 /// The real budget.
 const BUDGET: Duration = Duration::from_millis(1);
-/// About 8x what a CI runner takes (laptop 0.22 ms, CI roughly 2.5x that = 0.6 ms). Measured
-/// 3.3 ms on a laptop busy with other builds, so tighter flakes; a uniform 10x slowdown still
-/// fails on a CI-class runner (6 ms). The ratio test below catches growth (a scan
-/// quadratic in an object's width); this catches a constant factor.
-const BACKSTOP: Duration = Duration::from_millis(5);
+/// A parse may cost at most this many times the reference (FNV-1a over the same bytes, see
+/// `measure`). Measured normal ratio: 1.1-1.4 (laptop, also under load); K = 8 is
+/// about 6x that, so a uniform 10x slowdown of the parser fails and a slow or throttled machine, which
+/// slows the reference alike, does not. The ratio test below catches growth (a scan quadratic in
+/// an object's width); this catches a constant factor.
+const K: u32 = 8;
 
 /// Timings run one at a time: tests in one binary run in parallel threads, and two timed loops
 /// sharing a core measured ~30% slower.
@@ -118,32 +120,55 @@ fn worst_accepted(div: usize) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// Best of 50 runs: the minimum is the least noisy estimate of the real cost.
-fn best(src: &str) -> Duration {
+/// A serial hash of every byte: a fixed workload of the parser's size and rough cost that
+/// cannot regress and shares nothing with the parser.
+fn reference(src: &[u8]) -> u64 {
+    src.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// Best of 50 runs of the parse and of the reference, interleaved so both see the same machine
+/// state; the minimum is the least noisy estimate of the real cost.
+fn measure(src: &str) -> (Duration, Duration) {
     let _one_at_a_time = TIMING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    (0..50)
-        .map(|_| {
-            let t = Instant::now();
-            let r = parse_document(src.as_bytes(), MAX_POST_BODY);
-            let d = t.elapsed();
-            drop(r);
-            d
-        })
-        .min()
-        .unwrap()
+    let (mut parse, mut calibration) = (Duration::MAX, Duration::MAX);
+    for _ in 0..50 {
+        let t = Instant::now();
+        let r = parse_document(src.as_bytes(), MAX_POST_BODY);
+        parse = parse.min(t.elapsed());
+        drop(r);
+        let t = Instant::now();
+        std::hint::black_box(reference(std::hint::black_box(src.as_bytes())));
+        calibration = calibration.min(t.elapsed());
+    }
+    (parse, calibration)
+}
+
+fn best(src: &str) -> Duration {
+    measure(src).0
 }
 
 /// Prints the real budget, enforces it only when asked, and always enforces the backstop.
-fn report(what: &str, bytes: usize, d: Duration) {
-    eprintln!("perf json {what}: {bytes} bytes in {d:?} (budget {BUDGET:?})");
+fn report(what: &str, bytes: usize, (d, calibration): (Duration, Duration)) {
+    eprintln!(
+        "perf json {what}: {bytes} bytes in {d:?} (budget {BUDGET:?}); reference {calibration:?}, ratio {:.2} (limit {K})",
+        d.as_secs_f64() / calibration.as_secs_f64()
+    );
     if std::env::var_os("PLUMBLOG_PERF_STRICT").is_some() {
         assert!(d <= BUDGET, "{what}: parse took {d:?}, budget {BUDGET:?}");
     }
+    // The debug workspace run (`cargo test --workspace`) also runs this file; there the
+    // optimizer is off and the parser slows far more than the hash (ratio 5-7), so the ratio
+    // only means something in the release run that `scripts/check` makes for this test.
+    if cfg!(debug_assertions) {
+        return;
+    }
     assert!(
-        d <= BACKSTOP,
-        "{what}: parse took {d:?}, about 8x CI-normal"
+        d < K * calibration,
+        "{what}: parse took {d:?}, reference {calibration:?}: over {K}x"
     );
 }
 
@@ -162,8 +187,9 @@ fn many_wide_objects_are_refused_cheaply() {
         Err(e) => e,
     };
     assert_eq!(err.code, ErrorCode::TooComplex, "{}", err.detail);
-    let refused = best(&src);
-    report("22 x 1000 keys, refused", src.len(), refused);
+    let measured = measure(&src);
+    let refused = measured.0;
+    report("22 x 1000 keys, refused", src.len(), measured);
     // Refusing at the value cap must cost about what parsing a full document does, measured
     // on the same machine in the same run.
     let baseline = worst_accepted(1)
@@ -189,8 +215,10 @@ fn worst_accepted_documents_parse_in_linear_time() {
         parse_document(src.as_bytes(), MAX_POST_BODY).unwrap_or_else(|e| panic!("{what}: {e:?}"));
         parse_document(quarter.as_bytes(), MAX_POST_BODY)
             .unwrap_or_else(|e| panic!("{what} (quarter): {e:?}"));
-        let (small, full) = (best(&quarter), best(&src));
-        report(what, src.len(), full);
+        let small = best(&quarter);
+        let measured = measure(&src);
+        let full = measured.0;
+        report(what, src.len(), measured);
         eprintln!(
             "json {what}: {} bytes {small:?} -> {} bytes {full:?}",
             quarter.len(),
