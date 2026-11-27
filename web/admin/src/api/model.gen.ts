@@ -12,6 +12,16 @@ export const ERROR_CODES = [
   "store.not_found",
   "store.conflict",
   "invite.invalid",
+  "auth.invalid_credentials",
+  "auth.locked",
+  "auth.turnstile_required",
+  "auth.passkey_invalid",
+  "setup.invalid",
+  "api.not_found",
+  "settings.origin_missing",
+  "auth.reauth_required",
+  "api.body_too_large",
+  "api.length_required",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 

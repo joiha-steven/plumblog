@@ -80,27 +80,40 @@ export function makeStateDir() {
   return { dir: entry.state, remove: () => cleanupSync(entry) };
 }
 
-/** Applies migrations to a fresh local D1 and starts the Worker. Call stop() when done. */
-export async function startWorker() {
+/**
+ * Applies migrations to a fresh local D1 and starts the Worker. Call stop() when done.
+ * `seedSql` runs after the migrations, before the Worker starts (test data only); it may be a
+ * function of the Worker's URL (e.g. to configure the site origin); `vars`
+ * become `--var KEY:VALUE` (wrangler dev's way to set vars and secrets per run).
+ */
+export async function startWorker({ seedSql = null, vars = {} } = {}) {
   const entry = { state: mkdtempSync(join(RUN_DIR, "plumblog-wrangler-")), pgid: null, pgidFile: null };
   live.add(entry);
   const common = ["--config", CONFIG, "--persist-to", entry.state];
+  const port = await freePort();
+  const inspector = await freePort();
+  const url = `http://127.0.0.1:${port}`;
   try {
     run(WRANGLER, ["d1", "migrations", "apply", "DB", "--local", ...common]);
+    const sql = typeof seedSql === "function" ? seedSql(url) : seedSql;
+    if (sql) {
+      const file = join(entry.state, "seed.sql");
+      writeFileSync(file, sql);
+      run(WRANGLER, ["d1", "execute", "DB", "--local", ...common, "--file", file]);
+    }
   } catch (e) {
     cleanupSync(entry);
     throw e;
   }
 
-  const port = await freePort();
-  const inspector = await freePort();
   // detached: wrangler starts workerd children; killing the group stops them all.
   const child = spawn(
     WRANGLER,
     ["dev", join(OUT, "worker/shim.mjs"), "--assets", join(OUT, "assets"), ...common, "--ip", "127.0.0.1", "--port", String(port), "--inspector-port", String(inspector),
       "--show-interactive-dev-session=false", "--log-level", "log",
       // Serves /__scheduled so tests can fire the cron trigger.
-      "--test-scheduled"],
+      "--test-scheduled",
+      ...Object.entries(vars).flatMap(([k, v]) => ["--var", `${k}:${v}`])],
     { cwd: ROOT, env: ENV, detached: true, stdio: ["ignore", "pipe", "pipe"] },
   );
   entry.pgid = child.pid;
@@ -130,7 +143,6 @@ export async function startWorker() {
       setTimeout(() => cleanupSync(entry), 5_000).unref();
     });
 
-  const url = `http://127.0.0.1:${port}`;
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (exited !== null) {
@@ -139,8 +151,11 @@ export async function startWorker() {
     }
     try {
       await fetch(`${url}/healthz`);
+      // Reads the running Worker's local D1 (test assertions only).
+      const query = (sql) =>
+        JSON.parse(run(WRANGLER, ["d1", "execute", "DB", "--local", ...common, "--json", "--command", sql]))[0].results;
       // state: the --persist-to dir, for reading the local D1 with `wrangler d1 execute`.
-      return { url, stop, state: entry.state, log: () => log };
+      return { url, stop, state: entry.state, log: () => log, query };
     } catch {
       await new Promise((r) => setTimeout(r, 200));
     }

@@ -9,6 +9,7 @@ mod kit;
 mod library;
 mod listing;
 mod posts;
+mod signin;
 mod site;
 mod user_writes;
 
@@ -43,6 +44,8 @@ cases! {
     accounts::user_delete_effects,
     accounts::sessions,
     user_writes::user_narrow_writes,
+    user_writes::change_password_rotates_sessions,
+    user_writes::change_login_passkey_only,
     user_writes::user_writes_do_not_undo_each_other,
     user_writes::disable_ends_sessions,
     user_writes::last_owner_is_kept,
@@ -50,9 +53,21 @@ cases! {
     user_writes::disabled_user_credentials_do_not_resolve,
     accounts::passkeys,
     accounts::passkey_sign_count,
+    accounts::delete_own_passkey,
     accounts::tokens,
     accounts::invites,
     accounts::accept_invite_conflict_is_atomic,
+    signin::login_failures_count_and_restart,
+    signin::login_failures_multi_key_read,
+    signin::login_failures_stop_at_the_cap,
+    signin::login_failures_sweep_is_bounded,
+    signin::challenges_are_single_use,
+    signin::challenges_expire,
+    signin::challenges_cascade_on_user_delete,
+    signin::setup_refuses_bad_codes,
+    signin::setup_creates_first_owner_once,
+    signin::site_id_is_set_once,
+    signin::session_renewal,
     library::media_round_trip,
     library::media_paging,
     library::media_usage_tracks_saves,
