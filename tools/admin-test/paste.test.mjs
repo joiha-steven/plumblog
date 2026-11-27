@@ -4,6 +4,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Window } from "happy-dom";
+import { readFileSync } from "node:fs";
+import { mdAlt, mdUrl } from "../../web/admin/src/editor/md-text.ts";
 import { htmlToMarkdown, isRich } from "../../web/admin/src/editor/paste-md.ts";
 
 const win = new Window();
@@ -69,4 +71,104 @@ test("a large paste converts fast", () => {
   const out = md(big);
   assert.ok(out.length > 100_000);
   assert.ok(performance.now() - t < 2000, "5,000 paragraphs under 2 s in happy-dom");
+});
+
+// ---- Hostile and awkward input ----
+
+/** No link or picture target in `out` may use a scheme that runs or embeds code. */
+const noBadTargets = (out) => {
+  for (const m of out.matchAll(/\]\(([^)]*)\)/g)) assert.doesNotMatch(m[1], /^\s*(javascript|data|vbscript|file):/i, `target ${m[1]} in ${out}`);
+};
+
+test("data:, vbscript: and file: links keep only their text", () => {
+  for (const href of ["data:text/html,<script>alert(1)</script>", "vbscript:msgbox(1)", "file:///etc/passwd"]) {
+    const out = md(`<p><a href="${href.replace(/"/g, "&quot;")}">go</a></p>`);
+    assert.equal(out, "go");
+    noBadTargets(out);
+  }
+});
+
+test("entity- and whitespace-obfuscated javascript: links keep only their text", () => {
+  for (const href of ["jav&#x09;ascript:alert(1)", "&#106;avascript:alert(1)", "java&#10;script:alert(1)", "&#x01;javascript:alert(1)", "  JaVaScRiPt:alert(1)", "jav&Tab;ascript:alert(1)"]) {
+    const out = md(`<p><a href="${href}">go</a></p>`);
+    assert.equal(out, "go", href);
+    noBadTargets(out);
+  }
+});
+
+test("redirects to javascript: are dropped, redirects to pages are unwrapped", () => {
+  assert.equal(md('<a href="https://www.google.com/url?q=javascript:alert(1)">g</a>'), "g");
+  assert.equal(md('<a href="https://www.google.com/url?q=javascript%3Aalert(1)">g</a>'), "g");
+  assert.equal(md('<a href="https://x.safelinks.protection.outlook.com/?url=%0Ajavascript%3Aalert(1)">o</a>'), "o");
+  assert.equal(md('<a href="https://x.safelinks.protection.outlook.com/?url=https%3A%2F%2Fa.test%2Fp">o</a>'), "[o](https://a.test/p)");
+  assert.equal(md('<a href="https://www.google.com/url?q=https%3A%2F%2Fa.test%2Fp&sa=D">o</a>'), "[o](https://a.test/p)");
+});
+
+test("malformed percent-encoding in a redirect does not lose the rest of the paste", () => {
+  const out = md('<p><a href="https://www.google.com/url?q=%E0%A4%A">bad</a></p><p>rest of paste</p>');
+  assert.equal(out, "[bad](https://www.google.com/url?q=%E0%A4%A)\n\nrest of paste");
+  noBadTargets(out);
+  assert.equal(md('<a href="https://x.test/?x=%E0%A4%A">ok</a>'), "[ok](https://x.test/?x=%E0%A4%A)");
+});
+
+test("javascript:, data: and file: pictures are dropped", () => {
+  for (const src of ["javascript:alert(1)", " javascript:alert(1)", "data:image/svg+xml,<svg onload=alert(1)>", "file:///a.png", "vbscript:x"]) {
+    assert.equal(md(`<p>a<img src="${src}" alt="x">b</p>`), "ab", src);
+  }
+});
+
+test("pasted text that looks like Markdown or HTML stays inert text", () => {
+  const out = md("<p>&lt;script&gt;alert(1)&lt;/script&gt; and ](javascript:alert(1)) and [x](javascript:alert(1))</p>");
+  assert.equal(out, "<script>alert(1)</script> and \\](javascript:alert(1)) and \\[x\\](javascript:alert(1))");
+  assert.doesNotMatch(out, /(^|[^\\])[[\]]/);
+});
+
+test("link targets cannot end early", () => {
+  assert.equal(mdUrl("https://x.test/a)b"), "https://x.test/a%29b");
+  assert.equal(mdUrl("https://x.test/a b\\c<d>e(f)\t\n\u00a0g"), "https://x.test/a%20b%5Cc%3Cd%3Ee%28f%29%09%0A%C2%A0g");
+  assert.equal(md('<a href="https://x.test/a]b>c\\d e(f)">br</a>'), "[br](https://x.test/a]b%3Ec%5Cd%20e%28f%29)");
+  assert.equal(md('<img src="https://x.test/a)b.png">'), "![](https://x.test/a%29b.png)");
+});
+
+test("inline code fences are longer than any backtick run inside", () => {
+  assert.equal(md("<p><code>a`b</code></p>"), "``a`b``");
+  assert.equal(md("<p><code>a``b`c</code></p>"), "```a``b`c```");
+  assert.equal(md("<p><code>`a</code></p>"), "`` `a ``");
+  assert.equal(md("<p><code>a`</code></p>"), "`` a` ``");
+  assert.equal(md("<p><code>plain</code></p>"), "`plain`");
+  assert.equal(md("<pre>a\n````\nb</pre>"), "`````\na\n````\nb\n`````");
+});
+
+test("picture descriptions are one line with brackets and backslashes escaped", () => {
+  assert.equal(mdAlt("a\n\n b\t[c]\\"), "a b \\[c\\]\\\\");
+  assert.equal(md('<img src="https://x.test/a.png" alt="a\nb\n\n  c [d] e\\">'), "![a b c \\[d\\] e\\\\](https://x.test/a.png)");
+});
+
+test("20,000 nested spans and 50,000-deep nesting convert fast and do not throw", () => {
+  const nest = (tag, n, inner = "x") => `<${tag}>`.repeat(n) + inner + `</${tag}>`.repeat(n);
+  for (const [name, html] of [
+    ["spans", nest("span", 20_000)],
+    ["spans around a block", nest("span", 20_000, "<p>x</p>")],
+    ["divs", nest("div", 50_000)],
+    ["bold", nest("b", 50_000)],
+    ["lists", "<ul><li>".repeat(50_000) + "x" + "</li></ul>".repeat(50_000)],
+    ["quotes", nest("blockquote", 50_000)],
+  ]) {
+    const t = performance.now();
+    const out = md(html);
+    const took = performance.now() - t;
+    assert.match(out, /x/, name);
+    assert.ok(took < 1000, `${name}: ${took.toFixed(0)} ms`);
+  }
+});
+
+test("the converter reads a parsed copy and never writes HTML into the page", () => {
+  const dir = new URL("../../web/admin/src/editor/", import.meta.url);
+  const risky = /innerHTML|outerHTML|insertAdjacentHTML|document\.write|createContextualFragment|eval\(|new Function/;
+  const conv = readFileSync(new URL("paste-md.ts", dir), "utf8");
+  const editor = readFileSync(new URL("index.ts", dir), "utf8");
+  assert.doesNotMatch(conv, risky);
+  assert.doesNotMatch(editor, risky);
+  assert.match(editor, /new DOMParser\(\)\.parseFromString\(html, "text\/html"\)/);
+  assert.match(editor, /htmlToMarkdown\(doc\.body\)/);
 });

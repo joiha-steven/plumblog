@@ -6,7 +6,7 @@
 import { ERROR_CODES, type ErrorCode, type Role } from "./model.gen";
 
 /** Failures the server cannot name: no answer at all, or an answer that is not ours. */
-export type ClientCode = "network" | "bad_response";
+export type ClientCode = "network" | "bad_response" | "cancelled";
 
 export interface ApiError {
   code: ErrorCode | ClientCode;
@@ -77,7 +77,7 @@ export interface Api {
    */
   previewUrl: string | undefined;
   /** Stores a picture; `progress` follows the upload. */
-  upload(file: File, progress: Progress): Promise<Result<Media>>;
+  upload(file: File, progress: Progress, signal?: AbortSignal): Promise<Result<Media>>;
 }
 
 export const fail = <T>(code: ApiError["code"], status: number): Result<T> => ({
@@ -113,7 +113,7 @@ async function getJson<T>(path: string): Promise<Result<T>> {
 
 /** `POST /api/media` with the file as multipart `file`. XHR, not fetch: fetch reports no upload
  * progress. The posts and media API is issue #10; this follows its draft. */
-function upload(file: File, progress: Progress): Promise<Result<Media>> {
+function upload(file: File, progress: Progress, signal?: AbortSignal): Promise<Result<Media>> {
   const path = "/api/media";
   return new Promise((resolve) => {
     const x = new XMLHttpRequest();
@@ -139,6 +139,15 @@ function upload(file: File, progress: Progress): Promise<Result<Media>> {
     };
     const form = new FormData();
     form.append("file", file);
+    if (signal?.aborted) return resolve(fail("cancelled", 0));
+    signal?.addEventListener(
+      "abort",
+      () => {
+        x.abort();
+        resolve(fail("cancelled", 0));
+      },
+      { once: true },
+    );
     x.send(form);
   });
 }

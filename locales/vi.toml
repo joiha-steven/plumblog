@@ -121,6 +121,7 @@ failed = "Chưa tải lên được {name}. Bài viết của bạn vẫn nguyê
 offline = "Cần có mạng để thêm ảnh. Bài viết vẫn được lưu trên máy này."
 not_picture = "{name} không phải là ảnh. Có thể thêm ảnh JPEG, PNG, WebP, GIF và AVIF."
 too_big = "{name} lớn hơn 20 MB. Hãy lưu một bản nhỏ hơn rồi thêm bản đó."
+cancel = "Huỷ"
 retry = "Thử lại"
 remove = "Bỏ"
 alt_label = "Mô tả ảnh này"

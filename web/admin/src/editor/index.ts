@@ -16,6 +16,7 @@ import { closePop, openPop, openPopEl, toast } from "../ui";
 import { BLOCKS, type Block, blockName, fold, picker } from "./blocks";
 import { createEditor, inCode, removeCard, showCard } from "./cm";
 import { countWords, heading, link, linePrefix, wrap } from "./commands";
+import { mdAlt, mdUrl } from "./md-text";
 import { draftKey, loadDraft, saveDraft } from "./drafts";
 
 export interface EditorOptions {
@@ -480,7 +481,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
       closePop(false);
       // Found again by its address: the text may have moved while the writer typed.
       const now = view.state.doc.toString().indexOf(src);
-      const alt = input.value.replace(/[[\]\n]/g, " ").trim();
+      const alt = mdAlt(input.value);
       if (now >= 0 && alt) view.dispatch({ changes: { from: now + 2, insert: alt } });
       view.focus();
     });
@@ -510,7 +511,10 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     bar.style.transform = "scaleX(0)";
     // The outer box holds the card's space above and below (a widget may not have margins).
     const id = showCard(view, pos, h("div", { class: "cm-upload" }, card));
-    const r = await o.api.upload(file, (sent) => (bar.style.transform = `scaleX(${sent})`));
+    const ctl = new AbortController();
+    const acts = h("div", { class: "btn-row" }, h("button", { type: "button", class: "btn quiet", onclick: () => ctl.abort() }, t("admin.editor.upload.cancel")));
+    card.append(acts);
+    const r = await o.api.upload(file, (sent) => (bar.style.transform = `scaleX(${sent})`), ctl.signal);
     if (r.ok) {
       const at = removeCard(view, id) ?? view.state.doc.length;
       insertOwnLine(at, `![](${r.value.url})`);
@@ -519,13 +523,20 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
       requestAnimationFrame(() => requestAnimationFrame(() => altPrompt(url)));
       return;
     }
+    // Cancelled by the writer: no message, the text is untouched.
+    if (r.error.code === "cancelled") {
+      removeCard(view, id);
+      view.focus();
+      return;
+    }
     // Failed: the card says so and offers another try; the text is untouched.
     card.className = "up fail";
     card.setAttribute("role", "alert");
     label.textContent = r.error.code === "network" ? t("admin.editor.upload.offline") : t("admin.editor.upload.failed", { name: file.name });
     const retry = h("button", { type: "button", class: "btn quiet" }, t("admin.editor.upload.retry"));
     const remove = h("button", { type: "button", class: "btn quiet" }, t("admin.editor.upload.remove"));
-    card.querySelector(".bar")?.replaceWith(h("div", { class: "btn-row" }, retry, remove));
+    card.querySelector(".bar")?.remove();
+    acts.replaceChildren(retry, remove);
     remove.onclick = () => (removeCard(view, id), view.focus());
     retry.onclick = () => {
       const at = removeCard(view, id);
@@ -563,7 +574,11 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     if (!d) return false;
     const sel = v.state.selection.main;
     const files = Array.from(d.files);
-    if (files.length) {
+    const html = d.getData("text/html");
+    const doc = html ? new DOMParser().parseFromString(html, "text/html") : undefined;
+    // Word, Excel and other Office apps put a PNG of the selection next to the HTML: when the HTML
+    // has text, that is what was copied, so files count only for pictures copied without text.
+    if (files.length && !doc?.body.textContent?.trim()) {
       e.preventDefault();
       void addPictures(files, sel.head);
       return true;
@@ -572,23 +587,30 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     // An address pasted over selected words links them.
     if (!sel.empty && /^(https?:\/\/|mailto:)\S+$/.test(text.trim())) {
       e.preventDefault();
-      link(v, sel.from, sel.to, text.trim(), "");
+      link(v, sel.from, sel.to, mdUrl(text.trim()), "");
       return true;
     }
-    const html = d.getData("text/html");
-    if (!html || inCode(v.state, sel.head)) return false;
+    if (!doc || inCode(v.state, sel.head)) return false;
     // Rich text is converted by a small module loaded on the first such paste.
     e.preventDefault();
-    import("./paste-md")
-      .then((m) => {
-        const md = m.isRich(html) ? m.htmlToMarkdown(new DOMParser().parseFromString(html, "text/html").body) : "";
-        v.dispatch(v.state.replaceSelection(md || text), { userEvent: "input.paste", scrollIntoView: true });
-      })
-      .catch((err: unknown) => {
+    const put = (md: string) => v.dispatch(v.state.replaceSelection(md || text), { userEvent: "input.paste", scrollIntoView: true });
+    import("./paste-md").then(
+      (m) => {
+        let md = "";
+        try {
+          // The parsed copy is only read, never inserted into the page.
+          md = m.isRich(html) ? m.htmlToMarkdown(doc.body) : "";
+        } catch (err) {
+          console.error("admin editor: converting the pasted HTML failed", err);
+        }
+        put(md);
+      },
+      (err: unknown) => {
         // Offline before the module was ever loaded: paste the plain text, never nothing.
         console.error("admin editor: loading the paste converter failed", err);
-        v.dispatch(v.state.replaceSelection(text), { userEvent: "input.paste", scrollIntoView: true });
-      });
+        put("");
+      },
+    );
     return true;
   };
 

@@ -45,11 +45,15 @@ export function mockApi(params: URLSearchParams): Api {
     // The dev Worker's real renderer (crates/worker/src/contract.rs, test builds only).
     previewUrl: "/__preview",
     // Sends nothing: progress over a second or two, then the picture from this browser.
-    async upload(file, progress) {
+    async upload(file, progress, signal) {
       if (mode === "offline") return fail("network", 0);
       const steps = 12;
       for (let i = 1; i <= steps; i++) {
-        await new Promise((r) => setTimeout(r, up === "slow" ? 1700 : 120));
+        await new Promise((r) => {
+          const id = setTimeout(r, up === "slow" ? 1700 : 120);
+          signal?.addEventListener("abort", () => (clearTimeout(id), r(undefined)), { once: true });
+        });
+        if (signal?.aborted) return fail("cancelled", 0);
         if (up === "fail" && i > steps / 2) return fail("internal", 500);
         progress(i / steps);
       }

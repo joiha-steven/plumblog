@@ -4,6 +4,7 @@
  * and layout do not. No imports, so it loads as its own small chunk on the first rich paste
  * and runs in tests without a bundler (tools/admin-test).
  */
+import { mdAlt, mdUrl } from "./md-text.ts";
 
 /** Whether pasted HTML carries structure worth converting; plain text otherwise pastes as is. */
 export const isRich = (html: string): boolean =>
@@ -12,7 +13,31 @@ export const isRich = (html: string): boolean =>
 const SKIP = new Set(["SCRIPT", "STYLE", "META", "TITLE", "HEAD", "LINK", "TEMPLATE", "NOSCRIPT", "SVG", "O:P"]);
 const BLOCK = new Set(["P", "DIV", "H1", "H2", "H3", "H4", "H5", "H6", "UL", "OL", "LI", "BLOCKQUOTE", "PRE", "TABLE", "HR", "SECTION", "ARTICLE", "HEADER", "FOOTER", "MAIN", "ASIDE", "FIGURE", "FIGCAPTION", "DL", "DT", "DD", "ADDRESS"]);
 
-const BLOCK_SELECTOR = Array.from(BLOCK, (tag) => tag.toLowerCase()).join(",");
+/** Deeper nesting than any real document: the rest of that subtree is taken as plain text. */
+const MAX_DEPTH = 200;
+let level = 0;
+/** Elements with a block somewhere below them, filled by one pass per paste. */
+let withBlock = new WeakSet<Element>();
+/** Text of a subtree without recursion (a hostile paste can nest deeper than the stack). */
+function text(root: Node): string {
+  let out = "";
+  for (const todo = [root]; todo.length; ) {
+    const n = todo.pop() as Node;
+    if (n.nodeType === 3) out += n.nodeValue ?? "";
+    else if (n.nodeType === 1 && !SKIP.has((n as Element).tagName)) todo.push(...Array.from(n.childNodes).reverse());
+  }
+  return out;
+}
+const flat = (n: Node): string => escapeText(text(n).replace(/[\s\u00a0]+/g, " "));
+function guard<T>(over: () => T, run: () => T): T {
+  if (level >= MAX_DEPTH) return over();
+  level++;
+  try {
+    return run();
+  } finally {
+    level--;
+  }
+}
 const style = (el: Element): string => (el.getAttribute("style") ?? "").toLowerCase().replace(/\s+/g, "");
 
 /** Bold, italic, struck or code by tag or by inline style (Word and Docs use spans). */
@@ -36,15 +61,18 @@ const isCode = (el: Element): boolean =>
 const escapeText = (s: string): string =>
   s.replace(/([\\`*[\]])/g, "\\$1").replace(/(^|[^\p{L}\p{N}])_|_(?=[^\p{L}\p{N}]|$)/gu, (m) => m.replace("_", "\\_"));
 
-/** `(`, `)` and spaces would end a Markdown link target; encodeURIComponent keeps the parentheses. */
-const pct = (c: string): string => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`;
-
 /** Google and Outlook wrap outgoing links in redirects; keep where they lead. */
 function href(raw: string): string | undefined {
   let u = raw.trim();
   const m = /^https?:\/\/(?:www\.)?google\.[a-z.]+\/url\?(?:.*&)?q=([^&]+)/.exec(u) ?? /safelinks\.protection\.outlook\.com\/\?url=([^&]+)/.exec(u);
-  if (m?.[1]) u = decodeURIComponent(m[1]);
-  return /^(https?:|mailto:|tel:|\/|#)/i.test(u) ? u.replace(/[()\s]/g, pct) : undefined;
+  if (m?.[1]) {
+    try {
+      u = decodeURIComponent(m[1]);
+    } catch {
+      // Malformed %: keep the redirect address itself, which the check below still vets.
+    }
+  }
+  return /^(https?:|mailto:|tel:|\/(?!\/)|#)/i.test(u) ? mdUrl(u) : undefined;
 }
 
 /** Puts markers around text, keeping its outer spaces outside them (`** x**` is not bold). */
@@ -52,6 +80,13 @@ function around(text: string, open: string, close = open): string {
   const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(text);
   if (!m || !m[2]) return text;
   return `${m[1]}${open}${m[2]}${close}${m[3]}`;
+}
+
+/** One more than the longest run of `ch` in `s`, at least `min`. */
+function fenceLen(s: string, ch: string, min: number): number {
+  let top = 0;
+  for (const r of s.match(new RegExp(`${ch}+`, "g")) ?? []) top = Math.max(top, r.length);
+  return Math.max(min, top + 1);
 }
 
 function inline(node: Node, pre = false): string {
@@ -66,14 +101,24 @@ function inline(node: Node, pre = false): string {
   if (el.tagName === "IMG") {
     const src = el.getAttribute("src") ?? "";
     // Only pictures on the web travel; data:, blob: and file: ones are the clipboard's own.
-    return /^https?:\/\//i.test(src) ? `![${escapeText(el.getAttribute("alt") ?? "")}](${src.replace(/[()\s]/g, pct)})` : "";
+    return /^https?:\/\//i.test(src) ? `![${mdAlt(el.getAttribute("alt") ?? "")}](${mdUrl(src)})` : "";
   }
   if (isCode(el)) {
-    const txt = (el.textContent ?? "").replace(/\s+/g, " ");
+    const txt = text(el).replace(/\s+/g, " ");
     if (!txt.trim()) return txt;
-    const fence = txt.includes("`") ? "``" : "`";
-    return around(txt, fence);
+    // CommonMark: a fence longer than any backtick run inside, padded when the code touches one.
+    const body = txt.trim();
+    const fence = "`".repeat(fenceLen(body, "`", 1));
+    const pad = body.startsWith("`") || body.endsWith("`") ? " " : "";
+    return around(txt, fence + pad, pad + fence);
   }
+  return guard(
+    () => flat(el),
+    () => inlineChildren(el, pre),
+  );
+}
+
+function inlineChildren(el: Element, pre: boolean): string {
   let text = "";
   for (const c of Array.from(el.childNodes)) text += BLOCK.has((c as Element).tagName) ? ` ${inline(c, pre)} ` : inline(c, pre);
   if (el.tagName === "A") {
@@ -109,7 +154,13 @@ function table(el: Element): string {
   return [row(head), row(Array(width).fill("---")), ...body.map(row)].join("\n");
 }
 
-function list(el: Element, depth: number): string {
+const list = (el: Element, depth: number): string =>
+  guard(
+    () => flat(el),
+    () => listItems(el, depth),
+  );
+
+function listItems(el: Element, depth: number): string {
   const ordered = el.tagName === "OL";
   let n = Number(el.getAttribute("start") ?? 1) || 1;
   const items: string[] = [];
@@ -127,7 +178,13 @@ function list(el: Element, depth: number): string {
   return items.join("\n");
 }
 
-function blocks(root: Element, depth = 0): string[] {
+const blocks = (root: Element, depth = 0): string[] =>
+  guard(
+    () => [flat(root).trim()].filter(Boolean),
+    () => blockList(root, depth),
+  );
+
+function blockList(root: Element, depth: number): string[] {
   const out: string[] = [];
   let run = "";
   // The Word list being continued (`l0`, `l1`...) and its counters per level.
@@ -142,7 +199,7 @@ function blocks(root: Element, depth = 0): string[] {
     const el = c as Element;
     if (c.nodeType !== 1 || !BLOCK.has(el.tagName)) {
       // An inline element around blocks (Docs wraps a whole paste in one <b>) is only a box.
-      if (c.nodeType === 1 && !SKIP.has(el.tagName) && el.querySelector(BLOCK_SELECTOR)) {
+      if (c.nodeType === 1 && !SKIP.has(el.tagName) && withBlock.has(el)) {
         flush();
         out.push(...blocks(el, depth));
       } else run += inline(c);
@@ -171,8 +228,8 @@ function blocks(root: Element, depth = 0): string[] {
     else if (tag === "UL" || tag === "OL") b = list(el, depth);
     else if (tag === "BLOCKQUOTE") b = blocks(el).join("\n\n").replace(/^/gm, "> ").replace(/^> $/gm, ">");
     else if (tag === "PRE") {
-      const txt = (el.textContent ?? "").replace(/\n$/, "");
-      const fence = txt.includes("```") ? "~~~" : "```";
+      const txt = text(el).replace(/\n$/, "");
+      const fence = "`".repeat(fenceLen(txt, "`", 3));
       b = `${fence}\n${txt}\n${fence}`;
     } else if (tag === "TABLE") b = table(el);
     else if (tag === "HR") b = "---";
@@ -188,6 +245,19 @@ function blocks(root: Element, depth = 0): string[] {
 
 /** Markdown for pasted HTML, or "" when it holds no text. */
 export function htmlToMarkdown(body: Element): string {
+  level = 0;
+  // Document order without recursion; walked backwards, every element follows its descendants.
+  withBlock = new WeakSet();
+  const all: Element[] = [];
+  for (const todo = [body]; todo.length; ) {
+    const e = todo.pop() as Element;
+    all.push(e);
+    todo.push(...Array.from(e.children).reverse());
+  }
+  for (let i = all.length - 1; i >= 0; i--) {
+    const e = all[i] as Element;
+    if (BLOCK.has(e.tagName) || withBlock.has(e)) if (e.parentElement) withBlock.add(e.parentElement);
+  }
   return blocks(body)
     .join("\n\n")
     .replace(/\n{3,}/g, "\n\n")
