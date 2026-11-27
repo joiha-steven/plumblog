@@ -1,9 +1,11 @@
+use super::db::Db;
 use super::routes::{Route, parse};
 use super::source::{
     Filter, Neighbours, ReaderSource, SampleSource, Settings, Slice, StoredPost, Tag,
 };
 use super::{Outcome, render};
 use plumblog_model::Result;
+use plumblog_store::memory::MemoryStore;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
@@ -16,7 +18,15 @@ pub(super) fn run<F: Future>(f: F) -> F::Output {
 }
 
 fn get(path: &str) -> (u16, String) {
-    match run(render(SampleSource::get(), &super::NoSearch, path, "")).unwrap() {
+    match run(render(
+        SampleSource::get(),
+        &Db(&MemoryStore::default()),
+        &Db(&MemoryStore::default()),
+        path,
+        "",
+    ))
+    .unwrap()
+    {
         Outcome::Page { status, body, .. } => (status, body),
         Outcome::Redirect(to) => (301, to),
     }
@@ -27,11 +37,13 @@ pub(super) fn get_typed(path: &str) -> (u16, &'static str, String) {
 }
 
 pub(super) fn get_from(src: &impl ReaderSource, path: &str) -> (u16, &'static str, String) {
-    match run(render(src, &super::NoSearch, path, "")).unwrap() {
+    let db = MemoryStore::default();
+    match run(render(src, &Db(&db), &Db(&db), path, "")).unwrap() {
         Outcome::Page {
             status,
             content_type,
             body,
+            ..
         } => (status, content_type, body),
         Outcome::Redirect(to) => panic!("{path} redirected to {to}"),
     }
@@ -57,9 +69,6 @@ impl Fixture {
 }
 
 impl ReaderSource for Fixture {
-    async fn content_version(&self) -> Result<u64> {
-        self.posts.content_version().await
-    }
     fn settings(&self) -> impl Future<Output = Result<Settings>> {
         std::future::ready(Ok(self.settings.clone()))
     }

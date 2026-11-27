@@ -65,10 +65,8 @@ pub struct Neighbours {
 
 // Workers are single-threaded, so futures need not be `Send` (see auth::Crypto).
 #[allow(async_fn_in_trait)]
+/// The content version comes from the store (`db::ExtSource`), not from here.
 pub trait ReaderSource {
-    /// Bumped by every publish, edit, delete and settings change; part of every cache key, so
-    /// stale pages are never served and nothing needs purging.
-    async fn content_version(&self) -> Result<u64>;
     async fn settings(&self) -> Result<Settings>;
     /// Published posts, pinned first, then newest first.
     async fn posts(&self, filter: Filter<'_>, offset: usize, limit: usize) -> Result<Slice>;
@@ -190,10 +188,6 @@ fn year_of(unix: i64) -> i32 {
     reason = "in-memory stand-in for async D1 storage"
 )]
 impl ReaderSource for SampleSource {
-    async fn content_version(&self) -> Result<u64> {
-        Ok(1)
-    }
-
     async fn settings(&self) -> Result<Settings> {
         Ok(Settings {
             title: SAMPLE_SITE.title.to_owned(),

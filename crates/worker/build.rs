@@ -1,4 +1,4 @@
-//! Embeds the default theme's text files and the sample posts, so the Worker renders pages
+//! Embeds the default theme's text files, bundled plugins and the sample posts, so the Worker renders pages
 //! with no storage at all. Fonts and JS are served as static assets, not embedded (they would
 //! only grow the wasm).
 use std::fmt::Write;
@@ -38,6 +38,8 @@ fn main() {
         .unwrap();
     }
     out.push_str("];\n");
+
+    embed_plugins(&root.join("plugins"), &mut out);
 
     // Core UI text, for the few strings shown when the theme itself cannot render.
     let mut locales = Vec::new();
@@ -112,6 +114,44 @@ fn main() {
         out,
     )
     .unwrap();
+}
+
+/// Bundled plugins (docs/ARCHITECTURE.md, Plugins and options). Text files are embedded;
+/// other assets are served as static files, listed with empty text so the load check sees
+/// that they exist.
+fn embed_plugins(plugins_dir: &Path, out: &mut String) {
+    println!("cargo:rerun-if-changed={}", plugins_dir.display());
+    let mut names: Vec<PathBuf> = fs::read_dir(plugins_dir)
+        .map(|d| {
+            d.map(|e| e.unwrap().path())
+                .filter(|p| p.is_dir())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    out.push_str("pub static PLUGIN_FILES: &[(&str, &[(&str, &str)])] = &[\n");
+    for dir in &names {
+        let mut files = Vec::new();
+        walk(dir, &mut files);
+        files.sort();
+        writeln!(
+            out,
+            "    ({:?}, &[",
+            dir.file_name().unwrap().to_string_lossy()
+        )
+        .unwrap();
+        for p in &files {
+            let rel = rel(dir, p);
+            let embed = !rel.starts_with("assets/") || p.extension().is_some_and(|e| e == "css");
+            if embed {
+                writeln!(out, "        ({rel:?}, include_str!({:?})),", p.display()).unwrap();
+            } else {
+                writeln!(out, "        ({rel:?}, \"\"),").unwrap();
+            }
+        }
+        out.push_str("    ]),\n");
+    }
+    out.push_str("];\n");
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {

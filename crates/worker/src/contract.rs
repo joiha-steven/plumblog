@@ -3,15 +3,17 @@
 //! `GET /__contract` lists case names; `POST /__contract/<name>` empties the database and
 //! runs one case. Cases share one database, so the caller runs them one at a time.
 //! D1-only cases (`d1::selftest`) are listed and run the same way. `POST /__seed` empties the
-//! database and saves the sample posts (search tests, local previews).
+//! database and saves the sample posts (search tests, local previews); `POST /__option`
+//! stores one option value (options tests).
 
-use plumblog_store::contract;
+use plumblog_store::{OptionOwner, SettingsStore, contract};
 use worker::{Env, Request, Response, Result};
 
 use crate::d1::{D1Store, selftest};
 
 const PREFIX: &str = "/__contract";
 const SEED: &str = "/__seed";
+const OPTION: &str = "/__option";
 
 /// Second lock besides the cargo feature: the route empties the database, so it also needs
 /// this variable, which only tools/wrangler.dev.toml sets.
@@ -26,6 +28,33 @@ pub async fn handle(req: &Request, env: &Env) -> Result<Option<Response>> {
     let method = method.as_ref();
     // Empties the database and saves the sample posts, so search tests and local previews
     // read the same posts the sample pages show.
+    // Writes one theme or plugin option the way the admin will (bumps the content version):
+    // `?owner=theme|plugin&id=<name>&key=<key>`, body = the JSON value.
+    if path == OPTION && method == "POST" {
+        let url = req.url()?;
+        let q = |k: &str| {
+            url.query_pairs()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.into_owned())
+                .unwrap_or_default()
+        };
+        let owner = match q("owner").as_str() {
+            "theme" => OptionOwner::Theme,
+            "plugin" => OptionOwner::Plugin,
+            other => return Response::error(format!("owner {other:?}"), 400).map(Some),
+        };
+        let mut req = req.clone()?;
+        let value = req.text().await?;
+        let store = D1Store::new(env.d1("DB")?);
+        let now = i64::try_from(worker::Date::now().as_millis()).unwrap_or(0);
+        return match store
+            .put_option(owner, &q("id"), &q("key"), &value, now)
+            .await
+        {
+            Ok(()) => Response::ok("ok").map(Some),
+            Err(e) => Response::error(format!("put_option failed: {e}"), 500).map(Some),
+        };
+    }
     if path == SEED && method == "POST" {
         let store = D1Store::new(env.d1("DB")?);
         if let Err(e) = store.wipe().await {

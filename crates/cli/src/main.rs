@@ -3,6 +3,17 @@ use std::{fmt::Write, process::ExitCode};
 
 include!(concat!(env!("OUT_DIR"), "/guides.rs"));
 
+/// `(topic, summary, build)`.
+type Generated = (&'static str, &'static str, fn() -> String);
+
+/// References built from code at run time, so they can never drift from what the blog
+/// accepts.
+const GENERATED: &[Generated] = &[(
+    "options",
+    "Theme and plugin option schema (generated from code)",
+    plumblog_render::options::reference,
+)];
+
 #[derive(Parser)]
 #[command(name = "blog", version, about = "plumblog command line")]
 struct Cli {
@@ -24,6 +35,9 @@ fn guide_list() -> String {
     for (name, summary, _) in GUIDES {
         writeln!(out, "  {name:<20} {summary}").unwrap();
     }
+    for (name, summary, _) in GENERATED {
+        writeln!(out, "  {name:<20} {summary}").unwrap();
+    }
     out
 }
 
@@ -34,6 +48,12 @@ fn guide_output(topic: Option<&str>) -> Result<String, String> {
             .iter()
             .find(|(name, _, _)| *name == t)
             .map(|(_, _, text)| (*text).to_string())
+            .or_else(|| {
+                GENERATED
+                    .iter()
+                    .find(|(name, _, _)| *name == t)
+                    .map(|(_, _, build)| build())
+            })
             .ok_or_else(|| format!("unknown guide topic: {t}\n{}", guide_list())),
     }
 }
@@ -70,6 +90,20 @@ mod tests {
         let err = guide_output(Some("no-such-topic")).unwrap_err();
         assert!(err.contains("unknown guide topic: no-such-topic"));
         assert!(err.contains("getting-started"));
+    }
+
+    #[test]
+    fn options_reference_is_generated_from_the_schema() {
+        let text = guide_output(Some("options")).unwrap();
+        assert_eq!(text, plumblog_render::options::reference());
+        for t in plumblog_render::options::FieldType::ALL {
+            assert!(
+                text.contains(&format!("### `{}`", t.name())),
+                "{}",
+                t.name()
+            );
+        }
+        assert!(guide_list().contains("options"));
     }
 
     #[test]

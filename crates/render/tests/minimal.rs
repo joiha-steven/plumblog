@@ -33,7 +33,13 @@ fn load(files: &[(String, String)], chosen: &BTreeMap<String, toml::Value>) -> T
         .iter()
         .map(|(a, b)| (a.as_str(), b.as_str()))
         .collect();
-    Theme::load(&refs.as_slice(), None, chosen, "/theme/assets").unwrap()
+    let theme = Theme::load(&refs.as_slice(), None, Vec::new(), "/theme/assets").unwrap();
+    // Stored values are JSON, as the store keeps them.
+    let stored: Vec<(String, String)> = chosen
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::to_string(v).unwrap()))
+        .collect();
+    theme.with_options(&stored, &[]).0
 }
 
 fn site() -> Site {
@@ -199,7 +205,8 @@ fn options_come_from_declarations_and_owner_values() {
     accent.insert("light".into(), "#123456".into());
     accent.insert("dark".into(), "#abcdef".into());
     chosen.insert("accent".to_owned(), toml::Value::Table(accent));
-    chosen.insert("excerpt_words".to_owned(), toml::Value::Integer(2));
+    // On the step of 5 that theme.toml declares.
+    chosen.insert("excerpt_words".to_owned(), toml::Value::Integer(5));
     // Not a declared choice: falls back to the default style instead of breaking the site.
     chosen.insert("style".to_owned(), toml::Value::String("gone".into()));
     let custom = load(&files, &chosen);
@@ -225,7 +232,7 @@ fn options_come_from_declarations_and_owner_values() {
             },
         )
         .unwrap();
-    assert!(html.contains("<p class=\"excerpt\">Some words\u{2026}</p>"));
+    assert!(html.contains("<p class=\"excerpt\">Some words here and there\u{2026}</p>"));
 }
 
 #[test]
@@ -262,7 +269,7 @@ fn partial_theme_falls_back_and_bad_slots_fail() {
         ),
         ("locales/en.toml", "[notfound]\ntitle = \"Lost\"\n"),
     ];
-    let theme = Theme::load(&&child[..], Some(&default), &BTreeMap::new(), "/a").unwrap();
+    let theme = Theme::load(&&child[..], Some(&default), Vec::new(), "/a").unwrap();
     let html = theme
         .render(&site(), &page("en"), &Body::NotFound { recent: &[] })
         .unwrap();
@@ -279,7 +286,7 @@ fn partial_theme_falls_back_and_bad_slots_fail() {
         ("assets/fonts/faces.css", ""),
         ("templates/404.html", "{{ slot(\"sidebar\") }}"),
     ];
-    let theme = Theme::load(&&broken[..], None, &BTreeMap::new(), "/a").unwrap();
+    let theme = Theme::load(&&broken[..], Some(&default), Vec::new(), "/a").unwrap();
     let err = theme
         .render(&site(), &page("en"), &Body::NotFound { recent: &[] })
         .unwrap_err();
@@ -332,7 +339,7 @@ fn post_flags_reach_templates() {
             "{{ post.has_code }} {{ post.has_math }} {{ post.has_embed }} {{ post.reading_minutes }}",
         ),
     ];
-    let theme = Theme::load(&&child[..], Some(&default), &BTreeMap::new(), "/a").unwrap();
+    let theme = Theme::load(&&child[..], Some(&default), Vec::new(), "/a").unwrap();
     let mut p = post("x", "X", 0, false);
     p.body.has_code = true;
     p.body.reading_minutes = 7;
@@ -386,20 +393,21 @@ fn plural_messages_and_missing_keys_in_theme_locales() {
             )
             .unwrap()
     };
-    let line = |(html, _): &(String, Vec<(String, String)>)| {
+    let line = |r: &plumblog_render::Report| {
+        let html = &r.html;
         let start = html.find("<p id=\"plural\">").unwrap() + 15;
         html[start..start + html[start..].find("</p>").unwrap()].to_owned()
     };
     let en = render("en");
     assert_eq!(line(&en), "1 post|3 posts|5 posts|21 posts|test.gone");
     // Missing keys come back with the page, once each, and do not leak into the next render.
-    assert_eq!(en.1, [("en".to_owned(), "test.gone".to_owned())]);
+    assert_eq!(en.missing, [("en".to_owned(), "test.gone".to_owned())]);
     let ru = render("ru");
     assert_eq!(
         line(&ru),
         "1 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{44c}|3 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{438}|5 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{435}\u{439}|21 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{44c}|test.gone"
     );
-    assert_eq!(ru.1, [("ru".to_owned(), "test.gone".to_owned())]);
+    assert_eq!(ru.missing, [("ru".to_owned(), "test.gone".to_owned())]);
 }
 
 #[test]

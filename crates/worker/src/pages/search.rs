@@ -2,12 +2,10 @@
 //! is a new URL, and the store's content can change without the pages' content version).
 //! The FTS query is built by `plumblog_store::search::to_fts_query`, which quotes every word.
 
-use super::{PageResult, Pages, err, routes};
-use crate::d1::D1Store;
+use super::{PageResult, Pages, routes};
 use plumblog_markdown::Rendered;
 use plumblog_render::{Body, Post};
-use plumblog_store::{PostStore, PostSummary, search};
-use worker::Env;
+use plumblog_store::{PostSummary, search};
 
 /// Longest query kept, in characters. The store keeps at most `search::MAX_QUERY_WORDS`
 /// words anyway; this bounds the work and the text echoed on the page.
@@ -16,7 +14,8 @@ pub const MAX_QUERY_CHARS: usize = 100;
 /// told to add a word rather than paged.
 pub const RESULT_LIMIT: usize = 20;
 
-/// Where search reads from. The Worker uses D1; host tests use the in-memory store.
+/// Where search reads from: `db::Db` over D1 in the Worker, over the in-memory store in host
+/// tests.
 // Workers are single-threaded, so futures need not be `Send` (see auth::Crypto).
 #[allow(async_fn_in_trait)]
 pub trait SearchSource {
@@ -26,35 +25,6 @@ pub trait SearchSource {
         query: &str,
         limit: u32,
     ) -> std::result::Result<Vec<PostSummary>, String>;
-}
-
-/// Any store with posts.
-pub struct StoreSearch<'a, S>(pub &'a S);
-
-impl<S: PostStore> SearchSource for StoreSearch<'_, S> {
-    async fn search(
-        &self,
-        lang: &str,
-        query: &str,
-        limit: u32,
-    ) -> std::result::Result<Vec<PostSummary>, String> {
-        self.0.search(lang, query, limit).await.map_err(err)
-    }
-}
-
-/// D1 from the Worker's `DB` binding, opened only when a search runs.
-pub struct EnvSearch<'a>(pub &'a Env);
-
-impl SearchSource for EnvSearch<'_> {
-    async fn search(
-        &self,
-        lang: &str,
-        query: &str,
-        limit: u32,
-    ) -> std::result::Result<Vec<PostSummary>, String> {
-        let db = D1Store::new(self.0.d1("DB").map_err(|e| format!("D1 binding DB: {e}"))?);
-        StoreSearch(&db).search(lang, query, limit).await
-    }
 }
 
 /// The query as shown and searched: trimmed, at most [`MAX_QUERY_CHARS`] characters.
