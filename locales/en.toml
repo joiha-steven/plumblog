@@ -517,6 +517,7 @@ load_other = "Load that version"
 [admin.editor.sync]
 failed = "Could not save to the site. Your text is kept on this device; it is sent again when you next edit or come back online."
 slug_taken = "Could not save to the site: posts with this title's address already exist. Change the title a little and keep writing."
+slow = "Still saving to the site. Your text is safe on this device."
 
 [admin.editor.pub]
 publish = "Publish"
@@ -559,6 +560,7 @@ slug_conflict = "Another post already uses this link. Choose a different one."
 time_missing = "Pick a publish time."
 time_past = "Pick a time in the future."
 failed = "That did not go through. Nothing is lost; try again in a moment."
+status_moved = "This post's status was changed elsewhere. Check it, then press the button again."
 
 [admin.editor.warning.markdown]
 math_invalid = "A formula could not be rendered; check the TeX between the dollar signs."

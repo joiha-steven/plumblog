@@ -3,7 +3,8 @@
  * every change on this device first (drafts.ts); this sends the text about 3 s after the last
  * local save, one request at a time, only while online and only for drafts: a published or
  * scheduled post is never sent, so editing one never changes the live page; it stays on this
- * device until the publish step.
+ * device until the publish step. That holds for a draft published elsewhere while open too: the
+ * first server copy seen that is not a draft (a 409's fetch, any answer) stops sending for good.
  *
  * A new post becomes a server post on its first save: its URL and its draft key move to the
  * post's id. Every update is conditional on the version the text is based on; a stale one
@@ -43,6 +44,13 @@ export interface SyncHost {
   say(text: string): void;
   /** Shows the server copy next to this text and lets the writer pick (index.ts serverChoice). */
   choose(p: Post): void;
+  /**
+   * The server copy is no longer a draft (published, scheduled or trashed elsewhere): nothing
+   * more is sent from this editor; it shows the post's status and keeps the text here.
+   */
+  live(p: Post): void;
+  /** A new post was created from this draft: the editor now knows its id and slug. */
+  made(p: Post): void;
   /** Where the renderer's warnings show, under the title. */
   note: HTMLElement;
 }
@@ -51,12 +59,15 @@ export interface Sync {
   /** Called after every local save. */
   changed(): void;
   /**
-   * Resolves when no request of this sync is out, with the post as the server last answered (a
-   * new post is created first, by the same path as an autosave), or undefined when there is none
-   * (empty, offline, held for a choice, failed). Waiting text is not sent: the publish update
-   * carries it. The publish flow awaits this.
+   * Pauses autosave and resolves when no request of this sync is out, with the post as the
+   * server last answered (a new post is created first, by the same path as an autosave), or
+   * undefined when there is none (empty, offline, held for a choice, failed). Waiting text is
+   * not sent: the publish update carries it. The publish flow awaits this, sends its one update
+   * and then calls `resume`, so no autosave goes out with the same expected version.
    */
   flush(): Promise<Post | undefined>;
+  /** Autosave goes on after `flush`. */
+  resume(): void;
   /** The post's id once it exists on the server. */
   id(): number | undefined;
   /** Stops saving for good (the post is no longer a draft); a pending save is dropped. */
@@ -130,20 +141,42 @@ export async function accept(st: EdState, p: Post, text: () => [string, string])
   });
 }
 
-export function startSync(o: SyncHost, delay = 3000): Sync {
-  if (!o.draft) return { changed: () => undefined, flush: async () => undefined, id: () => o.id, stop: () => undefined };
+/** `slow`: a create still out after this long says so on the status line (it has no timeout). */
+export function startSync(o: SyncHost, delay = 3000, slow = 20_000): Sync {
+  if (!o.draft) return { changed: () => undefined, flush: async () => undefined, resume: () => undefined, id: () => o.id, stop: () => undefined };
   const st = o.st;
   let id = o.id;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let busy = false;
   let again = false;
-  let stopped = false;
+  /** A publish step is out (`flush` to `resume`): nothing is sent from here meanwhile. */
+  let held = false;
   /** The request in flight (`send` with its follow-ups), for `flush`. */
   let running: Promise<void> | undefined;
   /** The newest post the server answered with. */
   let last: Post | undefined;
+  /** A create has been out longer than `slow`: the status line says so until it settles. */
+  let lagging = false;
   /** The last attempt failed: the next failure in a row adds no toast. */
   let failing = false;
+  /** The server copy turned out not to be a draft: this editor never sends again. */
+  let stopped = false;
+
+  /**
+   * Every server copy this editor learns of passes here. One that is not a draft stops the
+   * sync for good: a PATCH without `status` keeps the live status, so sending would change the
+   * live page without the writer's Update. True while it is still a draft.
+   */
+  const learn = (p: Post): boolean => {
+    if (p.status === "draft") return true;
+    if (!stopped) {
+      stopped = true;
+      clearTimeout(timer);
+      console.warn(`admin editor: post ${p.id} is ${p.status} on the server; edits stay on this device`);
+      if (o.alive()) o.live(p);
+    }
+    return false;
+  };
 
   /** Drops the local draft when the server holds the editor's exact text and no save came since `rev`. */
   const tidy = (rev: number) =>
@@ -153,7 +186,9 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
 
   const changed = () => {
     clearTimeout(timer);
-    if (st.hold || stopped) return;
+    // A local save just set the status line; a create still out keeps saying so.
+    if (lagging) o.say(t("admin.editor.sync.slow"));
+    if (st.hold || stopped || held) return;
     if (same(o.text(), st.server)) {
       o.say(t("admin.editor.saved"));
       void tidy(st.rev);
@@ -186,6 +221,7 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
       if (!o.alive() || st.key.includes(":post-")) return;
       id = p.id;
       last = p;
+      o.made(p);
       const rev = await moveTo(st.key, o.user, p);
       st.key = draftKey(o.user, p.id, "");
       // Moved already (nothing here): read it. Another tab's rev is kept apart: the next save here then asks.
@@ -206,22 +242,30 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
   const stale = async (pid: number) => {
     st.hold = true;
     const r = await o.api.post(pid);
+    // Stopped meanwhile (trashed, or the publish flow took over): its own path decides.
+    if (stopped) {
+      st.hold = false;
+      return;
+    }
     if (!r.ok) {
       st.hold = false;
       return failed(r.error);
     }
     const p = r.value;
+    const draft = learn(p);
     if (same(o.text(), [p.title, p.markdown])) {
       Object.assign(st, { hold: false, base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
-      o.say(t("admin.editor.saved"));
+      o.say(draft ? t("admin.editor.saved") : t("admin.editor.saved_here"));
       return tidy(st.rev);
     }
-    o.say(t("admin.editor.not_saved"));
+    // Not a draft: either pick only keeps the text on this device (learn stopped the sync).
+    o.say(draft ? t("admin.editor.not_saved") : t("admin.editor.saved_here"));
     o.choose(p);
   };
 
-  const send = async (): Promise<void> => {
-    if (stopped || st.hold || st.paused || o.offline() || !o.alive()) return;
+  /** `force`: the create `flush` itself needs, while autosave is held. */
+  const send = async (force = false): Promise<void> => {
+    if (stopped || (held && !force) || st.hold || st.paused || o.offline() || !o.alive()) return;
     if (busy) {
       again = true;
       return;
@@ -234,7 +278,7 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
       } finally {
         busy = false;
       }
-      if (again && o.alive()) {
+      if (again && o.alive() && !stopped && !held) {
         again = false;
         await send();
       }
@@ -243,10 +287,11 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
   };
 
   const flush = async (): Promise<Post | undefined> => {
+    held = true;
     clearTimeout(timer);
     while (busy) await running;
     // Only a post that does not exist yet needs a send: the publish update carries the text.
-    if (id === undefined) await send();
+    if (id === undefined) await send(true);
     while (busy) await running;
     return last;
   };
@@ -256,7 +301,7 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
     if (prior) {
       const p = await prior;
       if (p) await adopt(p);
-      if (!o.alive()) return;
+      if (!o.alive() || stopped) return;
     }
     const text = o.text();
     if (same(text, st.server)) return tidy(st.rev);
@@ -269,21 +314,38 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
       const key = st.key;
       let done: (p: Post | undefined) => void = () => undefined;
       creates.set(key, new Promise((ok) => (done = ok)));
-      r = await create(title, markdown);
+      const late = setTimeout(() => {
+        lagging = true;
+        console.warn(`admin editor: the create of ${key} has been out for ${slow} ms`);
+        if (o.alive()) o.say(t("admin.editor.sync.slow"));
+      }, slow);
+      try {
+        r = await create(title, markdown);
+      } finally {
+        clearTimeout(late);
+        lagging = false;
+      }
       if (r.ok) {
         id = r.value.id;
         await adopt(r.value);
       } else creates.delete(key);
       done(r.ok ? r.value : undefined);
     } else r = await o.api.updatePost(id, { expected_version: st.version ?? 0, title, markdown });
+    // Stopped while the request was out (trashed, or not a draft any more): its answer changes nothing here.
+    if (stopped) {
+      console.warn(`admin editor: a save answered after this sync stopped (${r.ok ? `version ${r.value.version}` : r.error.code})`);
+      return;
+    }
     if (r.ok) {
       const p = r.value;
       // What the server holds is its answer, not what was sent: a normalised text is not "confirmed".
       Object.assign(st, { base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
       last = p;
       failing = false;
+      if (!learn(p)) return;
       if (o.alive()) {
-        o.say(t("admin.editor.saved"));
+        // Typed while the request was out: that text is not on the server yet.
+        o.say(same(o.text(), st.server) ? t("admin.editor.saved") : t("admin.editor.saved_here"));
         // i18n: admin.editor.warning.markdown.math_invalid
         const notes = p.warnings.map((w: RenderWarning) => t(`admin.editor.warning.${w}`));
         o.note.replaceChildren(...(notes.length ? [h("p", { class: "hint", role: "status" }, notes.join(" "))] : []));
@@ -300,6 +362,11 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
   return {
     changed,
     flush,
+    resume: () => {
+      held = false;
+      again = false;
+      changed();
+    },
     id: () => id,
     stop: () => {
       stopped = true;

@@ -95,7 +95,36 @@ export type Method = "GET" | "POST" | "PATCH" | "DELETE";
  * `auth.unauthenticated`, so an expired session sends the writer to sign in again instead of
  * failing screen by screen. Auth routes answer 401 as part of their own flow.
  */
-export const session = { expired: (): void => undefined };
+export const session: { expired: () => void; flush: (() => Promise<unknown>) | undefined } = {
+  expired: () => undefined,
+  /** Set by an open editor: saves its last keys on this device. Run before the page leaves. */
+  flush: undefined,
+};
+
+/**
+ * Runs the editor's registered flush, waiting at most `ms` (a stuck IndexedDB never keeps the
+ * writer from signing in again). Never throws.
+ */
+export async function flushLocal(ms = 2000): Promise<void> {
+  const f = session.flush;
+  if (!f) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([f(), new Promise((ok) => (timer = setTimeout(ok, ms)))]);
+  } catch (e) {
+    console.error("api: flushing the local draft before sign-in failed", e);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * A request with no answer by then settles as `network`, so a hung one never stalls saving.
+ * Not for creates: one that is slow but lands would be sent again as a second post, while a
+ * hung create keeps the editor's in-flight guard (sync.ts). A slow PATCH that did land answers
+ * the retry with a 409 the editor then resolves (#86).
+ */
+export const REQUEST_MS = 20_000;
 
 export const fail = <T>(code: ApiError["code"], status: number, extra: Pick<ApiError, "field" | "version"> = {}): Result<T> => ({
   ok: false,
@@ -110,9 +139,28 @@ async function request<T>(
   path: string,
   body: JsonBody | undefined,
   emptyOk: boolean,
+  /** The bound, or 0 for none. */
+  ms: number,
+): Promise<Result<T>> {
+  const stop = new AbortController();
+  const timer = ms > 0 ? setTimeout(() => stop.abort(), ms) : undefined;
+  try {
+    return await answer<T>(method, path, body, emptyOk, stop.signal, ms);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function answer<T>(
+  method: Method,
+  path: string,
+  body: JsonBody | undefined,
+  emptyOk: boolean,
+  signal: AbortSignal,
+  ms: number,
 ): Promise<Result<T>> {
   const headers: Record<string, string> = { accept: "application/json" };
-  const init: RequestInit = { method, credentials: "same-origin", headers };
+  const init: RequestInit = { method, credentials: "same-origin", headers, signal };
   if (body !== undefined) {
     headers["content-type"] = "application/json";
     init.body = JSON.stringify(body);
@@ -121,7 +169,7 @@ async function request<T>(
   try {
     res = await fetch(path, init);
   } catch (e) {
-    console.error(`api: ${method} ${path}: no response`, e);
+    console.error(`api: ${method} ${path}: ${signal.aborted ? `no answer within ${ms} ms` : "no response"}`, e);
     return fail("network", 0);
   }
   let parsed: unknown;
@@ -130,6 +178,11 @@ async function request<T>(
     if (text.trim() === "" && emptyOk && res.ok) return { ok: true, value: undefined as T };
     parsed = JSON.parse(text);
   } catch (e) {
+    // The body stalled past the bound: the same as no answer.
+    if (signal.aborted) {
+      console.error(`api: ${method} ${path}: ${res.status}, body not read within ${ms} ms`, e);
+      return fail("network", 0);
+    }
     console.error(`api: ${method} ${path}: ${res.status}, body is not JSON`, e);
     return fail("bad_response", res.status);
   }
@@ -159,7 +212,7 @@ function bodyOf(input: PostCreateInput | PostUpdateInput): JsonBody {
   return out;
 }
 
-const getJson = <T>(path: string): Promise<Result<T>> => request<T>("GET", path, undefined, false);
+
 /** `POST /api/media` with the file as multipart `file`. XHR, not fetch: fetch reports no upload
  * progress. The posts and media API is issue #10; this follows its draft. */
 function upload(file: File, progress: Progress, signal?: AbortSignal): Promise<Result<Media>> {
@@ -201,7 +254,9 @@ function upload(file: File, progress: Progress, signal?: AbortSignal): Promise<R
   });
 }
 
-export function httpApi(): Api {
+/** `ms`: the request bound (REQUEST_MS); tests pass a short one. */
+export function httpApi(ms = REQUEST_MS): Api {
+  const getJson = <T>(path: string): Promise<Result<T>> => request<T>("GET", path, undefined, false, ms);
   return {
     async me() {
       const r = await getJson<{ user: Me }>("/api/auth/me");
@@ -214,10 +269,10 @@ export function httpApi(): Api {
       return getJson<PostPage>(`/api/v1/posts${s ? `?${s}` : ""}`);
     },
     post: (id) => getJson<Post>(`/api/v1/posts/${id}`),
-    createPost: (input) => request<Post>("POST", "/api/v1/posts", bodyOf(input), false),
-    updatePost: (id, input) => request<Post>("PATCH", `/api/v1/posts/${id}`, bodyOf(input), false),
+    createPost: (input) => request<Post>("POST", "/api/v1/posts", bodyOf(input), false, 0),
+    updatePost: (id, input) => request<Post>("PATCH", `/api/v1/posts/${id}`, bodyOf(input), false, ms),
     previewUrl: undefined,
-    call: (method, path, body) => request(method, path, body, true),
+    call: (method, path, body) => request(method, path, body, true, ms),
     upload,
   };
 }

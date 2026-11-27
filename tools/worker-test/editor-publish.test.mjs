@@ -15,6 +15,8 @@ const T = Date.now();
 const SETUP_CODE = "setup-code-publish-0123456789";
 const OWNER = { login: "Wren", slug: "wren", name: "Wren Owner", password: "correct horse battery" };
 let session;
+/** The signed-in browser's cookies, for the later tests' own contexts. */
+let cookies = [];
 
 const en = (() => {
   const out = {};
@@ -91,7 +93,8 @@ test("publish, update, schedule, unpublish and trash from the editor", async () 
     await page.getByLabel(tx("admin.auth.password_repeat")).fill(OWNER.password);
     await page.getByRole("button", { name: tx("admin.auth.create") }).click();
     await page.waitForURL(/\/admin\/$/);
-    session = (await context.cookies()).find((c) => c.name === "__Host-plumblog_session")?.value;
+    cookies = await context.cookies();
+    session = cookies.find((c) => c.name === "__Host-plumblog_session")?.value;
     assert.ok(session, "signed in");
 
     // 1. A new post, published at once: one create, then the status change.
@@ -180,6 +183,144 @@ test("publish, update, schedule, unpublish and trash from the editor", async () 
     assert.equal((await api("GET", "/api/v1/posts/" + id)).json.status, "draft");
 
     assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+// Autosave and publish together: a draft autosaves; once published nothing autosaves, edits go
+// only by Update; a change from elsewhere is a choice, and Keep mine still never autosaves.
+test("a draft autosaves; published, only Update sends; after a 409 and Keep mine, Update sends my text", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: "en-US", timezoneId: "UTC" });
+  await context.addCookies(cookies);
+  const page = await context.newPage();
+  const problems = [];
+  const sent = [];
+  page.on("pageerror", (e) => problems.push(`page error: ${e}`));
+  page.on("console", (m) => {
+    // The stale Update below answers 409 on purpose; Chrome logs it by itself.
+    if (m.type() === "error" && !/status of 409/.test(m.text())) problems.push(`console: ${m.text()}`);
+  });
+  page.on("request", (r) => /\/api\/v1\/posts/.test(r.url()) && r.method() !== "GET" && sent.push({ method: r.method(), body: r.postDataJSON() }));
+  const button = (name) => page.getByRole("button", { name, exact: true });
+  const confirm = () => page.locator(".pubpop .btn.primary");
+  const toast = (text) => page.locator(".toast", { hasText: text }).waitFor();
+  const line = (key) => page.locator(".ed-actions .saved", { hasText: tx(key) }).waitFor();
+  const patches = () => sent.filter((r) => r.method === "PATCH");
+  const typeAtEnd = async (text) => {
+    await page.locator(".cm-content").click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type(text);
+  };
+  try {
+    // 1. A draft autosaves: one create.
+    await page.goto(at("/admin/posts/new"));
+    await page.getByRole("toolbar", { name: tx("admin.editor.toolbar") }).waitFor();
+    await page.getByLabel(tx("admin.editor.title_label")).fill("Round trip");
+    await page.locator(".cm-content").click();
+    await page.keyboard.type("Draft text.");
+    await page.waitForURL(/\/admin\/posts\/\d+$/, { timeout: 10_000 });
+    await line("admin.editor.saved");
+    const id = Number(new URL(page.url()).pathname.split("/").pop());
+    const row = () => w.query(`SELECT markdown, status, version FROM posts WHERE id = ${id}`)[0];
+    assert.equal(row().markdown, "Draft text.");
+    assert.deepEqual(sent.map((r) => r.method), ["POST"]);
+    // A post created by autosave shows Trash in the panel (review item 6).
+    await button(tx("admin.editor.pub.settings")).click();
+    await page.locator('[data-act="trash"]').waitFor();
+    await button(tx("admin.editor.pub.settings")).click();
+
+    // 2. Publish it.
+    await button(tx("admin.editor.pub.publish")).click();
+    await confirm().click();
+    await toast(tx("admin.editor.pub.published_toast"));
+    assert.equal(row().status, "published");
+    assert.equal(patches().length, 1);
+
+    // 3. Edit it: nothing is sent, and the status line says it is not live.
+    await typeAtEnd(" Edited.");
+    await line("admin.editor.pub.unpublished_changes");
+    await page.waitForTimeout(3600); // past a draft's autosave delay
+    assert.equal(patches().length, 1, "a live post never autosaves");
+
+    // 4. Update: one PATCH with the text and the status.
+    await button(tx("admin.editor.pub.update")).click();
+    await confirm().click();
+    await toast(tx("admin.editor.pub.published_toast"));
+    assert.equal(patches().length, 2);
+    assert.equal(patches()[1].body.markdown, "Draft text. Edited.");
+    assert.equal(patches()[1].body.status, "published");
+    assert.equal(row().markdown, "Draft text. Edited.");
+    await line("admin.editor.saved");
+
+    // 5. Another tab changes it; this one edits and presses Update: a 409, then the choice.
+    const theirs = await api("PATCH", `/api/v1/posts/${id}`, { expected_version: row().version, markdown: "Theirs." });
+    assert.equal(theirs.status, 200);
+    await typeAtEnd(" Mine.");
+    await button(tx("admin.editor.pub.update")).click();
+    await confirm().click();
+    const banner = page.getByRole("alert").filter({ hasText: tx("admin.editor.conflict.server_title") });
+    await banner.waitFor();
+    assert.equal(patches().length, 3, "the stale Update, nothing else");
+
+    // 6. Keep mine: still nothing autosaves; Update sends my text and it stays published.
+    await banner.getByRole("button", { name: tx("admin.editor.conflict.keep_mine") }).click();
+    await page.waitForTimeout(3600);
+    assert.equal(patches().length, 3, "Keep mine does not autosave a live post");
+    await button(tx("admin.editor.pub.update")).click();
+    await confirm().click();
+    await toast(tx("admin.editor.pub.published_toast"));
+    assert.equal(patches().length, 4);
+    const end = row();
+    assert.equal(end.markdown, "Draft text. Edited. Mine.");
+    assert.equal(end.status, "published");
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+// Publish then Unpublish while the sync chunk is still loading: one sync only, so one autosave.
+test("publish and unpublish before the sync code arrives start one autosave, not two", async () => {
+  const made = await api("POST", "/api/v1/posts", { lang: "en", slug: "slow-sync", title: "Slow sync", markdown: "Start." });
+  assert.equal(made.status, 201, JSON.stringify(made.json));
+  const id = made.json.id;
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: "en-US", serviceWorkers: "block" });
+  await context.addCookies(cookies);
+  let release;
+  const held = new Promise((ok) => (release = ok));
+  await context.route("**/chunks/sync-*.js", async (r) => {
+    await held;
+    await r.continue();
+  });
+  const page = await context.newPage();
+  const patches = [];
+  page.on("request", (r) => r.method() === "PATCH" && r.url().endsWith(`/api/v1/posts/${id}`) && patches.push(r.postDataJSON()));
+  const button = (name) => page.getByRole("button", { name, exact: true });
+  const toast = (text) => page.locator(".toast", { hasText: text }).waitFor();
+  try {
+    await page.goto(at(`/admin/posts/${id}`));
+    await page.getByRole("toolbar", { name: tx("admin.editor.toolbar") }).waitFor();
+    await button(tx("admin.editor.pub.publish")).click();
+    await page.locator(".pubpop .btn.primary").click();
+    await toast(tx("admin.editor.pub.published_toast"));
+    await button(tx("admin.editor.pub.settings")).click();
+    await page.getByRole("button", { name: tx("admin.editor.pub.unpublish") }).click();
+    await page.locator(".confirm .btn.danger").click();
+    await toast(tx("admin.editor.pub.unpublished"));
+    // Typed before the sync code arrives: every sync that starts finds text to send.
+    await page.locator(".cm-content").click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type(" Typed.");
+    await page.waitForTimeout(1000); // past the 700 ms local save
+    const loaded = page.waitForResponse((r) => /\/chunks\/sync-/.test(r.url()));
+    release();
+    await loaded;
+    await page.waitForTimeout(5000); // past the autosave delay
+    const autosaves = patches.filter((b) => b.status === undefined);
+    assert.equal(autosaves.length, 1, JSON.stringify(patches));
+    assert.equal(w.query(`SELECT markdown FROM posts WHERE id = ${id}`)[0].markdown, "Start. Typed.");
+    assert.equal(await page.getByRole("alert").filter({ hasText: tx("admin.editor.conflict.server_title") }).count(), 0, "no false conflict");
   } finally {
     await context.close();
   }

@@ -8,7 +8,9 @@ import { readFileSync } from "node:fs";
 import { build } from "esbuild";
 import { safeNext } from "../../web/admin/src/auth/next.ts";
 import { assertion, attestation, b64u, createOptions, fromB64u, getOptions } from "../../web/admin/src/auth/webauthn.ts";
-import { countDrafts } from "../../web/admin/src/editor/drafts.ts";
+import * as drafts from "../../web/admin/src/editor/drafts.ts";
+
+const { countDrafts } = drafts;
 
 const root = new URL("../../", import.meta.url);
 
@@ -190,7 +192,7 @@ test("attestation fields are register/verify's", () => {
 
 // --- drafts ---
 
-// A Map behind the slice of IndexedDB drafts.ts uses: open, transaction, get/put/count/delete.
+// A Map behind the slice of IndexedDB drafts.ts uses: open, transaction, get/put/count/delete/openCursor.
 function fakeIndexedDB(rows) {
   const inRange = (k, r) => (typeof r === "string" ? k === r : k >= r.lower && k <= r.upper);
   const request = (fn) => {
@@ -206,6 +208,18 @@ function fakeIndexedDB(rows) {
     put: (v, k) => request(() => rows.set(k, v) && k),
     count: (r) => request(() => [...rows.keys()].filter((k) => inRange(k, r)).length),
     delete: (r) => request(() => [...rows.keys()].filter((k) => inRange(k, r)).forEach((k) => rows.delete(k))),
+    openCursor(r) {
+      const keys = [...rows.keys()].filter((k) => inRange(k, r)).sort();
+      const req = {};
+      const step = () =>
+        queueMicrotask(() => {
+          const k = keys.shift();
+          req.result = k === undefined ? null : { key: k, value: rows.get(k), continue: step, delete: () => rows.delete(k) };
+          req.onsuccess?.();
+        });
+      step();
+      return req;
+    },
   };
   const db = {
     objectStoreNames: { contains: () => true },
@@ -220,15 +234,31 @@ function fakeIndexedDB(rows) {
   globalThis.indexedDB = { open: () => request(() => db) };
 }
 
+const kept = (body) => ({ title: "T", body, base: null, rev: 1, savedAt: 1 });
 const draftRows = () =>
   new Map([
-    ["1:post-3", {}],
-    ["1:new-ab", {}],
-    ["10:post-3", {}],
-    ["2:post-1", {}],
+    ["1:post-3", kept("a")],
+    ["1:post-3~abcdefgh12345678", kept("another tab's copy")],
+    ["1:new-abcdefghijkl", kept("b")],
+    ["10:post-3", kept("c")],
+    ["2:post-1", kept("d")],
   ]);
 
-test("countDrafts counts one user's drafts only (user 1 is not user 10)", async () => {
+test("a created post's note under its new-post key is swept after a day, not before; drafts and other users stay", async () => {
+  const now = 10 * 86_400_000;
+  const rows = new Map([
+    ["1:new-oldoldoldold", { movedTo: "1:post-3", at: now - 86_400_001 }],
+    ["1:new-freshfreshfr", { movedTo: "1:post-4", at: now - 60_000 }],
+    ["1:new-abcdefghijkl", kept("b")],
+    ["10:new-oldoldoldold", { movedTo: "10:post-5", at: 0 }],
+  ]);
+  fakeIndexedDB(rows);
+  assert.equal(typeof drafts.sweepMoved, "function", "notes are swept");
+  assert.equal(await drafts.sweepMoved(1, now), 1);
+  assert.deepEqual(new Set(rows.keys()), new Set(["1:new-abcdefghijkl", "1:new-freshfreshfr", "10:new-oldoldoldold"]));
+});
+
+test("countDrafts counts one user's drafts only (user 1 is not user 10), one per post as the list shows", async () => {
   fakeIndexedDB(draftRows());
   assert.equal(await countDrafts(1), 2);
   assert.equal(await countDrafts(10), 1);
@@ -425,7 +455,7 @@ test("signOut clears this user's drafts only after the server signed out", async
   fakeIndexedDB(rows);
   const down = fakeApi({ "POST /api/auth/logout": { ok: false, error: { code: "network", status: 0 } } });
   assert.equal((await flows.signOut(down, 1)).ok, false);
-  assert.equal(rows.size, 4, "a failed sign-out keeps every draft");
+  assert.equal(rows.size, 5, "a failed sign-out keeps every draft");
 
   const api = fakeApi();
   assert.deepEqual(await flows.signOut(api, 1), { ok: true, value: undefined });

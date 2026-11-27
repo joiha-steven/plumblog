@@ -188,6 +188,19 @@ test("kept drafts: only this user's, only with something written, only keys the 
   assert.equal(drafts.toEntry(1, "1:post-7", d(" ", "\n")), undefined, "nothing written");
   assert.equal(drafts.toEntry(1, "1:new-shot-a", d("T")), undefined, "not an id the editor makes");
   assert.equal(drafts.toEntry(1, "1:post-7", { title: 1 }), undefined, "not a draft");
+  assert.deepEqual(drafts.toEntry(1, "1:post-7~abcdefgh12345678", d("T")), { key: "1:post-7~abcdefgh12345678", title: "T", savedAt: 5, post: 7 }, "a tab's side copy names its post");
+  assert.equal(drafts.toEntry(1, "1:post-7~", d("T")), undefined, "not a side key the editor makes");
+});
+
+test("kept drafts: a post's draft and its side copies from other tabs are one row, the newest", () => {
+  const e = (key, savedAt, more) => ({ key, title: key, savedAt, ...more });
+  const out = drafts.onePerPost([
+    e("1:post-7", 5, { post: 7 }),
+    e("1:post-7~aaaaaaaaaaaaaaaa", 9, { post: 7 }),
+    e("1:new-abcdefghijkl~bbbbbbbbbbbbbbbb", 3, { newId: "abcdefghijkl" }),
+    e("1:post-8", 7, { post: 8 }),
+  ]);
+  assert.deepEqual(out.map((x) => x.key), ["1:post-7~aaaaaaaaaaaaaaaa", "1:post-8", "1:new-abcdefghijkl~bbbbbbbbbbbbbbbb"]);
 });
 
 test("pages: kind=page, no filters, no New page button", async () => {

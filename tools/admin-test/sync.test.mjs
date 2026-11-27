@@ -19,6 +19,8 @@ const root = new URL("../../", import.meta.url);
 const out = await build({ entryPoints: [new URL("web/admin/src/editor/sync.ts", root).pathname], bundle: true, write: false, format: "esm", logLevel: "silent" });
 const { startState } = await import(new URL("web/admin/src/editor/drafts.ts", root).href);
 const { settled, slugify, startSync } = await import(`data:text/javascript;base64,${Buffer.from(out.outputFiles[0].text).toString("base64")}`);
+const outClient = await build({ entryPoints: [new URL("web/admin/src/api/client.ts", root).pathname], bundle: true, write: false, format: "esm", logLevel: "silent" });
+const client = await import(`data:text/javascript;base64,${Buffer.from(outClient.outputFiles[0].text).toString("base64")}`);
 
 // A Map behind the slice of IndexedDB drafts.ts uses (as in auth.test.mjs), plus single-key delete.
 const rows = new Map();
@@ -52,6 +54,8 @@ const DELAY = 5;
 const settle = async (ms = 40) => {
   for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, ms / 4));
 };
+/** The keys holding drafts; a created post's new key keeps only a note of where it went (drafts.ts moveDraft). */
+const draftKeys = () => [...rows].filter(([, v]) => typeof v.movedTo !== "string").map(([k]) => k);
 const draft = (title, body, rev, extra = {}) => ({ title, body, base: null, rev, savedAt: 1, ...extra });
 const post = (id, title, markdown, version = 1, warnings = []) => ({
   id, kind: "post", translation_group: id, lang: "en", slug: "s", status: "draft", trashed_from: null, published_at: null, author_id: 1,
@@ -88,6 +92,8 @@ function editor(api, o = {}) {
     body: o.body ?? "",
     said: [],
     chosen: [],
+    lived: [],
+    made: [],
     online: true,
     alive: true,
     note: document.createElement("div"),
@@ -119,9 +125,10 @@ function editor(api, o = {}) {
     {
       api, user: 1, lang: "vi", st: e.st, id: o.post?.id, draft: (o.post?.status ?? "draft") === "draft",
       offline: () => !e.online, alive: () => e.alive, text: () => [e.title, e.body],
-      say: (s) => e.said.push(s), choose: (p) => e.chosen.push(p), note: e.note,
+      say: (s) => e.said.push(s), choose: (p) => e.chosen.push(p), live: (p) => e.lived.push(p), made: (p) => e.made.push(p), note: e.note,
     },
     DELAY,
+    o.slow,
   );
   return e;
 }
@@ -175,6 +182,30 @@ test("a new post is created once, even with edits during a slow create; then upd
   assert.equal(e.st.version, 2);
 });
 
+test("a create with no answer for a while says so, keeps saying so over local saves, and stops once it settles", async () => {
+  reset();
+  let release;
+  const api = fakeApi({ create: (input) => new Promise((r) => (release = () => r({ ok: true, value: post(7, input.title, input.markdown, 1) }))) });
+  const e = editor(api, { slow: 150 });
+  const warn = console.warn;
+  console.warn = () => undefined;
+  try {
+    await e.save("Hello", "first");
+    await settle();
+    assert.ok(!e.said.includes("admin.editor.sync.slow"), "not before the bound");
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(e.said.at(-1), "admin.editor.sync.slow");
+    await e.save("Hello", "second");
+    assert.equal(e.said.at(-1), "admin.editor.sync.slow", "a local save meanwhile does not hide it");
+    release();
+    await settle();
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(e.said.at(-1), "admin.editor.saved");
+  assert.ok(e.said.lastIndexOf("admin.editor.sync.slow") < e.said.lastIndexOf("admin.editor.saved"));
+});
+
 test("on create the URL and the draft key move to the post; the draft stays while the text differs", async () => {
   reset();
   let release;
@@ -187,7 +218,10 @@ test("on create the URL and the draft key move to the post; the draft stays whil
   await settle();
   assert.equal(location.pathname + location.search, "/admin/posts/7");
   assert.equal(e.st.key, "1:post-7");
-  assert.deepEqual([...rows.keys()], ["1:post-7"]);
+  assert.deepEqual(draftKeys(), ["1:post-7"]);
+  const note = [...rows].find(([k]) => k.startsWith("1:new-"))?.[1];
+  assert.equal(note?.movedTo, "1:post-7", "the new key says where it went");
+  assert.ok(Math.abs(note.at - Date.now()) < 5000, "and when, so it can be swept");
   assert.equal(rows.get("1:post-7").body, "sent");
   assert.equal(rows.get("1:post-7").version, 1);
   assert.equal(rows.get("1:post-7").base, 101);
@@ -243,31 +277,126 @@ test("every update sends expected_version; a 409 asks, sends nothing until the w
   await settle();
   assert.equal(api.calls.length, 2, "nothing sent while the choice is open");
   assert.equal(rows.get("1:post-3").body, "mine, more", "the local draft keeps every change");
-
-  // "Keep mine" (index.ts serverChoice): based on the fetched copy, sent with its version.
-  stale = false;
-  Object.assign(e.st, { hold: false, base: theirs.updated_at, version: theirs.version, server: [theirs.title, theirs.markdown] });
-  await e.save();
-  await settle();
-  assert.deepEqual(api.calls[2], ["update", 3, { expected_version: 6, title: "T", markdown: "mine, more" }]);
-  assert.equal(rows.has("1:post-3"), false);
+  // The writer's pick goes through index.ts serverChoice: tools/worker-test/editor-sync.test.mjs.
 });
 
-test("'Use saved' after a 409 loads the server text and sends nothing; the draft goes", async () => {
+test("typing while a save is out: its answer does not say Saved, even when the next send cannot go", async () => {
   reset("/admin/posts/3");
-  const p = post(3, "T", "base", 4);
-  const theirs = post(3, "T2", "theirs", 6);
-  const api = fakeApi({ update: () => conflict("expected_version", 6), get: () => ({ ok: true, value: theirs }) });
-  const e = editor(api, { key: "1:post-3", post: p, title: "T", body: "base" });
+  let release;
+  const api = fakeApi({
+    update: (id, input) => new Promise((r) => (release = () => r({ ok: true, value: post(id, input.title, input.markdown, input.expected_version + 1) }))),
+  });
+  const e = editor(api, { key: "1:post-3", post: post(3, "T", "base", 4), title: "T", body: "base" });
+  await e.save("T", "sent");
+  await settle();
+  assert.equal(api.calls.length, 1);
+  await e.save("T", "sent, then more");
+  e.online = false; // the follow-up send exits quietly
+  release();
+  await settle();
+  assert.equal(api.calls.length, 1);
+  assert.equal(e.said.at(-1), "admin.editor.saved_here", "the newer text is only on this device");
+});
+
+test("a 409 whose server copy is still a draft: after Keep mine the draft autosaves again", async () => {
+  reset("/admin/posts/3");
+  const theirs = post(3, "T", "theirs", 6);
+  let stale = true;
+  const api = fakeApi({
+    update: (id, input) => (stale ? conflict("expected_version", 6) : { ok: true, value: post(id, input.title, input.markdown, input.expected_version + 1) }),
+    get: () => ({ ok: true, value: theirs }),
+  });
+  const e = editor(api, { key: "1:post-3", post: post(3, "T", "base", 4), title: "T", body: "base" });
   await e.save("T", "mine");
   await settle();
   assert.equal(e.chosen.length, 1);
+  assert.deepEqual(e.lived, [], "a draft copy does not stop the sync");
+  // Keep mine, as index.ts serverChoice does it.
+  stale = false;
   Object.assign(e.st, { hold: false, base: theirs.updated_at, version: theirs.version, server: [theirs.title, theirs.markdown] });
-  await e.save("T2", "theirs");
+  await e.save("T", "mine, kept");
   await settle();
-  assert.equal(api.calls.length, 2, "update, get; nothing more");
-  assert.equal(rows.has("1:post-3"), false);
-  assert.equal(e.st.version, 6);
+  assert.deepEqual(api.calls.at(-1), ["update", 3, { expected_version: 6, title: "T", markdown: "mine, kept" }]);
+});
+
+test("a 409 whose server copy is published, scheduled or trashed stops sending for good", async () => {
+  for (const status of ["published", "scheduled", "trashed"]) {
+    reset("/admin/posts/3");
+    const theirs = { ...post(3, "T", "live text", 6), status };
+    const api = fakeApi({ update: () => conflict("expected_version", 6), get: () => ({ ok: true, value: theirs }) });
+    const e = editor(api, { key: "1:post-3", post: post(3, "T", "base", 4), title: "T", body: "base" });
+    await e.save("T", "mine");
+    await settle();
+    assert.deepEqual(api.calls.map((c) => c[0]), ["update", "get"], status);
+    assert.deepEqual(e.lived.map((p) => p.status), [status], "the editor is told, once");
+    assert.equal(e.chosen.length, 1, "the writer still picks which text stays here");
+    assert.equal(e.said.at(-1), "admin.editor.saved_here");
+    // Whatever the pick sets (index.ts adopt clears hold and takes the version), nothing is sent.
+    Object.assign(e.st, { hold: false, base: theirs.updated_at, version: theirs.version, server: [theirs.title, theirs.markdown] });
+    await e.save("T", "mine, kept");
+    await settle();
+    assert.equal(api.calls.length, 2, `${status}: never sent after it went live`);
+    assert.equal(rows.get("1:post-3").body, "mine, kept", "kept on this device");
+  }
+});
+
+test("a request with no answer settles as network within its bound, and the next change saves", async () => {
+  reset("/admin/posts/3");
+  const real = globalThis.fetch;
+  const sent = [];
+  globalThis.fetch = (path, init) => {
+    sent.push([init.method, path]);
+    // The first PATCH hangs until aborted; later ones answer.
+    if (sent.length === 1)
+      return new Promise((_, no) => init.signal.addEventListener("abort", () => no(new DOMException("aborted", "AbortError"))));
+    const body = JSON.parse(init.body);
+    return Promise.resolve(new Response(JSON.stringify(post(3, body.title, body.markdown, body.expected_version + 1)), { status: 200 }));
+  };
+  const errors = [];
+  const logErr = console.error;
+  console.error = (...a) => errors.push(a.join(" "));
+  try {
+    const api = client.httpApi(30);
+    // A create is never cut short: a slow one that lands would be sent again as a second post.
+    const create = api.createPost({ lang: "en", slug: "s", title: "T", markdown: "m" });
+    const raced = await Promise.race([create, new Promise((ok) => setTimeout(() => ok("pending"), 200))]);
+    assert.equal(raced, "pending", "a create has no bound");
+    sent.length = 0;
+    const hung = await Promise.race([api.updatePost(3, { expected_version: 4 }), new Promise((ok) => setTimeout(() => ok("still hung"), 1000))]);
+    assert.deepEqual(hung, { ok: false, error: { code: "network", status: 0 } });
+    assert.match(errors.join("\n"), /no answer within 30 ms/);
+
+    sent.length = 0;
+    const e = editor(api, { key: "1:post-3", post: post(3, "T", "base", 4), title: "T", body: "base" });
+    await e.save("T", "one");
+    await settle(200);
+    assert.equal(e.said.at(-1), "admin.editor.not_saved", "a hung save is a failed save");
+    assert.equal(rows.get("1:post-3").body, "one", "the draft stays");
+    await e.save("T", "two");
+    await settle(200);
+    assert.deepEqual(sent, [["PATCH", "/api/v1/posts/3"], ["PATCH", "/api/v1/posts/3"]], "busy cleared: the next change is sent");
+    assert.equal(e.said.at(-1), "admin.editor.saved");
+  } finally {
+    globalThis.fetch = real;
+    console.error = logErr;
+  }
+});
+
+test("an expired session waits for the editor's local save, at most its bound", async () => {
+  let done = false;
+  client.session.flush = () => new Promise((ok) => setTimeout(() => ok((done = true)), 20));
+  await client.flushLocal(1000);
+  assert.equal(done, true, "waited for the flush");
+  client.session.flush = () => new Promise(() => undefined);
+  const t0 = Date.now();
+  await client.flushLocal(50);
+  assert.ok(Date.now() - t0 < 500, "a stuck flush never keeps the writer from signing in");
+  client.session.flush = () => Promise.reject(new Error("boom"));
+  const logErr = console.error;
+  console.error = () => undefined;
+  await client.flushLocal(50);
+  console.error = logErr;
+  client.session.flush = undefined;
 });
 
 test("a 409 whose server copy already has this text needs no choice", async () => {
@@ -361,7 +490,7 @@ test("a failed save keeps the local draft, says so once, and retries on the next
   await settle();
   assert.equal(api.calls.length, 3);
   assert.equal(e.said.at(-1), "admin.editor.saved");
-  assert.equal(rows.size, 0);
+  assert.equal(draftKeys().length, 0);
 });
 
 test("warnings show under the title, then clear on a save without them", async () => {
@@ -435,7 +564,7 @@ test("a remount during a slow create waits for it: one create, then an update", 
   assert.deepEqual(api.calls.map((c) => c[0]), ["create", "update"]);
   assert.deepEqual(api.calls[1].slice(1), [7, { expected_version: 1, title: "T", markdown: "two" }]);
   assert.equal(b.st.key, "1:post-7");
-  assert.equal(rows.size, 0, "server holds the text: no draft left");
+  assert.equal(draftKeys().length, 0, "server holds the text: no draft left");
 });
 
 test("what the server confirmed is its answer: a normalised text keeps the draft", async () => {
@@ -487,6 +616,6 @@ test("a create that settles within the bound: the mount gets the post and its dr
   release();
   const p = await wait;
   assert.equal(p?.id, 8);
-  assert.deepEqual([...rows.keys()], ["1:post-8"]);
+  assert.deepEqual(draftKeys(), ["1:post-8"]);
   assert.equal(rows.get("1:post-8").version, 1);
 });

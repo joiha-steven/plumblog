@@ -15,6 +15,11 @@ export interface Pub {
   publishedAt: number | null;
   /** The server's slug; "" for a post not created yet. */
   slug: string;
+  /**
+   * The title the server slug was last seen with (load, create, publish). Autosave never
+   * changes it, so a draft's slug follows a retitle while it still matches this title.
+   */
+  slugTitle: string;
   /** The slug the writer typed in the settings panel; undefined until they do. */
   typed: string | undefined;
   /** "Later" is picked: the button says Schedule. */
@@ -23,9 +28,24 @@ export interface Pub {
   at: string;
 }
 
+/** A `datetime-local` value (local time) for a time in ms. */
+export const localValue = (ms: number): string => new Date(ms - new Date(ms).getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+
+/** The server's copy `p` is what `pub` now says; what the writer typed for the slug stays. */
+export const fromPost = (pub: Pub, p: Post): Pub => {
+  const status = p.status === "trashed" ? "draft" : p.status;
+  const later = status === "scheduled";
+  // A scheduled post's time is its publish time, so Schedule works before the panel is drawn.
+  const at = later && p.published_at ? localValue(p.published_at) : "";
+  return Object.assign(pub, { id: p.id, status, publishedAt: p.published_at, slug: p.slug, slugTitle: p.title, later, at });
+};
+
+/** The post was just created from the draft: only what names it; "later" and its time stay as picked. */
+export const created = (pub: Pub, p: Post): Pub => Object.assign(pub, { id: p.id, slug: p.slug, slugTitle: p.title });
+
 export const newPub = (post: Post | undefined): Pub => {
-  const status = post?.status === "trashed" ? "draft" : (post?.status ?? "draft");
-  return { id: post?.id, status, publishedAt: post?.published_at ?? null, slug: post?.slug ?? "", typed: undefined, later: status === "scheduled", at: "" };
+  const pub: Pub = { id: undefined, status: "draft", publishedAt: null, slug: "", slugTitle: "", typed: undefined, later: false, at: "" };
+  return post ? fromPost(pub, post) : pub;
 };
 
 /** The Publish button: Publish for a draft, Update for a live post, Schedule when "later". */

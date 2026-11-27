@@ -502,6 +502,7 @@ load_other = "Tải bản kia"
 [admin.editor.sync]
 failed = "Chưa lưu được lên trang. Bài vẫn được giữ trên máy này và sẽ được gửi lại khi bạn sửa tiếp hoặc có mạng trở lại."
 slug_taken = "Chưa lưu được lên trang: địa chỉ theo tiêu đề này đã có bài dùng. Hãy đổi tiêu đề một chút rồi viết tiếp."
+slow = "Vẫn đang lưu lên trang. Bài của bạn vẫn an toàn trên máy này."
 
 [admin.editor.pub]
 publish = "Đăng"
@@ -544,6 +545,7 @@ slug_conflict = "Đã có bài khác dùng đường dẫn này. Hãy chọn đ�
 time_missing = "Hãy chọn thời điểm đăng."
 time_past = "Hãy chọn một thời điểm trong tương lai."
 failed = "Chưa làm được. Không mất gì cả; hãy thử lại sau giây lát."
+status_moved = "Trạng thái bài này vừa được đổi ở nơi khác. Hãy xem lại rồi bấm nút một lần nữa."
 
 [admin.editor.warning.markdown]
 math_invalid = "Có công thức chưa hiển thị được; hãy xem lại phần TeX giữa hai dấu đô la."

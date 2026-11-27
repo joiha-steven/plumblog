@@ -132,7 +132,7 @@ function setup(api, p, text = ["Hello", "Body"]) {
   document.body.replaceChildren();
   const key = p ? `1:post-${p.id}` : `1:new-${new URLSearchParams(location.search).get("draft")}`;
   const { st } = m.startState(key, undefined, p);
-  const e = { text, chosen: [], applied: 0, busy: [], online: true, sync: undefined };
+  const e = { text, chosen: [], applied: 0, relabeled: 0, lived: [], busy: [], online: true, sync: undefined };
   const pub = m.newPub(p);
   const gear = document.createElement("button");
   gear.setAttribute("data-panel-btn", "");
@@ -154,12 +154,27 @@ function setup(api, p, text = ["Hello", "Body"]) {
     offline: () => !e.online,
     wide: () => true,
     busy: (on) => e.busy.push(on),
-    applied: () => e.applied++,
+    // As index.ts: a post that is not a draft never autosaves.
+    applied: () => {
+      e.applied++;
+      if (pub.status !== "draft") stopSync();
+    },
+    relabel: () => e.relabeled++,
+    live: (s) => {
+      e.lived.push(s);
+      m.fromPost?.(pub, s);
+      if (s.status !== "draft") stopSync();
+    },
     choose: (s) => e.chosen.push(s),
+  };
+  const stopSync = () => {
+    e.sync?.stop();
+    e.sync = undefined;
   };
   e.sync = m.startSync({
     api, user: 1, lang: "en", st, id: p?.id, draft: pub.status === "draft", offline: () => !e.online, alive: () => true,
-    text: () => e.text, say: () => undefined, choose: (s) => e.chosen.push(s), note: document.createElement("div"),
+    text: () => e.text, say: () => undefined, choose: (s) => e.chosen.push(s), live: (s) => e.host.live(s),
+    made: (s) => (m.created ?? m.fromPost)?.(pub, s), note: document.createElement("div"),
   }, 5);
   return e;
 }
@@ -182,16 +197,141 @@ test("the button says Publish for a draft, Update for a live post, Schedule for 
 
 test("slugPlan follows the title for a draft named after it, keeps what the server has otherwise", () => {
   const draft = { ...m.newPub(post(1, { slug: "hello" })) };
-  assert.deepEqual(m.slugPlan(draft, "Hello", "Hello"), { slug: "hello", send: false });
-  assert.deepEqual(m.slugPlan(draft, "Hello again", "Hello"), { slug: "hello-again", send: true });
-  assert.deepEqual(m.slugPlan({ ...draft, slug: "hello-2" }, "Hello", "Hello"), { slug: "hello-2", send: false }, "a numbered variant stays");
-  assert.deepEqual(m.slugPlan({ ...draft, typed: "My Link" }, "Hello", "Hello"), { slug: "my-link", send: true });
-  assert.deepEqual(m.slugPlan({ ...draft, typed: "hello" }, "Hello", "Hello"), { slug: "hello", send: false });
+  assert.deepEqual(m.slugPlan(draft, "Hello"), { slug: "hello", send: false });
+  assert.deepEqual(m.slugPlan(draft, "Hello again"), { slug: "hello-again", send: true });
+  assert.deepEqual(m.slugPlan({ ...draft, slug: "hello-2" }, "Hello"), { slug: "hello-2", send: false }, "a numbered variant stays");
+  assert.deepEqual(m.slugPlan({ ...draft, typed: "My Link" }, "Hello"), { slug: "my-link", send: true });
+  assert.deepEqual(m.slugPlan({ ...draft, typed: "hello" }, "Hello"), { slug: "hello", send: false });
   const live = m.newPub(post(1, { status: "published", slug: "old-name" }));
-  assert.deepEqual(m.slugPlan(live, "Totally new title", "Hello"), { slug: "old-name", send: false }, "a live link never follows the title");
-  assert.deepEqual(m.slugPlan(m.newPub(undefined), "Hi there", undefined), { slug: "hi-there", send: false });
+  assert.deepEqual(m.slugPlan(live, "Totally new title"), { slug: "old-name", send: false }, "a live link never follows the title");
+  assert.deepEqual(m.slugPlan(m.newPub(undefined), "Hi there"), { slug: "hi-there", send: false });
   const custom = m.newPub(post(1, { slug: "custom" }));
-  assert.deepEqual(m.slugPlan(custom, "Hello", "Hello"), { slug: "custom", send: false }, "a slug that is not the title's stays");
+  assert.deepEqual(m.slugPlan(custom, "Hello"), { slug: "custom", send: false }, "a slug that is not the title's stays");
+});
+
+// Review item 1: autosave moves the server title, so the slug must not be compared with it.
+test("a draft retitled and autosaved still gets the new title's slug; the address shown is the slug sent", async () => {
+  const api = fakeApi();
+  const e = setup(api, post(7));
+  e.text = ["Hello again", "Body"];
+  e.sync.changed();
+  await until(() => updates(api).length === 1 && e.st.server[0] === "Hello again");
+  m.publishClick(e.host, e.anchor);
+  assert.match(popup().textContent, /\/en\/hello-again/);
+  // Retitled again while the confirm is open: what was shown is what is sent.
+  e.text = ["Third title", "Body"];
+  popup().querySelector(".btn.primary").click();
+  await until(() => e.applied === 1);
+  const sent = updates(api)[1][2];
+  assert.equal(sent.slug, "hello-again");
+  assert.equal(sent.title, "Third title");
+});
+
+// Review item 2.
+test("a scheduled post can be rescheduled before the settings panel was ever drawn", async () => {
+  const api = fakeApi();
+  const at = Math.ceil((Date.now() + 2 * 86_400_000) / 60_000) * 60_000;
+  const e = setup(api, post(7, { status: "scheduled", published_at: at }));
+  e.text = ["Hello", "Edited"];
+  m.publishClick(e.host, e.anchor);
+  assert.notEqual(toastText(), tx("admin.editor.pub.time_missing"));
+  assert.ok(popup(), "the confirm opens");
+  popup().querySelector(".btn.primary").click();
+  await until(() => e.applied === 1);
+  assert.deepEqual(updates(api)[0][2], { expected_version: 3, title: "Hello", markdown: "Edited", status: "scheduled", published_at: at });
+});
+
+// Review item 3: picking now/later only relabels the button; the status line is not redrawn.
+test("choosing later in the panel relabels the button and nothing else", () => {
+  const e = setup(fakeApi(), post(7));
+  m.openPanel(e.host);
+  const radios = document.querySelectorAll('input[name="pub-when"]');
+  radios[1].dispatchEvent(new win.Event("change"));
+  assert.equal(e.pub.later, true);
+  assert.equal(e.relabeled, 1);
+  assert.equal(e.applied, 0);
+});
+
+// Review item 4: no autosave goes out while the publish update is in flight.
+test("autosave waits while a publish request is out, so no second update carries the same version", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const api = fakeApi({
+    update: async (id, input) => {
+      if (input.status) await gate;
+      const { expected_version: v, ...rest } = input;
+      return { ok: true, value: post(id, { ...rest, published_at: rest.status === "published" ? 5000 : null, version: v + 1 }) };
+    },
+  });
+  const e = setup(api, post(7));
+  e.text = ["Hello", "Body edited"];
+  m.publishClick(e.host, e.anchor);
+  popup().querySelector(".btn.primary").click();
+  await until(() => updates(api).length === 1);
+  e.text = ["Hello", "Typed during publish"];
+  e.sync?.changed();
+  await quiet(60);
+  assert.equal(updates(api).length, 1, "no autosave during the publish request");
+  release();
+  await until(() => e.applied === 1);
+  await quiet(60);
+  assert.equal(updates(api).length, 1, "a published post never autosaves after");
+});
+
+test("a save answered after the sync stopped is not acted on", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const api = fakeApi({ update: async () => (await gate, conflict("expected_version", 9)), get: () => ({ ok: true, value: post(7, { markdown: "Else", version: 9 }) }) });
+  const e = setup(api, post(7));
+  e.text = ["Hello", "Mine"];
+  e.sync.changed();
+  await until(() => updates(api).length === 1);
+  e.sync.stop();
+  const warn = console.warn;
+  console.warn = () => undefined;
+  try {
+    release();
+    await quiet(60);
+  } finally {
+    console.warn = warn;
+  }
+  assert.deepEqual(api.calls.map((c) => c[0]), ["update"], "no read, no choice after stop");
+  assert.equal(e.chosen.length, 0);
+});
+
+// Review item 5: another tab published it; Keep mine must not autosave over the live post.
+test("a 409 from a post published elsewhere adopts its status; Keep mine then autosaves nothing", async () => {
+  const server = post(7, { status: "published", published_at: 1000, markdown: "Theirs", version: 5, updated_at: 500 });
+  const api = fakeApi({ update: (id, input) => (input.status ? conflict("expected_version", 5) : assert.fail("autosave sent over a live post")), get: () => ({ ok: true, value: server }) });
+  const e = setup(api, post(7));
+  e.text = ["Hello", "Mine"];
+  const warn = console.warn;
+  console.warn = () => undefined;
+  try {
+    m.publishClick(e.host, e.anchor);
+    popup().querySelector(".btn.primary").click();
+    await until(() => e.chosen.length === 1);
+    assert.equal(e.pub.status, "published", "the new status is adopted");
+    // Keep mine, as index.ts serverChoice does it.
+    Object.assign(e.st, { hold: false, base: server.updated_at, version: server.version, server: [server.title, server.markdown] });
+    e.sync?.changed();
+    await quiet(60);
+  } finally {
+    console.warn = warn;
+  }
+  assert.deepEqual(api.calls.map((c) => c[0]), ["update", "get"]);
+  assert.equal(m.label(e.pub), tx("admin.editor.pub.update"));
+});
+
+// Review item 6: a post created by autosave shows Trash without a publish or a reload.
+test("a post created by autosave knows its id: the panel shows Trash", async () => {
+  const api = fakeApi();
+  const e = setup(api, undefined, ["Hello", "Body"]);
+  e.sync.changed();
+  await until(() => api.calls.length === 1 && location.pathname === "/admin/posts/7");
+  assert.equal(e.pub.id, 7);
+  m.openPanel(e.host);
+  assert.ok(document.querySelector('[data-act="trash"]'), "Trash shows");
 });
 
 test("publishing a draft sends one update: text, status, version; no time, no slug when unchanged", async () => {
@@ -392,11 +532,34 @@ test("a new post publishes after a single create, then one update", async () => 
   assert.equal(api.calls.length, 2, "nothing else is sent");
 });
 
-test("a failed create publishes nothing", async () => {
-  const api = fakeApi({ create: () => ({ ok: false, error: { code: "internal", status: 500 } }) });
-  const e = setup(api, undefined);
+// Found in the merge: the create's answer (a draft) must not undo "later" and its time.
+test("a new post scheduled before it exists is created once, then scheduled", async () => {
+  const api = fakeApi();
+  const e = setup(api, undefined, ["Later", "Body"]);
+  e.pub.later = true;
+  e.pub.at = m.localValue(Date.now() + 86_400_000);
+  const at = new Date(e.pub.at).getTime();
   m.publishClick(e.host, e.anchor);
   popup().querySelector(".btn.primary").click();
-  await until(() => toastText() === tx("admin.editor.pub.failed"));
+  await until(() => e.applied === 1);
+  assert.deepEqual(api.calls.map((c) => c[0]), ["create", "update"]);
+  assert.deepEqual(api.calls[1][2], { expected_version: 1, title: "Later", markdown: "Body", status: "scheduled", published_at: at });
+});
+
+test("a failed create publishes nothing, and says why in the log", async () => {
+  const api = fakeApi({ create: () => ({ ok: false, error: { code: "internal", status: 500 } }) });
+  const e = setup(api, undefined);
+  const log = console.error;
+  const logged = [];
+  console.error = (...a) => logged.push(a.join(" "));
+  try {
+    m.publishClick(e.host, e.anchor);
+    popup().querySelector(".btn.primary").click();
+    await until(() => toastText() === tx("admin.editor.pub.failed"));
+  } finally {
+    console.error = log;
+  }
   assert.deepEqual(api.calls.map((c) => c[0]), ["create"]);
+  // Review item 7: the toast alone left nothing for the next person to find.
+  assert.match(logged.join("\n"), /nothing to publish yet/);
 });

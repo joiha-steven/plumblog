@@ -236,9 +236,10 @@ test("a writer accepts an invite and the account page loads for them", async () 
     await page.locator("#main").getByText(tx("admin.role.writer"), { exact: true }).waitFor();
     await page.getByText(tx("admin.account.passkeys_empty"), { exact: true }).waitFor();
 
-    // Signing out with drafts on this device asks first, then deletes this writer's only.
+    // Signing out with drafts on this device asks first, then deletes this writer's only. The
+    // count is one per post, as the posts list shows them: a side copy (another tab's) adds none.
     const me = invited.query(`SELECT id FROM users WHERE login = ${sq(WRITER.login)}`)[0].id;
-    const keys = [`${me}:new-a`, `${me}:post-5`, "1:new-b"];
+    const keys = [`${me}:new-aaaaaaaaaaaa`, `${me}:post-5`, `${me}:post-5~abcdefgh12345678`, "1:new-bbbbbbbbbbbb"];
     await idb(page, "put", keys);
     await page.getByRole("button", { name: new RegExp(`^${WRITER.name}`) }).click();
     await page.getByRole("button", { name: tx("admin.account.signout"), exact: true }).click();
@@ -247,7 +248,7 @@ test("a writer accepts an invite and the account page loads for them", async () 
     assert.deepEqual(await idb(page, "keys"), keys.toSorted());
     await page.getByRole("button", { name: tx("admin.account.signout_delete"), exact: true }).click();
     await page.waitForURL(/\/admin\/signin$/);
-    assert.deepEqual(await idb(page, "keys"), ["1:new-b"]);
+    assert.deepEqual(await idb(page, "keys"), ["1:new-bbbbbbbbbbbb"]);
     assert.equal(invited.query("SELECT count(*) AS n FROM sessions")[0].n, 0);
     assert.deepEqual(problems, []);
   } finally {

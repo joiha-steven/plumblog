@@ -18,7 +18,7 @@ import { HREF, go } from "../router";
 import { closePop, openPop, toast } from "../ui";
 import { countWords } from "./commands";
 import type { EdState } from "./drafts";
-import { type Pub, label } from "./pub";
+import { type Pub, created, fromPost, label, localValue } from "./pub";
 import { type Sync, accept, slugify } from "./sync";
 
 /** What the panel keeps between redraws. */
@@ -49,17 +49,29 @@ export interface PubHost {
   busy(on: boolean): void;
   /** `pub` changed: redraw the chip, the button and start or stop draft saving. */
   applied(): void;
+  /** Only `pub.later` changed: the button's label follows; nothing else does. */
+  relabel(): void;
+  /** The server copy's status moved on elsewhere: the editor adopts it (and stops autosave if live). */
+  live(p: Post): void;
   /** The server copy moved on: the choice banner (index.ts serverChoice). */
   choose(p: Post): void;
 }
 
 const BASE = /-\d+$/;
 
-/** The slug the post will have: what the writer typed, else the title's while it is still a draft named after it. */
-export function slugPlan(pub: Pub, title: string, savedTitle: string | undefined): { slug: string; send: boolean } {
+export interface SlugPlan {
+  slug: string;
+  send: boolean;
+}
+
+/**
+ * The slug the post will have: what the writer typed, else the title's while it is still a
+ * draft named after the title its slug was made with (`pub.slugTitle`, which autosave leaves).
+ */
+export function slugPlan(pub: Pub, title: string): SlugPlan {
   const typed = pub.typed?.trim() ? slugify(pub.typed) : undefined;
   if (typed !== undefined) return { slug: typed, send: typed !== pub.slug };
-  const auto = pub.status === "draft" && (pub.slug === "" || pub.slug.replace(BASE, "") === slugify(savedTitle ?? title));
+  const auto = pub.status === "draft" && (pub.slug === "" || pub.slug.replace(BASE, "") === slugify(pub.slugTitle));
   if (!auto) return { slug: pub.slug, send: false };
   const want = slugify(title);
   // No slug yet: the create names it from the title.
@@ -67,8 +79,7 @@ export function slugPlan(pub: Pub, title: string, savedTitle: string | undefined
   return same ? { slug: pub.slug || want, send: false } : { slug: want, send: true };
 }
 
-/** A `datetime-local` value (local time) for a time in ms. */
-export const localValue = (ms: number): string => new Date(ms - new Date(ms).getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+export { localValue };
 const atMs = (v: string): number => (v ? new Date(v).getTime() : Number.NaN);
 const when = (ms: number): string => new Intl.DateTimeFormat(lang(), { dateStyle: "medium", timeStyle: "short" }).format(ms);
 
@@ -96,9 +107,18 @@ async function stale(host: PubHost, id: number): Promise<boolean> {
     return false;
   }
   const p = r.value;
+  // Published, unpublished or trashed elsewhere: adopt that first (a live post stops autosave),
+  // so no pick below sends over it; the writer then decides again with the new status shown.
+  const moved = p.status !== host.pub.status;
+  if (moved) {
+    console.warn(`admin editor: post ${p.id} is ${p.status} on the server, the editor had ${host.pub.status}`);
+    host.live(p);
+  }
   if (sameText(host.text(), p)) {
     Object.assign(st, { hold: false, base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
-    return true;
+    if (!moved) return true;
+    toast(t("admin.editor.pub.status_moved"), 6000);
+    return false;
   }
   host.choose(p);
   return false;
@@ -106,21 +126,26 @@ async function stale(host: PubHost, id: number): Promise<boolean> {
 
 /** Sends one update built by `build`, after sync has sent what waits. The saved post, or undefined (said). */
 async function commit(host: PubHost, build: () => PostUpdateInput): Promise<Post | undefined> {
-  const p = await send(host, build);
-  // Nothing went through: the autosave that `flush` held back starts again.
-  if (!p) host.sync()?.changed();
-  return p;
+  // Autosave is held from the flush to the answer, so it never sends with the same version.
+  const sync = host.sync();
+  try {
+    return await send(host, sync, build);
+  } finally {
+    // A stopped sync (the post went live) stays stopped; a draft's goes on.
+    sync?.resume();
+  }
 }
 
-async function send(host: PubHost, build: () => PostUpdateInput): Promise<Post | undefined> {
+async function send(host: PubHost, sync: Sync | undefined, build: () => PostUpdateInput): Promise<Post | undefined> {
   const { pub, st } = host;
   host.busy(true);
   try {
     for (let n = 0; n < 2; n++) {
-      const sent = await host.sync()?.flush();
-      if (sent) Object.assign(pub, { id: sent.id, slug: sent.slug });
+      const sent = await sync?.flush();
+      if (sent && pub.id === undefined) created(pub, sent);
       if (st.hold) return undefined; // a choice is pending
       if (pub.id === undefined) {
+        console.error(`admin editor: nothing to publish yet: the post was not created (${host.offline() ? "offline" : "the create failed or is held"})`);
         toast(t("admin.editor.pub.failed"), 6000);
         return undefined;
       }
@@ -152,7 +177,7 @@ async function send(host: PubHost, build: () => PostUpdateInput): Promise<Post |
 /** The server's answer is now what the editor shows. */
 function adopt(host: PubHost, p: Post): void {
   if (p.status === "trashed") return;
-  Object.assign(host.pub, { id: p.id, status: p.status, publishedAt: p.published_at, slug: p.slug, typed: undefined, later: p.status === "scheduled", at: "" });
+  fromPost(host.pub, p).typed = undefined;
   host.ui.slugError = undefined;
   host.applied();
   host.ui.draw?.();
@@ -181,7 +206,8 @@ export function publishClick(host: PubHost, anchor: HTMLElement): void {
     return;
   }
   const [title, markdown] = host.text();
-  const plan = slugPlan(pub, title, st.server?.[0]);
+  // Decided once: the address shown here is the slug sent.
+  const plan = slugPlan(pub, title);
   const words = countWords(`${title} ${markdown}`);
   const question = pub.later ? t("admin.editor.pub.q_schedule") : pub.status === "published" ? t("admin.editor.pub.q_update") : t("admin.editor.pub.q_publish");
   const yes = h(
@@ -191,7 +217,7 @@ export function publishClick(host: PubHost, anchor: HTMLElement): void {
       type: "button",
       onclick: () => {
         closePop();
-        void publish(host);
+        void publish(host, plan);
       },
     },
     pub.later || pub.status === "published" ? button : t("admin.editor.pub.publish_now"),
@@ -216,7 +242,7 @@ export function publishClick(host: PubHost, anchor: HTMLElement): void {
   );
 }
 
-async function publish(host: PubHost): Promise<void> {
+async function publish(host: PubHost, plan: SlugPlan): Promise<void> {
   const { pub, st } = host;
   // The time may have passed while the popover was open.
   const bad = timeError(pub);
@@ -228,7 +254,6 @@ async function publish(host: PubHost): Promise<void> {
   const wasScheduled = pub.status === "scheduled";
   const p = await commit(host, () => {
     const [title, markdown] = host.text();
-    const plan = slugPlan(pub, title, st.server?.[0]);
     const input: PostUpdateInput = { expected_version: st.version ?? 0, title, markdown, status: later ? "scheduled" : "published" };
     // Now: the server keeps a live post's time; a scheduled one would keep its future time, so say now.
     if (later) input.published_at = atMs(pub.at);
@@ -320,7 +345,7 @@ function draw(host: PubHost): void {
   if (!panel) return;
   // A scheduled post shows its time; "later" with no time yet starts a day from now.
   if (!pub.at && pub.status === "scheduled" && pub.publishedAt) pub.at = localValue(pub.publishedAt);
-  const plan = slugPlan(pub, host.text()[0], st.server?.[0]);
+  const plan = slugPlan(pub, host.text()[0]);
   const slug = h("input", {
     class: "input",
     id: "pub-slug",
@@ -338,7 +363,7 @@ function draw(host: PubHost): void {
     onchange: () => {
       // Normalised once the writer leaves the field; emptied, it goes back to following the title.
       pub.typed = slug.value.trim() ? slugify(slug.value) : undefined;
-      slug.value = pub.typed ?? slugPlan(pub, host.text()[0], st.server?.[0]).slug;
+      slug.value = pub.typed ?? slugPlan(pub, host.text()[0]).slug;
     },
   });
   const prefix = `/${host.lang}/`;
@@ -364,7 +389,7 @@ function draw(host: PubHost): void {
       at.value = pub.at;
     }
     at.hidden = !later;
-    host.applied();
+    host.relabel();
   };
   const button = (later: boolean) => label({ ...pub, later });
   const radio = (later: boolean, text: string) =>
