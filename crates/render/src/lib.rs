@@ -1,12 +1,32 @@
-//! Theme runtime. minijinja rendering lands with its own issue; this fixes which template a
-//! page uses and the fallback to the default theme.
+//! Theme runtime: loads a theme (theme.toml, templates, locales, CSS) and renders reader pages
+//! from template data. No I/O: theme files come in through [`ThemeFiles`], so the Worker can
+//! feed embedded files today and R2 bundles later, and tests feed plain maps.
+
+mod css;
+mod data;
+mod locale;
+mod theme;
+
+pub use data::{Body, Image, Link, NavItem, PageInfo, Post, Site};
+pub use theme::{Theme, ThemeError, ThemeFiles};
+
+/// Flattens a locale TOML file into `section.key` strings (core `locales/` use the same shape).
+///
+/// # Errors
+/// Invalid TOML or a value that is not text, naming the key.
+pub fn parse_locale(src: &str) -> Result<std::collections::HashMap<String, String>, String> {
+    locale::flatten(src)
+}
 
 /// Reader page kinds; each maps to one theme template.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageKind {
     Home,
     Post,
+    Tag,
+    Archive,
     Search,
+    NotFound,
 }
 
 impl PageKind {
@@ -15,43 +35,33 @@ impl PageKind {
         match self {
             Self::Home => "home.html",
             Self::Post => "post.html",
+            Self::Tag => "tag.html",
+            Self::Archive => "archive.html",
             Self::Search => "search.html",
+            Self::NotFound => "404.html",
+        }
+    }
+
+    /// Exposed to templates as `page.kind`, so a shared layout can mark the current page.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Home => "home",
+            Self::Post => "post",
+            Self::Tag => "tag",
+            Self::Archive => "archive",
+            Self::Search => "search",
+            Self::NotFound => "404",
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TemplateSource {
-    Theme,
-    Default,
-}
-
-/// Themes may override only some templates; the rest come from the default theme
-/// (docs/ARCHITECTURE.md, Themes), so a partial theme still renders every page.
-#[must_use]
-pub fn resolve(page: PageKind, theme_has: impl Fn(&str) -> bool) -> (TemplateSource, &'static str) {
-    let name = page.template();
-    if theme_has(name) {
-        (TemplateSource::Theme, name)
-    } else {
-        (TemplateSource::Default, name)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{PageKind, TemplateSource, resolve};
-
-    #[test]
-    fn missing_theme_template_falls_back_to_default() {
-        let theme = |name: &str| name == "post.html";
-        assert_eq!(
-            resolve(PageKind::Post, theme),
-            (TemplateSource::Theme, "post.html")
-        );
-        assert_eq!(
-            resolve(PageKind::Home, theme),
-            (TemplateSource::Default, "home.html")
-        );
-    }
-}
+/// Plugin slots a theme exposes with `{{ slot("<name>") }}` (docs/ARCHITECTURE.md, Themes).
+pub const SLOTS: &[&str] = &[
+    "head",
+    "body_start",
+    "body_end",
+    "before_post",
+    "after_post",
+    "footer",
+];

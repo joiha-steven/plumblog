@@ -264,6 +264,9 @@ textarea.field { resize: vertical; line-height: 1.55; }
 
 /* Search page: one field and its button on one row, results in the style's post list. */
 .search-title { margin: 0 0 .6em; }
+/* Tag, archive and 404 pages: a title over the style's post list. */
+.list-title { margin: 0 0 1em; }
+.list-sub { margin: 2.5em 0 1.2em; font-size: var(--t-md); }
 .search-row { display: flex; gap: .5em; }
 .search-row .field { flex: 1; min-width: 0; }
 .search-count { margin: 1.4em 0 2.5em; color: var(--c-text-2); }

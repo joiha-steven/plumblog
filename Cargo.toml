@@ -27,6 +27,13 @@ clap = { version = "4.6.7", features = ["derive"] }
 # NFC before slugging so the same heading typed on macOS (NFD) and elsewhere (NFC) gets one id;
 # composition tables are too large to hand-write correctly.
 unicode-normalization = "0.1.26"
+# Theme templates are Jinja (docs/ARCHITECTURE.md, Themes); a template engine with inheritance,
+# macros and autoescape is far more code than a dependency. Only the features templates use.
+minijinja = { version = "3.1.0", default-features = false, features = ["builtins", "macros", "multi_template", "adjacent_loop_items", "serde"] }
+# theme.toml and theme locale files are TOML; parse-only, no writer.
+toml = { version = "1.2.1", default-features = false, features = ["std", "parse", "serde"] }
+# Typed theme.toml and template data; minijinja and toml both speak serde.
+serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
 # Internal module crates; allowed edges between them are enforced by scripts/check.
 plumblog-model = { path = "crates/model" }
 plumblog-markdown = { path = "crates/markdown" }

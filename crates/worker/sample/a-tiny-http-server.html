@@ -1,0 +1,15 @@
+title: A tiny HTTP handler in Rust
+date: 2026-08-14
+tags: rust, code
+excerpt: Routing does not need a framework when there are five routes.
+
+<p>When a service has a handful of routes, a <code>match</code> on the method and path is easier to read than any router. Here is the shape I keep coming back to:</p>
+<div class="code" data-lang="rust"><pre><code><span class="tok-keyword">fn</span> <span class="tok-function">route</span><span class="tok-punct">(</span>method<span class="tok-punct">:</span> <span class="tok-punct">&amp;</span><span class="tok-type">str</span><span class="tok-punct">,</span> path<span class="tok-punct">:</span> <span class="tok-punct">&amp;</span><span class="tok-type">str</span><span class="tok-punct">)</span> <span class="tok-operator">-&gt;</span> <span class="tok-punct">(</span><span class="tok-type">u16</span><span class="tok-punct">,</span> <span class="tok-punct">&amp;</span><span class="tok-type">str</span><span class="tok-punct">)</span> <span class="tok-punct">{</span>
+    <span class="tok-keyword">match</span> <span class="tok-punct">(</span>method<span class="tok-punct">,</span> path<span class="tok-punct">)</span> <span class="tok-punct">{</span>
+        <span class="tok-punct">(</span><span class="tok-string">"GET"</span><span class="tok-punct">,</span> <span class="tok-string">"/healthz"</span><span class="tok-punct">)</span> <span class="tok-operator">=&gt;</span> <span class="tok-punct">(</span><span class="tok-number">200</span><span class="tok-punct">,</span> <span class="tok-string">"ok"</span><span class="tok-punct">),</span>
+        _ <span class="tok-operator">=&gt;</span> <span class="tok-punct">(</span><span class="tok-number">404</span><span class="tok-punct">,</span> <span class="tok-string">"not found"</span><span class="tok-punct">),</span>
+    <span class="tok-punct">}</span>
+<span class="tok-punct">}</span></code></pre></div>
+<p>A plain function like this can be tested without starting anything. The runtime only calls it and turns the result into a response.</p>
+<h2 id="when-to-stop">When to stop</h2>
+<p>Once routes need shared middleware, or paths carry several parameters, a small router earns its place. Until then the match statement is the whole story.</p>

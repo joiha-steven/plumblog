@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{%- from "entry.html" import entry %}
+{%- block title %}{{ t("post.page_title", title=t("tag.title", name=tag.name), site=site.title) }}{% endblock %}
+{% block main %}
+<h1 class="list-title">{{ t("tag.title", name=tag.name) }}</h1>
+<ol class="posts">
+  {%- for post in posts %}{{ entry(post, loop.index <= 4, theme.options.list_images, 2) }}{% endfor %}
+</ol>
+{%- if older_url or newer_url %}
+<nav class="older" aria-label="{{ t("home.pages") }}">
+  {%- if newer_url %}<a href="{{ newer_url }}" rel="prev">{{ t("home.newer_posts") }}</a>{% endif %}
+  {%- if older_url %}<a href="{{ older_url }}" rel="next">{{ t("home.older_posts") }}</a>{% endif %}
+</nav>
+{%- endif %}
+{% endblock %}

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{%- from "entry.html" import entry %}
+{%- block title %}{{ t("post.page_title", title=t("archive.title", year=year), site=site.title) }}{% endblock %}
+{% block main %}
+<h1 class="list-title">{{ t("archive.title", year=year) }}</h1>
+<ol class="posts">
+  {%- for post in posts %}{{ entry(post, loop.index <= 4, theme.options.list_images, 2) }}{% endfor %}
+</ol>
+{%- if years | length > 1 %}
+<nav class="older" aria-label="{{ t("archive.years") }}">
+  {%- for y in years %}
+  <a href="{{ y.url }}"{% if y.name == year | string %} aria-current="page"{% endif %}>{{ y.name }}</a>
+  {%- endfor %}
+</nav>
+{%- endif %}
+{% endblock %}

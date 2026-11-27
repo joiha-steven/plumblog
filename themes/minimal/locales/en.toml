@@ -50,6 +50,35 @@ notice_pending = "Thanks. Your comment will appear once it is approved."
 notice_error = "Your comment was not sent. Check your connection and try again; your text is still here."
 check_failed = "The spam check could not load, so the comment cannot be sent yet. Reload the page and try again."
 
+[date]
+# Post dates in lists and post headers; {month} is one of the month_N names below.
+short = "{month} {day}, {year}"
+month_1 = "Jan"
+month_2 = "Feb"
+month_3 = "Mar"
+month_4 = "Apr"
+month_5 = "May"
+month_6 = "Jun"
+month_7 = "Jul"
+month_8 = "Aug"
+month_9 = "Sep"
+month_10 = "Oct"
+month_11 = "Nov"
+month_12 = "Dec"
+
+[tag]
+title = "#{name}"
+
+[archive]
+title = "Posts from {year}"
+years = "Years"
+
+[notfound]
+title = "Page not found"
+text = "This page does not exist or has moved."
+home = "Go to the home page"
+recent = "Recent posts"
+
 # Labels for the owner's theme options (theme.toml [options]).
 [options]
 group_look = "Look"

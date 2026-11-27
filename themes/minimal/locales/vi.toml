@@ -48,6 +48,34 @@ notice_pending = "Cảm ơn bạn. Bình luận sẽ hiện sau khi được duy
 notice_error = "Chưa gửi được bình luận. Kiểm tra mạng rồi thử lại; chữ bạn viết vẫn còn đây."
 check_failed = "Không tải được bước chống spam nên chưa gửi được. Tải lại trang rồi thử lại."
 
+[date]
+short = "{day} {month}, {year}"
+month_1 = "thg 1"
+month_2 = "thg 2"
+month_3 = "thg 3"
+month_4 = "thg 4"
+month_5 = "thg 5"
+month_6 = "thg 6"
+month_7 = "thg 7"
+month_8 = "thg 8"
+month_9 = "thg 9"
+month_10 = "thg 10"
+month_11 = "thg 11"
+month_12 = "thg 12"
+
+[tag]
+title = "#{name}"
+
+[archive]
+title = "Bài viết năm {year}"
+years = "Các năm"
+
+[notfound]
+title = "Không tìm thấy trang"
+text = "Trang này không có hoặc đã chuyển đi chỗ khác."
+home = "Về trang chủ"
+recent = "Bài mới"
+
 # Nhãn cho các tuỳ chọn của theme (theme.toml [options]).
 [options]
 group_look = "Giao diện"

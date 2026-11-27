@@ -1,3 +1,6 @@
 # UI strings, Vietnamese.
 [site]
 title_fallback = "Trang chưa đặt tên"
+
+[error]
+page_failed = "Trang này tạm thời chưa hiện được. Bạn thử lại sau một phút nhé."
