@@ -165,12 +165,15 @@ fn rel(root: &Path, p: &Path) -> String {
 
 /// A locale file without its `[admin.<name>]` sections (each runs to the next `[` header).
 /// The bare `[admin]` section stays: the Worker's shell uses its title and noscript text.
+/// The `blog` CLI's `[cli]` tables are left out too: the CLI embeds its own copy.
 fn without_admin_client_text(src: &str) -> String {
     let mut keep = true;
     let mut out = String::with_capacity(src.len());
     for line in src.lines() {
         if line.starts_with('[') {
-            keep = !line.starts_with("[admin.");
+            keep = !(line.starts_with("[admin.")
+                || line.starts_with("[cli]")
+                || line.starts_with("[cli."));
         }
         if keep {
             out.push_str(line);

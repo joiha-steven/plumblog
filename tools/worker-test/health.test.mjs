@@ -14,6 +14,8 @@ test("GET /healthz returns 200 ok", async () => {
   const res = await fetch(`${worker.url}/healthz`);
   assert.equal(res.status, 200);
   assert.equal(await res.text(), "ok");
+  // From the CF_VERSION_METADATA binding: `blog deploy` waits for the new version's id here.
+  assert.match(res.headers.get("x-plumblog-version") ?? "", /^[0-9a-f-]{8,}$/i);
 });
 
 test("unknown path returns 404", async () => {
