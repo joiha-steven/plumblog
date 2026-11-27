@@ -7,10 +7,10 @@ import { type IconName, icon } from "./icons";
 import { lang, langs, setLang, t } from "./i18n";
 import { HREF, type Screen } from "./router";
 import { THEMES, type ThemeChoice, applyTheme, storedTheme } from "./theme";
-import { openPop } from "./ui";
+import { closePop, openPop } from "./ui";
 
 /** Renders the frame and returns the element screens draw into. */
-export function shell(root: HTMLElement, screen: Screen, site: string, me: Me | undefined): HTMLElement {
+export function shell(root: HTMLElement, screen: Screen, site: string, me: Me | undefined, signOut?: (anchor: HTMLElement) => void): HTMLElement {
   const owner = me !== undefined && PERMISSION_ROLES["settings.manage"].includes(me.role);
   const link = (to: keyof typeof HREF, ic: IconName, label: string) =>
     h(
@@ -30,7 +30,7 @@ export function shell(root: HTMLElement, screen: Screen, site: string, me: Me | 
       // the user is known (the phone label is hidden on wider screens).
       "aria-label": me ? null : t("admin.nav.account"),
       title: t("admin.nav.account"),
-      onclick: () => openPop(meButton, meMenu(), t("admin.nav.account")),
+      onclick: () => openPop(meButton, meMenu(me && signOut ? () => signOut(meButton) : undefined), t("admin.nav.account")),
     },
     icon("user"),
     me
@@ -88,7 +88,7 @@ function seg<T extends string>(label: string, values: readonly T[], chosen: T, n
   return h("div", { class: "seg", role: "group", "aria-label": label }, ...buttons);
 }
 
-function meMenu(): HTMLElement {
+function meMenu(signOut: (() => void) | undefined): HTMLElement {
   const themeName = (v: ThemeChoice) =>
     // i18n: admin.theme.light admin.theme.dark admin.theme.system
     t(`admin.theme.${v}`);
@@ -97,9 +97,15 @@ function meMenu(): HTMLElement {
   return h(
     "div",
     {},
+    signOut ? h("a", { class: "menu-item", href: HREF.account, "aria-current": location.pathname === HREF.account ? "page" : null }, icon("user"), t("admin.account.title")) : null,
+    signOut ? h("div", { class: "menu-sep" }) : null,
     h("div", { class: "menu-head cap" }, t("admin.me.colors")),
     h("div", { class: "menu-pad" }, seg(t("admin.me.colors"), THEMES, storedTheme(), themeName, applyTheme)),
     h("div", { class: "menu-head cap" }, t("admin.me.language")),
     h("div", { class: "menu-pad" }, seg(t("admin.me.language"), langs(), lang(), langName, (l) => l !== lang() && setLang(l))),
+    signOut ? h("div", { class: "menu-sep" }) : null,
+    signOut
+      ? h("button", { class: "menu-item", type: "button", "data-act": "signout", onclick: () => (closePop(false), signOut()) }, t("admin.account.signout"))
+      : null,
   );
 }

@@ -75,6 +75,10 @@ pub struct DeployRecord {
     /// `passed`, or what the smoke check saw when it failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smoke: Option<String>,
+    /// Every migration the bundle contained: `blog rollback` compares it with `d1_migrations`
+    /// before going back to this version. `None` in records older than this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_migrations: Option<Vec<String>>,
 }
 
 /// One `blog rollback`: code (`kind = "version"`) or database (`kind = "database"`).
@@ -115,6 +119,13 @@ pub struct SiteState {
     /// The version `blog setup` uploaded (503, no body): never a rollback target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder_version: Option<String>,
+    /// Value of the script's `PLUMBLOG_SITE_ID` plain-text binding: marks the script as made
+    /// by `blog` for this site, so setup never adopts someone else's Worker of the same name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_marker: Option<String>,
+    /// The custom domain has served a version once: from then on it is the smoke target.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub domain_smoke_passed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub d1: Option<D1State>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -204,6 +215,23 @@ pub fn save(dir: &Path, state: &SiteState, secrets: &[&ApiToken]) -> Result<(), 
         let _ = fs::remove_file(&tmp);
         fail(e.to_string())
     })
+}
+
+/// Read-modify-write: loads the file as it is now, applies `change`, saves atomically and
+/// returns what was saved. Callers hold the folder lock, so the only other writer is a person
+/// editing the file; their edit survives because nothing writes back an older copy.
+///
+/// # Errors
+/// As [`load`] and [`save`].
+pub fn update(
+    dir: &Path,
+    secrets: &[&ApiToken],
+    change: impl FnOnce(&mut SiteState),
+) -> Result<SiteState, StateError> {
+    let mut st = load(dir)?.unwrap_or_default();
+    change(&mut st);
+    save(dir, &st, secrets)?;
+    Ok(st)
 }
 
 #[cfg(test)]

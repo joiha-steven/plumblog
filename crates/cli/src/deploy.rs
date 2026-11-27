@@ -33,6 +33,7 @@ pub const VERSION_HEADER: &str = "x-plumblog-version";
 /// The version metadata binding the Worker reads its id from.
 pub const VERSION_BINDING: &str = "CF_VERSION_METADATA";
 /// Test-only smoke target instead of the site's origin; loopback only, like the API base.
+/// Requests go to `<base>/<host><path>`, so a test server tells the hosts apart.
 pub const SMOKE_BASE_ENV: &str = "PLUMBLOG_SMOKE_BASE";
 /// Where `blog deploy` builds the bundle in the repo.
 pub const BUILD_DIR: &str = "target/deploy-bundle";
@@ -108,6 +109,9 @@ pub struct RollbackOptions {
     pub yes: bool,
     /// With `--db`: forget the recorded failed migration although `db` is not its bookmark.
     pub clear_failed_migration: bool,
+    /// Go back to a version that lacks migrations the database ran, or whose migrations are
+    /// unknown (not deployed by `blog` from this folder).
+    pub allow_older: bool,
 }
 
 /// What deploy needs besides the API and the setup context.
@@ -166,6 +170,8 @@ struct Site {
     db_id: String,
     bucket: String,
     turnstile: bool,
+    /// Custom domain host, if any.
+    domain: Option<String>,
 }
 
 fn site(state: Option<&SiteState>, cx: &Context) -> Result<Site, Failure> {
@@ -191,6 +197,7 @@ fn site(state: Option<&SiteState>, cx: &Context) -> Result<Site, Failure> {
         db_id: d1.id.clone(),
         bucket: r2.bucket.clone(),
         turnstile: st.turnstile_site_key.is_some(),
+        domain: st.domain.clone(),
     })
 }
 
@@ -305,23 +312,26 @@ fn bundle(run: &mut Run, opts: &Options) -> Result<(PathBuf, Bundle), Failure> {
     Ok((dir, b))
 }
 
-/// Replaces the newest deploy record (this run's, pushed by [`run`]) and saves.
+/// Replaces this run's deploy record (the newest one with its time, pushed by [`run`]) in
+/// the file as it is now, and saves.
 fn put_record(run: &mut Run, rec: &DeployRecord) -> Result<(), Failure> {
-    match run.state.deploys.last_mut() {
-        Some(last) => *last = rec.clone(),
-        None => run.state.deploys.push(rec.clone()),
-    }
-    run.save()
+    run.update(
+        |s| match s.deploys.iter_mut().rev().find(|d| d.at == rec.at) {
+            Some(mine) => *mine = rec.clone(),
+            None => push_capped(&mut s.deploys, rec.clone()),
+        },
+    )
 }
 
-/// One deploy or rollback at a time per site folder: two runs would race on the migrations
-/// and the record. A lock left by a crash is named in the error, to be removed by hand.
-struct Lock(PathBuf);
+/// One setup, deploy or rollback at a time per site folder: two runs would race on the
+/// migrations and the state file. A lock left by a crash is named in the error, to be
+/// removed by hand.
+pub(crate) struct Lock(PathBuf);
 
 pub const LOCK_FILE: &str = ".blog-deploy.lock";
 
 impl Lock {
-    fn take(cx: &Context) -> Result<Self, Failure> {
+    pub(crate) fn take(cx: &Context) -> Result<Self, Failure> {
         let p = cx.dir.join(LOCK_FILE);
         match fs::OpenOptions::new().write(true).create_new(true).open(&p) {
             Ok(mut f) => {
@@ -568,6 +578,15 @@ fn upload_version(
     b: &Bundle,
     assets_jwt: &ApiToken,
 ) -> Result<String, Failure> {
+    // Every version carries the marker, so setup keeps recognising the script; a site set up
+    // before markers gets one now.
+    let marker = if let Some(m) = run.state.script_marker.clone() {
+        m
+    } else {
+        let m = run.random(setup::new_marker())?;
+        run.update(|s| s.script_marker = Some(m.clone()))?;
+        m
+    };
     let mut assets = json!({"jwt": assets_jwt.expose()});
     if let Some(h) = &b.headers {
         // wrangler sends `_headers` text as `assets.config._headers`.
@@ -581,6 +600,7 @@ fn upload_version(
             {"type": "r2_bucket", "name": "MEDIA", "bucket_name": site.bucket},
             {"type": "assets", "name": "ASSETS"},
             {"type": "version_metadata", "name": VERSION_BINDING},
+            {"type": "plain_text", "name": setup::MARKER_BINDING, "text": marker},
         ],
         "keep_bindings": KEEP_BINDINGS,
         "assets": assets,
@@ -750,11 +770,12 @@ fn smoke_once(
 /// `GET <base>/healthz` until it answers 200 with `x-plumblog-version: <version>`, then
 /// `GET <base>/` for 200; retried with backoff. Calls and waits together end within
 /// `rt.smoke_budget`.
-fn smoke(run: &mut Run, base: &str, version: &str, rt: &Runtime) -> Result<(), Seen> {
+fn smoke(run: &mut Run, t: &Targets, version: &str, rt: &Runtime) -> Result<(), Seen> {
+    let base = t.main.as_str();
     run.line(
         key!("cli.deploy.smoke_wait"),
         &[
-            ("origin", base.to_string()),
+            ("origin", t.main_shown.clone()),
             ("seconds", rt.smoke_budget.as_secs().to_string()),
         ],
     );
@@ -782,20 +803,103 @@ fn smoke(run: &mut Run, base: &str, version: &str, rt: &Runtime) -> Result<(), S
     }
 }
 
-/// The smoke target: [`SMOKE_BASE_ENV`] when it is a loopback test server, else the origin.
-fn smoke_base(site: &Site, rt: &Runtime, text: &Text) -> Result<String, Failure> {
+/// Where a smoke check goes for `origin`: the origin itself, or with [`SMOKE_BASE_ENV`] (a
+/// loopback test server) `<base>/<host>`.
+fn smoke_url(origin: &str, rt: &Runtime, text: &Text) -> Result<String, Failure> {
+    let origin = origin.trim_end_matches('/');
     match &rt.smoke_base {
-        Some(b) if crate::cloudflare::client::base_override_ok(b) => {
-            Ok(b.trim_end_matches('/').to_string())
-        }
+        Some(b) if crate::cloudflare::client::base_override_ok(b) => Ok(format!(
+            "{}/{}",
+            b.trim_end_matches('/'),
+            origin.trim_start_matches("https://")
+        )),
         Some(b) => Err(Failure::new(
             Code::SmokeBaseRefused,
             text,
             key!("cli.error.smoke_base_refused"),
             &[("var", SMOKE_BASE_ENV.to_string()), ("value", printable(b))],
         )),
-        None => Ok(site.origin.trim_end_matches('/').to_string()),
+        None => Ok(origin.to_string()),
     }
+}
+
+/// What the smoke check looks at.
+struct Targets {
+    /// Pass/fail: its failure rolls back.
+    main: String,
+    /// `main` as the owner knows it.
+    main_shown: String,
+    /// A custom domain that has never served a version: one try after `main` passed, a
+    /// warning if it does not serve the version yet.
+    domain: Option<(String, String)>,
+    /// `main` is a custom domain that has not passed yet.
+    domain_is_main: bool,
+}
+
+/// The origin, except for a custom domain that has not passed a smoke check yet: its
+/// certificate may take longer than the check, so workers.dev decides and the domain is
+/// only warned about. Without a workers.dev subdomain the domain decides, with a warning.
+fn targets(run: &mut Run, site: &Site, rt: &Runtime) -> Result<Targets, Failure> {
+    let text = run.cx.text;
+    let origin = site.origin.trim_end_matches('/').to_string();
+    let new_domain = site.domain.is_some() && !run.state.domain_smoke_passed;
+    let sub = if new_domain {
+        setup::workers_subdomain(run.client).map_err(|e| run.api(&e))?
+    } else {
+        None
+    };
+    if let Some(sub) = sub {
+        let dev = format!("https://{}.{sub}.workers.dev", site.worker);
+        return Ok(Targets {
+            main: smoke_url(&dev, rt, text)?,
+            main_shown: dev,
+            domain: Some((smoke_url(&origin, rt, text)?, origin)),
+            domain_is_main: false,
+        });
+    }
+    if new_domain {
+        run.line(
+            key!("cli.deploy.domain_cert_wait"),
+            &[("origin", origin.clone())],
+        );
+    }
+    Ok(Targets {
+        main: smoke_url(&origin, rt, text)?,
+        main_shown: origin,
+        domain: None,
+        domain_is_main: new_domain,
+    })
+}
+
+/// After the main check passed: one try on a new custom domain. Not serving the version yet
+/// is a warning; serving it (here or as the main target) makes the domain the smoke target
+/// from now on.
+fn check_domain(run: &mut Run, t: &Targets, version: &str, rt: &Runtime) -> Result<(), Failure> {
+    let passed = match &t.domain {
+        None => t.domain_is_main,
+        Some((url, shown)) => {
+            let agent = plain_agent(rt.smoke_base.is_some(), SMOKE_CALL_TIMEOUT, 3);
+            let left = || SMOKE_CALL_TIMEOUT;
+            match smoke_once(&agent, url, version, &left) {
+                Ok(()) => {
+                    run.line(key!("cli.deploy.domain_ok"), &[("origin", shown.clone())]);
+                    true
+                }
+                Err(seen) => {
+                    let words = seen.words(run.cx.text, version);
+                    run.line(
+                        key!("cli.deploy.domain_pending"),
+                        &[("origin", shown.clone()), ("seen", words)],
+                    );
+                    false
+                }
+            }
+        }
+    };
+    if passed {
+        run.update(|s| s.domain_smoke_passed = true)?;
+    }
+    Ok(())
 }
 
 /// One system log row per event in the site's own D1, as the Worker writes them
@@ -1045,8 +1149,9 @@ fn steps(
     put_record(run, rec)?;
     let (version, previous) = ship(run, site, b, rec)?;
     switch(run, site, rec, &version)?;
-    let smoked = smoke(run, &flow.base, &version, flow.rt);
+    let smoked = smoke(run, &flow.targets, &version, flow.rt);
     settle(run, site, rec, smoked, &version, &previous)?;
+    check_domain(run, &flow.targets, &version, flow.rt)?;
     cron(run, site, rec)?;
     run.line(
         key!("cli.deploy.done"),
@@ -1058,7 +1163,7 @@ fn steps(
 /// What [`steps`] needs beyond the run.
 struct Flow<'a> {
     rt: &'a Runtime<'a>,
-    base: String,
+    targets: Targets,
     stamp: String,
     before: Vec<String>,
     pending: bool,
@@ -1082,7 +1187,8 @@ pub fn run(
     let _lock = Lock::take(cx)?;
     let (st, site) = start(client, account_id, cx)?;
     restore_pending(&st, cx)?;
-    let base = smoke_base(&site, rt, cx.text)?;
+    // Refuses a bad test override before anything is built.
+    smoke_url(&site.origin, rt, cx.text)?;
     let client: &Client = client;
     let mut first = Run {
         client,
@@ -1112,22 +1218,23 @@ pub fn run(
     let before = migrations::recorded(&db).map_err(|e| run.api(&e))?;
     check_not_older(&run, &b, &before, opts.allow_older)?;
     let pending = b.migrations.iter().any(|m| !before.contains(&m.name));
+    let targets = targets(&mut run, &site, rt)?;
 
     // Backup, recorded before anything changes.
     let (at, stamp) = utc(cx.now_ms);
     let mut rec = DeployRecord {
         at,
         outcome: "started".into(),
+        bundle_migrations: Some(b.migrations.iter().map(|m| m.name.clone()).collect()),
         ..DeployRecord::default()
     };
     let mark = migrations::bookmark(&db, client).map_err(|e| run.api(&e))?;
     rec.bookmark = Some(mark.clone());
-    push_capped(&mut run.state.deploys, rec.clone());
-    run.save()?;
+    run.update(|s| push_capped(&mut s.deploys, rec.clone()))?;
     run.line(key!("cli.deploy.bookmark"), &[("bookmark", mark)]);
     let flow = Flow {
         rt,
-        base,
+        targets,
         stamp,
         before,
         pending,
@@ -1197,7 +1304,7 @@ pub fn rollback(
     };
     match &opts.db {
         Some(b) => restore_db(&mut run, &site, b, opts.clear_failed_migration),
-        None => rollback_code(&mut run, &site, opts.to.as_deref(), rt),
+        None => rollback_code(&mut run, &site, opts, rt),
     }
 }
 
@@ -1239,7 +1346,11 @@ fn rollback_target(run: &Run, site: &Site, to: Option<&str>) -> Result<String, F
                 )
             })?,
     };
-    if run.state.placeholder_version.as_deref() == Some(target.as_str()) {
+    // Every secret put or delete makes a new version of the placeholder's code, so the
+    // recorded id is not enough: any version without `DB` is a placeholder.
+    let placeholder = run.state.placeholder_version.as_deref() == Some(target.as_str())
+        || !has_db_binding(client, &site.worker, &target).map_err(|e| run.api(&e))?;
+    if placeholder {
         return Err(Failure::new(
             Code::RollbackPlaceholder,
             cx.text,
@@ -1250,44 +1361,120 @@ fn rollback_target(run: &Run, site: &Site, to: Option<&str>) -> Result<String, F
     Ok(target)
 }
 
+/// Whether the version binds the database: every version `blog deploy` uploads does, the
+/// setup placeholder and the versions secret changes make from it do not. Shape from
+/// wrangler 4.160.0 (`fetchUploadedVersion`; `versions view` reads `resources.bindings`).
+fn has_db_binding(client: &Client, worker: &str, version: &str) -> Result<bool, ApiError> {
+    let v = client.call(
+        &Call::new(Endpoint::VersionGet)
+            .param("script_name", worker.to_string())
+            .param("version_id", version.to_string()),
+    )?;
+    let bindings = v
+        .get("resources")
+        .and_then(|r| r.get("bindings"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| malformed(Endpoint::VersionGet, "no resources.bindings"))?;
+    Ok(bindings.iter().any(|b| {
+        b.get("type").and_then(Value::as_str) == Some("d1")
+            && b.get("name").and_then(Value::as_str) == Some("DB")
+    }))
+}
+
+/// deploy's `--allow-older` guard for a rollback target: the migrations its bundle had (from
+/// its deploy record) must include every one the database ran. No record: unknown, so
+/// refused too. With `allow`, a warning instead.
+fn check_target_not_older(
+    run: &mut Run,
+    site: &Site,
+    target: &str,
+    allow: bool,
+) -> Result<(), Failure> {
+    let cx = run.cx;
+    let known = run
+        .state
+        .deploys
+        .iter()
+        .rev()
+        .find(|d| d.version.as_deref() == Some(target))
+        .and_then(|d| d.bundle_migrations.clone());
+    let (k, args): (_, Vec<(&str, String)>) = match known {
+        None => (
+            if allow {
+                key!("cli.rollback.unknown_allowed")
+            } else {
+                key!("cli.error.rollback_unrecorded")
+            },
+            vec![("version", target.to_string())],
+        ),
+        Some(had) => {
+            let db = Database::new(run.client, site.db_id.clone());
+            let ran = migrations::recorded(&db).map_err(|e| run.api(&e))?;
+            let missing: Vec<String> = ran
+                .iter()
+                .filter(|m| !had.contains(m))
+                .map(|m| printable(m))
+                .collect();
+            if missing.is_empty() {
+                return Ok(());
+            }
+            (
+                if allow {
+                    key!("cli.rollback.older_allowed")
+                } else {
+                    key!("cli.error.rollback_older")
+                },
+                vec![
+                    ("version", target.to_string()),
+                    ("list", missing.join(", ")),
+                ],
+            )
+        }
+    };
+    if allow {
+        run.line(k, &args);
+        return Ok(());
+    }
+    Err(Failure::new(Code::RollbackOlder, cx.text, k, &args))
+}
+
 fn rollback_code(
     run: &mut Run,
     site: &Site,
-    to: Option<&str>,
+    opts: &RollbackOptions,
     rt: &Runtime,
 ) -> Result<(), Failure> {
     let cx = run.cx;
-    let base = smoke_base(site, rt, cx.text)?;
+    smoke_url(&site.origin, rt, cx.text)?;
     let client = run.client;
-    let target = rollback_target(run, site, to)?;
+    let target = rollback_target(run, site, opts.to.as_deref())?;
+    check_target_not_older(run, site, &target, opts.allow_older)?;
+    let targets = targets(run, site, rt)?;
     let current = active_version(client, &site.worker).map_err(|e| run.api(&e))?;
     deploy_version(client, &site.worker, &target).map_err(|e| run.api(&e))?;
     run.line(
         key!("cli.rollback.deployed"),
         &[("version", target.clone()), ("previous", current.clone())],
     );
-    let smoked = smoke(run, &base, &target, rt);
+    let smoked = smoke(run, &targets, &target, rt);
     // A target that fails its check goes away again: the version from before serves.
     let restored = smoked
         .as_ref()
         .err()
         .map(|_| deploy_version(client, &site.worker, &current));
     let (at, _) = utc(cx.now_ms);
-    push_capped(
-        &mut run.state.rollbacks,
-        RollbackRecord {
-            at,
-            kind: "version".into(),
-            to: target.clone(),
-            previous: Some(current.clone()),
-            smoke: Some(match (&smoked, &restored) {
-                (Ok(()), _) => "passed".into(),
-                (Err(s), Some(Ok(()))) => format!("{}; back to previous", s.record()),
-                (Err(s), _) => s.record(),
-            }),
-        },
-    );
-    let saved = run.save();
+    let record = RollbackRecord {
+        at,
+        kind: "version".into(),
+        to: target.clone(),
+        previous: Some(current.clone()),
+        smoke: Some(match (&smoked, &restored) {
+            (Ok(()), _) => "passed".into(),
+            (Err(s), Some(Ok(()))) => format!("{}; back to previous", s.record()),
+            (Err(s), _) => s.record(),
+        }),
+    };
+    let saved = run.update(|s| push_capped(&mut s.rollbacks, record));
     let db = Database::new(client, site.db_id.clone());
     let event = Event::new(
         EventKind::Deploy,
@@ -1350,9 +1537,10 @@ fn restore_db(run: &mut Run, site: &Site, bookmark: &str, clear: bool) -> Result
         None => run.line(key!("cli.rollback.undo_unknown"), &[]),
     }
     // Only the failed migration's own bookmark (or an explicit flag) undoes it.
+    let mut clear_failed = false;
     if let Some(f) = run.state.migrations.failed.clone() {
         if f.bookmark == bookmark || clear {
-            run.state.migrations.failed = None;
+            clear_failed = true;
             run.line(key!("cli.rollback.failed_cleared"), &[("name", f.name)]);
         } else {
             run.line(
@@ -1362,23 +1550,27 @@ fn restore_db(run: &mut Run, site: &Site, bookmark: &str, clear: bool) -> Result
         }
     }
     let (at, _) = utc(cx.now_ms);
-    push_capped(
-        &mut run.state.rollbacks,
-        RollbackRecord {
-            at,
-            kind: "database".into(),
-            to: bookmark.to_string(),
-            previous: previous.clone(),
-            smoke: None,
-        },
-    );
+    let record = RollbackRecord {
+        at,
+        kind: "database".into(),
+        to: bookmark.to_string(),
+        previous: previous.clone(),
+        smoke: None,
+    };
     let db = Database::new(client, site.db_id.clone());
     // What the restored database records; a failed read keeps the old list (setup and
     // deploy read the database again anyway).
-    if let Ok(names) = migrations::recorded(&db) {
-        run.state.migrations.applied = names;
-    }
-    if let Err(f) = run.save() {
+    let names = migrations::recorded(&db).ok();
+    let saved = run.update(|s| {
+        if clear_failed {
+            s.migrations.failed = None;
+        }
+        push_capped(&mut s.rollbacks, record);
+        if let Some(n) = names {
+            s.migrations.applied = n;
+        }
+    });
+    if let Err(f) = saved {
         return Err(Failure::new(
             Code::StateUnwritable,
             cx.text,

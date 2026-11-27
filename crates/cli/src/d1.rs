@@ -180,6 +180,21 @@ pub fn put_setting(db: &Database, key: &str, value_json: &str, now: i64) -> Resu
         .map(drop)
 }
 
+/// `delete_setting`'s bump condition and delete (crates/worker/src/d1/settings.rs).
+const BUMP_IF_SETTING: &str = "UPDATE site SET content_version = content_version + 1 \
+     WHERE id = 1 AND (EXISTS (SELECT 1 FROM settings WHERE key = ?))";
+const DELETE_SETTING: &str = "DELETE FROM settings WHERE key = ?";
+
+/// The Worker's `delete_setting`: the bump (only if the key exists) and the delete in one
+/// request, bump first as in [`put_setting`].
+///
+/// # Errors
+/// As [`Database::batch`].
+pub fn delete_setting(db: &Database, key: &str) -> Result<(), ApiError> {
+    db.batch(&[(BUMP_IF_SETTING, &[key]), (DELETE_SETTING, &[key])])
+        .map(drop)
+}
+
 /// The Worker's `ensure_site_id` write: stores `value_json` only if no site id exists.
 ///
 /// # Errors

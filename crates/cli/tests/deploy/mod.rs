@@ -22,6 +22,8 @@ const NOW: i64 = 1_790_000_000_000;
 const V1: &str = "00000000-0000-4000-8000-000000000001";
 const V2: &str = "00000000-0000-4000-8000-000000000002";
 const WORKERS: &str = "/accounts/acc1/workers/scripts/plumblog";
+/// The test smoke URL is `<fake>/<host><path>`.
+const HOST: &str = "/plumblog.steven.workers.dev";
 
 /// Real time plus virtual waits: `sleep` moves time without waiting, slow calls still count.
 struct FakeClock(std::time::Instant, Cell<Duration>);
@@ -42,6 +44,9 @@ impl Clock for FakeClock {
 }
 
 const V3: &str = "00000000-0000-4000-8000-000000000003";
+/// What serves after setup: the placeholder's code again, made by the second secret put
+/// (`WEBHOOK_KEY`, then `TURNSTILE_SECRET`), as Cloudflare makes a version per secret change.
+const P: &str = "00000000-0000-4000-9000-000000000002";
 
 /// Replaces the bundle's migrations/ with `migs`.
 fn write_migrations(bundle: &Path, migs: &[Migration]) {
@@ -243,7 +248,7 @@ fn log_rows(fake: &Fake, kind: &str) -> Vec<String> {
 }
 
 /// The version: modules, bindings, date, secrets kept, assets completion JWT and _headers.
-fn check_version(fake: &Fake, reqs: &[Recorded]) {
+fn check_version(fake: &Fake, reqs: &[Recorded], marker: &str) {
     let meta = metadata(fake, V2);
     assert_eq!(meta["main_module"], "index.js");
     assert_eq!(meta["compatibility_date"], deploy::COMPATIBILITY_DATE);
@@ -254,6 +259,7 @@ fn check_version(fake: &Fake, reqs: &[Recorded]) {
             {"type": "r2_bucket", "name": "MEDIA", "bucket_name": "plumblog-media"},
             {"type": "assets", "name": "ASSETS"},
             {"type": "version_metadata", "name": "CF_VERSION_METADATA"},
+            {"type": "plain_text", "name": "PLUMBLOG_SITE_ID", "text": marker},
             {"type": "inherit", "name": "WEBHOOK_KEY"},
             {"type": "inherit", "name": "TURNSTILE_SECRET"},
         ])
@@ -271,7 +277,13 @@ fn check_version(fake: &Fake, reqs: &[Recorded]) {
             .unwrap()
             .contains("Cache-Control")
     );
-    let version = fake.state().versions[1].clone();
+    let version = fake
+        .state()
+        .versions
+        .iter()
+        .find(|v| v.id == V2)
+        .unwrap()
+        .clone();
     assert_eq!(version.modules, ["index.js", "index_bg.wasm"]);
     let vreq = reqs.iter().find(|r| r.path.ends_with("/versions")).unwrap();
     assert!(
@@ -302,8 +314,8 @@ fn happy_deploy_runs_the_steps_in_order_with_the_documented_shapes() {
             format!("POST {w}/versions"),
             format!("GET {w}/deployments"),
             format!("POST {w}/deployments"),
-            "GET /healthz".into(),
-            "GET /".into(),
+            format!("GET {HOST}/healthz"),
+            format!("GET {HOST}/"),
             format!("PUT {w}/schedules"),
         ]
     );
@@ -325,7 +337,9 @@ fn happy_deploy_runs_the_steps_in_order_with_the_documented_shapes() {
             "/theme/minimal/site.css"
         ]
     );
-    check_version(&fake, &reqs);
+    let marker = load(&dir).script_marker.unwrap();
+    assert_eq!(marker.len(), 32);
+    check_version(&fake, &reqs, &marker);
     // Deployment at 100% and the cron.
     let dep = reqs
         .iter()
@@ -341,24 +355,21 @@ fn happy_deploy_runs_the_steps_in_order_with_the_documented_shapes() {
         Some(json!([{"cron": "*/10 * * * *"}]))
     );
     // Smoke target got no token.
-    for r in reqs
-        .iter()
-        .filter(|r| r.path == "/healthz" || r.path == "/")
-    {
+    for r in reqs.iter().filter(|r| r.path.starts_with(HOST)) {
         assert_eq!(r.header("authorization"), None);
     }
     // Record and system log.
     let rec = load(&dir).deploys.last().unwrap().clone();
     assert_eq!(rec.outcome, "deployed");
     assert_eq!(rec.version.as_deref(), Some(V2));
-    assert_eq!(rec.previous.as_deref(), Some(V1));
+    assert_eq!(rec.previous.as_deref(), Some(P));
     assert_eq!(rec.smoke.as_deref(), Some("passed"));
     assert_eq!(rec.at, "2026-09-21T14:13:20Z");
     assert!(rec.bookmark.is_some() && rec.export.is_none() && rec.migrations.is_empty());
     let log = log_rows(&fake, "system.deploy");
     assert_eq!(log.len(), 1);
     assert!(
-        log[0].starts_with(&format!("deploy {V2} deployed (previous {V1})")),
+        log[0].starts_with(&format!("deploy {V2} deployed (previous {P})")),
         "{}",
         log[0]
     );
@@ -597,7 +608,7 @@ fn a_slow_site_within_the_budget_passes() {
     assert_eq!(
         fake.requests()
             .iter()
-            .filter(|r| r.path == "/healthz")
+            .filter(|r| r.path.ends_with("/healthz"))
             .count(),
         5
     );
@@ -611,9 +622,9 @@ fn a_wrong_version_header_rolls_back() {
     assert_eq!(code(&r), Code::SmokeFailed);
     assert!(r.clock <= deploy::SMOKE_BUDGET, "{:?}", r.clock);
     assert!(r.clock >= Duration::from_secs(30), "{:?}", r.clock);
-    assert_eq!(active(&fake), V1);
+    assert_eq!(active(&fake), P);
     let msg = &r.result.as_ref().unwrap_err().message;
-    assert!(msg.contains("old-version") && msg.contains(V1), "{msg}");
+    assert!(msg.contains("old-version") && msg.contains(P), "{msg}");
     let rec = load(&dir).deploys[0].clone();
     assert_eq!(rec.outcome, "rolled_back");
     assert_eq!(rec.smoke.as_deref(), Some("/healthz version old-version"));
@@ -626,7 +637,7 @@ fn a_5xx_home_page_rolls_back() {
     fake.state().site.home_status = Some((V2.into(), 503));
     let r = deploy(&fake, &dir, &bundle);
     assert_eq!(code(&r), Code::SmokeFailed);
-    assert_eq!(active(&fake), V1);
+    assert_eq!(active(&fake), P);
     let rec = load(&dir).deploys[0].clone();
     assert_eq!(rec.outcome, "rolled_back");
     assert_eq!(rec.smoke.as_deref(), Some("/ http-503"));
@@ -767,7 +778,7 @@ fn a_dropped_deployment_create_may_have_happened() {
     assert_eq!(
         fake.requests()
             .iter()
-            .filter(|r| r.path == "/healthz")
+            .filter(|r| r.path.ends_with("/healthz"))
             .count(),
         1
     );
@@ -847,7 +858,7 @@ fn a_missing_secret_fails_the_version_upload() {
     let r = deploy(&fake, &dir, &bundle);
     assert_eq!(code(&r), Code::HttpFailed);
     assert!(r.result.unwrap_err().message.contains("WEBHOOK_KEY"));
-    assert_eq!(active(&fake), V1);
+    assert_eq!(active(&fake), P);
     let v = fake
         .requests()
         .into_iter()
@@ -881,7 +892,7 @@ fn slow_calls_count_against_the_smoke_budget() {
         started.elapsed()
     );
     assert!(r.clock < Duration::from_millis(2500), "{:?}", r.clock);
-    assert_eq!(active(&fake), V1, "rolled back");
+    assert_eq!(active(&fake), P, "rolled back");
 }
 
 #[test]
@@ -1159,4 +1170,295 @@ fn restoring_another_bookmark_keeps_the_failed_marker_unless_told() {
     assert!(restored < undo && undo < kept, "{}", r.out);
     ok(&rollback(&fake, &dir, &db(true)));
     assert!(load(&dir).migrations.failed.is_none());
+}
+
+#[test]
+fn a_lost_placeholder_reply_still_keeps_rollback_off_the_placeholder() {
+    let fake = Fake::start(site(ALL));
+    let dir = TempDir::new();
+    fake.fail_on(
+        "PUT /accounts/acc1/workers/scripts/plumblog",
+        Failure::DropAfter,
+    );
+    let first = setup_with(
+        &fake,
+        &dir,
+        &SetupOptions::default(),
+        &migrations::bundled(),
+        &en(),
+    );
+    assert!(first.result.is_err());
+    assert_eq!(load(&dir).placeholder_version, None, "the reply never came");
+    // The re-run adopts the script (its marker was saved before the upload) and records
+    // what serves now, never deployed by blog, as the placeholder.
+    setup_ok(&setup_with(
+        &fake,
+        &dir,
+        &SetupOptions::default(),
+        &migrations::bundled(),
+        &en(),
+    ));
+    assert_eq!(load(&dir).placeholder_version.as_deref(), Some(V1));
+    assert_eq!(fake.state().scripts["plumblog"].uploads, 1);
+    fake.state().site.script = "plumblog".into();
+    let bundle = make_bundle(&dir);
+    ok(&deploy(&fake, &dir, &bundle));
+    let skip = fake.requests().len();
+    assert_eq!(
+        code(&rollback(&fake, &dir, &RollbackOptions::default())),
+        Code::RollbackPlaceholder
+    );
+    assert!(
+        calls(&fake.requests(), skip)
+            .iter()
+            .all(|c| c.starts_with("GET"))
+    );
+    assert_eq!(active(&fake), V2);
+}
+
+#[test]
+fn an_unrecorded_migration_in_a_deploy_blocks_the_next_one() {
+    let (fake, dir, bundle) = set_up(&all_but_last());
+    let last = migrations::bundled().pop().unwrap().name;
+    fake.fail_body(&format!("\"params\":[\"{last}\"]"), Failure::Status(400));
+    let r = deploy(&fake, &dir, &bundle);
+    assert_eq!(code(&r), Code::MigrationUnrecorded);
+    let st = load(&dir);
+    let failed = st.migrations.failed.clone().unwrap();
+    assert_eq!(failed.name, last);
+    assert_eq!(Some(failed.bookmark), st.migrations.last_bookmark);
+    assert_eq!(st.deploys.last().unwrap().outcome, "migration_failed");
+    assert!(
+        calls(&fake.requests(), 0)
+            .iter()
+            .all(|c| !c.ends_with("/versions")),
+        "no code uploaded"
+    );
+    let skip = fake.requests().len();
+    assert_eq!(
+        code(&deploy(&fake, &dir, &bundle)),
+        Code::MigrationRestorePending
+    );
+    assert_eq!(fake.requests().len(), skip + 2, "token verify only");
+}
+
+/// A site set up with `--domain blog.example.com`; `workers_dev`: the account has a
+/// workers.dev subdomain.
+fn set_up_domain(workers_dev: bool) -> (Fake, TempDir, PathBuf) {
+    let mut st = site(ALL);
+    if !workers_dev {
+        st.subdomain = None;
+    }
+    let fake = Fake::start(st);
+    let dir = TempDir::new();
+    let opts = SetupOptions {
+        domain: Some("blog.example.com".into()),
+        ..SetupOptions::default()
+    };
+    setup_ok(&setup_with(
+        &fake,
+        &dir,
+        &opts,
+        &migrations::bundled(),
+        &en(),
+    ));
+    fake.state().site.script = "plumblog".into();
+    let bundle = make_bundle(&dir);
+    (fake, dir, bundle)
+}
+
+fn smoke_hosts(fake: &Fake, from: usize) -> Vec<String> {
+    fake.state().site.hosts[from..].to_vec()
+}
+
+#[test]
+fn a_new_custom_domain_is_checked_on_workers_dev_and_only_warned_about() {
+    let (fake, dir, bundle) = set_up_domain(true);
+    fake.state().site.down_hosts = vec!["blog.example.com".into()];
+    let r = deploy(&fake, &dir, &bundle);
+    ok(&r);
+    assert_eq!(
+        active(&fake),
+        V2,
+        "no rollback for a certificate still on its way"
+    );
+    assert!(
+        r.out
+            .contains("Warning: https://blog.example.com does not serve the new version yet"),
+        "{}",
+        r.out
+    );
+    assert_eq!(
+        smoke_hosts(&fake, 0),
+        [
+            "plumblog.steven.workers.dev",
+            "plumblog.steven.workers.dev",
+            "blog.example.com"
+        ]
+    );
+    assert!(!load(&dir).domain_smoke_passed);
+    // The certificate arrived: workers.dev decides once more, and the domain passes.
+    fake.state().site.down_hosts.clear();
+    let n = fake.state().site.hosts.len();
+    let r = deploy(&fake, &dir, &bundle);
+    ok(&r);
+    assert!(
+        r.out
+            .contains("https://blog.example.com serves the new version too"),
+        "{}",
+        r.out
+    );
+    assert_eq!(smoke_hosts(&fake, n)[0], "plumblog.steven.workers.dev");
+    assert!(load(&dir).domain_smoke_passed);
+    // From now on the domain is the target, and its failure rolls back.
+    let n = fake.state().site.hosts.len();
+    ok(&deploy(&fake, &dir, &bundle));
+    assert!(
+        smoke_hosts(&fake, n)
+            .iter()
+            .all(|h| h == "blog.example.com")
+    );
+    fake.state().site.down_hosts = vec!["blog.example.com".into()];
+    let r = deploy(&fake, &dir, &bundle);
+    assert_eq!(code(&r), Code::SmokeFailed);
+}
+
+#[test]
+fn without_workers_dev_a_new_domain_decides_with_a_warning() {
+    let (fake, dir, bundle) = set_up_domain(false);
+    let r = deploy(&fake, &dir, &bundle);
+    ok(&r);
+    assert!(r.out.contains("certificate may need a moment"), "{}", r.out);
+    assert!(
+        smoke_hosts(&fake, 0)
+            .iter()
+            .all(|h| h == "blog.example.com")
+    );
+    assert!(load(&dir).domain_smoke_passed);
+    // A domain that never answers: the 60 s bound, then the previous version again.
+    let (fake, dir, bundle) = set_up_domain(false);
+    fake.state().site.down_hosts = vec!["blog.example.com".into()];
+    let r = deploy(&fake, &dir, &bundle);
+    assert_eq!(code(&r), Code::SmokeFailed);
+    assert!(r.out.contains("certificate may need a moment"), "{}", r.out);
+    assert!(
+        r.clock < deploy::SMOKE_BUDGET + Duration::from_secs(5),
+        "{:?}",
+        r.clock
+    );
+    assert_eq!(active(&fake), P);
+    assert!(!load(&dir).domain_smoke_passed);
+}
+
+#[test]
+fn rollback_to_a_version_older_than_the_database_needs_allow_older() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    ok(&deploy(&fake, &dir, &bundle));
+    assert_eq!(
+        load(&dir).deploys[0].bundle_migrations,
+        Some(migrations::bundled().into_iter().map(|m| m.name).collect())
+    );
+    let mut migs = migrations::bundled();
+    migs.push(Migration {
+        name: "0099_extra.sql".into(),
+        sql: "CREATE TABLE extra (x INTEGER);".into(),
+    });
+    let opts = Options {
+        bundle: Some(bundle.clone()),
+        ..Options::default()
+    };
+    ok(&deploy_with(&fake, &dir, &opts, &migs, &en()));
+    assert_eq!(active(&fake), V3);
+    let to = |v: &str, allow| RollbackOptions {
+        to: Some(v.into()),
+        allow_older: allow,
+        ..RollbackOptions::default()
+    };
+    let skip = fake.requests().len();
+    for r in [
+        rollback(&fake, &dir, &to(V2, false)),
+        rollback(&fake, &dir, &RollbackOptions::default()),
+    ] {
+        assert_eq!(code(&r), Code::RollbackOlder);
+        let msg = r.result.unwrap_err().message;
+        assert!(
+            msg.contains("0099_extra.sql") && msg.contains("--allow-older"),
+            "{msg}"
+        );
+    }
+    assert!(
+        calls(&fake.requests(), skip)
+            .iter()
+            .all(|c| c.starts_with("GET"))
+    );
+    assert_eq!(active(&fake), V3);
+    let r = rollback(&fake, &dir, &to(V2, true));
+    ok(&r);
+    assert!(
+        r.out.contains("Warning") && r.out.contains("0099_extra.sql"),
+        "{}",
+        r.out
+    );
+    assert_eq!(active(&fake), V2);
+
+    // A version blog did not deploy: its migrations are unknown.
+    {
+        let mut st = fake.state();
+        st.versions.push(crate::fake_cf::Version {
+            id: "by-hand".into(),
+            metadata: json!({"bindings": [{"type": "d1", "name": "DB", "id": "db-1"}]}),
+            modules: vec![],
+        });
+        st.scripts
+            .get_mut("plumblog")
+            .unwrap()
+            .versions
+            .push("by-hand".into());
+    }
+    let r = rollback(&fake, &dir, &to("by-hand", false));
+    assert_eq!(code(&r), Code::RollbackOlder);
+    assert!(r.result.unwrap_err().message.contains("no record"));
+    assert_eq!(active(&fake), V2);
+    ok(&rollback(&fake, &dir, &to("by-hand", true)));
+    assert_eq!(active(&fake), "by-hand");
+}
+
+#[test]
+fn versions_made_by_secret_changes_are_placeholders_too() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    // Setup's upload, then one version per secret, the last one serving.
+    assert_eq!(
+        fake.state().scripts["plumblog"].versions,
+        [V1, "00000000-0000-4000-9000-000000000001", P]
+    );
+    assert_eq!(active(&fake), P);
+    assert_eq!(load(&dir).placeholder_version.as_deref(), Some(V1));
+    ok(&deploy(&fake, &dir, &bundle));
+    assert_eq!(load(&dir).deploys[0].previous.as_deref(), Some(P));
+    // The previous version is the placeholder's code with a secret: refused, nothing sent.
+    let skip = fake.requests().len();
+    let r = rollback(&fake, &dir, &RollbackOptions::default());
+    assert_eq!(code(&r), Code::RollbackPlaceholder);
+    assert!(
+        calls(&fake.requests(), skip)
+            .iter()
+            .all(|c| c.starts_with("GET"))
+    );
+    for v in [V1, "00000000-0000-4000-9000-000000000001", P] {
+        let to = RollbackOptions {
+            to: Some(v.into()),
+            ..RollbackOptions::default()
+        };
+        assert_eq!(
+            code(&rollback(&fake, &dir, &to)),
+            Code::RollbackPlaceholder,
+            "{v}"
+        );
+    }
+    assert_eq!(active(&fake), V2);
+    // After a second deploy, rollback goes to the first real version.
+    ok(&deploy(&fake, &dir, &bundle));
+    assert_eq!(active(&fake), V3);
+    ok(&rollback(&fake, &dir, &RollbackOptions::default()));
+    assert_eq!(active(&fake), V2);
 }

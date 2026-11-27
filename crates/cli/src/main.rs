@@ -153,6 +153,8 @@ enum Command {
         yes: bool,
         #[arg(long, requires = "db")]
         clear_failed_migration: bool,
+        #[arg(long, conflicts_with = "db")]
+        allow_older: bool,
     },
 }
 
@@ -238,6 +240,9 @@ fn command(text: &Text) -> clap::Command {
                 .mut_arg("yes", |a| a.help(t(key!("cli.rollback.yes_help"))))
                 .mut_arg("clear_failed_migration", |a| {
                     a.help(t(key!("cli.rollback.clear_failed_help")))
+                })
+                .mut_arg("allow_older", |a| {
+                    a.help(t(key!("cli.rollback.allow_older_help")))
                 })
         })
 }
@@ -505,6 +510,7 @@ fn run(text: &Text, args: &[String]) -> Outcome {
             db,
             yes,
             clear_failed_migration,
+            allow_older,
         }) => deploy_or_rollback(
             text,
             Err(deploy::RollbackOptions {
@@ -512,6 +518,7 @@ fn run(text: &Text, args: &[String]) -> Outcome {
                 db,
                 yes,
                 clear_failed_migration,
+                allow_older,
             }),
         ),
         None => return Outcome::Help(help::render(&cmd, &[], text)),

@@ -15,6 +15,7 @@ pub enum Method {
     Get,
     Post,
     Put,
+    Delete,
 }
 
 impl Method {
@@ -24,6 +25,7 @@ impl Method {
             Self::Get => "GET",
             Self::Post => "POST",
             Self::Put => "PUT",
+            Self::Delete => "DELETE",
         }
     }
 }
@@ -175,6 +177,9 @@ endpoints! {
     VersionList => Get "/accounts/{account_id}/workers/scripts/{script_name}/versions",
         Some(WorkersScriptsEdit), ApiToken, key!("cli.call.version_list"),
         "https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/versions/methods/list/";
+    VersionGet => Get "/accounts/{account_id}/workers/scripts/{script_name}/versions/{version_id}",
+        Some(WorkersScriptsEdit), ApiToken, key!("cli.call.version_get"),
+        "https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/versions/methods/get/";
     DeploymentCreate => Post "/accounts/{account_id}/workers/scripts/{script_name}/deployments",
         Some(WorkersScriptsEdit), ApiToken, key!("cli.call.deployment_create"),
         "https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/deployments/methods/create/";
@@ -194,6 +199,12 @@ endpoints! {
     SecretList => Get "/accounts/{account_id}/workers/scripts/{script_name}/secrets",
         Some(WorkersScriptsEdit), ApiToken, key!("cli.call.secret_list"),
         "https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/secrets/methods/list/";
+    SecretDelete => Delete "/accounts/{account_id}/workers/scripts/{script_name}/secrets/{secret_name}",
+        Some(WorkersScriptsEdit), ApiToken, key!("cli.call.secret_delete"),
+        "https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/secrets/methods/delete/";
+    ScriptSettingsGet => Get "/accounts/{account_id}/workers/scripts/{script_name}/settings",
+        Some(WorkersScriptsEdit), ApiToken, key!("cli.call.script_settings_get"),
+        "https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/settings/methods/get/";
     SchedulesPut => Put "/accounts/{account_id}/workers/scripts/{script_name}/schedules",
         Some(WorkersScriptsEdit), ApiToken, key!("cli.call.schedules_put"),
         "https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/schedules/methods/update/";

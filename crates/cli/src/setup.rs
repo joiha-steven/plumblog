@@ -39,6 +39,12 @@ const CODE_GROUP_LEN: usize = 5;
 /// Placeholder Worker until `blog deploy`: 503, no body, so secrets can attach to a script.
 const PLACEHOLDER_JS: &str =
     "export default { fetch() { return new Response(null, { status: 503 }); } };\n";
+/// Plain-text binding that marks a script as this site's (value: `script_marker` in state).
+/// A binding, not a script tag: the upload metadata docs and wrangler 4.160.0 send no tags,
+/// and a binding is kept on every version because `blog deploy` sends it again.
+pub const MARKER_BINDING: &str = "PLUMBLOG_SITE_ID";
+/// Random bytes of a new marker.
+const MARKER_BYTES: usize = 16;
 
 /// Turnstile, as asked on the command line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -218,6 +224,16 @@ pub fn new_site_id_json() -> Result<String, getrandom::Error> {
     Ok(json_string(&plumblog_auth::base64url::encode(&b)))
 }
 
+/// A new script marker: 32 lowercase hex characters.
+///
+/// # Errors
+/// The OS random source failed.
+pub fn new_marker() -> Result<String, getrandom::Error> {
+    let mut b = [0u8; MARKER_BYTES];
+    getrandom::getrandom(&mut b)?;
+    Ok(plumblog_auth::base64url::hex(&b))
+}
+
 fn json_string(s: &str) -> String {
     Value::String(s.to_string()).to_string()
 }
@@ -300,12 +316,18 @@ impl Run<'_> {
         Failure::api(e, self.cx.text)
     }
 
-    pub(crate) fn save(&self) -> Result<(), Failure> {
+    /// Applies `change` to `site.local.toml` as it is on disk now (read-modify-write, under
+    /// the folder lock) and keeps what was saved as this run's view. Never writes back a
+    /// whole copy read earlier.
+    pub(crate) fn update(&mut self, change: impl FnOnce(&mut SiteState)) -> Result<(), Failure> {
         let secrets: Vec<&ApiToken> = self.secrets.iter().collect();
-        state::save(self.cx.dir, &self.state, &secrets).map_err(|e| state_failure(&e, self.cx.text))
+        let saved = state::update(self.cx.dir, &secrets, change)
+            .map_err(|e| state_failure(&e, self.cx.text))?;
+        self.state = saved;
+        Ok(())
     }
 
-    fn random<T>(&self, r: Result<T, getrandom::Error>) -> Result<T, Failure> {
+    pub(crate) fn random<T>(&self, r: Result<T, getrandom::Error>) -> Result<T, Failure> {
         r.map_err(|e| {
             Failure::new(
                 Code::Internal,
@@ -425,13 +447,15 @@ pub fn run(
 ) -> Result<(), Failure> {
     let text = cx.text;
     check_options(opts, text)?;
+    // The same lock as deploy and rollback: setup also migrates and writes the state.
+    let _lock = crate::deploy::Lock::take(cx)?;
     let domain = opts.domain.as_deref().and_then(normalize_domain);
     let saved = state::load(cx.dir).map_err(|e| state_failure(&e, text))?;
 
     // 1. Token and account.
     let verified = token::verify(client, account_id).map_err(|e| Failure::token(&e, text))?;
     let account = verified.account.id.clone();
-    let mut st = saved.unwrap_or_default();
+    let st = saved.unwrap_or_default();
     same_or_mismatch(
         st.account_id.as_ref(),
         Some(&account),
@@ -446,9 +470,10 @@ pub fn run(
         .or_else(|| st.worker.clone())
         .unwrap_or_else(|| DEFAULT_NAME.to_string());
     let domain = domain.or_else(|| st.domain.clone());
-    st.account_id = Some(account);
-    st.worker = Some(name.clone());
-    st.domain.clone_from(&domain);
+    // Older setups made the script without a marker; a recorded placeholder or deploy of this
+    // very name says it is ours.
+    let recorded = st.worker.as_deref() == Some(name.as_str())
+        && (st.placeholder_version.is_some() || !st.deploys.is_empty());
 
     let client: &Client = client;
     let mut run = Run {
@@ -468,6 +493,13 @@ pub fn run(
     let subdomain = workers_subdomain(client).map_err(|e| run.api(&e))?;
     let (origin, zone_id) = resolve_origin(&run, &name, domain.as_deref(), subdomain.as_deref())?;
     let host = origin.trim_start_matches("https://").to_string();
+    // 5 (looked up first). A script of that name must be ours before anything is created.
+    let script = existing_script(&run, &name, recorded)?;
+    run.update(|s| {
+        s.account_id = Some(account);
+        s.worker = Some(name.clone());
+        s.domain.clone_from(&domain);
+    })?;
 
     // 2. D1; an existing one must be ours and keep its origin unless told otherwise.
     let db = database(&mut run, &name)?;
@@ -476,8 +508,7 @@ pub fn run(
     // stored one; a computed one (lost state, fresh folder) must not silently move the site.
     let may_change = opts.domain.is_some() || opts.change_origin;
     check_existing(&run, &database, &origin, may_change)?;
-    run.state.origin = Some(origin.clone());
-    run.save()?;
+    run.update(|s| s.origin = Some(origin.clone()))?;
     run.line(key!("cli.setup.origin"), &[("origin", origin.clone())]);
 
     // 3. R2, 4. migrations.
@@ -485,7 +516,7 @@ pub fn run(
     apply_migrations(&mut run, &database, opts.clear_failed_migration)?;
 
     // 5. Placeholder Worker and its workers.dev address.
-    let secrets = worker(&mut run, &name, subdomain.is_some(), &host)?;
+    let secrets = worker(&mut run, &name, script, subdomain.is_some(), &host)?;
 
     // 6. WEBHOOK_KEY: created once, never rotated (rotating loses every webhook secret).
     if secrets.iter().any(|s| s == WEBHOOK_KEY) {
@@ -500,7 +531,7 @@ pub fn run(
     if opts.turnstile == Turnstile::On {
         turnstile(&mut run, &name, &host, &secrets)?;
     } else {
-        run.line(key!("cli.setup.turnstile_off"), &[]);
+        turnstile_off(&mut run, &name, &database, &secrets)?;
     }
 
     // 8. Custom domain, its zone already found.
@@ -561,11 +592,12 @@ fn database(run: &mut Run, name: &str) -> Result<String, Failure> {
             Ok(made.uuid)
         },
     )?;
-    run.state.d1 = Some(D1State {
-        name: name.to_string(),
-        id: db.clone(),
-    });
-    run.save()?;
+    run.update(|s| {
+        s.d1 = Some(D1State {
+            name: name.to_string(),
+            id: db.clone(),
+        });
+    })?;
     let s = run.status(created);
     run.line(
         key!("cli.setup.d1"),
@@ -638,35 +670,120 @@ fn bucket(run: &mut Run, name: &str) -> Result<(), Failure> {
                 .map(drop)
         },
     )?;
-    run.state.r2 = Some(R2State {
-        bucket: bucket.clone(),
-    });
-    run.save()?;
+    run.update(|s| {
+        s.r2 = Some(R2State {
+            bucket: bucket.clone(),
+        });
+    })?;
     let s = run.status(created);
     run.line(key!("cli.setup.r2"), &[("name", bucket), ("status", s)]);
     Ok(())
+}
+
+/// A script that already has the site's name: its secret names, its marker and whether it
+/// has the `DB` binding (`None`: no such script).
+pub(crate) struct Existing {
+    secrets: Vec<String>,
+    marker: Option<String>,
+    deployed: bool,
+}
+
+/// Refuses a script of that name that `blog` did not make for this site: no marker, and no
+/// placeholder or deploy recorded for it in this folder; or another site's marker. Reads only.
+fn existing_script(run: &Run, name: &str, recorded: bool) -> Result<Option<Existing>, Failure> {
+    let client = run.client;
+    let Some(secrets) = script_secrets(client, name).map_err(|e| run.api(&e))? else {
+        return Ok(None);
+    };
+    let bindings = script_bindings(client, name).map_err(|e| run.api(&e))?;
+    let find = |kind: &str, n: &str| {
+        bindings
+            .iter()
+            .find(|b| str_of(b, "type") == Some(kind) && str_of(b, "name") == Some(n))
+    };
+    let marker = find("plain_text", MARKER_BINDING)
+        .and_then(|b| str_of(b, "text"))
+        .map(str::to_string);
+    let ours = match (&marker, &run.state.script_marker) {
+        (Some(m), Some(mine)) => m == mine,
+        // Made by `blog` for a site of this name; this folder lost or never had the state.
+        (Some(_), None) => true,
+        (None, _) => recorded,
+    };
+    if !ours {
+        return Err(Failure::new(
+            Code::ScriptForeign,
+            run.cx.text,
+            key!("cli.error.script_foreign"),
+            &[
+                ("name", name.to_string()),
+                ("binding", MARKER_BINDING.to_string()),
+            ],
+        ));
+    }
+    Ok(Some(Existing {
+        secrets,
+        marker,
+        deployed: find("d1", "DB").is_some(),
+    }))
+}
+
+fn str_of<'v>(v: &'v Value, key: &str) -> Option<&'v str> {
+    v.get(key).and_then(Value::as_str)
 }
 
 /// The script (a placeholder if new) and its workers.dev address; returns its secret names.
 fn worker(
     run: &mut Run,
     name: &str,
+    existing: Option<Existing>,
     workers_dev: bool,
     host: &str,
 ) -> Result<Vec<String>, Failure> {
     let client = run.client;
-    let secrets = if let Some(list) = script_secrets(client, name).map_err(|e| run.api(&e))? {
+    let secrets = if let Some(found) = existing {
         run.line(
             key!("cli.setup.worker_reused"),
             &[("name", name.to_string())],
         );
-        list
+        if let Some(m) = found.marker {
+            if run.state.script_marker.as_ref() != Some(&m) {
+                run.update(|s| s.script_marker = Some(m))?;
+            }
+        } else {
+            // An older setup: ours by record. The binding comes with the next `blog deploy`
+            // (a script's bindings change only with a new version of its code).
+            let m = match run.state.script_marker.clone() {
+                Some(m) => m,
+                None => run.random(new_marker())?,
+            };
+            run.update(|s| s.script_marker = Some(m))?;
+            run.line(
+                key!("cli.setup.marker_pending"),
+                &[("binding", MARKER_BINDING.to_string())],
+            );
+        }
+        // Never deployed by `blog` (no record, no `DB` binding): what serves is the
+        // placeholder, e.g. after its upload's reply was lost.
+        if run.state.placeholder_version.is_none()
+            && run.state.deploys.is_empty()
+            && !found.deployed
+        {
+            let v = crate::deploy::active_version(client, name).map_err(|e| run.api(&e))?;
+            run.update(|s| s.placeholder_version = Some(v))?;
+        }
+        found.secrets
     } else {
-        upload_placeholder(client, name).map_err(|e| run.api(&e))?;
+        // Saved before the upload: a re-run after a lost reply recognises the script.
+        let marker = match run.state.script_marker.clone() {
+            Some(m) => m,
+            None => run.random(new_marker())?,
+        };
+        run.update(|s| s.script_marker = Some(marker.clone()))?;
+        upload_placeholder(client, name, &marker).map_err(|e| run.api(&e))?;
         // `blog rollback` must never land on the placeholder.
         let placeholder = crate::deploy::active_version(client, name).map_err(|e| run.api(&e))?;
-        run.state.placeholder_version = Some(placeholder);
-        run.save()?;
+        run.update(|s| s.placeholder_version = Some(placeholder))?;
         run.line(
             key!("cli.setup.worker_created"),
             &[("name", name.to_string())],
@@ -704,7 +821,7 @@ fn worker(
 
 /// The account's workers.dev subdomain; `None` if it has none yet.
 /// <https://developers.cloudflare.com/api/resources/workers/subresources/subdomains/methods/get/>
-fn workers_subdomain(client: &Client) -> Result<Option<String>, ApiError> {
+pub(crate) fn workers_subdomain(client: &Client) -> Result<Option<String>, ApiError> {
     match client.call(&Call::new(Endpoint::SubdomainGet)) {
         Ok(v) => Ok(v
             .get("subdomain")
@@ -761,11 +878,25 @@ fn script_secrets(client: &Client, name: &str) -> Result<Option<Vec<String>>, Ap
     }
 }
 
+/// Bindings of the deployed script, as wrangler 4.160.0 reads them (`getSettings`:
+/// `GET .../scripts/{name}/settings`, `result.bindings[]`; a plain-text binding carries
+/// `text`, as `convertWorkerMetadataBindingsToFlatBindings` reads it).
+/// <https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/settings/methods/get/>
+fn script_bindings(client: &Client, name: &str) -> Result<Vec<Value>, ApiError> {
+    let v = client
+        .call(&Call::new(Endpoint::ScriptSettingsGet).param("script_name", name.to_string()))?;
+    Ok(v.get("bindings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
 /// First upload of the script: multipart with a `metadata` part and one ES module part.
 /// Part names and the module type `application/javascript+module` as wrangler 4.160.0's
-/// `createWorkerUploadForm` sends them.
+/// `createWorkerUploadForm` sends them; the marker as its plain-text binding
+/// (`{name, type: "plain_text", text}`).
 /// <https://developers.cloudflare.com/workers/configuration/multipart-upload-metadata/>
-fn upload_placeholder(client: &Client, name: &str) -> Result<(), ApiError> {
+fn upload_placeholder(client: &Client, name: &str, marker: &str) -> Result<(), ApiError> {
     let mut rnd = [0u8; 16];
     // A fixed boundary would also do: neither part can contain it.
     let _ = getrandom::getrandom(&mut rnd);
@@ -773,7 +904,7 @@ fn upload_placeholder(client: &Client, name: &str) -> Result<(), ApiError> {
     let metadata = json!({
         "main_module": "worker.js",
         "compatibility_date": crate::deploy::COMPATIBILITY_DATE,
-        "bindings": [],
+        "bindings": [{"type": "plain_text", "name": MARKER_BINDING, "text": marker}],
     });
     let mut body = String::new();
     for (part, file, ctype, content) in [
@@ -872,19 +1003,16 @@ pub(crate) fn apply_migrations(
                 ],
             ));
         }
-        run.state.migrations.failed = None;
-        run.save()?;
+        run.update(|s| s.migrations.failed = None)?;
     }
     match migrations::apply(db, run.client, run.cx.migrations) {
         Ok(report) => {
-            run.state.migrations.applied.clone_from(&report.recorded);
-            if report.bookmark.is_some() {
-                run.state
-                    .migrations
-                    .last_bookmark
-                    .clone_from(&report.bookmark);
-            }
-            run.save()?;
+            run.update(|s| {
+                s.migrations.applied.clone_from(&report.recorded);
+                if report.bookmark.is_some() {
+                    s.migrations.last_bookmark.clone_from(&report.bookmark);
+                }
+            })?;
             if let Some(b) = &report.bookmark {
                 run.line(key!("cli.setup.bookmark"), &[("bookmark", b.clone())]);
                 run.line(
@@ -909,22 +1037,33 @@ pub(crate) fn apply_migrations(
         }) => {
             // Record what did apply and the bookmark; no step after this runs, so no
             // settings are written on a database in an unknown state.
-            run.state.migrations.applied.extend(applied);
-            run.state.migrations.last_bookmark = Some(bookmark.clone());
-            run.state.migrations.failed = Some(FailedMigration {
-                name: name.clone(),
-                bookmark: bookmark.clone(),
-            });
-            run.save()?;
+            run.update(|s| {
+                for a in applied {
+                    if !s.migrations.applied.contains(&a) {
+                        s.migrations.applied.push(a);
+                    }
+                }
+                s.migrations.last_bookmark = Some(bookmark.clone());
+                s.migrations.failed = Some(FailedMigration {
+                    name: name.clone(),
+                    bookmark: bookmark.clone(),
+                });
+            })?;
             let restore = ROLLBACK_COMMAND.replace("{bookmark}", &bookmark);
+            // Its SQL ran but `d1_migrations` does not say so: a re-run would apply it
+            // again, so the code differs and the restore is the only way on.
+            let (code, k) = if sql_succeeded {
+                (
+                    Code::MigrationUnrecorded,
+                    key!("cli.error.migration_unrecorded"),
+                )
+            } else {
+                (Code::MigrationFailed, key!("cli.error.migration_failed"))
+            };
             Err(Failure::new(
-                Code::MigrationFailed,
+                code,
                 run.cx.text,
-                if sql_succeeded {
-                    key!("cli.error.migration_unrecorded")
-                } else {
-                    key!("cli.error.migration_failed")
-                },
+                k,
                 &[
                     ("name", name),
                     ("error", error.message(run.cx.text)),
@@ -1000,8 +1139,48 @@ fn turnstile(run: &mut Run, worker: &str, host: &str, secrets: &[String]) -> Res
         put_secret(run, worker, TURNSTILE_SECRET, &w.secret)?;
         secret_line(run, TURNSTILE_SECRET, true);
     }
-    run.state.turnstile_site_key = Some(w.sitekey);
-    run.save()
+    run.update(|s| s.turnstile_site_key = Some(w.sitekey))
+}
+
+/// `--no-turnstile --yes-i-understand` on a site that had Turnstile: the setting goes (with
+/// the Worker's own delete SQL and its content-version bump), then `TURNSTILE_SECRET`, then
+/// the site key in state. The widget stays, named, for the owner to delete or reuse.
+fn turnstile_off(
+    run: &mut Run,
+    worker: &str,
+    db: &Database,
+    secrets: &[String],
+) -> Result<(), Failure> {
+    let stored = d1::settings(db, &[TURNSTILE_SITE_KEY]).map_err(|e| run.api(&e))?;
+    let was_on = !stored.is_empty()
+        || run.state.turnstile_site_key.is_some()
+        || secrets.iter().any(|s| s == TURNSTILE_SECRET);
+    if !stored.is_empty() {
+        d1::delete_setting(db, TURNSTILE_SITE_KEY).map_err(|e| run.api(&e))?;
+    }
+    if secrets.iter().any(|s| s == TURNSTILE_SECRET) {
+        run.client
+            .call(
+                &Call::new(Endpoint::SecretDelete)
+                    .param("script_name", worker.to_string())
+                    .param("secret_name", TURNSTILE_SECRET.to_string()),
+            )
+            .map_err(|e| run.api(&e))?;
+    }
+    if run.state.turnstile_site_key.is_some() {
+        run.update(|s| s.turnstile_site_key = None)?;
+    }
+    if was_on {
+        run.line(
+            key!("cli.setup.turnstile_removed"),
+            &[
+                ("name", format!("plumblog-{worker}")),
+                ("secret", TURNSTILE_SECRET.to_string()),
+            ],
+        );
+    }
+    run.line(key!("cli.setup.turnstile_off"), &[]);
+    Ok(())
 }
 
 /// `PUT /workers/domains {hostname, service, zone_id, environment}`; body as the Cloudflare
@@ -1050,7 +1229,7 @@ fn attach_domain(run: &mut Run, worker: &str, host: &str, zone: &str) -> Result<
         key!("cli.setup.domain"),
         &[("host", host.to_string()), ("status", s)],
     );
-    run.save()
+    Ok(())
 }
 
 fn write_settings(run: &mut Run, db: &Database, origin: &str) -> Result<(), Failure> {

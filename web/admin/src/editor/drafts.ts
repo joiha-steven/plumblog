@@ -114,6 +114,22 @@ export async function dropDraft(key: string): Promise<void> {
   }
 }
 
+/**
+ * How many drafts `user` keeps here, so sign-out can warn before `clearDrafts` deletes them.
+ * A storage failure is logged and counts as none (sign-out's clear would fail the same way).
+ */
+export async function countDrafts(user: number): Promise<number> {
+  try {
+    return await run<number>("readonly", (s, done) => {
+      const req = s.count(IDBKeyRange.bound(`${user}:`, `${user}:\uffff`));
+      req.onsuccess = () => done(req.result);
+    });
+  } catch (e) {
+    console.error(`admin drafts: counting user ${user} failed`, e);
+    return 0;
+  }
+}
+
 /** Removes every draft of `user`. Sign-out (part D) calls it, so a shared browser keeps none. */
 export async function clearDrafts(user: number): Promise<void> {
   try {

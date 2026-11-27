@@ -115,6 +115,11 @@ pub struct Site {
     pub hits: usize,
     /// `/healthz` answers only after this long (a slow site).
     pub delay: std::time::Duration,
+    /// Hosts (first path segment, `<base>/<host>/healthz`) that answer 526, like a custom
+    /// domain whose certificate is not ready.
+    pub down_hosts: Vec<String>,
+    /// The host of every public request, in order.
+    pub hosts: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -179,6 +184,11 @@ pub struct State {
     /// `Some(n)`: after a `POST .../deployments` beyond the first n requests, every
     /// `GET .../deployments` gets no reply.
     pub blind_after_switch: Option<usize>,
+    /// `(pattern, failure)`: the first request whose body contains `pattern` fails, once.
+    pub fail_body: Vec<(String, Failure)>,
+    /// `(pattern, action)`: before answering the first request whose `METHOD /path` contains
+    /// `pattern`, run `action` once (e.g. someone editing site.local.toml meanwhile).
+    pub on_request: Vec<(String, Box<dyn FnOnce() + Send>)>,
 }
 
 pub struct Fake {
@@ -221,6 +231,18 @@ impl Fake {
     /// The next request matching `pattern` (`METHOD /path` substring) fails once.
     pub fn fail_on(&self, pattern: &str, failure: Failure) {
         self.state().fail_on.push((pattern.to_string(), failure));
+    }
+
+    /// The next request whose body contains `pattern` fails once.
+    pub fn fail_body(&self, pattern: &str, failure: Failure) {
+        self.state().fail_body.push((pattern.to_string(), failure));
+    }
+
+    /// Runs `action` before answering the next request matching `pattern`.
+    pub fn on_request(&self, pattern: &str, action: impl FnOnce() + Send + 'static) {
+        self.state()
+            .on_request
+            .push((pattern.to_string(), Box::new(action)));
     }
 
     /// Rows of `sql` in database `id`, as JSON objects.
@@ -297,7 +319,20 @@ fn serve_public(st: &mut State, req: &Recorded) -> Option<(u16, String, String)>
             .get(&st.site.script)
             .and_then(|s| s.deployments.first().cloned())
     };
-    match (req.method.as_str(), req.path.as_str()) {
+    // `<base>/<host>/healthz`: the CLI's test smoke URL names the host it means.
+    let mut path = req.path.as_str();
+    if let Some((host, rest)) = path[1..].split_once('/')
+        && host.contains('.')
+        && !host.starts_with("__")
+    {
+        st.site.hosts.push(host.to_string());
+        if st.site.down_hosts.iter().any(|h| h == host) {
+            return Some((526, "invalid certificate".into(), String::new()));
+        }
+        path = &req.path[host.len() + 1..];
+        let _ = rest;
+    }
+    match (req.method.as_str(), path) {
         ("GET", "/healthz") => {
             st.site.hits += 1;
             if st.site.hits <= st.site.ready_after {
@@ -348,7 +383,7 @@ fn serve(stream: &TcpStream, state: &Mutex<State>) {
     st.requests.push(req.clone());
     let n = st.requests.len();
     if let Some((status, body, extra)) = serve_public(&mut st, &req) {
-        let delay = if req.path == "/healthz" {
+        let delay = if req.path.ends_with("/healthz") {
             st.site.delay
         } else {
             std::time::Duration::ZERO
@@ -367,6 +402,22 @@ fn serve(stream: &TcpStream, state: &Mutex<State>) {
         failure = Some(Failure::Drop);
     }
     let line = format!("{} {}", req.method, req.path);
+    if let Some(i) = st
+        .on_request
+        .iter()
+        .position(|(p, _)| line.contains(p.as_str()))
+    {
+        let (_, action) = st.on_request.remove(i);
+        action();
+    }
+    if failure.is_none()
+        && let Some(i) = st
+            .fail_body
+            .iter()
+            .position(|(p, _)| req.body.contains(p.as_str()))
+    {
+        failure = Some(st.fail_body.remove(i).1);
+    }
     if failure.is_none()
         && let Some(i) = st
             .fail_on
@@ -715,7 +766,7 @@ fn route_workers(
             if !shaped {
                 return err(400, 10021, "bad multipart upload");
             }
-            placeholder(st, name);
+            placeholder(st, name, req);
             ok(&json!({"id": name}))
         }
         (_, ["accounts", _, "workers", "scripts", name, ..]) if !st.scripts.contains_key(*name) => {
@@ -731,19 +782,13 @@ fn route_workers(
                     .collect::<Vec<_>>()
             ))
         }
-        ("PUT", ["accounts", _, "workers", "scripts", name, "secrets"]) => {
-            let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
-            let (Some(n), Some(t), Some("secret_text")) = (
-                body["name"].as_str(),
-                body["text"].as_str(),
-                body["type"].as_str(),
-            ) else {
-                return err(400, 10021, "secret needs name, text and type secret_text");
-            };
-            let script = st.scripts.get_mut(*name).unwrap();
-            script.secrets.insert(n.to_string(), t.to_string());
-            ok(&json!({"name": n, "type": "secret_text"}))
-        }
+        ("DELETE", ["accounts", _, "workers", "scripts", _, "secrets", _])
+        | ("PUT", ["accounts", _, "workers", "scripts", _, "secrets"])
+        | (
+            "GET",
+            ["accounts", _, "workers", "scripts", _, "versions", _]
+            | ["accounts", _, "workers", "scripts", _, "settings"],
+        ) => script_meta(st, req, segs),
         (_, ["accounts", _, "workers", "scripts", _, op]) if SCRIPT_OPS.contains(op) => {
             route_versions(st, req, segs)
         }
@@ -783,12 +828,111 @@ fn route_workers(
     }
 }
 
-/// A script upload makes a version and deploys it, as Cloudflare does.
-fn placeholder(st: &mut State, name: &str) {
-    let id = format!("00000000-0000-4000-8000-{:012}", st.versions.len() + 1);
+/// Secret delete and the deployed version's bindings (script settings).
+fn script_meta(st: &mut State, req: &Recorded, segs: &[&str]) -> (u16, Value) {
+    match (req.method.as_str(), segs) {
+        ("DELETE", ["accounts", _, "workers", "scripts", name, "secrets", secret]) => {
+            let script = st.scripts.get_mut(*name).unwrap();
+            if script.secrets.remove(*secret).is_none() {
+                return err(404, 10056, "secret not found");
+            }
+            secret_version(st, name);
+            ok(&json!(null))
+        }
+        ("PUT", ["accounts", _, "workers", "scripts", name, "secrets"]) => {
+            let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
+            let (Some(n), Some(t), Some("secret_text")) = (
+                body["name"].as_str(),
+                body["text"].as_str(),
+                body["type"].as_str(),
+            ) else {
+                return err(400, 10021, "secret needs name, text and type secret_text");
+            };
+            let script = st.scripts.get_mut(*name).unwrap();
+            script.secrets.insert(n.to_string(), t.to_string());
+            secret_version(st, name);
+            ok(&json!({"name": n, "type": "secret_text"}))
+        }
+        // `result.resources.bindings`, as wrangler's `versions view` reads it.
+        ("GET", ["accounts", _, "workers", "scripts", name, "versions", id]) => {
+            if !st.scripts[*name].versions.iter().any(|v| v == id) {
+                return err(404, 10007, "version not found");
+            }
+            let meta = st
+                .versions
+                .iter()
+                .find(|v| v.id == *id)
+                .map(|v| v.metadata.clone())
+                .unwrap_or_default();
+            let bindings = Some(meta["bindings"].clone())
+                .filter(Value::is_array)
+                .unwrap_or_else(|| json!([]));
+            ok(&json!({"id": id, "resources": {"bindings": bindings}}))
+        }
+        // The deployed version's bindings, as the API reports them.
+        ("GET", ["accounts", _, "workers", "scripts", name, "settings"]) => {
+            let active = st.scripts[*name].deployments.first().cloned();
+            let bindings = st
+                .versions
+                .iter()
+                .find(|v| Some(&v.id) == active.as_ref())
+                .map(|v| v.metadata["bindings"].clone())
+                .filter(Value::is_array)
+                .unwrap_or_else(|| json!([]));
+            ok(&json!({"bindings": bindings, "logpush": false}))
+        }
+        _ => err(404, 7003, "Could not route to this path"),
+    }
+}
+
+/// The next upload's id: `...8000-<n>`, counting uploads only.
+fn upload_id(st: &State) -> String {
+    let n = st
+        .versions
+        .iter()
+        .filter(|v| v.id.contains("-8000-"))
+        .count()
+        + 1;
+    format!("00000000-0000-4000-8000-{n:012}")
+}
+
+/// A secret change makes a new version from the active one (same bindings) and deploys it,
+/// as Cloudflare does. Its own id series, so upload ids stay `...8000-<n>`.
+fn secret_version(st: &mut State, name: &str) {
+    let n = st
+        .versions
+        .iter()
+        .filter(|v| v.id.contains("-9000-"))
+        .count()
+        + 1;
+    let id = format!("00000000-0000-4000-9000-{n:012}");
+    let active = st.scripts[name].deployments.first().cloned();
+    let (metadata, modules) = st
+        .versions
+        .iter()
+        .find(|v| Some(&v.id) == active.as_ref())
+        .map(|v| (v.metadata.clone(), v.modules.clone()))
+        .unwrap_or_default();
     st.versions.push(Version {
         id: id.clone(),
-        metadata: json!({"main_module": "worker.js"}),
+        metadata,
+        modules,
+    });
+    let script = st.scripts.get_mut(name).unwrap();
+    script.versions.push(id.clone());
+    script.deployments.insert(0, id);
+}
+
+/// A script upload makes a version and deploys it, as Cloudflare does.
+fn placeholder(st: &mut State, name: &str, req: &Recorded) {
+    let metadata = multipart(req)
+        .and_then(|p| p.into_iter().find(|(h, _)| h.contains("name=\"metadata\"")))
+        .and_then(|(_, m)| serde_json::from_str(&m).ok())
+        .unwrap_or_default();
+    let id = upload_id(st);
+    st.versions.push(Version {
+        id: id.clone(),
+        metadata,
         modules: vec!["worker.js".into()],
     });
     let script = st.scripts.entry(name.to_string()).or_default();
@@ -831,7 +975,7 @@ fn new_version(st: &mut State, req: &Recorded, name: &str) -> (u16, Value) {
     if !st.completions.iter().any(|c| c == jwt) {
         return err(400, 10021, "assets jwt is not a completion token");
     }
-    let id = format!("00000000-0000-4000-8000-{:012}", st.versions.len() + 1);
+    let id = upload_id(st);
     st.versions.push(Version {
         id: id.clone(),
         metadata: meta.clone(),

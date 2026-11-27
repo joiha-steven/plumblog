@@ -102,6 +102,9 @@ codes! {
     UpdateVersionInvalid => "update.version_invalid",
     UpdateNoBuild => "update.no_build",
     UpdateReplaceFailed => "update.replace_failed",
+    ScriptForeign => "setup.script_foreign",
+    MigrationUnrecorded => "setup.migration_unrecorded",
+    RollbackOlder => "rollback.older",
 }
 
 /// One language's `[cli]` text, English behind it.

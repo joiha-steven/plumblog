@@ -10,7 +10,7 @@ use crate::retry::{
     Failure, LEASE_MS, MAX_ATTEMPTS, MAX_PER_RUN, Outcome, classify, next_attempt_at,
 };
 use crate::secret::{SealKey, Secret, open, seal};
-use crate::ssrf::{Policy, check};
+use crate::ssrf::{Blocked, Policy, check};
 use crate::{
     KEEP_MS, PRUNE_PER_RUN, PostInfo, WebhookCrypto, WebhookEvent, WebhookHttp, events_column,
     payload, sign, wants,
@@ -40,9 +40,14 @@ impl std::fmt::Debug for Created {
 
 fn guard_url(url: &str, policy: Policy) -> Result<()> {
     check(url, policy).map(drop).map_err(|why| {
+        let hint = if why == Blocked::NonAsciiHost {
+            "; write the host in its punycode form (xn--...)"
+        } else {
+            ""
+        };
         Error::new(
             ErrorCode::WebhookUrlBlocked,
-            format!("webhook URL refused: {}", why.as_str()),
+            format!("webhook URL refused: {}{hint}", why.as_str()),
         )
     })
 }
