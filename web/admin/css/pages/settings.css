@@ -10,3 +10,25 @@
   .subnav { position: static; display: flex; overflow-x: auto; scrollbar-width: none; margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); scroll-padding-inline: var(--gutter); margin-top: calc(-1 * var(--stack)); }
   /* The strip plays the role of the filter row on other pages, so it sits flush under the header like they do. */
 }
+
+/* Account: the page gutter around plain sections; one passkey per row; the add form is a quiet panel. */
+.acct { padding: var(--stack) max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-32) max(var(--gutter), env(safe-area-inset-left, 0px)); }
+.acct-kv { display: grid; gap: var(--sp-12); }
+.acct .prow .v { min-width: 0; overflow-wrap: anywhere; }
+.pk-list { display: grid; }
+.pk { display: flex; align-items: center; gap: var(--sp-12); padding: var(--sp-12) 0; border-top: 1px solid var(--line); }
+.pk:first-child { border-top: 0; padding-top: 0; }
+.pk-main { flex: 1; min-width: 0; display: grid; gap: var(--sp-2); }
+.pk-name { font: var(--type-item-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pk-meta { display: flex; flex-wrap: wrap; column-gap: var(--sp-8); font: var(--type-meta); color: var(--muted); }
+.pk-meta > span + span::before { content: "\00b7"; margin-inline-end: var(--sp-8); }
+.acct-panel { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-16); padding: var(--sp-16); border-radius: var(--r-16); background: var(--field); border: 1px solid var(--line); }
+.reauth { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-8); }
+.reauth-seg { display: flex; }
+.confirm .reauth { margin-top: var(--sp-4); }
+.confirm-q { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-4); overflow-wrap: anywhere; }
+.confirm > p { overflow-wrap: anywhere; font: var(--type-body); }
+@media (max-width: 599px) {
+  .pk-meta { flex-direction: column; }
+  .pk-meta > span + span::before { content: none; }
+}

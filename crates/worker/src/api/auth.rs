@@ -1,5 +1,5 @@
 //! `/api/auth/*`: setup, password sign-in, sign-out, invites, own password and profile.
-//! Request bodies carry the browser-stretched password (`web/admin/js/stretch.js`), never the
+//! Request bodies carry the browser-stretched password (`web/admin/src/auth/stretch.ts`), never the
 //! password itself.
 
 use plumblog_auth::password::{

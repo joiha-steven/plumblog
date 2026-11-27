@@ -310,6 +310,29 @@ fn create_refuses_and_saves_nothing() {
 }
 
 #[test]
+fn unicode_host_is_refused_asking_for_punycode_and_punycode_is_saved() {
+    let (db, cr) = (MemoryStore::default(), FakeCrypto::default());
+    let all = [WebhookEvent::PostPublished];
+    let key = key();
+    let make = |url: &str| {
+        run(create_webhook(
+            &db,
+            &cr,
+            Some(&key),
+            url,
+            &all,
+            Policy::Production,
+            T,
+        ))
+    };
+    let e = make("https://b\u{fc}cher.example/hook").unwrap_err();
+    assert_eq!(e.code, ErrorCode::WebhookUrlBlocked);
+    assert!(e.detail.contains("xn--"), "unclear error: {}", e.detail);
+    make("https://xn--bcher-kva.example/hook").unwrap();
+    assert_eq!(webhooks(&db).len(), 1);
+}
+
+#[test]
 fn rotate_replaces_the_secret() {
     let (db, cr) = (MemoryStore::default(), FakeCrypto::default());
     let made = create(&db, &cr, &[WebhookEvent::PostPublished]);

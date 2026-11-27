@@ -25,3 +25,10 @@
   .story-meta { font: var(--type-meta); color: var(--faint); }
   .auth-id { display: none; }
 }
+/* No story column (no post API yet): one centered card, with the site's mark shown at every width. */
+.auth.solo { grid-template-columns: minmax(0, 1fr); }
+.auth.solo .auth-id { display: flex; }
+.auth-alert { padding: var(--sp-12) var(--sp-16); border-radius: var(--r-10); background: var(--st-err-bg); color: var(--st-err); font: var(--type-small); }
+.auth-alert:empty { display: none; }
+.auth-challenge { display: grid; justify-content: center; min-height: var(--ctl-lg); }
+.auth-challenge[hidden] { display: none; }

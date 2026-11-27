@@ -145,8 +145,8 @@ test("picture descriptions are one line with brackets and backslashes escaped", 
 });
 
 // Wall time on a shared CI runner is a poor clock, so this checks how the work grows, not a
-// fixed number of milliseconds: doubling the input must not much more than double the time
-// (quadratic work would quadruple it). Only conversion is timed, never happy-dom's parsing;
+// fixed number of milliseconds: four times the input must take well under 16 times the time
+// (linear work takes about 4x, quadratic 16x). Only conversion is timed, never happy-dom's parsing;
 // best of three conversions per size. The absolute bound is a backstop far above normal.
 const nest = (tag, n, inner = "x") => `<${tag}>`.repeat(n) + inner + `</${tag}>`.repeat(n);
 const SHAPES = {
@@ -178,13 +178,15 @@ const best = (html) => {
 
 test("deep and wide nesting converts in time linear in its size, and never throws", () => {
   for (const [name, make] of Object.entries(SHAPES)) {
-    const [small, outSmall] = best(make(10_000));
+    // 4x the size: linear time grows about 4x (up to 6.5x seen with garbage collection under
+    // load), quadratic 16x; the bound of 10 clears both by 1.5x. At 2x, 3.03 against 3 failed.
+    const [small, outSmall] = best(make(5_000));
     const [large, outLarge] = best(make(20_000));
     assert.match(outSmall, /x/, name);
     assert.match(outLarge, /x/, name);
     // A floor keeps timer noise on tiny durations from deciding the ratio.
     const ratio = large / Math.max(small, 5);
-    assert.ok(ratio < 3, `${name}: ${small.toFixed(0)} ms -> ${large.toFixed(0)} ms (x${ratio.toFixed(2)})`);
+    assert.ok(ratio < 10, `${name}: ${small.toFixed(0)} ms -> ${large.toFixed(0)} ms (x${ratio.toFixed(2)})`);
     assert.ok(large < 10_000, `${name}: ${large.toFixed(0)} ms`);
   }
 });

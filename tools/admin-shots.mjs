@@ -56,6 +56,58 @@ const line = async (page, text) => {
   }, text);
   return page.locator(".cm-line", { hasText: text }).first();
 };
+// Signed-out pages: type into the form, press the key, wait for the answer in the alert region.
+const typed = async (page, values) => {
+  for (const [id, v] of Object.entries(values)) await page.fill(`#${id}`, v);
+};
+const answered = (page) => page.waitForFunction(() => document.querySelector(".auth-alert")?.textContent);
+const SIGN = { login: "lan", password: "correct horse battery" };
+const ACCOUNT = { login: "lan", slug: "lan", "display-name": "Lan Nguyen", password: "correct horse battery", "password-repeat": "correct horse battery" };
+const submitWith = (values, click = "button[type=submit]") => async (page) => {
+  await typed(page, values);
+  await page.click(click);
+  await answered(page);
+};
+// Account screen: open the add form, or the remove confirm of the first passkey; `send` types the
+// password and waits for the answer in the form's alert region.
+const PASSKEYS = ".pk-list .pk";
+const addForm = async (page) => {
+  await page.click(".acct-add button");
+  await page.waitForSelector(".acct-panel");
+};
+const removeConfirm = async (page) => {
+  await page.click(".pk .btn");
+  await page.waitForSelector(".confirm");
+  await settle(page, ".pop");
+};
+const send = (form) => async (page) => {
+  await page.fill(`${form} input[type=password]`, "correct horse battery");
+  await page.click(`${form} button[type=submit]`);
+  await page.waitForFunction((f) => document.querySelector(`${f} .auth-alert`)?.textContent, form);
+};
+// Two drafts for user 1 (the mock's user), under keys no editor state opens (editor/drafts.ts).
+const seedDrafts = (page) =>
+  page.evaluate(
+    () =>
+      new Promise((resolve, reject) => {
+        const req = indexedDB.open("plumblog-admin", 2);
+        req.onupgradeneeded = () => {
+          if (req.result.objectStoreNames.contains("drafts")) req.result.deleteObjectStore("drafts");
+          req.result.createObjectStore("drafts");
+        };
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const db = req.result;
+          const tx = db.transaction("drafts", "readwrite");
+          const draft = { title: "A draft", body: "Words kept on this device.", base: null, rev: 1, savedAt: Date.now() };
+          tx.objectStore("drafts").put(draft, "1:new-shot-a");
+          tx.objectStore("drafts").put(draft, "1:new-shot-b");
+          tx.oncomplete = () => (db.close(), resolve());
+          tx.onerror = () => reject(tx.error);
+        };
+      }),
+  );
+
 // [name, path, element to wait for, action before the shot, widths it applies to]
 // Pastes into the writing column what a clipboard would hold: a picture made on a canvas, or
 // HTML as Google Docs puts it there.
@@ -169,6 +221,62 @@ const STATES = [
   ],
   ["preview", "/admin/posts/1", EDITOR, (page) => previewIn(page, () => page.click(".seg button:last-child"))],
   ["new", "/admin/posts/new", EDITOR],
+  ["signin", "/admin/signin"],
+  ["signin-wrong", "/admin/signin?auth=wrong", null, submitWith(SIGN)],
+  ["signin-locked", "/admin/signin?auth=locked", null, submitWith(SIGN)],
+  [
+    "signin-turnstile",
+    "/admin/signin?auth=turnstile_hold",
+    null,
+    async (page) => {
+      await typed(page, SIGN);
+      await page.click("button[type=submit]");
+      // The always-pass widget solves itself, then the page sends the token by itself: busy again.
+      await page.waitForSelector("button[type=submit]:disabled", { timeout: 15000 });
+      await page.waitForTimeout(600);
+    },
+  ],
+  ["signin-passkey-origin", "/admin/signin?auth=origin", null, submitWith({}, "button[type=button]")],
+  ["setup", "/admin/setup?code=7f3a-91c2"],
+  ["setup-short", "/admin/setup?code=7f3a-91c2", null, submitWith({ ...ACCOUNT, password: "short", "password-repeat": "short" })],
+  ["setup-invalid", "/admin/setup?auth=setup_invalid&code=0000-0000", null, submitWith(ACCOUNT)],
+  ["invite", "/admin/invite?code=b2d8-44e0"],
+  ["invite-invalid", "/admin/invite?auth=invite_invalid&code=0000-0000", null, submitWith(ACCOUNT)],
+  ["account", "/admin/account", PASSKEYS],
+  ["account-empty", "/admin/account?passkeys=0", ".acct .empty"],
+  ["account-add", "/admin/account", PASSKEYS, addForm],
+  ["account-remove-confirm", "/admin/account", PASSKEYS, removeConfirm],
+  [
+    "account-remove-conflict",
+    "/admin/account?auth=conflict",
+    PASSKEYS,
+    async (page) => {
+      await removeConfirm(page);
+      await send(".confirm")(page);
+    },
+  ],
+  [
+    "account-wrong-password",
+    "/admin/account?auth=reauth_wrong",
+    PASSKEYS,
+    async (page) => {
+      await addForm(page);
+      await send(".acct-panel")(page);
+    },
+  ],
+  [
+    "signout-confirm",
+    "/admin/account",
+    PASSKEYS,
+    async (page) => {
+      await seedDrafts(page);
+      await page.click("button.me");
+      await page.waitForSelector(".pop");
+      await page.click(".pop [data-act=signout]");
+      await page.waitForSelector(".confirm");
+      await settle(page, ".pop");
+    },
+  ],
   [
     "paste-docs",
     "/admin/posts/new",
@@ -230,7 +338,7 @@ try {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const english = ["posts", "no-permission", "editor", "slash"];
+        const english = ["posts", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "account", "account-wrong-password", "signout-confirm"];
         const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
         const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);

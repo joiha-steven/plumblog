@@ -20,7 +20,7 @@ const sha256hex = (b) => createHash("sha256").update(b).digest("hex");
 const b64u = (buf) => Buffer.from(buf).toString("base64url");
 const sq = (s) => `'${String(s).replaceAll("'", "''")}'`;
 const pbkdf2Async = promisify(pbkdf2);
-/** The browser's stretch (web/admin/js/stretch.js); auth.test.mjs pins it. */
+/** The browser's stretch (web/admin/src/auth/stretch.ts); auth.test.mjs pins it. */
 const stretch = (site, login, password) =>
   pbkdf2Async(password, `plumblog:${site}:${login.toLowerCase()}`, 600000, 32, "sha256").then(b64u);
 /** Stored form of crates/auth hash_password, for seeded users. */
