@@ -18,6 +18,10 @@ use worker::{Context, Env, Request, Response, Result, ScheduleContext, Scheduled
 async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
     // Test builds only: /__contract empties the database, so it never exists in a release build.
     #[cfg(feature = "contract-tests")]
+    if let Some(res) = contract::instance(&req, &env) {
+        return res;
+    }
+    #[cfg(feature = "contract-tests")]
     if let Some(res) = contract::handle(&req, &env).await? {
         return Ok(res);
     }
