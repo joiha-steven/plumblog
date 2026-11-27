@@ -50,9 +50,15 @@ fn api_reference() -> String {
         }
         let _ = writeln!(
             o,
-            "body limit: {} bytes\nanswer: {} {}",
-            r.max_body, r.status, r.response
+            "body: {}, limit {} bytes\nanswer: {} {}",
+            r.body.as_str(),
+            r.max_body,
+            r.status,
+            r.response
         );
+        if let Some(v) = r.variants {
+            let _ = writeln!(o, "variants: {}", v.as_str());
+        }
         for f in r.fields {
             let need = if f.required { "required" } else { "optional" };
             let _ = writeln!(
@@ -160,6 +166,9 @@ mod tests {
             text.matches("\n## ").count(),
             plumblog_model::api::ROUTES.len()
         );
+        assert!(text.contains(
+            "body: original, limit 20971520 bytes\nanswer: 201 media\nvariants: admin_encoder\n"
+        ));
         assert!(guide_list().contains("api"));
     }
 

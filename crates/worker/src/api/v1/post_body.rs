@@ -67,11 +67,11 @@ pub fn plain_text(html: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// Whitespace-separated words. Approximate for unspaced scripts (the renderer's own counter
-/// is private); nothing reads `word_count` for layout.
+/// Words as the renderer counts them for reading time: each CJK or Thai-like character is
+/// one, so unspaced scripts are not counted as a single word per sentence.
 #[must_use]
 pub fn word_count(text: &str) -> i64 {
-    i64::try_from(text.split_whitespace().count()).unwrap_or(i64::MAX)
+    i64::try_from(plumblog_markdown::word_count(text)).unwrap_or(i64::MAX)
 }
 
 /// `[{"level":2,"id":"...","text":"..."}, ...]`.
@@ -115,6 +115,11 @@ mod tests {
         assert!(text.contains("Hi & bye"), "{text}");
         assert!(text.contains("x<y"), "{text}");
         assert_eq!(word_count(&text), 6, "{text}");
+        // Unspaced scripts: one word per character, not one per run.
+        assert_eq!(word_count("\u{65e5}\u{672c}\u{8a9e} \u{4e2d}\u{6587}"), 5);
+        assert_eq!(word_count("\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}"), 5);
+        assert_eq!(word_count("\u{e2a}\u{e27}\u{e31}\u{e2a}\u{e14}\u{e35}"), 4);
+        assert_eq!(word_count("Hello \u{4e16}\u{754c} ok"), 4);
         let toc = toc_json(&html.toc);
         assert!(toc.starts_with("[{\"level\":1,"), "{toc}");
     }

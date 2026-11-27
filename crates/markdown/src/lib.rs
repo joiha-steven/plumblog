@@ -10,7 +10,7 @@ mod link;
 mod mathml;
 mod text;
 
-pub use text::heading_id;
+pub use text::{heading_id, word_count};
 
 /// Knobs that change the output. The excerpt length is the theme option `excerpt_words`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

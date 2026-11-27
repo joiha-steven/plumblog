@@ -38,6 +38,25 @@ const ROUTES = [
   "POST /api/v1/series",
   "PATCH /api/v1/series/{id}",
   "DELETE /api/v1/series/{id}",
+  "GET /api/v1/media",
+  "GET /api/v1/media/{id}",
+  "POST /api/v1/media",
+  "PATCH /api/v1/media/{id}",
+  "DELETE /api/v1/media/{id}",
+  "GET /api/v1/redirects",
+  "PUT /api/v1/redirects",
+  "DELETE /api/v1/redirects",
+  "GET /api/v1/settings",
+  "PUT /api/v1/settings/{key}",
+  "DELETE /api/v1/settings/{key}",
+  "GET /api/v1/themes/{name}/options",
+  "PUT /api/v1/themes/{name}/options/{key}",
+  "DELETE /api/v1/themes/{name}/options",
+  "GET /api/v1/plugins",
+  "PUT /api/v1/plugins/{name}",
+  "GET /api/v1/plugins/{name}/options",
+  "PUT /api/v1/plugins/{name}/options/{key}",
+  "DELETE /api/v1/plugins/{name}/options",
 ];
 
 /** One API call. `as` is {cookie} or {bearer}; `origin: null` omits the header. */
@@ -100,7 +119,8 @@ after(async () => {
 });
 
 /** A request path for a route key, ids filled in. */
-const pathOf = (key, id = 999999) => key.split(" ")[1].replace("{id}", String(id));
+const pathOf = (key, id = 999999) =>
+  key.split(" ")[1].replace("{id}", String(id)).replace("{key}", "zz_probe").replace("{name}", "minimal");
 const methodOf = (key) => key.split(" ")[0];
 const newPost = (slug, extra = {}) => ({ lang: "en", slug, title: `Title ${slug}`, markdown: `Body of ${slug}.`, ...extra });
 

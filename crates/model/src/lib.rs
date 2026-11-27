@@ -3,6 +3,7 @@
 use std::fmt;
 
 pub mod api;
+pub mod image;
 pub mod ts;
 
 /// Engine version, taken from the workspace so it never drifts.

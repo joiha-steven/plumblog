@@ -9,6 +9,19 @@ pub const MAX_BODY: usize = 8 * 1024;
 /// Request body cap for post routes: room for a ~20k-word post with code, math and images
 /// (docs/ARCHITECTURE.md, Budgets).
 pub const MAX_POST_BODY: usize = 160 * 1024;
+/// Request body cap for a media upload (the original image bytes). Under the Workers
+/// request-body limit of every plan (100 MB on Free) and well inside the 128 MB isolate
+/// memory, since the Worker holds the whole body to check its header (docs/ARCHITECTURE.md,
+/// Budgets).
+pub const MAX_MEDIA_BODY: usize = 20 * 1024 * 1024;
+/// Image types a media upload accepts (the upload's `mime` field).
+pub const MEDIA_MIMES: &[&str] = &[
+    "image/avif",
+    "image/webp",
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+];
 /// Largest `limit` a list accepts.
 pub const MAX_LIMIT: u32 = 100;
 /// `limit` when none is given.
@@ -18,6 +31,7 @@ pub const DEFAULT_LIMIT: u32 = 20;
 pub enum Method {
     Get,
     Post,
+    Put,
     Patch,
     Delete,
 }
@@ -28,6 +42,7 @@ impl Method {
         match self {
             Self::Get => "GET",
             Self::Post => "POST",
+            Self::Put => "PUT",
             Self::Patch => "PATCH",
             Self::Delete => "DELETE",
         }
@@ -54,6 +69,8 @@ pub enum Type {
     IntOrNull,
     /// An array of integers.
     IntList,
+    /// Any JSON value (setting and option values), stored as sent after a strict parse.
+    Json,
 }
 
 impl Type {
@@ -65,6 +82,7 @@ impl Type {
             Self::Bool => "boolean",
             Self::IntOrNull => "integer|null",
             Self::IntList => "integer[]",
+            Self::Json => "json",
         }
     }
 }
@@ -100,6 +118,23 @@ const fn path(name: &'static str) -> Field {
         name,
         ty: Type::Int,
         at: In::Path,
+        required: true,
+    }
+}
+/// A path segment that is a name (setting key, theme or plugin), not an id.
+const fn path_name(name: &'static str) -> Field {
+    Field {
+        name,
+        ty: Type::Str,
+        at: In::Path,
+        required: true,
+    }
+}
+const fn query_req(name: &'static str, ty: Type) -> Field {
+    Field {
+        name,
+        ty,
+        at: In::Query,
         required: true,
     }
 }
@@ -151,6 +186,60 @@ pub enum RouteId {
     SeriesCreate,
     SeriesUpdate,
     SeriesDelete,
+    MediaList,
+    MediaGet,
+    MediaUpload,
+    MediaUpdate,
+    MediaDelete,
+    RedirectList,
+    RedirectPut,
+    RedirectDelete,
+    SettingList,
+    SettingPut,
+    SettingDelete,
+    ThemeOptions,
+    ThemeOptionPut,
+    ThemeOptionsDelete,
+    PluginList,
+    PluginPut,
+    PluginOptions,
+    PluginOptionPut,
+    PluginOptionsDelete,
+}
+
+/// What a request body is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Body {
+    /// A strict JSON object of the body fields.
+    Json,
+    /// The raw bytes of an original image; its metadata comes in query fields.
+    Original,
+}
+
+impl Body {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Original => "original",
+        }
+    }
+}
+
+/// Who makes a resource's derived files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Variants {
+    /// The admin's in-browser AVIF encoder (issue #13); the API stores the original only.
+    AdminEncoder,
+}
+
+impl Variants {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AdminEncoder => "admin_encoder",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,6 +253,9 @@ pub struct Route {
     pub also: &'static [Permission],
     pub fields: &'static [Field],
     pub max_body: usize,
+    pub body: Body,
+    /// Set where derived files (image sizes) are not made by the API.
+    pub variants: Option<Variants>,
     pub status: u16,
     /// Name of the response shape; `none` for an empty 204.
     pub response: &'static str,
@@ -224,6 +316,32 @@ const POST_UPDATE: &[Field] = &[
 
 const ID: &[Field] = &[path("id")];
 
+const MEDIA: Access = Access::Require(Permission::UploadMedia);
+const SETTINGS: Access = Access::Require(Permission::ManageSettings);
+const THEMES: Access = Access::Require(Permission::ManageThemes);
+const PLUGINS: Access = Access::Require(Permission::ManagePlugins);
+
+const MEDIA_FILTERS: &[Field] = &[
+    query("missing_alt", Type::Bool),
+    query("unused", Type::Bool),
+    query("cursor", Type::Str),
+    query("limit", Type::Int),
+];
+const MEDIA_UPLOAD: &[Field] = &[
+    query_req("name", Type::Str),
+    query_req("mime", Type::Str),
+    query_req("width", Type::Int),
+    query_req("height", Type::Int),
+    query("alt", Type::Str),
+];
+const VALUE: &[Field] = &[path_name("key"), req("value", Type::Json)];
+const OWNER: &[Field] = &[path_name("name")];
+const OWNER_VALUE: &[Field] = &[
+    path_name("name"),
+    path_name("key"),
+    req("value", Type::Json),
+];
+
 const fn route(
     id: RouteId,
     method: Method,
@@ -241,12 +359,14 @@ const fn route(
         also: &[],
         fields,
         max_body: MAX_BODY,
+        body: Body::Json,
+        variants: None,
         status,
         response,
     }
 }
 
-/// The whole `/api/v1` surface. Media, redirects and settings join here (issue #10, part 3).
+/// The whole `/api/v1` surface.
 pub const ROUTES: &[Route] = &[
     route(
         RouteId::Reference,
@@ -445,6 +565,182 @@ pub const ROUTES: &[Route] = &[
         204,
         "none",
     ),
+    route(
+        RouteId::MediaList,
+        Method::Get,
+        "/api/v1/media",
+        Access::Read,
+        MEDIA_FILTERS,
+        200,
+        "media_page",
+    ),
+    route(
+        RouteId::MediaGet,
+        Method::Get,
+        "/api/v1/media/{id}",
+        Access::Read,
+        ID,
+        200,
+        "media",
+    ),
+    Route {
+        max_body: MAX_MEDIA_BODY,
+        body: Body::Original,
+        variants: Some(Variants::AdminEncoder),
+        ..route(
+            RouteId::MediaUpload,
+            Method::Post,
+            "/api/v1/media",
+            MEDIA,
+            MEDIA_UPLOAD,
+            201,
+            "media",
+        )
+    },
+    route(
+        RouteId::MediaUpdate,
+        Method::Patch,
+        "/api/v1/media/{id}",
+        MEDIA,
+        &[path("id"), req("alt", Type::Str)],
+        200,
+        "media",
+    ),
+    route(
+        RouteId::MediaDelete,
+        Method::Delete,
+        "/api/v1/media/{id}",
+        MEDIA,
+        ID,
+        204,
+        "none",
+    ),
+    route(
+        RouteId::RedirectList,
+        Method::Get,
+        "/api/v1/redirects",
+        Access::Read,
+        &[],
+        200,
+        "redirect_list",
+    ),
+    route(
+        RouteId::RedirectPut,
+        Method::Put,
+        "/api/v1/redirects",
+        SETTINGS,
+        &[req("from", Type::Str), req("to", Type::Str)],
+        204,
+        "none",
+    ),
+    route(
+        RouteId::RedirectDelete,
+        Method::Delete,
+        "/api/v1/redirects",
+        SETTINGS,
+        &[query_req("from", Type::Str)],
+        204,
+        "none",
+    ),
+    route(
+        RouteId::SettingList,
+        Method::Get,
+        "/api/v1/settings",
+        Access::Read,
+        &[],
+        200,
+        "values",
+    ),
+    route(
+        RouteId::SettingPut,
+        Method::Put,
+        "/api/v1/settings/{key}",
+        SETTINGS,
+        VALUE,
+        204,
+        "none",
+    ),
+    route(
+        RouteId::SettingDelete,
+        Method::Delete,
+        "/api/v1/settings/{key}",
+        SETTINGS,
+        &[path_name("key")],
+        204,
+        "none",
+    ),
+    route(
+        RouteId::ThemeOptions,
+        Method::Get,
+        "/api/v1/themes/{name}/options",
+        Access::Read,
+        OWNER,
+        200,
+        "values",
+    ),
+    route(
+        RouteId::ThemeOptionPut,
+        Method::Put,
+        "/api/v1/themes/{name}/options/{key}",
+        THEMES,
+        OWNER_VALUE,
+        204,
+        "none",
+    ),
+    route(
+        RouteId::ThemeOptionsDelete,
+        Method::Delete,
+        "/api/v1/themes/{name}/options",
+        THEMES,
+        OWNER,
+        204,
+        "none",
+    ),
+    route(
+        RouteId::PluginList,
+        Method::Get,
+        "/api/v1/plugins",
+        Access::Read,
+        &[],
+        200,
+        "plugin_list",
+    ),
+    route(
+        RouteId::PluginPut,
+        Method::Put,
+        "/api/v1/plugins/{name}",
+        PLUGINS,
+        &[path_name("name"), req("enabled", Type::Bool)],
+        204,
+        "none",
+    ),
+    route(
+        RouteId::PluginOptions,
+        Method::Get,
+        "/api/v1/plugins/{name}/options",
+        Access::Read,
+        OWNER,
+        200,
+        "values",
+    ),
+    route(
+        RouteId::PluginOptionPut,
+        Method::Put,
+        "/api/v1/plugins/{name}/options/{key}",
+        PLUGINS,
+        OWNER_VALUE,
+        204,
+        "none",
+    ),
+    route(
+        RouteId::PluginOptionsDelete,
+        Method::Delete,
+        "/api/v1/plugins/{name}/options",
+        PLUGINS,
+        OWNER,
+        204,
+        "none",
+    ),
 ];
 
 /// Path field values of a matched route, in pattern order.
@@ -496,7 +792,7 @@ pub fn find(method: Method, path: &str) -> Result<(&'static Route, PathValues<'_
 
 #[cfg(test)]
 mod tests {
-    use super::{Access, In, Method, ROUTES, find, match_path};
+    use super::{Access, Body, In, MAX_POST_BODY, Method, ROUTES, find, match_path};
 
     #[test]
     fn table_is_consistent() {
@@ -527,9 +823,18 @@ mod tests {
             assert_eq!(segs, fields, "{}", r.path);
             if matches!(r.method, Method::Get | Method::Delete) {
                 assert!(r.fields.iter().all(|f| f.at != In::Body), "{}", r.path);
-            } else {
+            } else if r.body == Body::Json {
                 assert!(r.fields.iter().all(|f| f.at != In::Query), "{}", r.path);
+            } else {
+                // A raw body carries no JSON fields; its metadata is in the query.
+                assert!(r.fields.iter().all(|f| f.at != In::Body), "{}", r.path);
             }
+            // Only the media upload takes more than the post cap, and only as raw bytes.
+            assert!(
+                r.max_body <= MAX_POST_BODY || r.body == Body::Original,
+                "{}",
+                r.path
+            );
             if r.access == Access::Read {
                 assert_eq!(r.method, Method::Get, "{}", r.path);
             }

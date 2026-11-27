@@ -4,12 +4,17 @@
 //! cookie or API token alike.
 
 mod input;
+mod media;
 mod post_body;
 mod posts;
+mod settings;
 mod taxonomy;
 
-use plumblog_model::api::{self, Access, Field, Method as M, ROUTES, Route, RouteId};
+use plumblog_auth::json;
+use plumblog_model::api::{self, Access, Body, Field, Method as M, ROUTES, Route, RouteId};
 use plumblog_model::{Error, ErrorCode, Result, TokenScope};
+use plumblog_store::OptionOwner;
+use plumblog_syslog::EventKind;
 use worker::Method;
 
 use super::body::{Out, object, quote};
@@ -22,6 +27,7 @@ fn method(m: &Method) -> Option<M> {
     match m {
         Method::Get => Some(M::Get),
         Method::Post => Some(M::Post),
+        Method::Put => Some(M::Put),
         Method::Patch => Some(M::Patch),
         Method::Delete => Some(M::Delete),
         _ => None,
@@ -33,6 +39,61 @@ pub fn max_body(m: &Method, path: &str) -> usize {
     method(m)
         .and_then(|m| api::find(m, path).ok())
         .map_or(api::MAX_BODY, |(r, _)| r.max_body)
+}
+
+/// Whether this request's body is raw bytes (a media upload): the gate then checks only its
+/// declared length, and reads it after [`check_access`], so an anonymous or read-only caller
+/// never makes the Worker take in 20 MiB.
+pub fn raw_body(m: &Method, path: &str) -> bool {
+    method(m)
+        .and_then(|m| api::find(m, path).ok())
+        .is_some_and(|(r, _)| r.body == Body::Original)
+}
+
+fn access(p: &Principal, route: &Route) -> Result<()> {
+    match route.access {
+        Access::Read => p.require_read()?,
+        Access::Require(perm) => p.require(perm)?,
+    };
+    Ok(())
+}
+
+/// The access check of the route this request names, if any (`dispatch` repeats it).
+///
+/// # Errors
+///
+/// `Unauthenticated` or `Forbidden`.
+pub fn check_access(p: &Principal, m: &Method, path: &str) -> Result<()> {
+    match method(m).and_then(|m| api::find(m, path).ok()) {
+        Some((route, _)) => access(p, route),
+        None => Ok(()),
+    }
+}
+
+/// A content write in the system log: who, how (session or token), what.
+async fn changed(ctx: &Ctx, p: &Principal, action: &str, subject: &str) {
+    ctx.syslog(
+        p.event(ctx, EventKind::ContentChanged)
+            .subject(subject)
+            .field("action", action),
+    )
+    .await;
+}
+
+/// JSON text from storage as a value to write: `null` (logged) when it is not one JSON value,
+/// so a bad row cannot break the response around it.
+fn stored_json(ctx: &Ctx, what: &str, text: &str) -> Out {
+    let wrapped = format!("{{\"v\":{text}}}");
+    match json::parse_document(wrapped.as_bytes(), usize::MAX) {
+        Ok(members) if members.len() == 1 => Out::Raw(text.to_owned()),
+        _ => {
+            worker::console_error!(
+                "[{}] {what}: stored value is not JSON",
+                ctx.request_id.as_str()
+            );
+            Out::Null
+        }
+    }
 }
 
 /// Finds the route, checks access then input, and runs the handler.
@@ -47,7 +108,7 @@ pub async fn dispatch(
     m: &Method,
     path: &str,
     query: &[(String, String)],
-    body: &[u8],
+    body: Vec<u8>,
 ) -> Result<Reply> {
     let not_found = || {
         Error::new(
@@ -59,11 +120,9 @@ pub async fn dispatch(
         .ok_or_else(not_found)
         .and_then(|m| api::find(m, path).map_err(|_| not_found()))?;
     // Access first: an anonymous or read-only caller learns nothing from input checks.
-    match route.access {
-        Access::Read => p.require_read()?,
-        Access::Require(perm) => p.require(perm)?,
-    };
-    let input = Input::parse(route, &path_values, query, body)?;
+    access(p, route)?;
+    let input = Input::parse(route, &path_values, query, &body)?;
+    let (theme, plugin) = (OptionOwner::Theme, OptionOwner::Plugin);
     match route.id {
         RouteId::Reference => Ok(Reply::json(200, reference())),
         RouteId::Me => me(p),
@@ -84,6 +143,25 @@ pub async fn dispatch(
         RouteId::SeriesCreate => taxonomy::series_create(ctx, p, &input).await,
         RouteId::SeriesUpdate => taxonomy::series_update(ctx, p, &input).await,
         RouteId::SeriesDelete => taxonomy::series_delete(ctx, p, &input).await,
+        RouteId::MediaList => media::list(ctx, &input).await,
+        RouteId::MediaGet => media::get(ctx, &input).await,
+        RouteId::MediaUpload => media::upload(ctx, p, &input, body).await,
+        RouteId::MediaUpdate => media::update(ctx, p, &input).await,
+        RouteId::MediaDelete => media::delete(ctx, p, &input).await,
+        RouteId::RedirectList => settings::redirects(ctx).await,
+        RouteId::RedirectPut => settings::redirect_put(ctx, p, &input).await,
+        RouteId::RedirectDelete => settings::redirect_delete(ctx, p, &input).await,
+        RouteId::SettingList => settings::list(ctx).await,
+        RouteId::SettingPut => settings::put(ctx, p, &input).await,
+        RouteId::SettingDelete => settings::delete(ctx, p, &input).await,
+        RouteId::ThemeOptions => settings::options(ctx, theme, &input).await,
+        RouteId::ThemeOptionPut => settings::option_put(ctx, p, theme, &input).await,
+        RouteId::ThemeOptionsDelete => settings::options_delete(ctx, p, theme, &input).await,
+        RouteId::PluginList => settings::plugins(ctx).await,
+        RouteId::PluginPut => settings::plugin_put(ctx, p, &input).await,
+        RouteId::PluginOptions => settings::options(ctx, plugin, &input).await,
+        RouteId::PluginOptionPut => settings::option_put(ctx, p, plugin, &input).await,
+        RouteId::PluginOptionsDelete => settings::options_delete(ctx, p, plugin, &input).await,
     }
 }
 
@@ -117,6 +195,12 @@ fn route_json(r: &Route) -> String {
         (
             "max_body",
             Out::Int(i64::try_from(r.max_body).unwrap_or(i64::MAX)),
+        ),
+        ("body", Out::Str(r.body.as_str().to_owned())),
+        (
+            "variants",
+            r.variants
+                .map_or(Out::Null, |v| Out::Str(v.as_str().to_owned())),
         ),
         ("status", Out::Int(i64::from(r.status))),
         ("response", Out::Str(r.response.to_owned())),

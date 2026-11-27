@@ -189,6 +189,30 @@ fn check_origin(req: &Request, method: &Method, want: &str) -> Result<()> {
     }
 }
 
+/// Whether a body comes, refusing it unread when `Content-Length` is over `max` (413) or
+/// missing on a body (411).
+fn declared_length(req: &Request, max: usize) -> Result<bool> {
+    match req.headers().get("content-length").ok().flatten() {
+        Some(v) => {
+            let n: usize = v.trim().parse().map_err(|_| {
+                Error::new(ErrorCode::InvalidInput, format!("Content-Length {v:?}"))
+            })?;
+            if n > max {
+                return Err(Error::new(
+                    ErrorCode::BodyTooLarge,
+                    format!("body of {n} bytes > {max}"),
+                ));
+            }
+            Ok(true)
+        }
+        None if req.inner().body().is_some() => Err(Error::new(
+            ErrorCode::LengthRequired,
+            "body without Content-Length",
+        )),
+        None => Ok(false),
+    }
+}
+
 /// The request body, refused before it is read when `Content-Length` says it is over `max`
 /// (413), or when a body comes without one (chunked: its size is unknown until read, 411).
 /// The runtime frames the body by `Content-Length`, so it cannot be longer; the length is
@@ -200,22 +224,8 @@ async fn read_body(req: &mut Request, max: usize) -> Result<Vec<u8>> {
             format!("body of {n} bytes > {max}"),
         )
     };
-    match req.headers().get("content-length").ok().flatten() {
-        Some(v) => {
-            let n: usize = v.trim().parse().map_err(|_| {
-                Error::new(ErrorCode::InvalidInput, format!("Content-Length {v:?}"))
-            })?;
-            if n > max {
-                return Err(too_large(n));
-            }
-        }
-        None if req.inner().body().is_some() => {
-            return Err(Error::new(
-                ErrorCode::LengthRequired,
-                "body without Content-Length",
-            ));
-        }
-        None => return Ok(Vec::new()),
+    if !declared_length(req, max)? {
+        return Ok(Vec::new());
     }
     let bytes = req
         .bytes()
@@ -263,19 +273,30 @@ pub async fn handle(mut req: Request, env: &Env) -> worker::Result<Response> {
                 .map_or_else(|| ctx.request_origin.clone(), |s| s.origin);
             check_origin(&req, &method, &want)?;
         }
+        let max = v1::max_body(&method, &path);
+        let raw = v1::raw_body(&method, &path);
         let body = if matches!(method, Method::Get | Method::Head) {
             Vec::new()
+        } else if raw {
+            declared_length(&req, max)?;
+            Vec::new()
         } else {
-            read_body(&mut req, v1::max_body(&method, &path)).await?
+            read_body(&mut req, max).await?
         };
         let (principal, cookie) = principal::resolve(&ctx, &req).await?;
         gate_cookie = cookie;
         if path.starts_with(v1::PREFIX) {
+            let body = if raw {
+                v1::check_access(&principal, &method, &path)?;
+                read_body(&mut req, max).await?
+            } else {
+                body
+            };
             let url = req
                 .url()
                 .map_err(|e| Error::new(ErrorCode::Internal, format!("request url: {e}")))?;
             let query: Vec<(String, String)> = url.query_pairs().into_owned().collect();
-            return v1::dispatch(&ctx, &principal, &method, &path, &query, &body).await;
+            return v1::dispatch(&ctx, &principal, &method, &path, &query, body).await;
         }
         route(&ctx, &principal, &method, &path, &body).await
     }

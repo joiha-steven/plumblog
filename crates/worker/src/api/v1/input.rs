@@ -3,8 +3,10 @@
 //! Handlers then read typed values that cannot fail.
 
 use plumblog_auth::json::{self, Value};
-use plumblog_model::api::{Field, In, PathValues, Route, Type};
+use plumblog_model::api::{Body, Field, In, PathValues, Route, Type};
 use plumblog_model::{Error, ErrorCode, Result};
+
+use crate::api::body::quote;
 
 /// A nullable integer field of a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,7 +54,8 @@ fn type_ok(ty: Type, v: &Value) -> bool {
         (Type::Str, Value::Str(_))
         | (Type::Int | Type::IntOrNull, Value::Int(_))
         | (Type::IntOrNull, Value::Null)
-        | (Type::Bool, Value::Bool(_)) => true,
+        | (Type::Bool, Value::Bool(_))
+        | (Type::Json, _) => true,
         (Type::IntList, Value::Arr(items)) => items.iter().all(|i| matches!(i, Value::Int(_))),
         _ => false,
     }
@@ -62,7 +65,8 @@ impl Input {
     /// # Errors
     ///
     /// `NotFound` for a path id that is not a positive integer (the resource cannot exist);
-    /// `InvalidInput` naming the field for any other mismatch with the route's fields.
+    /// `InvalidInput` naming the field for any other mismatch with the route's fields. A
+    /// route whose body is not JSON leaves `body` to its handler.
     pub fn parse(
         route: &'static Route,
         path: &PathValues<'_>,
@@ -74,6 +78,11 @@ impl Input {
         };
         let mut values: Vec<(&'static str, Value)> = Vec::new();
         for (name, raw) in path {
+            if field(name, In::Path).is_some_and(|f| f.ty == Type::Str) {
+                // Names are checked by their handler (each kind has its own rule).
+                values.push((name, Value::Str((*raw).to_owned())));
+                continue;
+            }
             let id = int_text(raw).filter(|n| *n > 0).ok_or_else(|| {
                 Error::new(ErrorCode::NotFound, format!("{name}: {raw:?} is not an id"))
             })?;
@@ -92,12 +101,14 @@ impl Input {
                     "false" => Value::Bool(false),
                     _ => return Err(invalid(f.name, "boolean")),
                 },
-                Type::IntOrNull | Type::IntList => return Err(invalid(f.name, "not a query type")),
+                Type::IntOrNull | Type::IntList | Type::Json => {
+                    return Err(invalid(f.name, "not a query type"));
+                }
             };
             values.push((f.name, v));
         }
         let has_body_fields = route.fields.iter().any(|f| f.at == In::Body);
-        if !body.is_empty() || has_body_fields {
+        if route.body == Body::Json && (!body.is_empty() || has_body_fields) {
             // A body-less write (trash, restore) still accepts `{}`.
             let members = json::parse_document(body, route.max_body)?;
             for (name, v) in members {
@@ -179,10 +190,52 @@ impl Input {
         }
     }
 
+    /// A [`Type::Json`] field as compact JSON text: what was sent, re-serialised from the
+    /// strict parse (so no whitespace, comments or duplicate keys reach storage).
+    #[must_use]
+    pub fn json(&self, name: &str) -> Option<String> {
+        self.get(name).map(|v| {
+            let mut out = String::new();
+            write_json(&mut out, v);
+            out
+        })
+    }
+
     /// The route's path id (validated positive by [`Input::parse`]).
     #[must_use]
     pub fn id(&self) -> i64 {
         self.int("id").unwrap_or(0)
+    }
+}
+
+fn write_json(out: &mut String, v: &Value) {
+    match v {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Int(n) => out.push_str(&n.to_string()),
+        Value::Str(s) => out.push_str(&quote(s)),
+        Value::Arr(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_json(out, item);
+            }
+            out.push(']');
+        }
+        Value::Obj(members) => {
+            out.push('{');
+            for (i, (k, item)) in members.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&quote(k));
+                out.push(':');
+                write_json(out, item);
+            }
+            out.push('}');
+        }
     }
 }
 
@@ -249,6 +302,49 @@ mod tests {
         );
         assert_eq!(field(post("")), None);
         assert_eq!(field(post("[]")), None);
+    }
+
+    #[test]
+    fn json_values_and_names() {
+        let i = parse(
+            Method::Put,
+            "/api/v1/settings/title",
+            &[],
+            "{ \"value\" : {\"a\": [1, -2, null, true, \"x\\u00e9\"], \"b\": {}} }",
+        )
+        .unwrap();
+        assert_eq!(i.str("key"), Some("title"));
+        assert_eq!(
+            i.json("value").as_deref(),
+            Some("{\"a\":[1,-2,null,true,\"x\u{e9}\"],\"b\":{}}")
+        );
+        for bad in [
+            "{\"value\":1.5}",
+            "{\"value\":1,\"value\":2}",
+            "{}",
+            "{\"value\":01}",
+        ] {
+            assert_eq!(
+                parse(Method::Put, "/api/v1/settings/t", &[], bad)
+                    .err()
+                    .unwrap()
+                    .0,
+                ErrorCode::InvalidInput,
+                "{bad}"
+            );
+        }
+        // A raw upload's body is not JSON; its fields come from the query.
+        let q = [
+            ("name", "a.png"),
+            ("mime", "image/png"),
+            ("width", "1"),
+            ("height", "1"),
+        ];
+        assert!(parse(Method::Post, "/api/v1/media", &q, "\u{89}PNG").is_ok());
+        assert_eq!(
+            field(parse(Method::Post, "/api/v1/media", &q[..3], "")).as_deref(),
+            Some("height")
+        );
     }
 
     #[test]
