@@ -1,10 +1,11 @@
 //! Loading a theme and rendering pages with it.
 
 use crate::data::{Body, EntryData, LinkData, PageInfo, Post, PostData, Site, civil, cut_words};
-use crate::{PageKind, SLOTS, css, locale};
+use crate::keys;
+use crate::{PageKind, SLOTS, css};
 use minijinja::value::{Kwargs, Serde, Value};
 use minijinja::{Environment, State};
-use plumblog_i18n::Catalog;
+use plumblog_i18n::{Catalog, Key, MissingKeys};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Write as _};
@@ -136,6 +137,16 @@ pub struct Theme {
     catalogs: Arc<Catalogs>,
 }
 
+/// Keys one render asked for that exist nowhere, passed to the template `t` function through
+/// the render context (`Theme` is shared across requests, so it must not hold them).
+#[derive(Debug, Default)]
+struct RenderMissing(MissingKeys);
+
+impl minijinja::value::Object for RenderMissing {}
+
+/// Context variable holding the render's [`RenderMissing`].
+const MISSING_VAR: &str = "__i18n_missing";
+
 struct Catalogs {
     by_lang: HashMap<String, Catalog>,
     english: Catalog,
@@ -199,7 +210,13 @@ impl Theme {
                 let args = kwargs_strings(&kwargs)?;
                 let args: Vec<(&str, String)> =
                     args.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-                Ok(locale::fill(for_t.get(&lang).get(key), &args))
+                let fallback = MissingKeys::default();
+                let missing = state.lookup(MISSING_VAR);
+                let missing = missing
+                    .as_ref()
+                    .and_then(|v| v.downcast_object_ref::<RenderMissing>())
+                    .map_or(&fallback, |m| &m.0);
+                Ok(for_t.get(&lang).t_template(key, &args, missing))
             },
         );
         env.add_function("slot", |name: &str| -> Result<Value, minijinja::Error> {
@@ -243,22 +260,38 @@ impl Theme {
         &self.css
     }
 
-    /// Text for `key` in `lang` (theme locale, then English, then the key itself).
+    /// Text for `key` in `lang` (theme locale, then English, then the key itself). Rust keys
+    /// are checked against the default theme, which every theme's catalog includes.
     #[must_use]
-    pub fn text(&self, lang: &str, key: &str, args: &[(&str, String)]) -> String {
-        locale::fill(self.catalogs.get(lang).get(key), args)
+    pub fn text(&self, lang: &str, key: Key, args: &[(&str, String)]) -> String {
+        self.catalogs.get(lang).t(key, args)
     }
 
     /// Renders one reader page.
     ///
     /// # Errors
     /// A template error, with template name and line.
-    pub fn render<'b>(
+    pub fn render(
+        &self,
+        site: &Site,
+        page: &PageInfo,
+        body: &Body<'_>,
+    ) -> Result<String, ThemeError> {
+        self.render_reporting(site, page, body)
+            .map(|(html, _)| html)
+    }
+
+    /// Like [`Theme::render`], also returning the `(lang, key)` pairs this render asked for
+    /// that exist in no locale, each once, for the Worker to log as `i18n.missing_key`.
+    ///
+    /// # Errors
+    /// A template error, with template name and line.
+    pub fn render_reporting<'b>(
         &self,
         site: &Site,
         page: &PageInfo,
         body: &Body<'b>,
-    ) -> Result<String, ThemeError> {
+    ) -> Result<(String, Vec<(String, String)>), ThemeError> {
         let lang = page.lang.as_str();
         let entries = |posts: &[&'b Post]| self.entries(posts);
         let (kind, description, data) = match body {
@@ -352,9 +385,24 @@ impl Theme {
                 options: &self.options,
             },
         };
-        let ctx = minijinja::context! { ..ser(&ctx), ..data };
-        let tmpl = self.env.get_template(kind.template())?;
-        Ok(tmpl.render(ctx)?)
+        self.run(kind, ser(&ctx), data)
+    }
+
+    /// Renders `kind`'s template with a fresh missing-key collector for this render only.
+    fn run(
+        &self,
+        kind: PageKind,
+        ctx: Value,
+        data: Value,
+    ) -> Result<(String, Vec<(String, String)>), ThemeError> {
+        let missing = Arc::new(RenderMissing::default());
+        let ctx = minijinja::context! {
+            ..minijinja::context! { __i18n_missing => Value::from_dyn_object(Arc::clone(&missing)) },
+            ..ctx,
+            ..data
+        };
+        let html = self.env.get_template(kind.template())?.render(ctx)?;
+        Ok((html, missing.0.take()))
     }
 
     fn entries<'a>(&self, posts: &[&'a Post]) -> Vec<EntryData<'a>> {
@@ -376,12 +424,12 @@ impl Theme {
         let minutes = post.body.reading_minutes;
         let date_display = self.text(
             &post.lang,
-            "date.short",
+            keys::DATE_SHORT,
             &[
                 ("day", day.to_string()),
                 (
                     "month",
-                    self.text(&post.lang, &format!("date.month_{month}"), &[]),
+                    self.text(&post.lang, keys::MONTHS[month_index(month)], &[]),
                 ),
                 ("year", year.to_string()),
             ],
@@ -506,6 +554,11 @@ fn ser<T: Serialize>(v: T) -> Value {
     Value::from(Serde(v))
 }
 
+/// `civil` months are 1-12; clamp so a bad timestamp can never index out of bounds.
+fn month_index(month: u32) -> usize {
+    usize::try_from(month.clamp(1, 12) - 1).unwrap_or(0)
+}
+
 fn page_lang(state: &State) -> String {
     state
         .lookup("page")
@@ -561,8 +614,8 @@ fn load_catalogs(
             else {
                 continue;
             };
-            let strings = locale::flatten(files.read(path).unwrap_or_default())
-                .map_err(|e| ThemeError::new(format!("{path}: {e}")))?;
+            let strings = plumblog_i18n::parse(files.read(path).unwrap_or_default())
+                .map_err(|e| ThemeError::new(format!("{path}: {}", e.detail)))?;
             merged.entry(lang.to_owned()).or_default().extend(strings);
         }
     }
@@ -571,7 +624,8 @@ fn load_catalogs(
         .into_iter()
         .map(|(lang, strings)| {
             let fallback = english_strings.clone();
-            (lang, Catalog::new(strings, fallback))
+            let catalog = Catalog::new(strings, fallback).with_lang(&lang);
+            (lang, catalog)
         })
         .collect();
     Ok(Catalogs {

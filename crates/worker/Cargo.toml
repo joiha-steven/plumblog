@@ -13,6 +13,7 @@ worker.workspace = true
 plumblog-model.workspace = true
 plumblog-markdown.workspace = true
 plumblog-render.workspace = true
+plumblog-i18n.workspace = true
 
 [lints]
 workspace = true
