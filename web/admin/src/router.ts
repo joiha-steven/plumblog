@@ -1,14 +1,19 @@
 /** History routing under /admin/; the Worker answers every admin path with the same shell. */
 
-export type Screen = "posts" | "pages" | "media" | "settings" | "new" | "edit" | "missing";
+export type Screen = "posts" | "pages" | "media" | "settings" | "account" | "new" | "edit" | "missing" | AuthScreen;
+
+/** The signed-out pages: a full page load each (their CSP differs), never client-side routing. */
+export type AuthScreen = "signin" | "setup" | "invite";
+export const isAuth = (s: Screen): s is AuthScreen => s === "signin" || s === "setup" || s === "invite";
 
 export const HREF = {
   posts: "/admin/",
   pages: "/admin/pages",
   media: "/admin/media",
   settings: "/admin/settings",
+  account: "/admin/account",
   new: "/admin/posts/new",
-} as const satisfies Record<Exclude<Screen, "missing" | "edit">, string>;
+} as const satisfies Record<Exclude<Screen, "missing" | "edit" | AuthScreen>, string>;
 
 export const editHref = (id: number): string => `/admin/posts/${id}`;
 
@@ -19,8 +24,12 @@ export interface Route {
 }
 
 export function current(): Route {
-  const path = location.pathname.replace(/\/+$/, "") || "/";
+  // At most one trailing slash, as the Worker (is_auth_page) and sw.ts read paths: anything
+  // else is not a page, so a sign-in page never renders under the signed-in CSP.
+  const path = location.pathname.replace(/\/$/, "") || "/";
   if (path === "/admin") return { screen: "posts" };
+  const auth = /^\/admin\/(signin|setup|invite)$/.exec(path);
+  if (auth) return { screen: auth[1] as AuthScreen };
   const edit = /^\/admin\/posts\/(\d{1,15})$/.exec(path);
   if (edit) return { screen: "edit", id: Number(edit[1]) };
   const hit = Object.entries(HREF).find(([, href]) => href === path);

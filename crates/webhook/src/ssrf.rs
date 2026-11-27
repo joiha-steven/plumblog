@@ -24,6 +24,7 @@ stable_codes! {
         IpNotPublic => "ip_not_public",
         ReservedName => "reserved_name",
         SingleLabel => "single_label",
+        NonAsciiHost => "non_ascii_host",
     }
 }
 
@@ -55,6 +56,14 @@ const RESERVED_SUFFIXES: &[&str] = &["localhost", "local", "internal", "home.arp
 /// # Errors
 /// The first rule the URL breaks.
 pub fn check(url: &str, policy: Policy) -> Result<Target, Blocked> {
+    // Before the ASCII-only rule, so a Unicode host gets its own reason: the writer must send
+    // the punycode (`xn--`) form, which no part of the Worker converts for them.
+    if let Some((_, rest)) = url.split_once("://") {
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        if url.len() <= MAX_URL && !rest[..end].is_ascii() {
+            return Err(Blocked::NonAsciiHost);
+        }
+    }
     if url.len() > MAX_URL
         || !url
             .bytes()
@@ -286,8 +295,8 @@ mod tests {
     #[test]
     fn rejects_with_reason() {
         use Blocked::{
-            BadHost, BadPort, IpNotPublic, Malformed, NonCanonicalIp, NotHttps, ReservedName,
-            SingleLabel, Userinfo,
+            BadHost, BadPort, IpNotPublic, Malformed, NonAsciiHost, NonCanonicalIp, NotHttps,
+            ReservedName, SingleLabel, Userinfo,
         };
         for (url, why) in [
             // Scheme.
@@ -306,7 +315,8 @@ mod tests {
             ("https://exa mple.com/", Malformed),
             ("https://exa\tmple.com/", Malformed),
             ("https://127.0.0.\n1/", Malformed),
-            ("https://b\u{fc}cher.example/", Malformed),
+            ("https://b\u{fc}cher.example/", NonAsciiHost),
+            ("https://\u{4f8b}.example:8443/x", NonAsciiHost),
             ("https://%31%32%37.0.0.1/", BadHost),
             ("https://exa_mple.com/", BadHost),
             ("https://example..com/", BadHost),
@@ -427,6 +437,7 @@ mod tests {
                 "ip_not_public",
                 "reserved_name",
                 "single_label",
+                "non_ascii_host",
             ]
         );
     }

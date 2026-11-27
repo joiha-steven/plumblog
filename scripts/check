@@ -71,6 +71,7 @@ order=$(awk '/^## Code layout/{s=1} s&&/^```/{n++; next} s&&n==1&&/^crates\//{sp
 # web-sys, js-sys, wasm-bindgen, reqwest...) cannot slip into logic that must test on the host.
 external_allowlist='
 worker   worker                 # the Cloudflare runtime; the only crate that does I/O
+worker   idna_adapter           # pins the IDNA back end of url, for size (see Cargo.toml)
 worker   roxmltree              # tests only: feeds and sitemap parse as real XML
 cli      clap                   # argument parsing for the `blog` binary
 cli      ureq                   # blocking HTTPS to the Cloudflare REST API (setup, deploy)

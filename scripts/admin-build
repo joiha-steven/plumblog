@@ -15,6 +15,9 @@ cd "$(dirname "$0")/.."
 SHELL_JS_BUDGET=$((35 * 1024))
 CHUNK_JS_BUDGET=$((110 * 1024))
 CSS_BUDGET=$((20 * 1024))
+# The sign-in, setup, invite and account screens: a lazy part like the editor, but small, so
+# it gets its own line well under the chunk budget (it loads before anything else when signed out).
+AUTH_JS_BUDGET=$((12 * 1024))
 
 fail() { echo "admin-build: FAIL: $1" >&2; exit 1; }
 mock=false
@@ -116,5 +119,22 @@ for f in "$out"/chunks/*.js; do
   case " $(echo $shell_files) " in *" $f "*) continue ;; esac
   check_size "$f" "$CHUNK_JS_BUDGET" "chunk"
 done
+# The auth part: its entry chunks and every chunk they import statically, minus the shell.
+auth_files=$(node -e '
+  const m = require(process.argv[1]).outputs, shell = new Set(process.argv[3].split("\n")), seen = new Set();
+  const todo = Object.keys(m).filter((f) => /web\/admin\/src\/auth\/(screens|account)\.ts$/.test(m[f].entryPoint ?? ""));
+  if (todo.length !== 2) throw new Error(`auth entry chunks: ${todo.length}, expected 2`);
+  while (todo.length) {
+    const f = todo.pop();
+    if (seen.has(f) || shell.has(f)) continue;
+    seen.add(f);
+    for (const i of m[f].imports) if (i.kind === "import-statement") todo.push(i.path);
+  }
+  console.log([...seen].join("\n"));
+' "$PWD/$meta" "$out/app.js" "$shell_files") || fail "reading $meta for the auth part"
+auth_size=0
+for f in $auth_files; do auth_size=$((auth_size + $(gz "$f"))); done
+echo "admin-build: auth ($(echo $auth_files | wc -w | tr -d ' ') files) gzip = $auth_size bytes (budget $AUTH_JS_BUDGET)"
+[ "$auth_size" -le "$AUTH_JS_BUDGET" ] || over+="auth $auth_size > $AUTH_JS_BUDGET; "
 check_size "$out/app.css" "$CSS_BUDGET" "css"
 [ -z "$over" ] || fail "over budget: $over"

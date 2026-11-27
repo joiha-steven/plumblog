@@ -50,6 +50,29 @@ function postsList(api: Api): HTMLElement {
   return box;
 }
 
+/** The account screen lives in the auth chunk: the shell never carries it. */
+function accountBox(me: Me, api: Api): HTMLElement {
+  const wait = (): HTMLElement => {
+    const rows = loadingRows(2);
+    rows.classList.add("flush");
+    return rows;
+  };
+  const box = h("div", { class: "acct" }, wait());
+  const load = (): void => {
+    box.replaceChildren(wait());
+    import("./auth/account").then(
+      (m) => m.mountAccount(box, me, api),
+      (e: unknown) => {
+        // A chunk that failed to load (offline, new deploy): say so instead of a blank screen.
+        console.error("admin: account page failed to load", e);
+        box.replaceChildren(failed({ code: "network", status: 0 }, load));
+      },
+    );
+  };
+  load();
+  return box;
+}
+
 export function screen(name: Screen, me: Me, api: Api): Child[] {
   switch (name) {
     case "posts":
@@ -72,9 +95,14 @@ export function screen(name: Screen, me: Me, api: Api): Child[] {
         ];
       }
       return [head(t("admin.nav.settings")), building()];
+    case "account":
+      return [head(t("admin.account.title")), accountBox(me, api)];
     case "new":
     case "edit":
-      // Drawn by the editor chunk (main.ts); never reached.
+    case "signin":
+    case "setup":
+    case "invite":
+      // Drawn by the editor chunk and the sign-in chunk (main.ts); never reached.
       return [];
     case "missing":
       return [

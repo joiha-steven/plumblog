@@ -22,13 +22,37 @@ const LANG_COOKIE: &str = "pb_lang";
 /// element allowed is the editor's (`CodeMirror` adds its base theme that way, see
 /// `EditorView.cspNonce`), and only with this response's nonce. `img-src blob:` is for image
 /// previews before upload.
-fn csp(nonce: &str) -> String {
+///
+/// The sign-in, setup and invite pages may also run Cloudflare Turnstile (its script and its
+/// frame), which the server asks for after repeated failures. Only those pages: the client
+/// always reaches them by a full page load, so no other admin page ever runs with it.
+fn csp(nonce: &str, turnstile: bool) -> String {
+    let (script, frame) = if turnstile {
+        (
+            format!("'self' {TURNSTILE_ORIGIN}"),
+            format!(" frame-src {TURNSTILE_ORIGIN};"),
+        )
+    } else {
+        ("'self'".to_owned(), String::new())
+    };
     format!(
-        "default-src 'self'; script-src 'self'; style-src 'self' 'nonce-{nonce}'; \
-    img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; worker-src 'self'; \
+        "default-src 'self'; script-src {script}; style-src 'self' 'nonce-{nonce}'; \
+    img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; worker-src 'self';{frame} \
     manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; \
     frame-ancestors 'none'"
     )
+}
+
+/// Where Turnstile's script and challenge frame come from.
+const TURNSTILE_ORIGIN: &str = "https://challenges.cloudflare.com";
+
+/// The pages a signed-out visitor uses; the only ones whose CSP admits Turnstile.
+/// At most one trailing slash, the same rule as the service worker's (`web/admin/src/sw.ts`):
+/// a looser match here would hand the Turnstile policy to a path the service worker treats as
+/// an ordinary page, and keep it as the offline shell.
+fn is_auth_page(path: &str) -> bool {
+    let p = path.strip_suffix('/').unwrap_or(path);
+    matches!(p, "/admin/signin" | "/admin/setup" | "/admin/invite")
 }
 
 /// 16 bytes from the platform's cryptographic RNG, hex. A nonce must not be guessable, so
@@ -115,7 +139,7 @@ pub async fn serve(req: &Request) -> Result<Response> {
     // Small and language-dependent: revalidate every time rather than serve a stale shell.
     h.set("cache-control", "no-cache")?;
     h.set("vary", "cookie, accept-language")?;
-    h.set("content-security-policy", &csp(&nonce))?;
+    h.set("content-security-policy", &csp(&nonce, is_auth_page(&path)))?;
     h.set("x-content-type-options", "nosniff")?;
     h.set("referrer-policy", "same-origin")?;
     h.set("x-robots-tag", "noindex")?;
@@ -283,7 +307,7 @@ fn escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{boot_json, icon, is_file, manifest, pick_lang, shell};
+    use super::{boot_json, csp, icon, is_auth_page, is_file, manifest, pick_lang, shell};
 
     #[test]
     fn files_are_told_apart_from_client_routes() {
@@ -350,6 +374,32 @@ mod tests {
             vi.contains(&link("inter-vietnamese"))
                 && vi.contains(&link("inter-display-vietnamese"))
         );
+    }
+
+    #[test]
+    fn only_the_sign_in_pages_admit_turnstile() {
+        let strict = csp("n0", false);
+        assert!(!strict.contains("challenges.cloudflare.com"));
+        assert!(strict.contains("script-src 'self';"));
+        let open = csp("n0", true);
+        assert!(open.contains("script-src 'self' https://challenges.cloudflare.com;"));
+        assert!(open.contains("frame-src https://challenges.cloudflare.com;"));
+        assert!(open.contains("frame-ancestors 'none'"));
+        for p in ["/admin/signin", "/admin/setup", "/admin/invite"] {
+            assert!(is_auth_page(p), "{p}");
+        }
+        assert!(is_auth_page("/admin/signin/"));
+        for p in [
+            "/admin/signin//",
+            "/admin/setup///",
+            "/admin/",
+            "/admin/posts/1",
+            "/admin/signin/x",
+            "/admin/settings",
+            "/admin/signinx",
+        ] {
+            assert!(!is_auth_page(p), "{p}");
+        }
     }
 
     #[test]
