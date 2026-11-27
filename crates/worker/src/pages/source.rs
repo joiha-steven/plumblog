@@ -144,6 +144,14 @@ fn first_paragraph_text(html: &str) -> String {
         .split_once("<p>")
         .and_then(|(_, rest)| rest.split_once("</p>"))
         .map_or("", |(p, _)| p);
+    // Footnote markers are not part of the sentence.
+    let mut para = para.to_owned();
+    while let Some(i) = para.find("<sup") {
+        let end = para[i..]
+            .find("</sup>")
+            .map_or(para.len(), |e| i + e + "</sup>".len());
+        para.replace_range(i..end, "");
+    }
     let mut out = String::new();
     let mut in_tag = false;
     for c in para.chars() {
@@ -264,7 +272,14 @@ impl ReaderSource for SampleSource {
 
 #[cfg(test)]
 mod tests {
-    use super::{unix_from_date, year_of};
+    use super::{first_paragraph_text, unix_from_date, year_of};
+
+    #[test]
+    fn auto_excerpt_drops_tags_and_footnote_markers() {
+        let html =
+            "<p>To zoom.<sup class=\"fnref\"><a href=\"#fn-1\">1</a></sup> A &amp; B</p><p>x</p>";
+        assert_eq!(first_paragraph_text(html), "To zoom. A & B");
+    }
 
     #[test]
     fn dates_round_trip() {
