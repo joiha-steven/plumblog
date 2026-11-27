@@ -17,10 +17,33 @@ use plumblog_model::{Error, ErrorCode, Result};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
-/// A locale key used from Rust. Construct it only in a crate's `keys.rs`: `scripts/check`
-/// rejects `Key(` anywhere else, so every key Rust can ask for is listed where it checks.
+/// A locale key used from Rust, made only by [`key!`] from a string literal. The field is
+/// private, so no constant, array element or `format!` can become a key: every key Rust can
+/// ask for is a literal the repository locale check reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Key(pub &'static str);
+pub struct Key(&'static str);
+
+impl Key {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+
+    /// Only for [`key!`]; `scripts/check` fails if any other code calls it.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn __from_literal(key: &'static str) -> Self {
+        Self(key)
+    }
+}
+
+/// A [`Key`] from a plain string literal: `key!("date.short")`.
+#[macro_export]
+macro_rules! key {
+    ($key:literal) => {
+        $crate::Key::__from_literal($key)
+    };
+}
 
 /// Keys a page asked for that exist in neither its language nor English. Shared by the
 /// lookups of one render; the caller drains it and logs `i18n.missing_key` once per key.
@@ -113,10 +136,9 @@ impl Catalog {
         self
     }
 
-    /// Raw text for `key`. A missing key returns the key itself, so a gap is visible on
-    /// screen and in review instead of rendering as empty text.
-    #[must_use]
-    pub fn get<'a>(&'a self, key: &'a str) -> &'a str {
+    /// Stored text for `key` in this language, else English, else the key itself (so a gap
+    /// is visible on screen and in review instead of rendering as empty text).
+    fn raw<'a>(&'a self, key: &'a str) -> &'a str {
         self.strings
             .get(key)
             .or_else(|| self.fallback.get(key))
@@ -125,15 +147,23 @@ impl Catalog {
 
     /// Text for `key` with `{name}` placeholders filled from `args`. A plural message picks
     /// its form from the `count` argument: this language's form, else its `other`, then the
-    /// same in English. A `count` that is not a whole number uses `other`.
+    /// same in English. Without a whole-number `count` it uses `other`.
     #[must_use]
-    pub fn t(&self, key: &str, args: &[(&str, String)]) -> String {
-        self.lookup(key, args, None)
+    pub fn t(&self, key: Key, args: &[(&str, String)]) -> String {
+        self.lookup(key.0, args, None)
     }
 
     /// Like [`Catalog::t`], recording a key found nowhere into `missing`.
     #[must_use]
-    pub fn t_reporting(&self, key: &str, args: &[(&str, String)], missing: &MissingKeys) -> String {
+    pub fn t_reporting(&self, key: Key, args: &[(&str, String)], missing: &MissingKeys) -> String {
+        self.lookup(key.0, args, Some(missing))
+    }
+
+    /// The template bridge: templates name keys as runtime strings. Only the theme runtime
+    /// (`crates/render`) may call this; `scripts/check` fails on any other caller, so Rust
+    /// code keeps going through [`Key`].
+    #[must_use]
+    pub fn t_template(&self, key: &str, args: &[(&str, String)], missing: &MissingKeys) -> String {
         self.lookup(key, args, Some(missing))
     }
 
@@ -141,13 +171,11 @@ impl Catalog {
         let count = args
             .iter()
             .find(|(k, _)| *k == "count")
-            .map(|(_, v)| v.parse::<u64>().ok());
-        let plural_text = count.and_then(|n| {
-            Self::plural_form(&self.strings, &self.lang, key, n)
-                .or_else(|| Self::plural_form(&self.fallback, "en", key, n))
-        });
+            .and_then(|(_, v)| v.parse::<u64>().ok());
+        let plural_text = Self::plural_form(&self.strings, &self.lang, key, count)
+            .or_else(|| Self::plural_form(&self.fallback, "en", key, count));
         let text = plural_text.unwrap_or_else(|| {
-            let text = self.get(key);
+            let text = self.raw(key);
             if let Some(m) = missing
                 && std::ptr::eq(text, key)
             {
@@ -219,9 +247,9 @@ mod tests {
             map(&[("post.read_more", "\u{110}\u{1ecd}c ti\u{1ebf}p")]),
             map(&[("post.read_more", "Read more"), ("post.share", "Share")]),
         );
-        assert_eq!(c.get("post.read_more"), "\u{110}\u{1ecd}c ti\u{1ebf}p");
-        assert_eq!(c.get("post.share"), "Share");
-        assert_eq!(c.get("post.missing"), "post.missing");
+        assert_eq!(c.raw("post.read_more"), "\u{110}\u{1ecd}c ti\u{1ebf}p");
+        assert_eq!(c.raw("post.share"), "Share");
+        assert_eq!(c.raw("post.missing"), "post.missing");
     }
 
     #[test]
@@ -249,8 +277,11 @@ two = \"Second\"
         )
         .unwrap();
         let c = Catalog::new(rank, HashMap::new());
-        assert_eq!(c.t("rank.one", &[]), "First");
-        assert_eq!(c.t("rank", &[("count", "1".into())]), "rank");
+        assert_eq!(c.t(key!("rank.one"), &[]), "First");
+        assert_eq!(c.t(key!("rank"), &[("count", "1".into())]), "rank");
+        let m = MissingKeys::default();
+        assert_eq!(c.t_template("rank.two", &[], &m), "Second");
+        assert!(m.take().is_empty());
         assert!(parse("not toml =").is_err());
     }
 
@@ -265,39 +296,42 @@ two = \"Second\"
         let ru = Catalog::new(ru, en.clone()).with_lang("ru");
         let n = |c: u64| [("count", c.to_string())];
         assert!(
-            ru.t("c.posts", &n(1))
+            ru.t(key!("c.posts"), &n(1))
                 .ends_with("\u{437}\u{430}\u{43f}\u{438}\u{441}\u{44c}")
         );
         assert!(
-            ru.t("c.posts", &n(3))
+            ru.t(key!("c.posts"), &n(3))
                 .ends_with("\u{437}\u{430}\u{43f}\u{438}\u{441}\u{438}")
         );
         assert!(
-            ru.t("c.posts", &n(11))
+            ru.t(key!("c.posts"), &n(11))
                 .ends_with("\u{437}\u{430}\u{43f}\u{438}\u{441}\u{435}\u{439}")
         );
         let vi =
             Catalog::new(map(&[("c.posts.other", "{count} b\u{e0}i")]), en.clone()).with_lang("vi");
-        assert_eq!(vi.t("c.posts", &n(1)), "1 b\u{e0}i");
+        assert_eq!(vi.t(key!("c.posts"), &n(1)), "1 b\u{e0}i");
         // A language without the message uses English forms.
         let fr = Catalog::new(HashMap::new(), en).with_lang("fr");
-        assert_eq!(fr.t("c.posts", &n(1)), "1 post");
-        assert_eq!(fr.t("c.posts", &n(2)), "2 posts");
+        assert_eq!(fr.t(key!("c.posts"), &n(1)), "1 post");
+        assert_eq!(fr.t(key!("c.posts"), &n(2)), "2 posts");
         // A count that is not a whole number uses `other`.
-        assert_eq!(fr.t("c.posts", &[("count", "1.5".into())]), "1.5 posts");
-        assert_eq!(fr.t("c.posts", &[("count", "-1".into())]), "-1 posts");
-        // No count: the plain key path, visible when missing.
-        assert_eq!(fr.t("c.posts", &[]), "c.posts");
+        assert_eq!(
+            fr.t(key!("c.posts"), &[("count", "1.5".into())]),
+            "1.5 posts"
+        );
+        assert_eq!(fr.t(key!("c.posts"), &[("count", "-1".into())]), "-1 posts");
+        // No count: a plural message still shows its `other` form.
+        assert_eq!(fr.t(key!("c.posts"), &[]), "{count} posts");
     }
 
     #[test]
     fn missing_keys_are_reported_once_per_key() {
         let c = Catalog::new(map(&[("a", "A")]), map(&[("b", "B")])).with_lang("vi");
         let missing = MissingKeys::default();
-        assert_eq!(c.t_reporting("a", &[], &missing), "A");
-        assert_eq!(c.t_reporting("b", &[], &missing), "B");
-        assert_eq!(c.t_reporting("nope", &[], &missing), "nope");
-        assert_eq!(c.t_reporting("nope", &[], &missing), "nope");
+        assert_eq!(c.t_reporting(key!("a"), &[], &missing), "A");
+        assert_eq!(c.t_reporting(key!("b"), &[], &missing), "B");
+        assert_eq!(c.t_reporting(key!("nope"), &[], &missing), "nope");
+        assert_eq!(c.t_reporting(key!("nope"), &[], &missing), "nope");
         assert_eq!(missing.take(), [("vi".to_owned(), "nope".to_owned())]);
         assert!(missing.take().is_empty());
     }

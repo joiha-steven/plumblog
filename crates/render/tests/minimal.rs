@@ -345,7 +345,7 @@ fn plural_messages_and_missing_keys_in_theme_locales() {
     let theme = load(&files, &BTreeMap::new());
     let render = |lang: &str| {
         theme
-            .render(
+            .render_reporting(
                 &site(),
                 &page(lang),
                 &Body::Home {
@@ -356,23 +356,18 @@ fn plural_messages_and_missing_keys_in_theme_locales() {
             )
             .unwrap()
     };
-    let line = |html: &str| {
+    let line = |(html, _): &(String, Vec<(String, String)>)| {
         let start = html.find("<p id=\"plural\">").unwrap() + 15;
         html[start..start + html[start..].find("</p>").unwrap()].to_owned()
     };
+    let en = render("en");
+    assert_eq!(line(&en), "1 post|3 posts|5 posts|21 posts|test.gone");
+    // Missing keys come back with the page, once each, and do not leak into the next render.
+    assert_eq!(en.1, [("en".to_owned(), "test.gone".to_owned())]);
+    let ru = render("ru");
     assert_eq!(
-        line(&render("en")),
-        "1 post|3 posts|5 posts|21 posts|test.gone"
-    );
-    assert_eq!(
-        line(&render("ru")),
+        line(&ru),
         "1 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{44c}|3 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{438}|5 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{435}\u{439}|21 \u{437}\u{430}\u{43f}\u{438}\u{441}\u{44c}|test.gone"
     );
-    assert_eq!(
-        theme.take_missing_keys(),
-        [
-            ("en".to_owned(), "test.gone".to_owned()),
-            ("ru".to_owned(), "test.gone".to_owned())
-        ]
-    );
+    assert_eq!(ru.1, [("ru".to_owned(), "test.gone".to_owned())]);
 }

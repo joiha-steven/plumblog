@@ -5,8 +5,13 @@
 //!
 //! Layers: `locales/` serves core and admin code; each `themes/<name>/locales/` serves that
 //! theme's templates, and the default theme (`minimal`) also serves `crates/render`.
-//! Dynamic keys (`t("comments.notice_" ~ kind)`) only need one key with that prefix; keys
-//! built with `format!` in Rust cannot be seen and are not checked.
+//!
+//! Rust: the compiler makes every key a `key!("literal")` (`Key` has a private field and
+//! the lookup functions take `Key`), so this check reads every `key!(` in every crate. It
+//! also fails on the hidden constructor or the `&str` template bridge used anywhere else.
+//! Templates: `t` may only appear as a direct call `t(...)`; a key built at runtime
+//! (`t("a_" ~ x)`, `t(var)`) needs `{# i18n: <every key> #}` on the same or previous line,
+//! checked both ways against `en.toml`.
 
 use plumblog_i18n::{categories, parse};
 use std::collections::{BTreeMap, BTreeSet};
@@ -120,8 +125,8 @@ fn compare_languages(dir: &Path, langs: &BTreeMap<String, Messages>, problems: &
 enum Use {
     /// `t("a.b")`.
     Literal(String),
-    /// `t("a.b_" ~ x)` or `t(x)`: the possible keys come from an `{# i18n: ... #}`
-    /// declaration on the same or the previous line; `None` when there is none.
+    /// `t("a.b_" ~ x)` or `t(x)`: the keys come from an `{# i18n: ... #}` declaration on the
+    /// same or the previous line; `None` when there is none.
     Dynamic {
         prefix: String,
         declared: Option<Vec<String>>,
@@ -133,114 +138,170 @@ fn declaration(line: &str) -> Option<Vec<String>> {
     let start = line.find("{#")?;
     let body = &line[start + 2..];
     let body = &body[..body.find("#}")?];
-    let body = body.trim_start_matches('-').trim();
-    let keys = body.strip_prefix("i18n:")?;
+    let keys = body.trim_start_matches('-').trim().strip_prefix("i18n:")?;
     Some(keys.split_whitespace().map(str::to_owned).collect())
 }
 
-/// Every `t(...)` call: quotes `"` or `'`, spaces after `(` allowed. Calls such as
-/// `slot("x")` are not `t` calls.
-fn template_uses(src: &str) -> Vec<(Use, usize)> {
-    let lines: Vec<&str> = src.lines().collect();
+fn is_ident(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Byte ranges of `{{ ... }}` and `{% ... %}` (where template code lives), with the
+/// delimiters' inner text only.
+fn code_regions(src: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
-    for (n, line) in lines.iter().enumerate() {
-        let bytes = line.as_bytes();
-        for (i, _) in line.match_indices("t(") {
-            if i > 0
-                && (bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'_' | b'.'))
-            {
+    let mut pos = 0;
+    while let Some(i) = src[pos..].find('{').map(|i| pos + i) {
+        let close = match src[i + 1..].chars().next() {
+            Some('{') => "}}",
+            Some('%') => "%}",
+            _ => {
+                pos = i + 1;
                 continue;
             }
-            let rest = line[i + 2..].trim_start();
-            let literal = rest
-                .chars()
-                .next()
-                .filter(|q| *q == '"' || *q == '\'')
-                .and_then(|q| {
-                    let body = &rest[1..];
-                    body.find(q)
-                        .map(|end| (body[..end].to_owned(), body[end + 1..].trim_start()))
-                });
-            let used = match literal {
-                Some((key, after)) if !after.starts_with('~') => Use::Literal(key),
-                other => Use::Dynamic {
-                    prefix: other.map(|(k, _)| k).unwrap_or_default(),
-                    declared: declaration(line)
-                        .or_else(|| n.checked_sub(1).and_then(|p| declaration(lines[p]))),
-                },
-            };
-            out.push((used, n + 1));
-        }
+        };
+        let Some(end) = src[i + 2..].find(close).map(|e| i + 2 + e) else {
+            break;
+        };
+        out.push((i + 2, end));
+        pos = end + 2;
     }
     out
 }
 
-/// Keys declared in a crate's `keys.rs` (`Key("...")`).
-fn declared_rust_keys(src: &str) -> Vec<String> {
-    src.match_indices("Key(\"")
-        .filter_map(|(i, _)| {
-            let body = &src[i + 5..];
-            body.find('"').map(|end| body[..end].to_owned())
-        })
-        .collect()
+/// Calls found, and misuses as (message, line).
+type Scan = (Vec<(Use, usize)>, Vec<(String, usize)>);
+
+/// Every use of `t` in template code: direct calls become [`Use`]s; any other use of `t` as
+/// a value (`{% set f = t %}`, `[t][0](...)`) is a problem, because the check could not see
+/// which keys it is called with. Quotes may be `"` or `'`; whitespace and newlines are
+/// allowed before `(` and around the key.
+fn template_uses(src: &str) -> Scan {
+    let lines: Vec<&str> = src.lines().collect();
+    let line_of = |i: usize| src[..i].matches('\n').count() + 1;
+    let declared_near = |line: usize| {
+        declaration(lines.get(line - 1).unwrap_or(&""))
+            .or_else(|| line.checked_sub(2).and_then(|p| declaration(lines[p])))
+    };
+    let mut uses = Vec::new();
+    let mut misuse = Vec::new();
+    for (start, end) in code_regions(src) {
+        let code = &src[start..end];
+        let mut chars = code.char_indices().peekable();
+        let mut prev_sig: Option<char> = None;
+        while let Some((i, c)) = chars.next() {
+            if c == '"' || c == '\'' {
+                // Skip string literals, so `"t"` in text is not a use.
+                for (_, n) in chars.by_ref() {
+                    if n == c {
+                        break;
+                    }
+                }
+                prev_sig = Some(c);
+                continue;
+            }
+            if !is_ident(c) {
+                if !c.is_whitespace() {
+                    prev_sig = Some(c);
+                }
+                continue;
+            }
+            let mut word_end = i + c.len_utf8();
+            while let Some(&(j, n)) = chars.peek() {
+                if !is_ident(n) {
+                    break;
+                }
+                word_end = j + n.len_utf8();
+                chars.next();
+            }
+            let word = &code[i..word_end];
+            let after_dot = prev_sig == Some('.');
+            prev_sig = Some('a');
+            if word != "t" || after_dot {
+                continue;
+            }
+            let line = line_of(start + i);
+            let rest = code[word_end..].trim_start();
+            let Some(args) = rest.strip_prefix('(') else {
+                misuse.push((
+                    "`t` used other than as a direct call `t(...)`".to_owned(),
+                    line,
+                ));
+                continue;
+            };
+            let args = args.trim_start();
+            let literal = args
+                .chars()
+                .next()
+                .filter(|q| *q == '"' || *q == '\'')
+                .and_then(|q| {
+                    let body = &args[1..];
+                    body.find(q)
+                        .map(|e| (body[..e].to_owned(), body[e + 1..].trim_start()))
+                });
+            let call = match literal {
+                Some((key, after)) if after.starts_with(',') || after.starts_with(')') => {
+                    Use::Literal(key)
+                }
+                // `"a_" ~ x` has a known prefix; anything else (`x`, `"a" if c else "b"`) none.
+                other => Use::Dynamic {
+                    prefix: other
+                        .filter(|(_, after)| after.starts_with('~'))
+                        .map(|(k, _)| k)
+                        .unwrap_or_default(),
+                    declared: declared_near(line),
+                },
+            };
+            uses.push((call, line));
+        }
+    }
+    (uses, misuse)
 }
 
-/// Ways Rust code could name a key outside `keys.rs`: constructing `Key`, or passing a
-/// string literal to a lookup function.
-fn rust_bypasses(src: &str) -> Vec<String> {
-    // Comments may mention calls; drop them, keep line breaks for line numbers.
+/// Problems in Rust source: `key!` without a plain string literal, the hidden `Key`
+/// constructor, or the template bridge outside the theme runtime. Returns the keys found.
+fn rust_keys(src: &str, bridge_allowed: bool, problems: &mut Vec<String>, at: &str) -> Vec<String> {
     let code: String = src
         .lines()
         .map(|l| l.split("//").next().unwrap_or(""))
         .collect::<Vec<_>>()
         .join("\n");
     let line_of = |i: usize| code[..i].matches('\n').count() + 1;
-    let mut out = Vec::new();
-    for (i, _) in code.match_indices("Key(\"") {
-        out.push(format!("line {}: `Key(` outside keys.rs", line_of(i)));
-    }
-    // The key is the first argument of `.t(` / `.t_reporting(`, the second of `.text(`.
-    for (call, arg) in [(".t(", 0), (".t_reporting(", 0), (".text(", 1)] {
-        for (i, _) in code.match_indices(call) {
-            let key = nth_arg(&code[i + call.len()..], arg);
-            if key.starts_with('"') || key.contains("format!") {
-                out.push(format!(
-                    "line {}: key `{key}` passed to `{call}` is not a Key constant",
-                    line_of(i)
-                ));
-            }
+    let mut keys = Vec::new();
+    for (i, _) in code.match_indices("key!") {
+        let args = code[i + 4..].trim_start();
+        let Some(args) = args.strip_prefix('(') else {
+            continue;
+        };
+        let args = args.trim_start();
+        let key = args.strip_prefix('"').and_then(|b| {
+            b.find(['"', '\\'])
+                .filter(|e| b[*e..].starts_with('"'))
+                .map(|e| &b[..e])
+        });
+        match key {
+            Some(k) => keys.push(k.to_owned()),
+            None => problems.push(format!(
+                "{at}:{}: key! takes a plain string literal (no raw strings or escapes)",
+                line_of(i)
+            )),
         }
     }
-    out
-}
-
-/// The `n`th top-level argument of a call whose `(` was just consumed, trimmed.
-fn nth_arg(args: &str, n: usize) -> &str {
-    let (mut depth, mut start, mut index, mut quoted) = (0i32, 0, 0, false);
-    for (i, c) in args.char_indices() {
-        match c {
-            '"' => quoted = !quoted,
-            _ if quoted => {}
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' if depth == 0 => {
-                return if index == n {
-                    args[start..i].trim()
-                } else {
-                    ""
-                };
-            }
-            ')' | ']' | '}' => depth -= 1,
-            ',' if depth == 0 => {
-                if index == n {
-                    return args[start..i].trim();
-                }
-                index += 1;
-                start = i + 1;
-            }
-            _ => {}
+    for (i, _) in code.match_indices("__from_literal") {
+        problems.push(format!(
+            "{at}:{}: use key!(\"...\"), not Key::__from_literal",
+            line_of(i)
+        ));
+    }
+    if !bridge_allowed {
+        for (i, _) in code.match_indices("t_template") {
+            problems.push(format!(
+                "{at}:{}: t_template is only for the theme runtime; Rust code uses key!",
+                line_of(i)
+            ));
         }
     }
-    ""
+    keys
 }
 
 fn check_template(
@@ -284,19 +345,6 @@ fn check_template(
     }
 }
 
-fn check_rust_keys(
-    keys: &[String],
-    at: &str,
-    en: Option<&Messages>,
-    en_file: &str,
-    problems: &mut Vec<String>,
-) {
-    let Some(en) = en else { return };
-    for key in keys.iter().filter(|k| !en.contains_key(*k)) {
-        problems.push(format!("{at}: declares `{key}`, missing from {en_file}"));
-    }
-}
-
 #[test]
 fn locale_keys_are_complete_and_consistent() {
     let root = root();
@@ -322,13 +370,11 @@ fn locale_keys_are_complete_and_consistent() {
         let en_file = format!("{}/en.toml", rel(&loc_dir));
         for tpl in files(&dir.join("templates"), "html") {
             let src = fs::read_to_string(&tpl).unwrap_or_default();
-            check_template(
-                &template_uses(&src),
-                &rel(&tpl),
-                langs.get("en"),
-                &en_file,
-                &mut problems,
-            );
+            let (uses, misuse) = template_uses(&src);
+            for (p, line) in misuse {
+                problems.push(format!("{}:{line}: {p}", rel(&tpl)));
+            }
+            check_template(&uses, &rel(&tpl), langs.get("en"), &en_file, &mut problems);
         }
         if dir.file_name().is_some_and(|n| n == DEFAULT_THEME) {
             default_theme_en = langs.get("en").cloned().map(|m| (m, en_file));
@@ -341,26 +387,24 @@ fn locale_keys_are_complete_and_consistent() {
         .flatten()
     {
         let name = crate_dir.file_name().to_string_lossy().into_owned();
-        // This crate's own tests use sample keys on purpose.
+        // This crate defines the API and tests it with sample keys.
         if name == "i18n" {
             continue;
         }
-        for file in files(&crate_dir.path().join("src"), "rs") {
-            let src = fs::read_to_string(&file).unwrap_or_default();
+        let (en, en_file) = if name == "render" {
+            default_theme_en
+                .as_ref()
+                .map_or((None, String::new()), |(m, f)| (Some(m), f.clone()))
+        } else {
+            (core.get("en"), "locales/en.toml".to_owned())
+        };
+        for file in files(&crate_dir.path(), "rs") {
             let at = rel(&file);
-            if file.file_name().is_some_and(|n| n == "keys.rs") {
-                let keys = declared_rust_keys(&src);
-                if name == "render" {
-                    let (en, en_file) = default_theme_en
-                        .as_ref()
-                        .map_or((None, ""), |(m, f)| (Some(m), f.as_str()));
-                    check_rust_keys(&keys, &at, en, en_file, &mut problems);
-                } else {
-                    check_rust_keys(&keys, &at, core.get("en"), "locales/en.toml", &mut problems);
-                }
-            } else {
-                for p in rust_bypasses(&src) {
-                    problems.push(format!("{at}: {p}; name keys in keys.rs"));
+            let src = fs::read_to_string(&file).unwrap_or_default();
+            let bridge = at == "crates/render/src/theme.rs";
+            for key in rust_keys(&src, bridge, &mut problems, &at) {
+                if en.is_some_and(|en| !en.contains_key(&key)) {
+                    problems.push(format!("{at}: uses `{key}`, missing from {en_file}"));
                 }
             }
         }
@@ -374,28 +418,39 @@ fn locale_keys_are_complete_and_consistent() {
 }
 
 #[test]
-fn key_scanners_find_what_templates_and_code_use() {
-    let tpl = "{{ t(\"post.next\") }} {{ slot(\"after_post\") }} {{ t( 'a.b' ) }} {{ x.t(\"no\") }}\n{#- i18n: c.notice_ok c.notice_error #}\n{{ t(\"c.notice_\" ~ kind) }} {{ t(name) }}";
-    let uses: Vec<Use> = template_uses(tpl).into_iter().map(|(u, _)| u).collect();
+fn template_scanner_allows_only_direct_calls() {
+    let tpl = "{{ t(\"post.next\") }} {{ slot(\"after_post\") }} {{ t( 'a.b' ) }} {{ x.t(\"no\") }} <p>t(\"html text\")</p>\n{{ t (\"sp.ace\") }} {{ t\n(\"new.line\", n=1) }}\n{#- i18n: c.notice_ok c.notice_error #}\n{{ t(\"c.notice_\" ~ kind) }} {{ t(name) }}\n{% set f = t %}{{ [t][0](\"x\") }}";
+    let (uses, misuse) = template_uses(tpl);
+    let uses: Vec<Use> = uses.into_iter().map(|(u, _)| u).collect();
+    let declared = Some(vec!["c.notice_ok".into(), "c.notice_error".into()]);
     assert_eq!(
         uses,
         [
             Use::Literal("post.next".into()),
             Use::Literal("a.b".into()),
+            Use::Literal("sp.ace".into()),
+            Use::Literal("new.line".into()),
             Use::Dynamic {
                 prefix: "c.notice_".into(),
-                declared: Some(vec!["c.notice_ok".into(), "c.notice_error".into()]),
+                declared: declared.clone()
             },
             Use::Dynamic {
                 prefix: String::new(),
-                declared: Some(vec!["c.notice_ok".into(), "c.notice_error".into()]),
+                declared
             },
         ]
     );
-    assert_eq!(
-        declared_rust_keys("pub const A: Key = Key(\"a.b\");"),
-        ["a.b"]
-    );
-    let bad = "let k = Key(\"x.y\");\nlet s = cat.t(\"site.title\", &[]);\nlet d = self.text(\n&lang, keys::A, &[(\"day\", x)]);\nlet f = self.text(&lang, &format!(\"date.month_{m}\"), &[]);\nlet e = self.text(\n    &lang,\n    \"date.short\",\n);";
-    assert_eq!(rust_bypasses(bad).len(), 4, "{:?}", rust_bypasses(bad));
+    assert_eq!(misuse.len(), 2, "{misuse:?}");
+}
+
+#[test]
+fn rust_scanner_reads_key_macros_and_rejects_bypasses() {
+    let mut problems = Vec::new();
+    let src = "const A: Key = key!(\"a.b\");\nconst B: Key = key! ( \"c.d\" );\n// key!(\"in.comment\")\nconst C: Key = key!(r\"raw\");\nlet k = Key::__from_literal(S);\nlet t = c.t_template(\"x\", &[], &m);";
+    let keys = rust_keys(src, false, &mut problems, "f.rs");
+    assert_eq!(keys, ["a.b", "c.d"]);
+    assert_eq!(problems.len(), 3, "{problems:?}");
+    let mut ok = Vec::new();
+    rust_keys("c.t_template(k, &a, &m)", true, &mut ok, "theme.rs");
+    assert!(ok.is_empty());
 }

@@ -15,6 +15,7 @@
 </form>
 {%- if query %}
 <p class="search-count" role="status">
+  {#- i18n: search.count_one search.count_other #}
   {%- if results %}{{ t("search.count_one" if results | length == 1 else "search.count_other", count=results | length, query=query) }}
   {%- else %}{{ t("search.none", query=query) }}{% endif %}</p>
 {%- if results %}

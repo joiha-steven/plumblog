@@ -5,13 +5,15 @@ mod cache;
 mod routes;
 pub mod source;
 
+use crate::keys;
+use plumblog_i18n::{Catalog, Key};
 use plumblog_model::VERSION;
 use plumblog_render::{Body, Link, PageInfo, Post, Site, Theme, ThemeError};
 use routes::Route;
 use source::{Filter, ReaderSource, SampleSource, Settings, StoredPost};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
-use worker::{Context, Headers, Request, Response, Result, console_error};
+use worker::{Context, Headers, Request, Response, Result, console_error, console_warn};
 
 /// Where the default theme's `assets/` folder is served (Workers static assets).
 pub const THEME_ASSETS_URL: &str = "/theme/minimal";
@@ -116,21 +118,21 @@ pub async fn serve(req: &Request, ctx: &Context) -> Result<Response> {
 /// Plain-text 500 from the core locale, for when the theme or the data cannot produce a page.
 fn failure(detail: &str) -> Response {
     console_error!("pages: render failed: {detail}");
-    let text = core_text("en", "error.page_failed");
+    let text = core_text("en", keys::PAGE_FAILED);
     Response::error(text, 500).unwrap_or_else(|_| Response::empty().expect("empty response"))
 }
 
-fn core_text(lang: &str, key: &str) -> String {
-    let find = |l: &str| {
+fn core_text(lang: &str, key: Key) -> String {
+    let strings = |l: &str| {
         source::CORE_LOCALES
             .iter()
             .find(|(name, _)| *name == l)
-            .and_then(|(_, src)| plumblog_render::parse_locale(src).ok())
-            .and_then(|m| m.get(key).cloned())
+            .and_then(|(_, src)| plumblog_i18n::parse(src).ok())
+            .unwrap_or_default()
     };
-    find(lang)
-        .or_else(|| find("en"))
-        .unwrap_or_else(|| key.to_owned())
+    Catalog::new(strings(lang), strings("en"))
+        .with_lang(lang)
+        .t(key, &[])
 }
 
 /// Routes and renders without touching the runtime, so every route is testable on the host.
@@ -186,10 +188,21 @@ type PageResult = std::result::Result<Option<String>, String>;
 
 impl<S: ReaderSource> Pages<'_, S> {
     fn show(&self, body: &Body<'_>) -> PageResult {
-        self.theme
-            .render(&self.site, &self.info, body)
-            .map(Some)
-            .map_err(err)
+        self.render(body).map(Some)
+    }
+
+    /// Renders and logs locale keys the theme asked for but no locale has. Worker logs, not
+    /// the system log: this happens while serving a page view, and the system log never
+    /// writes per view (docs/ARCHITECTURE.md, System log).
+    fn render(&self, body: &Body<'_>) -> std::result::Result<String, String> {
+        let (html, missing) = self
+            .theme
+            .render_reporting(&self.site, &self.info, body)
+            .map_err(err)?;
+        for (lang, key) in missing {
+            console_warn!("i18n.missing_key lang={lang} key={key}");
+        }
+        Ok(html)
     }
 
     async fn home(&self, n: usize) -> PageResult {
@@ -290,9 +303,7 @@ impl<S: ReaderSource> Pages<'_, S> {
             .map_err(err)?;
         let posts: Vec<Post> = recent.posts.iter().map(to_render).collect();
         let refs: Vec<&Post> = posts.iter().collect();
-        self.theme
-            .render(&self.site, &self.info, &Body::NotFound { recent: &refs })
-            .map_err(err)
+        self.render(&Body::NotFound { recent: &refs })
     }
 }
 

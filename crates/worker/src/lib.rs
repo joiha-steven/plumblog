@@ -1,3 +1,4 @@
+mod keys;
 mod pages;
 
 use worker::{Context, Env, Request, Response, Result, event};
