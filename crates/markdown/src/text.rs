@@ -108,6 +108,12 @@ fn words(s: &str) -> impl Iterator<Item = (usize, usize, Kind)> + '_ {
     })
 }
 
+/// Words in `s` as reading time counts them: each CJK or Thai-like character is one.
+#[must_use]
+pub fn word_count(s: &str) -> usize {
+    words(s).count()
+}
+
 /// Common adult silent-reading rates: words per minute for spaced scripts, characters per
 /// minute for CJK, and for Thai-like scripts (about 4-5 characters per word at ~220 wpm).
 const WPM: usize = 230;

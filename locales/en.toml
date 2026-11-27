@@ -6,6 +6,10 @@ title_fallback = "Untitled site"
 # Shown as plain text when the theme itself cannot render a page.
 page_failed = "This page cannot be shown right now. Please try again in a minute."
 
+[error.input]
+# A JSON body with more values in all than the API takes (4096).
+too_complex = "This request holds too many items. Send less at a time."
+
 [syslog]
 # Shown in the system log wherever a secret or personal value was removed.
 redacted = "[hidden]"
