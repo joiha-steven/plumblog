@@ -1,7 +1,14 @@
 name: check
+# Branch pushes are covered by their PR run; running both doubled the CI queue.
 on:
   push:
+    branches: [main]
   pull_request:
+
+# A new push to a PR makes the older run useless; main runs always finish.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
