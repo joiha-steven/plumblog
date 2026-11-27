@@ -2,14 +2,16 @@
 //!
 //! Order, cheapest refusal first, and nothing written before the gate has passed: method and
 //! form shape (64 KB cap) -> post exists, published, comments open -> name and body limits ->
-//! [`CommentGate::verify`] (Turnstile) -> [`CommentGate::allow`] (per-IP limit) -> insert as
+//! [`CommentGate::allow`] (per-IP limit) -> [`CommentGate::verify`] (Turnstile) -> insert as
 //! pending -> one `comment.created` system log entry (ids only) -> 303 to
 //! `<post>?comment=pending#comments`. Every refusal is a 303 to
 //! `<post>?comment=error&code=<stable code>#comments`: the reader's input is never echoed.
 
+use crate::api::{Ctx, limit, site};
 use crate::d1::D1Store;
 use crate::pages::{comment_target, routes};
-use plumblog_model::{Error, ErrorCode, Result as CoreResult};
+use crate::webcrypto::WebCrypto;
+use plumblog_model::{Error, ErrorCode, RequestId, Result as CoreResult};
 use plumblog_store::comment;
 use plumblog_syslog::{Scope, request_id};
 use worker::{Env, Request, Response, Result, console_error, console_log, js_sys};
@@ -21,8 +23,8 @@ pub const MAX_FORM_BYTES: usize = 64 * 1024;
 /// The form field Turnstile adds inside the form.
 const TOKEN_FIELD: &str = "cf-turnstile-response";
 
-/// What stands between a form post and the database. `verify` proves a person sent it
-/// (Turnstile); `allow` counts the attempt against a per-IP limit. Both run before any
+/// What stands between a form post and the database. `allow` counts the attempt against a
+/// per-IP limit; `verify` proves a person sent it (Turnstile). Both run before any
 /// write, so spam that fails costs no D1 write. Errors carry `comments.unavailable`,
 /// `comments.check_failed` or `comments.rate_limited`.
 // Workers are single-threaded, so futures need not be `Send` (see auth::Crypto).
@@ -32,8 +34,8 @@ pub trait CommentGate {
     async fn allow(&self, remote_ip: Option<&str>) -> CoreResult<()>;
 }
 
-/// The production gate until Turnstile and the limiter are wired (issue #17 phase 2):
-/// refuses everything, so no comment can be stored on a live site before spam checks exist.
+/// The gate while Turnstile is not set up (no site key or no `TURNSTILE_SECRET`): refuses
+/// everything, so no comment can be stored on a site without spam checks.
 pub struct Unconfigured;
 
 #[expect(
@@ -56,40 +58,128 @@ fn unavailable() -> Error {
     )
 }
 
-/// The gate a request gets. Test builds may swap in [`crate::contract::TestGate`].
+/// The production gate when Turnstile is set up: the per-address limit, then siteverify.
+/// Reuses sign-in's Turnstile call and limiter store (`api::limit`).
+struct Turnstile {
+    ctx: Ctx,
+    secret: String,
+}
+
+impl CommentGate for Turnstile {
+    async fn verify(&self, token: &str, remote_ip: Option<&str>) -> CoreResult<()> {
+        let failed = || Error::new(ErrorCode::CommentCheckFailed, "turnstile refused the token");
+        if token.is_empty() {
+            return Err(Error::new(ErrorCode::CommentCheckFailed, "no token"));
+        }
+        // Never fail open: a siteverify error (network, status, bad answer) refuses the
+        // comment, with the detail in the Worker log for the next agent.
+        match limit::turnstile_ok(&self.ctx, &self.secret, token, remote_ip).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(failed()),
+            Err(e) => {
+                console_error!(
+                    "[{}] comments: siteverify error, comment refused: {} {}",
+                    self.ctx.request_id.as_str(),
+                    e.code.as_str(),
+                    e.detail
+                );
+                // Our own setup problem is not the reader's failed check.
+                let code = if e.code == ErrorCode::OriginMissing {
+                    ErrorCode::CommentsUnavailable
+                } else {
+                    ErrorCode::CommentCheckFailed
+                };
+                Err(Error::new(code, e.detail))
+            }
+        }
+    }
+
+    async fn allow(&self, _remote_ip: Option<&str>) -> CoreResult<()> {
+        // The address comes from the context (hashed there); a limiter failure refuses too.
+        limit::comment_attempt(&self.ctx).await.inspect_err(|e| {
+            if e.code != ErrorCode::CommentRateLimited {
+                console_error!(
+                    "[{}] comments: limiter error, comment refused: {} {}",
+                    self.ctx.request_id.as_str(),
+                    e.code.as_str(),
+                    e.detail
+                );
+            }
+        })
+    }
+}
+
+/// The gate a request gets.
 enum Gate {
     Unconfigured(Unconfigured),
-    #[cfg(feature = "contract-tests")]
-    Test(crate::contract::TestGate),
+    Turnstile(Turnstile),
 }
 
 impl CommentGate for Gate {
     async fn verify(&self, token: &str, remote_ip: Option<&str>) -> CoreResult<()> {
         match self {
             Self::Unconfigured(g) => g.verify(token, remote_ip).await,
-            #[cfg(feature = "contract-tests")]
-            Self::Test(g) => g.verify(token, remote_ip).await,
+            Self::Turnstile(g) => g.verify(token, remote_ip).await,
         }
     }
     async fn allow(&self, remote_ip: Option<&str>) -> CoreResult<()> {
         match self {
             Self::Unconfigured(g) => g.allow(remote_ip).await,
-            #[cfg(feature = "contract-tests")]
-            Self::Test(g) => g.allow(remote_ip).await,
+            Self::Turnstile(g) => g.allow(remote_ip).await,
         }
     }
 }
 
-#[cfg_attr(
-    not(feature = "contract-tests"),
-    expect(unused_variables, reason = "test builds read them")
-)]
-fn gate(env: &Env, req: &Request) -> Gate {
-    #[cfg(feature = "contract-tests")]
-    if let Some(g) = crate::contract::TestGate::for_request(env, req) {
-        return Gate::Test(g);
+/// A sign-in-style context for the shared Turnstile and limiter code.
+fn context(env: &Env, req: &Request, request_id: RequestId) -> Option<Ctx> {
+    let (Ok(crypto), Ok(db)) = (WebCrypto::new(), env.d1("DB")) else {
+        console_error!(
+            "[{}] comments: no WebCrypto or D1 binding",
+            request_id.as_str()
+        );
+        return None;
+    };
+    Some(Ctx {
+        store: D1Store::new(db),
+        crypto,
+        env: env.clone(),
+        now: i64::try_from(worker::Date::now().as_millis()).unwrap_or(0),
+        request_id,
+        ip: req.headers().get("cf-connecting-ip").ok().flatten(),
+        request_origin: String::new(),
+    })
+}
+
+/// Turnstile when the site key and the site origin are settings and `TURNSTILE_SECRET` is
+/// set; anything missing (logged: half a setup) or an unreadable setting gives the refusing
+/// gate. The page shows the widget on settings alone (`pages::db`), so a page may carry a
+/// widget while this answers `comments.unavailable`; that is accurate.
+async fn gate(env: &Env, req: &Request, scope: &Scope) -> Gate {
+    let Some(ctx) = context(env, req, scope.request_id().clone()) else {
+        return Gate::Unconfigured(Unconfigured);
+    };
+    let secret = match limit::turnstile_secret(&ctx).await {
+        Ok(Some(secret)) => secret,
+        Ok(None) => return Gate::Unconfigured(Unconfigured),
+        Err(e) => {
+            console_error!("{} comments: settings read failed: {e}", scope.log_prefix());
+            return Gate::Unconfigured(Unconfigured);
+        }
+    };
+    match site::configured(&ctx).await {
+        Ok(Some(_)) => Gate::Turnstile(Turnstile { ctx, secret }),
+        Ok(None) => {
+            console_error!(
+                "{} comments: Turnstile is set up but the site origin is not; comments unavailable",
+                scope.log_prefix()
+            );
+            Gate::Unconfigured(Unconfigured)
+        }
+        Err(e) => {
+            console_error!("{} comments: origin setting: {e}", scope.log_prefix());
+            Gate::Unconfigured(Unconfigured)
+        }
     }
-    Gate::Unconfigured(Unconfigured)
 }
 
 /// Handles a form post to `/<slug>/comments`.
@@ -107,8 +197,7 @@ pub async fn handle(req: &mut Request, env: &Env, slug: &str) -> Result<Response
             return redirect(&post_url, Err(unavailable().code));
         }
     };
-    let gate = gate(env, req);
-    match accept(req, &store, &gate, &scope, slug).await {
+    match accept(req, env, &store, &scope, slug).await {
         Accept::Stored => redirect(&post_url, Ok(())),
         Accept::NoPost => Ok(Response::empty()?.with_status(404)),
         Accept::Refused(e) => {
@@ -133,8 +222,8 @@ enum Accept {
 
 async fn accept(
     req: &mut Request,
+    env: &Env,
     store: &D1Store,
-    gate: &impl CommentGate,
     scope: &Scope,
     slug: &str,
 ) -> Accept {
@@ -157,11 +246,14 @@ async fn accept(
         Ok(c) => c,
         Err(e) => return Accept::Refused(e),
     };
+    // Built only now: a bad form or a missing post costs no settings read.
+    let gate = gate(env, req, scope).await;
     let ip = form.remote_ip.as_deref();
-    if let Err(e) = gate.verify(&form.token, ip).await {
+    // Allow first: a flood is refused by one D1 upsert instead of a siteverify call each.
+    if let Err(e) = gate.allow(ip).await {
         return Accept::Refused(e);
     }
-    if let Err(e) = gate.allow(ip).await {
+    if let Err(e) = gate.verify(&form.token, ip).await {
         return Accept::Refused(e);
     }
     let now = worker::Date::now().as_millis();

@@ -1,72 +1,115 @@
-// Reader comments through the real Worker and local D1 (issue #17, phase 1): the form post,
-// its refusals, moderation and the page cache. The test build's gate accepts one fixed token
-// and counts per client; `x-plumblog-test-client: unconfigured` gets the production gate.
+// Reader comments through the real Worker and local D1 (issue #17): the form post, its
+// refusals, moderation and the page cache. The production gate runs as is: Turnstile is set
+// up (site key setting + TURNSTILE_SECRET) and siteverify is a local fake that decides by the
+// token's text. Each "client" posts from its own fake address (CF-Connecting-IP), so the
+// per-address limit of one test never touches another.
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { after, before, test } from "node:test";
 import { startWorker, wrangler } from "./harness.mjs";
 
-const TOKEN = "plumblog-test-token"; // crates/worker/src/contract.rs TEST_TOKEN
-const LIMIT = 3; // TEST_LIMIT
+const TOKEN = "pass";
+const SITE_KEY = "1x00000000000000000000AA";
+const LIMIT = 5; // COMMENTS_PER_WINDOW in crates/worker/src/api/limit.rs
 const POST = "/first-post";
 
-let worker;
+let worker, noSecret, stub;
+/** Every siteverify request the fake received, as form fields. */
+const verifyCalls = [];
+
 before(async () => {
-  worker = await startWorker();
-  const res = await fetch(`${worker.url}/__seed`, { method: "POST" });
-  assert.equal(res.status, 200, await res.text());
-  // Site switch on; first-post open, slow-mornings off, why-small-tools a draft with its own
-  // switch on. Raw SQL skips the store, so the content version is bumped by hand.
+  // Like Cloudflare, `hostname` is where the widget was solved.
+  stub = createServer((req, res) => {
+    let data = "";
+    req.on("data", (d) => (data += d));
+    req.on("end", () => {
+      const form = new URLSearchParams(data);
+      verifyCalls.push(form);
+      const token = form.get("response");
+      if (token === "reset") return req.socket.destroy();
+      if (token === "http500") {
+        res.statusCode = 500;
+        return res.end("boom");
+      }
+      if (token === "garbage") return res.end("<html>not json");
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ success: token === "pass" || token === "elsewhere", hostname: token === "elsewhere" ? "evil.example" : "127.0.0.1", "error-codes": [] }));
+    });
+  });
+  await new Promise((ok) => stub.listen(0, "127.0.0.1", ok));
+  const vars = { TURNSTILE_SECRET: "stub-secret-value", TURNSTILE_VERIFY_URL: `http://127.0.0.1:${stub.address().port}/verify` };
+  worker = await startWorker({ vars });
+  noSecret = await startWorker({ vars: { TURNSTILE_VERIFY_URL: vars.TURNSTILE_VERIFY_URL } });
+  for (const w of [worker, noSecret]) {
+    const res = await fetch(`${w.url}/__seed`, { method: "POST" });
+    assert.equal(res.status, 200, await res.text());
+    sql(
+      "INSERT INTO settings (key, value_json, updated_at) VALUES ('comments.enabled', 'true', 0), " +
+        `('origin', '"${w.url}"', 0), ('turnstile_site_key', '"${SITE_KEY}"', 0); ` +
+        "UPDATE posts SET comments_enabled = 1 WHERE slug = 'first-post'; UPDATE site SET content_version = content_version + 1",
+      w,
+    );
+  }
+  // Site switch on (above); first-post open, slow-mornings off, why-small-tools a draft with
+  // its own switch on. Raw SQL skips the store, so the content version is bumped by hand.
   sql(
-    "INSERT INTO settings (key, value_json, updated_at) VALUES ('comments.enabled', 'true', 0); " +
-      "UPDATE posts SET comments_enabled = 1 WHERE slug IN ('first-post', 'why-small-tools'); " +
+    "UPDATE posts SET comments_enabled = 1 WHERE slug = 'why-small-tools'; " +
       "UPDATE posts SET status = 'draft', published_at = NULL WHERE slug = 'why-small-tools'; " +
       "UPDATE site SET content_version = content_version + 1",
   );
 });
 after(async () => {
-  await worker?.stop();
+  await Promise.all([worker?.stop(), noSecret?.stop()]);
+  stub?.close();
 });
 
-function sql(command) {
-  const out = wrangler(["d1", "execute", "DB", "--local", "--persist-to", worker.state, "--json", "--command", command]);
+function sql(command, w = worker) {
+  const out = wrangler(["d1", "execute", "DB", "--local", "--persist-to", w.state, "--json", "--command", command]);
   const start = out.indexOf("[");
   assert.ok(start >= 0, `no JSON in wrangler output:\n${out}`);
   return JSON.parse(out.slice(start)).at(-1).results ?? [];
 }
 const count = () => sql("SELECT count(*) AS n FROM comments")[0].n;
 /** Everything a refused post must leave alone: comment rows, system log rows, content version. */
-const snapshot = () =>
+const snapshot = (w = worker) =>
   sql(
     "SELECT (SELECT count(*) FROM comments) AS comments, (SELECT count(*) FROM system_log) AS log, " +
       "(SELECT content_version FROM site WHERE id = 1) AS version",
+    w,
   )[0];
 const bump = () => sql("UPDATE site SET content_version = content_version + 1");
 
 /** Posts the form; returns the status and the Location path (origin stripped). */
-async function send(fields, { client = "default", slug = POST, type, raw } = {}) {
+const addresses = new Map();
+const addressOf = (client) => {
+  if (!addresses.has(client)) addresses.set(client, `10.7.${Math.floor(addresses.size / 250)}.${(addresses.size % 250) + 1}`);
+  return addresses.get(client);
+};
+async function send(fields, { client = "default", slug = POST, type, raw, w = worker } = {}) {
   const body = raw ?? new URLSearchParams({ "cf-turnstile-response": TOKEN, ...fields }).toString();
-  const res = await fetch(`${worker.url}${slug}/comments`, {
+  const res = await fetch(`${w.url}${slug}/comments`, {
     method: "POST",
     redirect: "manual",
-    headers: { "content-type": type ?? "application/x-www-form-urlencoded", "x-plumblog-test-client": client },
+    headers: { "content-type": type ?? "application/x-www-form-urlencoded", "cf-connecting-ip": addressOf(client) },
     body,
   });
   const loc = res.headers.get("location") ?? "";
   await res.arrayBuffer();
-  return { status: res.status, to: loc.replace(worker.url, "") };
+  return { status: res.status, to: loc.replace(w.url, "") };
 }
 const pending = `${POST}?comment=pending#comments`;
 const refused = (code) => `${POST}?comment=error&code=${code}#comments`;
 
 /** A refused post: the given code, no row written. */
 async function refusedWith(code, fields, opts) {
-  const before = snapshot();
+  const w = opts?.w ?? worker;
+  const before = snapshot(w);
   const r = await send(fields, opts);
   console.log(`refused ${code}:`, r.status, r.to);
   assert.equal(r.status, 303);
   assert.equal(r.to, opts?.slug ? r.to : refused(code));
   assert.ok(r.to.endsWith(`?comment=error&code=${code}#comments`), r.to);
-  assert.deepEqual(snapshot(), before, `${code}: no comment, no system log entry, same content version`);
+  assert.deepEqual(snapshot(w), before, `${code}: no comment, no system log entry, same content version`);
 }
 
 const get = (path) => fetch(`${worker.url}${path}`);
@@ -75,7 +118,7 @@ const commentsOf = (html) => html.split('<section class="comments"')[1]?.split("
 test("no-JS form markup is on an open post", async () => {
   const html = await (await get(POST)).text();
   const section = commentsOf(html);
-  assert.match(section, /<form class="comment-form" action="\/first-post\/comments" method="post"/);
+  assert.match(section, /<form class="comment-form" action="\/first-post\/comments" method="post" data-turnstile="1x00000000000000000000AA"/);
   assert.match(section, /name="name" required maxlength="60"/);
   assert.match(section, /name="body" required rows="5" maxlength="5000"/);
   assert.match(section, /class="hint nojs">Sending a comment needs JavaScript/);
@@ -204,18 +247,117 @@ test("hostile Markdown is stored raw and rendered safe", async () => {
   assert.equal((item.match(/<a /g) ?? []).length, (item.match(/rel="nofollow ugc noopener"/g) ?? []).length);
 });
 
-test("a failed spam check writes nothing", async () => {
-  await refusedWith("comments.check_failed", { name: "A", body: "hi", "cf-turnstile-response": "wrong" }, { client: "verify" });
-  await refusedWith("comments.check_failed", {}, { client: "verify", raw: "name=A&body=hi" });
+test("the form carries the Turnstile key when key and origin are settings, secret or not", async () => {
+  assert.match(commentsOf(await (await get(POST)).text()), /data-turnstile="1x00000000000000000000AA"/);
+  // Key and origin set, no secret: the page still shows the widget (it depends on settings
+  // only, so a cached page never disagrees with the gate); sending says unavailable.
+  const html = await (await fetch(`${noSecret.url}${POST}`)).text();
+  assert.match(commentsOf(html), /data-turnstile="1x00000000000000000000AA"/);
 });
 
-test("the rate limit refuses after the limit, with no extra rows", async () => {
+test("key set, no secret: unavailable, nothing written, no limit count", async () => {
+  const limiter = () => sql("SELECT count(*) AS n FROM login_failures", noSecret)[0].n;
+  const n = limiter();
+  for (let i = 0; i < LIMIT + 2; i++) {
+    await refusedWith("comments.unavailable", { name: "A", body: "hi" }, { client: "nosecret-count", w: noSecret });
+  }
+  assert.equal(limiter(), n, "no limiter row");
+});
+
+test("key set, no origin: no widget and unavailable, and setting the key changes the page", async () => {
+  const keep = sql("SELECT value_json FROM settings WHERE key = 'origin'")[0].value_json;
+  sql("DELETE FROM settings WHERE key = 'origin'; UPDATE site SET content_version = content_version + 1");
+  try {
+    assert.match(commentsOf(await (await get(POST)).text()), /data-turnstile=""/);
+    verifyCalls.length = 0;
+    const limiterBefore = sql("SELECT count(*) AS n FROM login_failures")[0].n;
+    await refusedWith("comments.unavailable", { name: "A", body: "hi" }, { client: "noorigin" });
+    assert.equal(verifyCalls.length, 0);
+    assert.equal(sql("SELECT count(*) AS n FROM login_failures WHERE key_hash IN (SELECT key_hash FROM login_failures)")[0].n, limiterBefore, "no limiter row");
+  } finally {
+    sql(`INSERT INTO settings (key, value_json, updated_at) VALUES ('origin', '${keep}', 0); UPDATE site SET content_version = content_version + 1`);
+  }
+  assert.match(commentsOf(await (await get(POST)).text()), /data-turnstile="1x00/, "cache followed the settings");
+});
+
+test("a cached page follows a site key change (put_setting bumps the content version)", async () => {
+  await get(POST);
+  assert.equal((await get(POST)).headers.get("x-plumblog-cache"), "hit");
+  sql("UPDATE settings SET value_json = '\"2x00000000000000000000AB\"' WHERE key = 'turnstile_site_key'; UPDATE site SET content_version = content_version + 1");
+  const html = await (await get(POST)).text();
+  assert.match(commentsOf(html), /data-turnstile="2x00000000000000000000AB"/);
+  sql("UPDATE settings SET value_json = '\"1x00000000000000000000AA\"' WHERE key = 'turnstile_site_key'; UPDATE site SET content_version = content_version + 1");
+});
+
+test("a post to a missing slug or a bad form makes no siteverify call", async () => {
+  verifyCalls.length = 0;
+  assert.equal((await send({ name: "A", body: "hi" }, { client: "ghost", slug: "/no-such-post" })).status, 404);
+  await refusedWith("comments.body_invalid", { name: "A", body: " " }, { client: "ghost" });
+  assert.equal(verifyCalls.length, 0);
+});
+
+test("siteverify gets the token, the secret and the sender's address", async () => {
+  verifyCalls.length = 0;
+  assert.deepEqual(await send({ name: "V", body: "verify call" }, { client: "call" }), { status: 303, to: pending });
+  assert.equal(verifyCalls.length, 1);
+  assert.equal(verifyCalls[0].get("secret"), "stub-secret-value");
+  assert.equal(verifyCalls[0].get("response"), TOKEN);
+  assert.equal(verifyCalls[0].get("remoteip"), addressOf("call"));
+});
+
+test("a failed spam check writes nothing", async () => {
+  const refuse = (client, token, extra = {}) =>
+    refusedWith("comments.check_failed", { name: "A", body: "hi", "cf-turnstile-response": token, ...extra }, { client });
+  await refuse("no", "no"); // the fake says no
+  await refuse("elsewhere", "elsewhere"); // solved on another site
+  await refusedWith("comments.check_failed", {}, { client: "missing", raw: "name=A&body=hi" }); // no token
+  await refuse("empty", "");
+  // Siteverify itself failing is refused too, never let through.
+  await refuse("http500", "http500");
+  await refuse("garbage", "garbage");
+  await refuse("reset", "reset");
+});
+
+test("a token is not asked about when there is none", async () => {
+  verifyCalls.length = 0;
+  await refusedWith("comments.check_failed", {}, { client: "none", raw: "name=A&body=hi" });
+  assert.equal(verifyCalls.length, 0, "no siteverify call for an empty token");
+});
+
+test("the rate limit refuses after the limit, with no extra rows and no siteverify call", async () => {
   const before = count();
   for (let i = 0; i < LIMIT; i++) {
     assert.deepEqual(await send({ name: "R", body: `rate ${i}` }, { client: "rate" }), { status: 303, to: pending });
   }
+  verifyCalls.length = 0;
   await refusedWith("comments.rate_limited", { name: "R", body: "one too many" }, { client: "rate" });
+  await refusedWith("comments.rate_limited", { name: "R", body: "again" }, { client: "rate" });
+  assert.equal(verifyCalls.length, 0, "refused before siteverify");
   assert.equal(count(), before + LIMIT);
+  // Another address is not affected.
+  assert.deepEqual(await send({ name: "R", body: "someone else" }, { client: "rate-other" }), { status: 303, to: pending });
+  assert.equal(count(), before + LIMIT + 1);
+});
+
+test("failed checks count against the limit too", async () => {
+  for (let i = 0; i < LIMIT; i++) {
+    await refusedWith("comments.check_failed", { name: "F", body: "x", "cf-turnstile-response": "no" }, { client: "flood" });
+  }
+  await refusedWith("comments.rate_limited", { name: "F", body: "x", "cf-turnstile-response": "no" }, { client: "flood" });
+});
+
+test("not configured: no site key, or no secret, refuses with comments.unavailable", async () => {
+  // No secret in this Worker's environment.
+  await refusedWith("comments.unavailable", { name: "A", body: "hi" }, { client: "nosecret", w: noSecret });
+  // No site key in the settings.
+  const keep = sql("SELECT value_json FROM settings WHERE key = 'turnstile_site_key'")[0].value_json;
+  sql("DELETE FROM settings WHERE key = 'turnstile_site_key'");
+  try {
+    await refusedWith("comments.unavailable", { name: "A", body: "hi" }, { client: "nokey" });
+  } finally {
+    sql(`INSERT INTO settings (key, value_json, updated_at) VALUES ('turnstile_site_key', '${keep}', 0)`);
+  }
+  assert.deepEqual(await send({ name: "A", body: "back on" }, { client: "nokey-after" }), { status: 303, to: pending });
 });
 
 test("closed comments are refused: post off, draft, site off", async () => {
@@ -243,10 +385,6 @@ test("closed comments are refused: post off, draft, site off", async () => {
     sql("UPDATE settings SET value_json = 'true' WHERE key = 'comments.enabled'");
     bump();
   }
-});
-
-test("the production gate refuses everything with comments.unavailable", async () => {
-  await refusedWith("comments.unavailable", { name: "A", body: "hi" }, { client: "unconfigured" });
 });
 
 test("a full-length Vietnamese comment fits the form cap", async () => {

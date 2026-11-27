@@ -4,11 +4,12 @@
 
 use super::search::SearchSource;
 use super::{err, routes};
+use crate::api::body::json_string;
 use plumblog_markdown::render_comment;
 use plumblog_render::{CommentItem, Comments};
 use plumblog_store::{
-    CommentStatus, CommentStore, OptionOwner, PostStatus, PostStore, PostSummary, SettingsStore,
-    SiteStore, comment,
+    CommentStatus, CommentStore, ORIGIN_KEY, OptionOwner, PostStatus, PostStore, PostSummary,
+    SettingsStore, SiteStore, TURNSTILE_SITE_KEY, comment,
 };
 
 /// Approved comments a post page lists (the newest; paging comes later). Bounds the page's
@@ -33,6 +34,27 @@ pub trait ExtSource {
 
 /// Any store, for both page data and search.
 pub struct Db<'a, S>(pub &'a S);
+
+impl<S: SettingsStore> Db<'_, S> {
+    /// The Turnstile site key when it and the site origin are both set, else empty (no widget).
+    async fn turnstile_key(&self) -> Result<String, String> {
+        let get = |k: &'static str| async move {
+            Ok::<_, String>(
+                self.0
+                    .get_setting(k)
+                    .await
+                    .map_err(err)?
+                    .and_then(|v| json_string(&v))
+                    .filter(|v| !v.is_empty()),
+            )
+        };
+        let key = get(TURNSTILE_SITE_KEY).await?;
+        Ok(match (key, get(ORIGIN_KEY).await?) {
+            (Some(key), Some(_)) => key,
+            _ => String::new(),
+        })
+    }
+}
 
 impl<S: SettingsStore + SiteStore + PostStore + CommentStore> ExtSource for Db<'_, S> {
     // 1 query.
@@ -78,6 +100,15 @@ impl<S: SettingsStore + SiteStore + PostStore + CommentStore> ExtSource for Db<'
             _ => (false, (Vec::new(), false)),
         };
         let (rows, more) = rows;
+        // Settings only, never the Worker secret: settings writes bump the content version, so
+        // cached pages follow them. A page with a widget but no secret says "unavailable" on
+        // send. Read only for a page with an open form; a read error fails the render, so it
+        // is never cached.
+        let turnstile_key = if open {
+            self.turnstile_key().await?
+        } else {
+            String::new()
+        };
         let items = rows
             .into_iter()
             .map(|c| CommentItem {
@@ -94,8 +125,7 @@ impl<S: SettingsStore + SiteStore + PostStore + CommentStore> ExtSource for Db<'
             open,
             items,
             action_url: routes::comments(slug),
-            // Set once Turnstile is wired (issue #17 phase 2); empty means no widget.
-            turnstile_key: String::new(),
+            turnstile_key,
             max_length: comment::BODY_MAX,
             name_max_length: comment::NAME_MAX,
             max_links: comment::LINKS_MAX,

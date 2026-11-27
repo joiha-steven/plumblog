@@ -4,12 +4,12 @@
 //! log the detail with the request id; no user-facing text is produced here.
 
 mod auth;
-mod body;
+pub(crate) mod body;
 mod fields;
-mod limit;
+pub(crate) mod limit;
 mod passkey;
 mod principal;
-mod site;
+pub(crate) mod site;
 
 use plumblog_auth::Crypto;
 use plumblog_auth::base64url;
