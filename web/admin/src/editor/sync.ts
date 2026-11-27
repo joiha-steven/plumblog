@@ -50,6 +50,17 @@ export interface SyncHost {
 export interface Sync {
   /** Called after every local save. */
   changed(): void;
+  /**
+   * Resolves when no request of this sync is out, with the post as the server last answered (a
+   * new post is created first, by the same path as an autosave), or undefined when there is none
+   * (empty, offline, held for a choice, failed). Waiting text is not sent: the publish update
+   * carries it. The publish flow awaits this.
+   */
+  flush(): Promise<Post | undefined>;
+  /** The post's id once it exists on the server. */
+  id(): number | undefined;
+  /** Stops saving for good (the post is no longer a draft); a pending save is dropped. */
+  stop(): void;
 }
 
 const MAX_SLUG = 100;
@@ -106,13 +117,31 @@ export const serial = <T>(st: EdState, f: () => Promise<T>): Promise<T> => {
   return p;
 };
 
+/**
+ * The server answered with `p` for the editor's text `text` (a publish or an unpublish, not an
+ * autosave): its version and text become the base, and the local draft goes when it holds
+ * nothing the server lacks. The same drop `tidy` does after a save.
+ */
+export async function accept(st: EdState, p: Post, text: () => [string, string]): Promise<void> {
+  Object.assign(st, { base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
+  const rev = st.rev;
+  await serial(st, async () => {
+    if (rev && st.rev === rev && same(text(), st.server) && (await dropDraft(st.key, rev))) st.rev = 0;
+  });
+}
+
 export function startSync(o: SyncHost, delay = 3000): Sync {
-  if (!o.draft) return { changed: () => undefined };
+  if (!o.draft) return { changed: () => undefined, flush: async () => undefined, id: () => o.id, stop: () => undefined };
   const st = o.st;
   let id = o.id;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let busy = false;
   let again = false;
+  let stopped = false;
+  /** The request in flight (`send` with its follow-ups), for `flush`. */
+  let running: Promise<void> | undefined;
+  /** The newest post the server answered with. */
+  let last: Post | undefined;
   /** The last attempt failed: the next failure in a row adds no toast. */
   let failing = false;
 
@@ -124,7 +153,7 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
 
   const changed = () => {
     clearTimeout(timer);
-    if (st.hold) return;
+    if (st.hold || stopped) return;
     if (same(o.text(), st.server)) {
       o.say(t("admin.editor.saved"));
       void tidy(st.rev);
@@ -156,6 +185,7 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
     serial(st, async () => {
       if (!o.alive() || st.key.includes(":post-")) return;
       id = p.id;
+      last = p;
       const rev = await moveTo(st.key, o.user, p);
       st.key = draftKey(o.user, p.id, "");
       // Moved already (nothing here): read it. Another tab's rev is kept apart: the next save here then asks.
@@ -191,22 +221,34 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
   };
 
   const send = async (): Promise<void> => {
-    if (st.hold || st.paused || o.offline() || !o.alive()) return;
+    if (stopped || st.hold || st.paused || o.offline() || !o.alive()) return;
     if (busy) {
       again = true;
       return;
     }
     // Busy until the answer is handled, so a change meanwhile never starts a second create.
     busy = true;
-    try {
-      await attempt();
-    } finally {
-      busy = false;
-    }
-    if (again && o.alive()) {
-      again = false;
-      await send();
-    }
+    running = (async () => {
+      try {
+        await attempt();
+      } finally {
+        busy = false;
+      }
+      if (again && o.alive()) {
+        again = false;
+        await send();
+      }
+    })();
+    await running;
+  };
+
+  const flush = async (): Promise<Post | undefined> => {
+    clearTimeout(timer);
+    while (busy) await running;
+    // Only a post that does not exist yet needs a send: the publish update carries the text.
+    if (id === undefined) await send();
+    while (busy) await running;
+    return last;
   };
 
   const attempt = async (): Promise<void> => {
@@ -238,6 +280,7 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
       const p = r.value;
       // What the server holds is its answer, not what was sent: a normalised text is not "confirmed".
       Object.assign(st, { base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
+      last = p;
       failing = false;
       if (o.alive()) {
         o.say(t("admin.editor.saved"));
@@ -254,5 +297,13 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
   const prior = id === undefined ? creates.get(st.key) : undefined;
   if (prior) void prior.then((p) => p && adopt(p).then(changed));
   changed();
-  return { changed };
+  return {
+    changed,
+    flush,
+    id: () => id,
+    stop: () => {
+      stopped = true;
+      clearTimeout(timer);
+    },
+  };
 }

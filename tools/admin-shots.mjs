@@ -276,6 +276,73 @@ const STATES = [
   ],
   ["preview", "/admin/posts/1", EDITOR, (page) => previewIn(page, () => page.click(".seg button:last-child"))],
   ["new", "/admin/posts/new", EDITOR],
+  // Publishing: a live post's Update button, the confirm, and the settings panel (a sheet over the text on phones).
+  // Post 4, not 2: the "posts-strip" state leaves a kept draft for post 2, which asks first.
+  ["editor-published", "/admin/posts/4", EDITOR, pictures],
+  [
+    "publish-confirm",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await page.click(".ed-actions .btn.primary");
+      await page.waitForSelector(".pubpop");
+      await settle(page, ".pop");
+    },
+  ],
+  [
+    "publish-confirm-update",
+    "/admin/posts/4",
+    EDITOR,
+    async (page) => {
+      await page.click(".ed-actions .btn.primary");
+      await page.waitForSelector(".pubpop");
+      await settle(page, ".pop");
+    },
+  ],
+  [
+    "settings-now",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await settle(page, ".panel");
+    },
+  ],
+  [
+    "settings-later",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await page.check('.panel input[name="pub-when"] >> nth=1');
+      await page.waitForSelector("[data-at]:not([hidden])");
+      await settle(page, ".panel");
+      // The radio's fill eases in; the shot waits for it.
+      await page.waitForTimeout(400);
+    },
+  ],
+  [
+    "settings-published",
+    "/admin/posts/4",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await settle(page, ".panel");
+    },
+  ],
+  [
+    "settings-scheduled",
+    "/admin/posts/3",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await settle(page, ".panel");
+    },
+  ],
   ["signin", "/admin/signin"],
   ["signin-wrong", "/admin/signin?auth=wrong", null, submitWith(SIGN)],
   ["signin-locked", "/admin/signin?auth=locked", null, submitWith(SIGN)],

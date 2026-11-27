@@ -20,6 +20,8 @@ import { createEditor, inCode, removeCard, showCard } from "./cm";
 import { countWords, heading, link, linePrefix, wrap } from "./commands";
 import { mdAlt, mdUrl } from "./md-text";
 import { draftKey, loadDraft, saveDraft, startState } from "./drafts";
+import { label as pubLabel, newPub } from "./pub";
+import type { PubHost, PubUi } from "./publish";
 import type { Sync } from "./sync";
 
 export interface EditorOptions {
@@ -126,7 +128,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   const { st, fromLocal, serverMoved } = startState(key, local, post);
   let sync: Sync | undefined;
   const lang = post?.lang ?? o.lang;
-  const status = post?.status ?? "draft";
+  const pub = newPub(post);
   const start = fromLocal ? local : undefined;
   let title = start?.title ?? post?.title ?? "";
   const body = start?.body ?? post?.markdown ?? "";
@@ -141,6 +143,10 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   /* ---------- frame ---------- */
   const saved = h("span", { class: "saved", "aria-live": "polite" });
   const saved2 = h("span", {});
+  const stLabel = h("span", {}, statusName(pub.status));
+  const chip = h("span", { class: `st ${pub.status}` }, statusName(pub.status));
+  const gear = h("button", { type: "button", class: "ib", "data-panel-btn": "", "aria-pressed": "false", "aria-label": t("admin.editor.pub.settings"), title: t("admin.editor.pub.settings_tip") }, icon("panel"));
+  const pubBtn = h("button", { type: "button", class: "btn primary" }, pubLabel(pub));
   const wc = h("span", { class: "wc" });
   const wc2 = h("span", { class: "num" });
   const modes = h("div", { class: "seg", role: "group", "aria-label": t("admin.editor.modes") });
@@ -168,10 +174,11 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
       titleIn,
       note,
       cmHost,
-      h("div", { class: "phone-status" }, h("span", {}, statusName(status), " \u00b7 ", saved2), wc2),
+      h("div", { class: "phone-status" }, h("span", {}, stLabel, " \u00b7 ", saved2), wc2),
     ),
   );
   const previewPane = h("div", { class: "pane ed-preview" });
+  const edBody = h("div", { class: "ed-body" }, write, previewPane);
   const root = h(
     "div",
     { class: "ed", "data-mode": mode },
@@ -179,11 +186,11 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
       "header",
       { class: "head ed-top" },
       h("a", { class: "ib flush-start", href: HREF.posts, "aria-label": t("admin.editor.back"), title: t("admin.editor.back") }, icon("back")),
-      h("div", { class: "crumb" }, h("span", {}, t("admin.nav.posts")), h("span", { class: `st ${status}` }, statusName(status)), wc),
+      h("div", { class: "crumb" }, h("span", {}, t("admin.nav.posts")), chip, wc),
       h("div", { class: "ed-mid" }, modes),
-      h("div", { class: "ed-actions" }, saved),
+      h("div", { class: "ed-actions" }, saved, gear, pubBtn),
     ),
-    h("div", { class: "ed-body" }, write, previewPane),
+    edBody,
   );
   o.root.replaceChildren(root);
 
@@ -269,6 +276,8 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   /* ---------- saving ---------- */
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let quietTimer: ReturnType<typeof setTimeout> | undefined;
+  // A live post's edits stay here until Update: say they are not on the site.
+  const here = () => pub.status === "draft" ? t("admin.editor.saved_here") : t("admin.editor.pub.unpublished_changes");
   const setSaved = (text: string, quiet = false) => {
     for (const el of [saved, saved2]) {
       el.textContent = text;
@@ -298,8 +307,8 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
       return;
     }
     st.rev++;
-    setSaved(t("admin.editor.saved_here"));
-    quietTimer = setTimeout(() => setSaved(t("admin.editor.saved_here"), true), 1800);
+    setSaved(here());
+    quietTimer = setTimeout(() => setSaved(here(), true), 1800);
     if (mode !== "write" && root.isConnected) preview();
     sync?.changed();
   };
@@ -310,7 +319,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     unsaved = true;
     saveTimer = setTimeout(saveNow, 700);
   };
-  setSaved(fromLocal || post ? t("admin.editor.saved_here") : "", true);
+  setSaved(fromLocal || (post && pub.status === "draft") ? here() : "", true);
 
   /* ---------- two texts: the writer chooses, never a silent pick ---------- */
   const setText = (tt: string, bb: string) => {
@@ -324,6 +333,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     const pick = (f: () => void) => () => {
       choiceSlot.replaceChildren();
       f();
+      pubState();
     };
     choiceSlot.replaceChildren(
       h(
@@ -335,6 +345,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
         h("button", { type: "button", class: "btn quiet", onclick: pick(other[1]) }, other[0]),
       ),
     );
+    pubState();
   };
   /** The server copy moved on since this device's draft began. Either pick bases the text on it. */
   const serverChoice = (p: Post) => {
@@ -379,6 +390,13 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     const text = words ? t("admin.editor.words", { count: words, minutes: num(Math.max(1, Math.round(words / 220))) }) : t("admin.editor.words_none");
     wc.textContent = text;
     wc2.textContent = text;
+    pubState();
+  };
+  /* ---------- publishing (publish.ts, loaded on first use) ---------- */
+  let working = false;
+  /** Nothing to publish yet, or a choice between two texts is waiting. */
+  const pubState = () => {
+    pubBtn.disabled = working || st.hold || st.paused || (!titleIn.value.trim() && view.state.doc.length === 0);
   };
 
   /* ---------- typing: toolbar steps back, typewriter keeps the line mid-screen ---------- */
@@ -943,26 +961,67 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
 
   drawModes();
   if (serverMoved && post) serverChoice(post);
-  // Drafts also go to the server (sync.ts); published and scheduled posts stay here.
-  void import("./sync").then(
-    (m) => {
-      sync = m.startSync({
-        api: o.api,
-        user: o.user,
-        lang,
-        st,
-        id: post?.id,
-        draft: status === "draft",
-        offline: o.offline,
-        alive: () => root.isConnected,
-        text: () => [titleIn.value, view.state.doc.toString()],
-        say: (s) => setSaved(s),
-        choose: serverChoice,
-        note,
-      });
+  // Drafts also go to the server (sync.ts); published and scheduled posts stay here until Update.
+  const begin = () =>
+    void import("./sync").then(
+      (m) => {
+        sync = m.startSync({
+          api: o.api,
+          user: o.user,
+          lang,
+          st,
+          id: pub.id,
+          draft: pub.status === "draft",
+          offline: o.offline,
+          alive: () => root.isConnected,
+          text: () => [titleIn.value, view.state.doc.toString()],
+          say: (s) => setSaved(s),
+          choose: serverChoice,
+          note,
+        });
+      },
+      (e: unknown) => console.error("admin editor: loading the server sync failed; drafts stay on this device", e),
+    );
+  if (pub.status === "draft") begin();
+  const ui: PubUi = {};
+  const applied = () => {
+    chip.className = `st ${pub.status}`;
+    chip.textContent = statusName(pub.status);
+    stLabel.textContent = statusName(pub.status);
+    pubBtn.textContent = pubLabel(pub);
+    setSaved(t("admin.editor.saved"), true);
+    if (pub.status !== "draft") {
+      sync?.stop();
+      sync = undefined;
+    } else if (!sync) begin();
+  };
+  const host: PubHost = {
+    api: o.api,
+    root,
+    body: edBody,
+    pub,
+    st,
+    lang,
+    ui,
+    text: () => [titleIn.value, view.state.doc.toString()],
+    sync: () => sync,
+    offline: o.offline,
+    wide,
+    busy: (on) => {
+      working = on;
+      pubState();
     },
-    (e: unknown) => console.error("admin editor: loading the server sync failed; drafts stay on this device", e),
-  );
+    applied,
+    choose: serverChoice,
+  };
+  const loadPublish = (f: (m: typeof import("./publish")) => void) =>
+    void import("./publish").then(f, (e: unknown) => {
+      console.error("admin editor: loading the publish flow failed", e);
+      toast(t("admin.editor.pub.failed"), 6000);
+    });
+  pubBtn.addEventListener("click", () => loadPublish((m) => m.publishClick(host, pubBtn)));
+  gear.addEventListener("click", () => loadPublish((m) => m.togglePanel(host)));
+  pubState();
   if (!body && !title) titleIn.focus();
   else if (!phone()) {
     view.focus();
