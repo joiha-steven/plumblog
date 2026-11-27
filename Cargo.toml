@@ -29,6 +29,9 @@ clap = { version = "4.6.7", features = ["derive"] }
 # NFC before slugging so the same heading typed on macOS (NFD) and elsewhere (NFC) gets one id;
 # composition tables are too large to hand-write correctly.
 unicode-normalization = "0.1.26"
+# Comment names drop every format character (General_Category Cf: bidi controls, tags, Mongolian
+# vowel separator...). The Cf set changes with each Unicode version; a hand list would drift.
+unicode-properties = { version = "0.1.5", default-features = false, features = ["general-category"] }
 # Theme templates are Jinja (docs/ARCHITECTURE.md, Themes); a template engine with inheritance,
 # macros and autoescape is far more code than a dependency. Only the features templates use.
 minijinja = { version = "3.1.0", default-features = false, features = ["builtins", "macros", "multi_template", "adjacent_loop_items", "serde"] }

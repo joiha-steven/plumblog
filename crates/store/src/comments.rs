@@ -8,6 +8,7 @@ use plumblog_model::{
     CommentId, Error, ErrorCode, Permission, PostId, Result, Role, UserId, stable_codes,
 };
 use plumblog_syslog::{EventKind, LogSink, Scope, record};
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 stable_codes! {
     /// Stored in `comments.status`.
@@ -96,12 +97,23 @@ pub struct Checked {
     pub body: String,
 }
 
-/// Invisible characters that could spoof or blank a display name: bidi controls, zero-width
-/// characters, soft hyphen, BOM. The body keeps them (the theme isolates its direction).
+/// Characters that draw nothing, so they could blank a display name or hide inside one
+/// ("Ann" + a tag character shows as "Ann"). The body keeps them (the theme isolates its
+/// direction).
+///
+/// Controls (Cc) and every format character (Cf: bidi controls, zero-width characters, soft
+/// hyphen, BOM, tags, the Arabic letter mark...) come from the Unicode tables. The rest are the
+/// `Default_Ignorable_Code_Point` code points that are not Cf (Unicode `DerivedCoreProperties.txt`):
+/// the combining grapheme joiner, Hangul and Khmer fillers, Mongolian free variation selectors,
+/// variation selectors, and the reserved ignorable ranges. U+2800 is not ignorable but renders
+/// as a blank cell, the usual way to fake an empty name.
 fn invisible(c: char) -> bool {
     c.is_control()
-        || matches!(c, '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
-            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
+        || c.general_category() == GeneralCategory::Format
+        || matches!(c, '\u{34f}' | '\u{115f}'..='\u{1160}' | '\u{17b4}'..='\u{17b5}'
+            | '\u{180b}'..='\u{180d}' | '\u{180f}' | '\u{2065}' | '\u{2800}' | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}' | '\u{ffa0}' | '\u{fff0}'..='\u{fff8}'
+            | '\u{e0000}'..='\u{e0fff}')
 }
 
 /// Checks the reader's form fields.
@@ -334,6 +346,28 @@ mod tests {
             ErrorCode::CommentName
         );
         assert_eq!(check("A\u{202e}nn\u{200b}", "b").unwrap().name, "Ann");
+        // Characters that show as nothing (Hangul fillers, Arabic letter mark, Mongolian vowel
+        // separator, grapheme joiner, variation selectors, braille blank) cannot make a blank
+        // name, and a tag character cannot hide inside one.
+        for blank in [
+            "\u{3164}",
+            "\u{115f}",
+            "\u{61c}",
+            "\u{180e}",
+            "\u{34f}",
+            "\u{fe00}\u{fe0f}",
+            "\u{2800}",
+            "\u{e0041}",
+        ] {
+            assert_eq!(code(check(blank, "b")), ErrorCode::CommentName, "{blank:?}");
+        }
+        assert_eq!(check("Ann\u{e0041}", "b").unwrap().name, "Ann");
+        assert_eq!(
+            check("A\u{61c}n\u{fe0f}n\u{3164}", "b").unwrap().name,
+            "Ann"
+        );
+        // Vietnamese marks are combining characters too (NFD), and stay.
+        assert_eq!(check("Ha\u{300}", "b").unwrap().name, "Ha\u{300}");
         assert_eq!(code(check("Ann", " \n ")), ErrorCode::CommentBody);
         assert!(check("Ann", &"\u{1ea1}".repeat(BODY_MAX)).is_ok());
         assert_eq!(
