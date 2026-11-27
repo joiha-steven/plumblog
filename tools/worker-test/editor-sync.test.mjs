@@ -148,6 +148,34 @@ test("a new post is saved to the server, then updated, and a concurrent change a
     // Offline, fetching the post fails on purpose and says so in the log.
     problems.splice(before, problems.length - before, ...problems.slice(before).filter((x) => !/ERR_INTERNET_DISCONNECTED|no response/.test(x)));
 
+    // 6. The editor is redrawn while a slow create is out: the new mount waits for it and
+    // opens the post it made (index.ts, sync.ts `settled`); one post holds every typed key.
+    await page.route("**/api/v1/posts", async (route) => {
+      if (route.request().method() === "POST") await new Promise((ok) => setTimeout(ok, 4000));
+      await route.continue();
+    });
+    await page.goto(at("/admin/posts/new"));
+    await page.getByRole("toolbar", { name: tx("admin.editor.toolbar") }).waitFor();
+    const createOut = page.waitForRequest((r) => r.method() === "POST" && r.url().endsWith("/api/v1/posts"), { timeout: 15_000 });
+    await page.getByLabel(tx("admin.editor.title_label")).fill("Slow create");
+    await page.locator(".cm-content").click();
+    await page.keyboard.type("Alpha.");
+    await createOut;
+    await page.keyboard.type(" Beta.");
+    // The redrawn editor opens the saved post: it reads it from the API (a new post's editor never does).
+    const reopened = page.waitForRequest((r) => r.method() === "GET" && /\/api\/v1\/posts\/\d+$/.test(r.url()), { timeout: 15_000 });
+    const before6 = problems.length;
+    await context.setOffline(true);
+    await context.setOffline(false);
+    await reopened;
+    await page.waitForURL(/\/admin\/posts\/\d+$/);
+    await status.filter({ hasText: new RegExp(`^${tx("admin.editor.saved")}$`) }).waitFor({ timeout: 15_000 });
+    const slow = w.query("SELECT id, markdown FROM posts WHERE title = 'Slow create'");
+    assert.equal(slow.length, 1, "exactly one post");
+    assert.equal(slow[0].markdown, "Alpha. Beta.");
+    assert.equal(new URL(page.url()).pathname, `/admin/posts/${slow[0].id}`);
+    problems.splice(before6, problems.length - before6, ...problems.slice(before6).filter((x) => !/ERR_INTERNET_DISCONNECTED|no response/.test(x)));
+
     assert.deepEqual(problems, []);
   } finally {
     await context.close();

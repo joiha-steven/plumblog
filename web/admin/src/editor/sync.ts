@@ -10,8 +10,9 @@
  * stops saving and asks the writer which text to keep, never a silent pick. The local draft
  * is dropped once the server holds exactly the text still in the editor.
  *
- * A mount redrawn (online/offline) while the create is out waits for it (`creates`) and opens
- * the post. A reload while the create request is out: the browser asks first (beforeunload). If the
+ * A mount redrawn (online/offline) while the create is out waits for it up to 8 s and opens
+ * the post; past that it shows the local draft, sends nothing and adopts the post when the
+ * create settles (`settled`, `adopt`). A reload while the create request is out: the browser asks first (beforeunload). If the
  * page goes anyway and the create had reached the server, the reloaded editor still holds
  * the local draft under its new-post key and creates a second server draft (slug `-2`):
  * the text is never lost, and the extra draft shows in the posts list to delete.
@@ -75,7 +76,26 @@ export const slugify = (title: string, n = 1): string => {
  * failed. A later mount for the same key waits for it instead of creating a second post.
  */
 const creates = new Map<string, Promise<Post | undefined>>();
-export const settled = (key: string): Promise<Post | undefined> => creates.get(key) ?? Promise.resolve(undefined);
+
+/** Moves a new post's draft to the created post's key, based on its version. Resolves to its rev. */
+const moveTo = (key: string, user: number, p: Post): Promise<number> =>
+  moveDraft(key, draftKey(user, p.id, ""), { base: p.updated_at, version: p.version });
+
+/**
+ * For a mount of a new post's editor: the post an earlier mount's create made of this draft
+ * key, with the draft moved to it, or undefined (no create, it failed, or it is still out after
+ * `ms`: a hung request never keeps the writer on the loading frame). The mount then goes on;
+ * its sync holds for that create, never starts another, and adopts the post when it settles.
+ */
+export async function settled(key: string, user: number, ms = 8000): Promise<Post | undefined> {
+  const prior = creates.get(key);
+  if (!prior) return undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const p = await Promise.race([prior, new Promise<undefined>((ok) => (timer = setTimeout(ok, ms)))]);
+  clearTimeout(timer);
+  if (p) await moveTo(key, user, p);
+  return p;
+}
 
 const same = (a: [string, string], b: [string, string] | undefined): boolean => b !== undefined && a[0] === b[0] && a[1] === b[1];
 
@@ -127,27 +147,22 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
     }
   };
 
-  /** A new post was created: its draft, then its URL, now name the post. */
-  const created = (p: Post) =>
+  /**
+   * The post `p` was made of this draft (by this mount, or by an earlier one this mount waited
+   * for): the draft, then the URL, now name it. An editor no longer on the page leaves the move
+   * to the next mount (`settled` or its own `adopt`), so two never move one draft.
+   */
+  const adopt = (p: Post) =>
     serial(st, async () => {
-      const newId = st.key.slice(st.key.indexOf(":new-") + 5);
-      const to = draftKey(o.user, p.id, "");
-      const rev = await moveDraft(st.key, to, { base: p.updated_at, version: p.version });
-      st.key = to;
-      // A draft changed by another tab keeps its own rev: the next save here then asks.
-      if (rev !== st.rev) console.warn(`admin editor: draft moved at rev ${rev}, this tab had ${st.rev}`);
-      // A mount redrawn meanwhile waits on `creates` and opens the post itself.
-      if (o.alive() || new URLSearchParams(location.search).get("draft") === newId) history.replaceState(history.state, "", editHref(p.id));
-    });
-
-  /** Another mount created this post: continue as it, with the draft now under its key. */
-  const join = (p: Post) =>
-    serial(st, async () => {
+      if (!o.alive() || st.key.includes(":post-")) return;
       id = p.id;
+      const rev = await moveTo(st.key, o.user, p);
       st.key = draftKey(o.user, p.id, "");
-      st.rev = (await loadDraft(st.key))?.rev ?? 0;
+      // Moved already (nothing here): read it. Another tab's rev is kept apart: the next save here then asks.
+      if (!rev) st.rev = (await loadDraft(st.key))?.rev ?? 0;
+      else if (rev !== st.rev) console.warn(`admin editor: draft moved at rev ${rev}, this tab had ${st.rev}`);
       Object.assign(st, { base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
-      if (o.alive()) history.replaceState(history.state, "", editHref(p.id));
+      history.replaceState(history.state, "", editHref(p.id));
     });
 
   const failed = (e: ApiError) => {
@@ -198,7 +213,8 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
     const prior = id === undefined ? creates.get(st.key) : undefined;
     if (prior) {
       const p = await prior;
-      if (p) await join(p);
+      if (p) await adopt(p);
+      if (!o.alive()) return;
     }
     const text = o.text();
     if (same(text, st.server)) return tidy(st.rev);
@@ -214,7 +230,7 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
       r = await create(title, markdown);
       if (r.ok) {
         id = r.value.id;
-        await created(r.value);
+        await adopt(r.value);
       } else creates.delete(key);
       done(r.ok ? r.value : undefined);
     } else r = await o.api.updatePost(id, { expected_version: st.version ?? 0, title, markdown });
@@ -234,6 +250,9 @@ export function startSync(o: SyncHost, delay = 3000): Sync {
     else failed(r.error);
   };
 
+  // Mounted while an earlier mount's create is out: adopt it as soon as it settles.
+  const prior = id === undefined ? creates.get(st.key) : undefined;
+  if (prior) void prior.then((p) => p && adopt(p).then(changed));
   changed();
   return { changed };
 }

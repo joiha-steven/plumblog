@@ -111,10 +111,10 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   const key = draftKey(o.user, post?.id, newId);
   await flushed;
   // Redrawn (online/offline) while an earlier mount was creating this post: open the post it
-  // became rather than creating a second one (sync.ts `creates`).
+  // became rather than creating a second one (sync.ts `settled`, at most 8 s).
   if (post === undefined) {
     const made = await import("./sync").then(
-      (m) => m.settled(key),
+      (m) => m.settled(key, o.user),
       () => undefined,
     );
     if (made) {

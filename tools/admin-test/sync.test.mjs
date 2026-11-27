@@ -18,7 +18,7 @@ for (const k of ["document", "location", "history", "Node", "HTMLElement", "addE
 const root = new URL("../../", import.meta.url);
 const out = await build({ entryPoints: [new URL("web/admin/src/editor/sync.ts", root).pathname], bundle: true, write: false, format: "esm", logLevel: "silent" });
 const { startState } = await import(new URL("web/admin/src/editor/drafts.ts", root).href);
-const { slugify, startSync } = await import(`data:text/javascript;base64,${Buffer.from(out.outputFiles[0].text).toString("base64")}`);
+const { settled, slugify, startSync } = await import(`data:text/javascript;base64,${Buffer.from(out.outputFiles[0].text).toString("base64")}`);
 
 // A Map behind the slice of IndexedDB drafts.ts uses (as in auth.test.mjs), plus single-key delete.
 const rows = new Map();
@@ -447,4 +447,46 @@ test("what the server confirmed is its answer: a normalised text keeps the draft
   await settle();
   assert.deepEqual(e.st.server, ["T", "body"]);
   assert.equal(rows.get("1:post-3")?.body, "body  ", "the draft stays: the server holds other text");
+});
+
+test("a mount waits at most the bound for a hung create, then holds: nothing sent until it settles, then adopts it", async () => {
+  reset();
+  let release;
+  const api = fakeApi({ create: (input) => new Promise((r) => (release = () => r({ ok: true, value: post(7, input.title, input.markdown, 1) }))) });
+  const a = editor(api);
+  await a.save("T", "one");
+  await settle();
+  a.alive = false; // redrawn while the create hangs
+  const key = newKey();
+  const t0 = Date.now();
+  assert.equal(await settled(key, 1, 30), undefined, "the mount goes on after the bound");
+  assert.ok(Date.now() - t0 < 500);
+  const b = editor(api, { title: "T", body: "one" });
+  await b.save("T", "two");
+  await settle();
+  assert.equal(api.calls.length, 1, "no second create, no update while the first is out");
+  assert.ok(!b.said.includes("admin.editor.saved") && !b.said.includes("admin.editor.not_saved"));
+  release();
+  await settle();
+  assert.equal(b.st.key, "1:post-7", "adopted: key moved");
+  assert.equal(location.pathname, "/admin/posts/7", "adopted: URL fixed");
+  assert.deepEqual(api.calls.map((c) => c[0]), ["create", "update"]);
+  assert.deepEqual(api.calls[1].slice(1), [7, { expected_version: 1, title: "T", markdown: "two" }]);
+});
+
+test("a create that settles within the bound: the mount gets the post and its draft is moved", async () => {
+  reset();
+  let release;
+  const api = fakeApi({ create: (input) => new Promise((r) => (release = () => r({ ok: true, value: post(8, input.title, input.markdown, 1) }))) });
+  const a = editor(api);
+  await a.save("T", "one");
+  await settle();
+  a.alive = false;
+  const key = newKey();
+  const wait = settled(key, 1, 5000);
+  release();
+  const p = await wait;
+  assert.equal(p?.id, 8);
+  assert.deepEqual([...rows.keys()], ["1:post-8"]);
+  assert.equal(rows.get("1:post-8").version, 1);
 });
