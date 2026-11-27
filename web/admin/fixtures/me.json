@@ -1,0 +1,10 @@
+{
+  "user": {
+    "id": 1,
+    "login": "lan",
+    "slug": "lan",
+    "display_name": "Lan Nguyen",
+    "bio": "",
+    "role": "owner"
+  }
+}

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Installs the pinned contributor tools in tools/ (wrangler, esbuild, typescript...), once per
+# lockfile change. Blog owners never need Node; scripts/worker-test and scripts/admin-build call this.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+NODE_MAJOR_MIN=22
+fail() { echo "tools-install: FAIL: $1" >&2; exit 1; }
+
+command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 \
+  || fail "Node.js $NODE_MAJOR_MIN+ with npm is required for contributor tools. Install it from https://nodejs.org or with your package manager, then rerun."
+major=$(node -p 'process.versions.node.split(".")[0]')
+[ "$major" -ge "$NODE_MAJOR_MIN" ] || fail "Node.js $NODE_MAJOR_MIN+ is required, found $(node -v). Upgrade Node, then rerun."
+
+stamp=tools/node_modules/.lock-stamp
+if ! cmp -s tools/package-lock.json "$stamp" 2>/dev/null; then
+  echo "tools-install: npm ci in tools/ (first run or lockfile change only)"
+  npm ci --prefix tools --no-audit --no-fund --loglevel=error || fail "npm ci in tools/ failed"
+  cp tools/package-lock.json "$stamp"
+fi
