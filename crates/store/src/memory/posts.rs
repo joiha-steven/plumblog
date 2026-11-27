@@ -103,15 +103,23 @@ impl PostStore for MemoryStore {
         })
     }
 
-    async fn publish_due(&self, now: i64) -> Result<Vec<PostId>> {
+    async fn publish_due(&self, now: i64, limit: u32) -> Result<Vec<PostId>> {
         self.write(|s| {
-            let mut ids = Vec::new();
-            for p in s.posts.values_mut().filter(|p| {
-                p.status == PostStatus::Scheduled && p.published_at.is_some_and(|t| t <= now)
-            }) {
-                p.status = PostStatus::Published;
-                p.version += 1;
-                ids.push(p.id);
+            let mut due: Vec<(i64, PostId)> = s
+                .posts
+                .values()
+                .filter(|p| p.status == PostStatus::Scheduled)
+                .filter_map(|p| p.published_at.filter(|t| *t <= now).map(|t| (t, p.id)))
+                .collect();
+            due.sort_unstable();
+            due.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+            let mut ids: Vec<PostId> = due.into_iter().map(|(_, id)| id).collect();
+            ids.sort_unstable();
+            for id in &ids {
+                if let Some(p) = s.posts.get_mut(id) {
+                    p.status = PostStatus::Published;
+                    p.version += 1;
+                }
             }
             // Each newly live path takes over from any redirect away from it (see save_post).
             for id in &ids {

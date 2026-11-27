@@ -507,7 +507,7 @@ pub async fn publish_due<S: Store>(db: &S) -> Check {
     d.published_at = Some(10);
     let draft = save(db, d).await?;
     let v = version(db).await?;
-    let done = ok("publish_due", db.publish_due(200).await)?;
+    let done = ok("publish_due", db.publish_due(200, 100).await)?;
     eq!(
         "publishes published_at <= now, ascending",
         done,
@@ -534,10 +534,47 @@ pub async fn publish_due<S: Store>(db: &S) -> Check {
     )?;
     eq!(
         "nothing due",
-        ok("publish_due", db.publish_due(299).await)?,
+        ok("publish_due", db.publish_due(299, 100).await)?,
         Vec::new(),
     )?;
     version_is(db, "publish_due with nothing due", v + 1).await
+}
+
+/// A limit publishes the earliest due first and leaves the rest due for the next run.
+pub async fn publish_due_limit<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let mut ids = Vec::new();
+    // Saved out of due order, so id order and due order differ.
+    for (slug, at) in [("late", 300), ("early", 100), ("mid", 200), ("tie", 100)] {
+        let mut p = post(u, "vi", slug, PostStatus::Scheduled);
+        p.published_at = Some(at);
+        p.now = 50;
+        ids.push(save(db, p).await?);
+    }
+    let (late, early, mid, tie) = (ids[0], ids[1], ids[2], ids[3]);
+    eq!(
+        "earliest two (published_at, id), ascending ids",
+        ok("publish_due", db.publish_due(400, 2).await)?,
+        asc(&[early, tie]),
+    )?;
+    eq!(
+        "the rest stay scheduled",
+        (
+            ok("get_post", db.get_post(mid).await)?.status,
+            ok("get_post", db.get_post(late).await)?.status,
+        ),
+        (PostStatus::Scheduled, PostStatus::Scheduled),
+    )?;
+    eq!(
+        "limit 0 publishes nothing",
+        ok("publish_due", db.publish_due(400, 0).await)?,
+        Vec::new(),
+    )?;
+    eq!(
+        "next run takes the rest",
+        ok("publish_due", db.publish_due(400, 2).await)?,
+        asc(&[late, mid]),
+    )
 }
 
 pub async fn revisions<S: Store>(db: &S) -> Check {
@@ -827,7 +864,7 @@ pub async fn post_version_status_changes<S: Store>(db: &S) -> Check {
     s.published_at = Some(100);
     let sid = save(db, s.clone()).await?;
     let before_publish = update(db, sid, s).await?;
-    ok("publish_due", db.publish_due(100).await)?;
+    ok("publish_due", db.publish_due(100, 100).await)?;
     eq!("publish_due adds 1", row_version(db, sid).await?, 2)?;
     fails(
         "save from before publish_due",

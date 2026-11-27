@@ -98,6 +98,17 @@ pub trait LoginLimitStore {
         window_ms: i64,
         cap: i64,
     ) -> Result<Recorded>;
+    /// Counts one attempt on a shared key (the site-wide limit) in one statement, without
+    /// reading the row back: an ended window restarts at 1 with `window_start = now`; an open
+    /// one goes up by one while below `cap`. Returns the count after this attempt, or `None`
+    /// when the key is at `cap` in its open window: then the statement writes no row.
+    async fn count_capped(
+        &self,
+        key_hash: &str,
+        now: i64,
+        window_ms: i64,
+        cap: i64,
+    ) -> Result<Option<i64>>;
     /// Deletes at most `limit` rows whose window ended (`window_start + window_ms <= now`)
     /// and returns how many went. Rows for random logins and credential ids would otherwise
     /// stay forever; the caller sweeps a bounded batch now and then.

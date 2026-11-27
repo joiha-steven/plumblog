@@ -51,6 +51,29 @@ impl LoginLimitStore for MemoryStore {
         })
     }
 
+    async fn count_capped(
+        &self,
+        key_hash: &str,
+        now: i64,
+        window_ms: i64,
+        cap: i64,
+    ) -> Result<Option<i64>> {
+        self.write(|s| {
+            let row = s.login_failures.get(key_hash).copied();
+            let next = match row {
+                Some((n, start)) if !window_ended(start, now, window_ms) => {
+                    if n >= cap {
+                        return Ok(None);
+                    }
+                    (n + 1, start)
+                }
+                _ => (1, now),
+            };
+            s.login_failures.insert(key_hash.to_owned(), next);
+            Ok(Some(next.0))
+        })
+    }
+
     async fn delete_ended_failures(&self, now: i64, window_ms: i64, limit: u32) -> Result<u64> {
         self.write(|s| {
             let ended: Vec<String> = s

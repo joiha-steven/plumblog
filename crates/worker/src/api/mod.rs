@@ -98,7 +98,7 @@ impl Reply {
 /// HTTP status for each stable code. Exhaustive, so a new code must pick one.
 fn status(code: ErrorCode) -> u16 {
     match code {
-        ErrorCode::InvalidInput | ErrorCode::PasskeyInvalid => 400,
+        ErrorCode::InvalidInput | ErrorCode::PasskeyInvalid | ErrorCode::WebhookUrlBlocked => 400,
         ErrorCode::Unauthenticated | ErrorCode::InvalidCredentials => 401,
         // A signed-in user must prove it again (adding or removing a passkey): not a dead
         // session, so not 401.
@@ -115,9 +115,12 @@ fn status(code: ErrorCode) -> u16 {
         ErrorCode::LengthRequired => 411,
         ErrorCode::BodyTooLarge => 413,
         ErrorCode::Locked => 429,
-        ErrorCode::Storage | ErrorCode::Internal => 500,
-        // The site is not set up for this yet (no configured origin): not the client's fault.
-        ErrorCode::OriginMissing => 503,
+        ErrorCode::Storage | ErrorCode::Internal | ErrorCode::WebhookSecretUnreadable => 500,
+        // The receiver failed, not this server.
+        ErrorCode::WebhookDeliveryFailed => 502,
+        // The site is not set up for this yet (no configured origin, no WEBHOOK_KEY): not the
+        // client's fault.
+        ErrorCode::OriginMissing | ErrorCode::WebhookKeyInvalid => 503,
     }
 }
 

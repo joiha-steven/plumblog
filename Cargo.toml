@@ -7,6 +7,7 @@ members = [
   "crates/auth",
   "crates/syslog",
   "crates/store",
+  "crates/webhook",
   "crates/render",
   "crates/worker",
   "crates/cli",
@@ -53,6 +54,7 @@ plumblog-i18n = { path = "crates/i18n" }
 plumblog-auth = { path = "crates/auth" }
 plumblog-syslog = { path = "crates/syslog" }
 plumblog-store = { path = "crates/store" }
+plumblog-webhook = { path = "crates/webhook" }
 plumblog-render = { path = "crates/render" }
 
 [workspace.lints.rust]
@@ -63,6 +65,10 @@ pedantic = { level = "warn", priority = -1 }
 
 # Small wasm matters: the free plan limits Worker size and startup CPU.
 [profile.release]
+# "s", not "z" (issue #50, measured on the deployed wasm): "z" ships 769 KB instead of 879 KB
+# but renders a long post about twice as slowly (0.54 -> 1.31 ms natively, over the 2 ms
+# budget on CI runners), and CPU (10 ms per request) is the scarcer limit. "z" everywhere but
+# the render path saved only 20 KB more than this.
 opt-level = "s"
 lto = true
 codegen-units = 1

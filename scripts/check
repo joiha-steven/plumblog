@@ -4,7 +4,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 WASM_GZIP_BUDGET_BYTES=$((1024 * 1024)) # Workers free plan allows 3 MiB gzipped; keep headroom.
-WASM_FILE="${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/plumblog_worker.wasm"
 
 fail() { echo "check: FAIL: $1" >&2; exit 1; }
 step() { echo "check: $1"; }
@@ -44,11 +43,19 @@ step "markdown render CPU budget (release)"
 cargo test -q --release -p plumblog-markdown --test perf || fail "markdown render over its CPU budget"
 # --- end markdown CPU budget ---
 
-step "worker wasm build + size budget"
-cargo build -q -p plumblog-worker --target wasm32-unknown-unknown --release \
-  || fail "worker wasm build failed"
+step "worker wasm build + size budget (what a deploy ships)"
+# The budget applies to the deployed wasm: the same pinned worker-build a deploy runs, so
+# wasm-bindgen and wasm-opt included. It fails, and so does this check, if wasm-opt cannot
+# run. Its own target dir keeps it apart from the test builds.
+wb=$(scripts/worker-build) || fail "worker-build unavailable"
+release_target="$PWD/target/worker-release-build"
+(cd crates/worker && "$wb" --release --out-dir ../../target/worker-release \
+  -- --target-dir "$release_target" > ../../target/worker-release.log 2>&1) \
+  || { tail -20 target/worker-release.log >&2; fail "worker-build --release failed (see target/worker-release.log)"; }
+WASM_FILE=target/worker-release/index_bg.wasm
+[ -s "$WASM_FILE" ] || fail "worker-build produced no $WASM_FILE"
 size=$(gzip -9 -c "$WASM_FILE" | wc -c | tr -d ' ')
-echo "check: worker.wasm gzip = $size bytes (budget $WASM_GZIP_BUDGET_BYTES)"
+echo "check: worker.wasm gzip = $size bytes (budget $WASM_GZIP_BUDGET_BYTES; deployed form, after wasm-opt)"
 [ "$size" -le "$WASM_GZIP_BUDGET_BYTES" ] || fail "worker wasm gzip $size > budget $WASM_GZIP_BUDGET_BYTES"
 
 # --- crate dependency graph (issue #1) ---
@@ -74,6 +81,7 @@ markdown pulldown-cmark         # CommonMark + GFM parser
 markdown pulldown-latex         # LaTeX to MathML at save time
 i18n     toml                   # locale files are TOML
 store unicode-normalization  # in-memory search folds diacritics like FTS5 unicode61
+webhook serde_json            # payload JSON
 '
 meta=$(cargo metadata -q --format-version 1 --no-deps) || fail "cargo metadata failed"
 graph_errors=$(jq -r --arg order "$order" --arg allow "$external_allowlist" '

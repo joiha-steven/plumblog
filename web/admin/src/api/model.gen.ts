@@ -22,6 +22,10 @@ export const ERROR_CODES = [
   "auth.reauth_required",
   "api.body_too_large",
   "api.length_required",
+  "webhook.key_invalid",
+  "webhook.url_blocked",
+  "webhook.secret_unreadable",
+  "webhook.delivery_failed",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 

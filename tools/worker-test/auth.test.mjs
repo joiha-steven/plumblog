@@ -145,7 +145,9 @@ before(async () => {
     // Turnstile checks the host a token names against the configured origin.
     startWorker({
       seedSql: (url) => `${seedB}\nINSERT INTO settings (key, value_json, updated_at) VALUES ('origin', ${sq(JSON.stringify(url))}, ${T});`,
-      vars: { TURNSTILE_SECRET: TS_SECRET, TURNSTILE_VERIFY_URL: stubUrl },
+      // This site makes more attempts than the site-wide cap allows in one window; the cap
+      // itself is covered by globalcap.test.mjs.
+      vars: { TURNSTILE_SECRET: TS_SECRET, TURNSTILE_VERIFY_URL: stubUrl, PLUMBLOG_TEST_GLOBAL_CAP: "100000" },
     }),
     startWorker({ seedSql: seedC }),
   ]);
@@ -264,8 +266,9 @@ describe("fresh site", () => {
     assert.equal(b.status, a.status);
     assert.equal(b.text, a.text);
     assert.equal(a.setCookie, null);
-    // Keys are SHA-256 hex only: no raw login or address in the table.
-    for (const { key_hash } of fresh.query("SELECT key_hash FROM login_failures")) {
+    // Keys are SHA-256 hex only: no raw login or address in the table. The one exception is
+    // the fixed site-wide key (ratelimit::GLOBAL_KEY).
+    for (const { key_hash } of fresh.query("SELECT key_hash FROM login_failures WHERE key_hash <> 'global'")) {
       assert.match(key_hash, /^[0-9a-f]{64}$/);
     }
   });
@@ -282,19 +285,23 @@ describe("fresh site", () => {
     assert.equal(fresh.query("SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.sign_in_locked' AND detail = 'password'")[0].n, 1);
   });
 
-  test("a locked address writes nothing more: no rows for new logins, its own count stays", async () => {
+  test("a locked address writes nothing: no rows for new logins, its own count stays, the site-wide count stays", async () => {
     const ip = "198.51.100.90";
     for (let i = 0; i < 5; i++) {
       const r = await api(fresh, "POST", "/api/auth/login", { body: { login: `random${i}`, password: wrong() }, ip });
       assertError(r, 401, "auth.invalid_credentials");
     }
-    const snap = () => fresh.query("SELECT key_hash, count, window_start FROM login_failures ORDER BY key_hash");
+    // Refused from a read of its own row: one address cannot fill the site-wide cap.
+    const snap = () => fresh.query("SELECT key_hash, count, window_start FROM login_failures WHERE key_hash <> 'global' ORDER BY key_hash");
+    const global = () => fresh.query("SELECT count FROM login_failures WHERE key_hash = 'global'")[0].count;
     const before = snap();
+    const globalBefore = global();
     for (let i = 0; i < 10; i++) {
       const r = await api(fresh, "POST", "/api/auth/login", { body: { login: `later${i}`, password: wrong() }, ip });
       assertError(r, 429, "auth.locked");
     }
     assert.deepEqual(snap(), before);
+    assert.equal(global(), globalBefore, "a locked address moved the site-wide count");
   });
 
   test("bodies: over 8 KiB by Content-Length is 413 before reading; no Content-Length (chunked) is 411", async () => {
