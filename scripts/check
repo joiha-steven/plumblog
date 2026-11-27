@@ -49,6 +49,7 @@ external_allowlist='
 worker   worker                 # the Cloudflare runtime; the only crate that does I/O
 cli      clap                   # argument parsing for the `blog` binary
 markdown unicode-normalization  # NFC before heading ids (pure Rust, no I/O)
+store unicode-normalization  # in-memory search folds diacritics like FTS5 unicode61
 '
 meta=$(cargo metadata -q --format-version 1 --no-deps) || fail "cargo metadata failed"
 graph_errors=$(jq -r --arg order "$order" --arg allow "$external_allowlist" '
