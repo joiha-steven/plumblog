@@ -83,6 +83,12 @@ impl RequestId {
         ok.then(|| Self(raw.to_owned()))
     }
 
+    /// For work with no id to inherit and no working RNG, so an event never lacks one.
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self("unknown".to_owned())
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
