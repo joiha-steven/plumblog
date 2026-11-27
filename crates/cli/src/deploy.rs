@@ -240,7 +240,7 @@ fn restore_pending(st: &SiteState, cx: &Context) -> Result<(), Failure> {
 }
 
 /// A dev build has no release to download: it deploys only what the owner names.
-fn check_source(opts: &Options, text: &Text) -> Result<(), Failure> {
+pub(crate) fn check_source(opts: &Options, text: &Text) -> Result<(), Failure> {
     if opts.bundle.is_none() && !opts.build && opts.release.is_none() {
         return Err(Failure::new(
             Code::ReleaseDevBuild,
@@ -254,7 +254,7 @@ fn check_source(opts: &Options, text: &Text) -> Result<(), Failure> {
 
 /// The bundle: `--bundle`, else built in the repo with [`BUILD_SCRIPT`] (`--build`), else
 /// this binary's release bundle.
-fn bundle(run: &mut Run, opts: &Options) -> Result<(PathBuf, Bundle), Failure> {
+pub(crate) fn bundle(run: &mut Run, opts: &Options) -> Result<(PathBuf, Bundle), Failure> {
     let text = run.cx.text;
     let dir = if let Some(b) = &opts.bundle {
         b.clone()
@@ -448,7 +448,7 @@ pub(crate) fn export(
 }
 
 /// No token, ever: these go to the site and to signed URLs.
-fn plain_agent(local: bool, timeout: Duration, redirects: u32) -> ureq::Agent {
+pub(crate) fn plain_agent(local: bool, timeout: Duration, redirects: u32) -> ureq::Agent {
     let mut config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(redirects)
@@ -938,7 +938,7 @@ fn check_domain(run: &mut Run, t: &Targets, version: &str, rt: &Runtime) -> Resu
 
 /// One system log row per event in the site's own D1, as the Worker writes them
 /// (crates/worker d1/log.rs). A failure is reported, never fatal: the deploy is done.
-fn log_events(run: &mut Run, db: &Database, events: &[Event]) {
+pub(crate) fn log_events(run: &mut Run, db: &Database, events: &[Event]) {
     const SQL: &str = "INSERT INTO system_log (at_ms, request_id, kind, actor_id, error_code, \
                        detail) VALUES (?, ?, ?, NULL, NULL, ?)";
     let rows: Vec<[String; 4]> = events
@@ -963,11 +963,11 @@ fn log_events(run: &mut Run, db: &Database, events: &[Event]) {
     }
 }
 
-fn request_id(kind: &str, now_ms: i64) -> RequestId {
+pub(crate) fn request_id(kind: &str, now_ms: i64) -> RequestId {
     RequestId::parse(&format!("cli-{kind}-{now_ms}")).unwrap_or_else(RequestId::unknown)
 }
 
-fn at_ms(cx: &Context) -> u64 {
+pub(crate) fn at_ms(cx: &Context) -> u64 {
     u64::try_from(cx.now_ms).unwrap_or(0)
 }
 
@@ -1514,6 +1514,7 @@ fn rollback_code(
             (Err(s), Some(Ok(()))) => format!("{}; back to previous", s.record()),
             (Err(s), _) => s.record(),
         }),
+        outcome: None,
     };
     let saved = run.update(|s| push_capped(&mut s.rollbacks, record));
     let db = Database::new(client, site.db_id.clone());
@@ -1597,6 +1598,7 @@ fn restore_db(run: &mut Run, site: &Site, bookmark: &str, clear: bool) -> Result
         to: bookmark.to_string(),
         previous: previous.clone(),
         smoke: None,
+        outcome: None,
     };
     let db = Database::new(client, site.db_id.clone());
     // What the restored database records; a failed read keeps the old list (setup and

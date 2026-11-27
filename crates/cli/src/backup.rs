@@ -106,7 +106,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn md5_hex(bytes: &[u8]) -> String {
+pub(crate) fn md5_hex(bytes: &[u8]) -> String {
     use md5::{Digest, Md5};
     hex(&Md5::digest(bytes))
 }

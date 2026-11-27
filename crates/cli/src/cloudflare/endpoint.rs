@@ -159,6 +159,13 @@ endpoints! {
     D1Export => Post "/accounts/{account_id}/d1/database/{database_id}/export", Some(D1Edit),
         ApiToken, key!("cli.call.d1_export"),
         "https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/export/";
+    // `{action: "init" | "ingest" | "poll"}`, as wrangler 4.160.0 sends them for
+    // `d1 execute --file --remote` (wrangler-dist/cli.js `executeRemotely`,
+    // `uploadAndBeginIngestion`, `pollUntilComplete`, near line 240040). The file itself goes
+    // to the `upload_url` the init reply names, a presigned URL, never with the token.
+    D1Import => Post "/accounts/{account_id}/d1/database/{database_id}/import", Some(D1Edit),
+        ApiToken, key!("cli.call.d1_import"),
+        "https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/import/";
 
     R2BucketList => Get "/accounts/{account_id}/r2/buckets", Some(WorkersR2StorageEdit), ApiToken,
         key!("cli.call.r2_list"),

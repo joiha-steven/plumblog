@@ -26,7 +26,7 @@ const WORKERS: &str = "/accounts/acc1/workers/scripts/plumblog";
 const HOST: &str = "/plumblog.steven.workers.dev";
 
 /// Real time plus virtual waits: `sleep` moves time without waiting, slow calls still count.
-struct FakeClock(std::time::Instant, Cell<Duration>);
+pub(crate) struct FakeClock(std::time::Instant, Cell<Duration>);
 
 impl Default for FakeClock {
     fn default() -> Self {
@@ -49,7 +49,7 @@ const V3: &str = "00000000-0000-4000-8000-000000000003";
 const P: &str = "00000000-0000-4000-9000-000000000002";
 
 /// Replaces the bundle's migrations/ with `migs`.
-fn write_migrations(bundle: &Path, migs: &[Migration]) {
+pub(crate) fn write_migrations(bundle: &Path, migs: &[Migration]) {
     let d = bundle.join("migrations");
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -79,7 +79,7 @@ fn assets() -> Vec<(&'static str, &'static [u8])> {
 }
 
 /// A release bundle as scripts/build-bundle lays it out.
-fn make_bundle(dir: &TempDir) -> PathBuf {
+pub(crate) fn make_bundle(dir: &TempDir) -> PathBuf {
     let b = dir.0.join("bundle");
     let w = b.join("worker");
     std::fs::create_dir_all(w.join("worker")).unwrap();

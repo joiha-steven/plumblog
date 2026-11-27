@@ -40,16 +40,20 @@ private.
 
 ## Restore
 
+To a Time Travel bookmark (within 7 days), or from a `.sql` file of any age:
+
 ```sh
 blog rollback --db <bookmark> --yes
+blog restore backups/<utc>-<database>.sql --yes
 ```
 
-Overwrites the whole database with its state at the bookmark (within 7 days) and cancels
-running queries. It prints a bookmark that undoes it; keep that line. Ask the owner first.
+Both overwrite the whole database and cancel running queries; ask the owner first. Both print
+the undo command; keep it. `blog restore` without `--yes` checks the file and prints its plan,
+changing nothing. It refuses a file that is not a blog backup, another site's backup
+(`--allow-other-site` overrides) and one made by newer code (`restore.backup_newer`: update
+`blog` first). It saves a bookmark first, then reruns the migrations the backup lacks.
 
 ## Not covered yet
 
-- Restoring from a `.sql` file older than 7 days: no `blog` command.
-- Restoring media from `backups/media`: no `blog` command.
-
-Tell the owner these gaps instead of improvising with other tools.
+Restoring media from `backups/media` has no `blog` command. Tell the owner this gap instead
+of improvising with other tools.

@@ -191,6 +191,16 @@ pub struct State {
     /// `(pattern, action)`: before answering the first request whose `METHOD /path` contains
     /// `pattern`, run `action` once (e.g. someone editing site.local.toml meanwhile).
     pub on_request: Vec<(String, Box<dyn FnOnce() + Send>)>,
+    /// D1 import uploads by file name: `(database id, etag from init, bytes once PUT)`.
+    pub uploads: HashMap<String, (String, String, Option<String>)>,
+    /// Replaces the `ETag` an upload answers with (bytes damaged on the way).
+    pub upload_etag: Option<String>,
+    /// The next import fails with this error, applying nothing.
+    pub import_error: Option<String>,
+    /// Polls an import answers `active` before its result.
+    pub import_polls: usize,
+    /// `(database id, polls so far, final reply)` of the running import.
+    pub importing: Option<(String, usize, Value)>,
 }
 
 /// An R2 object: bytes (text, for the tests) and the `ETag` header it answers with.
@@ -356,6 +366,7 @@ fn serve_public(st: &mut State, req: &Recorded) -> Option<(u16, String, String)>
             };
             Some((status, "<html></html>".into(), String::new()))
         }
+        ("PUT", p) if p.starts_with("/__upload/") => Some(upload(st, req, p)),
         ("GET", p) if p.starts_with("/__signed/") => {
             if query(&req.query, "sig") != Some("s1g") {
                 return Some((403, "bad signature".into(), String::new()));
@@ -609,6 +620,7 @@ fn route_d1(
             ok(&json!({"bookmark": b}))
         }
         ("POST", ["accounts", _, "d1", "database", id, "export"]) => d1_export(st, req, id),
+        ("POST", ["accounts", _, "d1", "database", id, "import"]) => d1_import(st, req, id),
         (
             "POST",
             [
@@ -666,6 +678,124 @@ fn d1_export(st: &mut State, req: &Recorded, id: &str) -> (u16, Value) {
                "at_bookmark": "exp-bm", "messages": [],
                "result": {"filename": format!("{id}.sql"), "signed_url": url}}),
     )
+}
+
+fn md5_hex(bytes: &[u8]) -> String {
+    use md5::{Digest, Md5};
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    for b in Md5::digest(bytes) {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// The presigned upload URL D1 import's `init` hands out: like R2, it takes no credentials
+/// and answers with the MD5 of the bytes as a quoted `ETag`.
+fn upload(st: &mut State, req: &Recorded, path: &str) -> (u16, String, String) {
+    if query(&req.query, "X-Amz-Signature") != Some("upl0ad") {
+        return (403, "bad signature".into(), String::new());
+    }
+    if req.header("authorization").is_some() {
+        return (400, "credentials not allowed".into(), String::new());
+    }
+    let name = path.trim_start_matches("/__upload/");
+    let Some(entry) = st.uploads.get_mut(name) else {
+        return (404, "no such upload".into(), String::new());
+    };
+    entry.2 = Some(req.body.clone());
+    let etag = st
+        .upload_etag
+        .clone()
+        .unwrap_or_else(|| md5_hex(req.body.as_bytes()));
+    (200, String::new(), format!("ETag: \"{etag}\"\r\n"))
+}
+
+/// Runs an uploaded file in one transaction, as D1 import does ("your DB will return to its
+/// original state" on failure, wrangler 4.160.0), and returns the final poll reply.
+fn apply_import(st: &mut State, id: &str, sql: &str) -> Value {
+    let conn = &st.sqlite[id];
+    let applied = match st.import_error.take() {
+        Some(e) => Err(e),
+        None => conn
+            .execute_batch("BEGIN")
+            .and_then(|()| conn.execute_batch(sql))
+            .and_then(|()| conn.execute_batch("COMMIT"))
+            .map_err(|e| e.to_string()),
+    };
+    match applied {
+        Ok(()) => {
+            let b = format!("bm-{}-{}", id, st.bookmarks.len() + 1);
+            st.bookmarks.push(b.clone());
+            json!({"success": true, "type": "import", "status": "complete", "at_bookmark": b,
+                   "messages": ["Imported"],
+                   "result": {"num_queries": sql.matches(';').count(), "final_bookmark": b,
+                              "meta": {"duration": 1.0, "rows_read": 0, "rows_written": 0}}})
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            json!({"success": true, "type": "import", "status": "error", "at_bookmark": "imp-bm",
+                   "error": e, "errors": [e], "messages": ["Import failed"]})
+        }
+    }
+}
+
+/// D1 import (wrangler 4.160.0 `executeRemotely`): `init` hands out an upload URL, `ingest`
+/// runs the uploaded file, `poll` follows it.
+fn d1_import(st: &mut State, req: &Recorded, id: &str) -> (u16, Value) {
+    if req.header("content-type") != Some("application/json") {
+        return err(400, 1001, "expected application/json");
+    }
+    let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
+    let active = json!({"success": true, "type": "import", "status": "active",
+                        "at_bookmark": "imp-bm", "messages": ["Processing"]});
+    match body["action"].as_str() {
+        Some("init") => {
+            let Some(etag) = body["etag"]
+                .as_str()
+                .filter(|e| e.len() == 32 && e.bytes().all(|b| b.is_ascii_hexdigit()))
+            else {
+                return err(400, 7400, "etag must be the hex MD5 of the file");
+            };
+            let name = format!("{id}-{}.sql", st.uploads.len() + 1);
+            st.uploads
+                .insert(name.clone(), (id.to_string(), etag.to_string(), None));
+            let url = format!("{}/__upload/{name}?X-Amz-Signature=upl0ad", st.base);
+            ok(&json!({"success": true, "upload_url": url, "filename": name}))
+        }
+        Some("ingest") => {
+            let (Some(name), Some(etag)) = (body["filename"].as_str(), body["etag"].as_str())
+            else {
+                return err(400, 7400, "filename and etag are required");
+            };
+            let Some((db, want, Some(sql))) = st.uploads.get(name).cloned() else {
+                return err(400, 7400, "file not uploaded");
+            };
+            if db != id || want != etag || md5_hex(sql.as_bytes()) != etag {
+                return err(400, 7400, "etag does not match the upload");
+            }
+            let reply = apply_import(st, id, &sql);
+            if st.import_polls == 0 {
+                return ok(&reply);
+            }
+            st.importing = Some((id.to_string(), 0, reply));
+            ok(&active)
+        }
+        Some("poll") => {
+            let Some((db, n, reply)) = st.importing.take() else {
+                return err(400, 7400, "no import running");
+            };
+            if db != id || body["current_bookmark"] != "imp-bm" {
+                return err(400, 7400, "wrong bookmark");
+            }
+            if n + 1 < st.import_polls {
+                st.importing = Some((db, n + 1, reply));
+                return ok(&active);
+            }
+            ok(&reply)
+        }
+        _ => err(400, 7400, "unknown action"),
+    }
 }
 
 /// Time Travel restore; the bookmark must be one the fake handed out.

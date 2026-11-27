@@ -114,6 +114,15 @@ codes! {
     BackupRowInvalid => "backup.row_invalid",
     BackupMediaUnwritable => "backup.media_unwritable",
     BackupIncomplete => "backup.incomplete",
+    RestoreUnconfirmed => "restore.unconfirmed",
+    RestoreUnreadable => "restore.unreadable",
+    RestoreNotABackup => "restore.not_a_backup",
+    RestoreOtherSite => "restore.other_site",
+    RestoreBackupNewer => "restore.backup_newer",
+    RestoreUploadFailed => "restore.upload_failed",
+    RestoreUploadMismatch => "restore.upload_mismatch",
+    RestoreImportFailed => "restore.import_failed",
+    RestoreImportUncertain => "restore.import_uncertain",
 }
 
 /// One language's `[cli]` text, English behind it.

@@ -8,6 +8,7 @@ pub mod deploy;
 pub mod help;
 pub mod migrations;
 pub mod release;
+pub mod restore;
 pub mod setup;
 pub mod state;
 pub mod text;
