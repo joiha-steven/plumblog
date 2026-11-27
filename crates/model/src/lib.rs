@@ -45,7 +45,8 @@ stable_codes! {
     /// Webhooks: `key_invalid` = `WEBHOOK_KEY` missing or malformed; `url_blocked` = a URL
     /// the guard refuses (not https, private address...); `secret_unreadable` = a stored
     /// secret not sealed or not decrypting; `delivery_failed` = an attempt failed (the log
-    /// entry says why).
+    /// entry says why). `too_complex` = a JSON body with more values in all than the reader
+    /// takes (`plumblog_auth::json::MAX_VALUES`): send less, not different.
     pub enum ErrorCode {
         PostNotFound => "post.not_found",
         UserNotFound => "user.not_found",
@@ -71,6 +72,7 @@ stable_codes! {
         WebhookUrlBlocked => "webhook.url_blocked",
         WebhookSecretUnreadable => "webhook.secret_unreadable",
         WebhookDeliveryFailed => "webhook.delivery_failed",
+        TooComplex => "input.too_complex",
     }
 }
 
@@ -307,6 +309,7 @@ mod tests {
                     "webhook.secret_unreadable"
                 ),
                 (ErrorCode::WebhookDeliveryFailed, "webhook.delivery_failed"),
+                (ErrorCode::TooComplex, "input.too_complex"),
             ]
         );
     }

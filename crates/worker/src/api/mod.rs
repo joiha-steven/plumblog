@@ -116,7 +116,8 @@ fn status(code: ErrorCode) -> u16 {
         ErrorCode::Conflict => 409,
         ErrorCode::InviteInvalid => 410,
         ErrorCode::LengthRequired => 411,
-        ErrorCode::BodyTooLarge => 413,
+        // A size cap like the byte cap: the client must send less, not fix a field.
+        ErrorCode::BodyTooLarge | ErrorCode::TooComplex => 413,
         ErrorCode::Locked => 429,
         ErrorCode::Storage | ErrorCode::Internal | ErrorCode::WebhookSecretUnreadable => 500,
         // The receiver failed, not this server.

@@ -6,9 +6,8 @@
 //!   i64 range), nesting and container sizes capped, for `/api/v1` bodies.
 
 use plumblog_model::{Error, ErrorCode, Result};
-use std::collections::HashMap;
-use std::collections::hash_map::{Entry, RandomState};
-use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Json {
@@ -34,7 +33,47 @@ pub const MAX_DEPTH: usize = 16;
 pub const MAX_ITEMS: usize = 1000;
 /// Longest key, in bytes: keys are field names, never data.
 pub const MAX_KEY: usize = 64;
+/// Most values in one [`parse_document`] document: array items plus object members, at every
+/// depth. Bounds the whole parse, not one container: 160 KiB of 1000-key objects (22,000
+/// members) took ~1.2 ms natively and ~3 ms on a CI runner, too close to the Worker's 10 ms
+/// once in Wasm. Real bodies are far smaller: a post is ~15 members plus its tags, a theme
+/// option list at most 20 items, a color 2, a setting a few dozen (nav), and tokens,
+/// redirects and media metadata a handful (media metadata is in the query). 4096 still lets
+/// one container reach [`MAX_ITEMS`] four times over, so no cap is reachable before it.
+pub const MAX_VALUES: usize = 4096;
 
+/// Whether a string byte ends a plain run: quote, backslash or control character.
+#[inline]
+fn special(b: u8) -> bool {
+    b == b'"' || b == b'\\' || b < 0x20
+}
+
+/// Length of the plain run at the start of `bytes`, if it ends before the input does. Reads
+/// eight bytes per step: a byte at a time was most of the parse time (`tests/perf.rs`).
+fn plain_run(bytes: &[u8]) -> Option<usize> {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    // Non-zero iff some byte of `w` is below `n` (n <= 128); exact as a yes/no.
+    let below = |w: u64, n: u8| w.wrapping_sub(ONES * u64::from(n)) & !w & HIGH;
+    let mut i = 0;
+    while let Some(chunk) = bytes.get(i..i + 8) {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(chunk);
+        let w = u64::from_le_bytes(word);
+        if below(w ^ (ONES * u64::from(b'"')), 1)
+            | below(w ^ (ONES * u64::from(b'\\')), 1)
+            | below(w, 0x20)
+            != 0
+        {
+            break;
+        }
+        i += 8;
+    }
+    bytes[i..].iter().position(|&b| special(b)).map(|p| i + p)
+}
+
+// Hot paths call this on failure only; kept out of line so they stay small and inlined.
+#[cold]
 fn invalid(detail: impl Into<String>) -> Error {
     Error::new(ErrorCode::InvalidInput, format!("json: {}", detail.into()))
 }
@@ -44,69 +83,87 @@ fn invalid(detail: impl Into<String>) -> Error {
 const SCAN_KEYS: usize = 8;
 
 /// Duplicate-key check for one object. Scanning every key is quadratic: 160 KiB of 1000-key
-/// objects took ~20 ms natively (`tests/perf.rs`). Past [`SCAN_KEYS`], each key is hashed once
-/// with `std`'s randomly keyed hasher (so crafted keys cannot be made to collide) and the
-/// table maps that hash to the key's index; growing the table reuses the stored hash.
+/// objects took ~20 ms natively (`tests/perf.rs`). Up to [`SCAN_KEYS`] keys, each new key is
+/// compared with the others; past it, each key is hashed once with `std`'s randomly keyed
+/// hasher (so crafted keys cannot be made to collide) and the hashes are sorted when the
+/// object ends, which beat a growing hash table here.
 #[derive(Default)]
 struct Keys {
-    seen: HashMap<u64, usize, BuildHasherDefault<Stored>>,
+    hashes: Vec<(u64, usize)>,
     hasher: RandomState,
 }
 
 impl Keys {
-    /// Whether `key` is already among `fields`; otherwise remembers that `fields.len()` will
-    /// be its index.
+    /// Whether `key` repeats one of a small object's `fields`; past [`SCAN_KEYS`], remembers
+    /// its hash for [`Keys::repeated`] and answers `false`.
     fn duplicate<V>(&mut self, fields: &[(String, V)], key: &str) -> bool {
         if fields.len() < SCAN_KEYS {
             return fields.iter().any(|(k, _)| k == key);
         }
-        if self.seen.is_empty() {
+        if self.hashes.is_empty() {
             for (i, (k, _)) in fields.iter().enumerate() {
-                self.seen.insert(self.hasher.hash_one(k.as_str()), i);
+                self.hashes.push((self.hasher.hash_one(k.as_str()), i));
             }
         }
-        match self.seen.entry(self.hasher.hash_one(key)) {
-            Entry::Vacant(e) => {
-                e.insert(fields.len());
-                false
+        self.hashes.push((self.hasher.hash_one(key), fields.len()));
+        false
+    }
+
+    /// A key that appears twice among the hashed ones, once the object is complete.
+    fn repeated<'f, V>(&mut self, fields: &'f [(String, V)]) -> Option<&'f str> {
+        self.hashes.sort_unstable();
+        let mut run = 0;
+        for i in 1..=self.hashes.len() {
+            if i < self.hashes.len() && self.hashes[i].0 == self.hashes[run].0 {
+                continue;
             }
-            Entry::Occupied(e) if fields[*e.get()].0 == key => true,
-            // Two keys with one 64-bit hash: as good as never, but stay exact.
-            Entry::Occupied(_) => fields.iter().any(|(k, _)| k == key),
+            // Keys with one 64-bit hash: equal, or (as good as never) a collision.
+            let same = &self.hashes[run..i];
+            for (n, (_, a)) in same.iter().enumerate() {
+                if same[n + 1..]
+                    .iter()
+                    .any(|(_, b)| fields[*a].0 == fields[*b].0)
+                {
+                    return Some(&fields[*a].0);
+                }
+            }
+            run = i;
         }
-    }
-}
-
-/// Hasher for [`Keys`]: its keys already are random 64-bit hashes.
-#[derive(Default)]
-struct Stored(u64);
-
-impl Hasher for Stored {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 = self.0.rotate_left(8) ^ u64::from(b);
-        }
-    }
-    fn write_u64(&mut self, n: u64) {
-        self.0 = n;
+        None
     }
 }
 
 struct Parser<'a> {
+    /// Already checked to be UTF-8; plain runs of strings are sliced from it, not re-checked.
+    text: &'a str,
     input: &'a [u8],
     pos: usize,
+    /// Values read so far, for [`MAX_VALUES`].
+    values: usize,
 }
 
 impl Parser<'_> {
+    /// Counts one more value; refuses the document the moment it passes [`MAX_VALUES`].
+    #[inline]
+    fn count_value(&mut self) -> Result<()> {
+        self.values += 1;
+        if self.values > MAX_VALUES {
+            return Err(Error::new(
+                ErrorCode::TooComplex,
+                format!("json: more than {MAX_VALUES} values"),
+            ));
+        }
+        Ok(())
+    }
+
+    #[inline]
     fn skip_ws(&mut self) {
         while let Some(b' ' | b'\t' | b'\n' | b'\r') = self.input.get(self.pos) {
             self.pos += 1;
         }
     }
 
+    #[inline]
     fn next(&mut self) -> Result<u8> {
         let b = *self
             .input
@@ -116,6 +173,7 @@ impl Parser<'_> {
         Ok(b)
     }
 
+    #[inline]
     fn expect(&mut self, want: u8) -> Result<()> {
         self.skip_ws();
         if self.next()? == want {
@@ -130,68 +188,88 @@ impl Parser<'_> {
     }
 
     fn hex4(&mut self) -> Result<u32> {
+        let digits = self
+            .input
+            .get(self.pos..self.pos + 4)
+            .ok_or_else(|| invalid("bad \\u escape"))?;
         let mut v = 0u32;
-        for _ in 0..4 {
-            let d = char::from(self.next()?)
-                .to_digit(16)
-                .ok_or_else(|| invalid("bad \\u escape"))?;
-            v = (v << 4) | d;
+        for &b in digits {
+            let d = match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                b'A'..=b'F' => b - b'A' + 10,
+                _ => return Err(invalid("bad \\u escape")),
+            };
+            v = (v << 4) | u32::from(d);
         }
+        self.pos += 4;
         Ok(v)
     }
 
-    /// A string; the opening quote is already consumed. The input is known to be UTF-8, so
-    /// copying non-escape bytes through keeps it UTF-8.
+    /// The character of one escape; the backslash is already consumed.
+    fn escape(&mut self) -> Result<char> {
+        Ok(match self.next()? {
+            b'"' => '"',
+            b'\\' => '\\',
+            b'/' => '/',
+            b'b' => '\u{8}',
+            b'f' => '\u{c}',
+            b'n' => '\n',
+            b'r' => '\r',
+            b't' => '\t',
+            b'u' => {
+                let hi = self.hex4()?;
+                let code = if (0xd800..0xdc00).contains(&hi) {
+                    if self.input.get(self.pos..self.pos + 2) != Some(b"\\u") {
+                        return Err(invalid("lone high surrogate"));
+                    }
+                    self.pos += 2;
+                    let lo = self.hex4()?;
+                    if !(0xdc00..0xe000).contains(&lo) {
+                        return Err(invalid("bad low surrogate"));
+                    }
+                    0x10000 + ((hi - 0xd800) << 10) + (lo - 0xdc00)
+                } else {
+                    hi
+                };
+                char::from_u32(code).ok_or_else(|| invalid("lone low surrogate"))?
+            }
+            _ => return Err(invalid("bad escape")),
+        })
+    }
+
+    /// A string; the opening quote is already consumed. Runs between escapes are copied whole
+    /// from the already-checked text: per-byte work was most of the parse time
+    /// (`tests/perf.rs`).
     fn string(&mut self) -> Result<String> {
-        // Plain bytes up to the first quote, escape or control character are copied in one go:
-        // byte-at-a-time pushes were most of the parse time (`tests/perf.rs`).
-        let start = self.pos;
-        while let Some(&b) = self.input.get(self.pos) {
-            if b == b'"' || b == b'\\' || b < 0x20 {
-                break;
-            }
-            self.pos += 1;
-        }
-        let mut out = self.input[start..self.pos].to_vec();
+        let mut out = String::new();
         loop {
-            match self.next()? {
-                b'"' => break,
-                b'\\' => {
-                    let c = match self.next()? {
-                        b'"' => '"',
-                        b'\\' => '\\',
-                        b'/' => '/',
-                        b'b' => '\u{8}',
-                        b'f' => '\u{c}',
-                        b'n' => '\n',
-                        b'r' => '\r',
-                        b't' => '\t',
-                        b'u' => {
-                            let hi = self.hex4()?;
-                            let code = if (0xd800..0xdc00).contains(&hi) {
-                                if self.next()? != b'\\' || self.next()? != b'u' {
-                                    return Err(invalid("lone high surrogate"));
-                                }
-                                let lo = self.hex4()?;
-                                if !(0xdc00..0xe000).contains(&lo) {
-                                    return Err(invalid("bad low surrogate"));
-                                }
-                                0x10000 + ((hi - 0xd800) << 10) + (lo - 0xdc00)
-                            } else {
-                                hi
-                            };
-                            char::from_u32(code).ok_or_else(|| invalid("lone low surrogate"))?
-                        }
-                        _ => return Err(invalid("bad escape")),
-                    };
-                    let mut buf = [0u8; 4];
-                    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            let start = self.pos;
+            let run = plain_run(&self.input[start..]).ok_or_else(|| invalid("unexpected end"))?;
+            self.pos += run;
+            // Both ends sit next to an ASCII byte, so they are character boundaries.
+            let plain = self
+                .text
+                .get(start..self.pos)
+                .ok_or_else(|| invalid("not UTF-8"))?;
+            match self.input[self.pos] {
+                b'"' => {
+                    self.pos += 1;
+                    if out.is_empty() {
+                        return Ok(plain.to_owned());
+                    }
+                    out.push_str(plain);
+                    return Ok(out);
                 }
-                b if b < 0x20 => return Err(invalid("control character in string")),
-                b => out.push(b),
+                b'\\' => {
+                    self.pos += 1;
+                    out.push_str(plain);
+                    let c = self.escape()?;
+                    out.push(c);
+                }
+                _ => return Err(invalid("control character in string")),
             }
         }
-        String::from_utf8(out).map_err(|_| invalid("not UTF-8"))
     }
 
     fn literal(&mut self, word: &[u8]) -> Result<()> {
@@ -282,6 +360,7 @@ impl Parser<'_> {
                     if items.len() == MAX_ITEMS {
                         return Err(invalid("too many items"));
                     }
+                    self.count_value()?;
                     items.push(self.any(depth + 1)?);
                     self.skip_ws();
                     match self.next()? {
@@ -319,6 +398,7 @@ impl Parser<'_> {
             if fields.len() == MAX_ITEMS {
                 return Err(invalid("too many keys"));
             }
+            self.count_value()?;
             self.expect(b'"')?;
             let key = self.string()?;
             if key.len() > MAX_KEY {
@@ -333,7 +413,12 @@ impl Parser<'_> {
             self.skip_ws();
             match self.next()? {
                 b',' => {}
-                b'}' => return Ok(fields),
+                b'}' => {
+                    if let Some(key) = keys.repeated(&fields) {
+                        return Err(wrap(key, invalid(format!("duplicate key {key:?}"))));
+                    }
+                    return Ok(fields);
+                }
                 _ => return Err(invalid("expected ',' or '}'")),
             }
         }
@@ -359,7 +444,12 @@ impl Parser<'_> {
                 self.skip_ws();
                 match self.next()? {
                     b',' => {}
-                    b'}' => break,
+                    b'}' => {
+                        if let Some(key) = keys.repeated(&fields) {
+                            return Err(invalid(format!("duplicate key {key:?}")));
+                        }
+                        break;
+                    }
                     _ => return Err(invalid("expected ',' or '}'")),
                 }
             }
@@ -382,8 +472,14 @@ pub fn parse_object(input: &[u8], max_len: usize) -> Result<Vec<(String, Json)>>
     if input.len() > max_len {
         return Err(invalid(format!("{} bytes is too long", input.len())));
     }
-    std::str::from_utf8(input).map_err(|_| invalid("not UTF-8"))?;
-    Parser { input, pos: 0 }.object()
+    let text = std::str::from_utf8(input).map_err(|_| invalid("not UTF-8"))?;
+    Parser {
+        text,
+        input,
+        pos: 0,
+        values: 0,
+    }
+    .object()
 }
 
 /// Parses `input` as one object of any values but floats, in key order. An error inside a
@@ -393,13 +489,19 @@ pub fn parse_object(input: &[u8], max_len: usize) -> Result<Vec<(String, Json)>>
 ///
 /// [`ErrorCode::InvalidInput`] when it is longer than `max_len`, not UTF-8, not one object,
 /// or breaks a rule above (float, out-of-range integer, leading zero, duplicate key, deeper
-/// than [`MAX_DEPTH`], a container over [`MAX_ITEMS`], a key over [`MAX_KEY`]).
+/// than [`MAX_DEPTH`], a container over [`MAX_ITEMS`], a key over [`MAX_KEY`]);
+/// [`ErrorCode::TooComplex`] past [`MAX_VALUES`] values in all.
 pub fn parse_document(input: &[u8], max_len: usize) -> Result<Vec<(String, Value)>> {
     if input.len() > max_len {
         return Err(invalid(format!("{} bytes is too long", input.len())));
     }
-    std::str::from_utf8(input).map_err(|_| invalid("not UTF-8"))?;
-    let mut p = Parser { input, pos: 0 };
+    let text = std::str::from_utf8(input).map_err(|_| invalid("not UTF-8"))?;
+    let mut p = Parser {
+        text,
+        input,
+        pos: 0,
+        values: 0,
+    };
     let fields = p.members(1, |key, e| e.at(key))?;
     p.skip_ws();
     if p.pos != input.len() {
@@ -410,8 +512,9 @@ pub fn parse_document(input: &[u8], max_len: usize) -> Result<Vec<(String, Value
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_DEPTH, MAX_ITEMS, SCAN_KEYS, Value, parse_document, parse_object};
+    use super::{MAX_DEPTH, MAX_ITEMS, MAX_VALUES, SCAN_KEYS, Value, parse_document, parse_object};
     use crate::testutil::Prng;
+    use plumblog_model::ErrorCode;
 
     type Doc = Result<Vec<(String, Value)>, (String, Option<String>)>;
 
@@ -490,6 +593,46 @@ mod tests {
         let items = |n: usize| format!(r#"{{"a":[{}]}}"#, vec!["1"; n].join(","));
         assert!(doc(&items(MAX_ITEMS)).is_ok());
         assert!(doc(&items(MAX_ITEMS + 1)).is_err());
+    }
+
+    /// Values are counted at every depth, members and items alike, up to the cap exactly.
+    #[test]
+    fn document_value_cap() {
+        // `{"a":[[...],...]}`: 1 member, `arrays` items, the rest ints in them.
+        let doc_of = |total: usize| {
+            let arrays = total.div_ceil(MAX_ITEMS + 1);
+            let mut ints = total - 1 - arrays;
+            let mut parts = Vec::new();
+            for _ in 0..arrays {
+                let n = ints.min(MAX_ITEMS);
+                ints -= n;
+                parts.push(format!("[{}]", vec!["1"; n].join(",")));
+            }
+            format!(r#"{{"a":[{}]}}"#, parts.join(","))
+        };
+        assert!(doc(&doc_of(MAX_VALUES)).is_ok());
+        let over = doc_of(MAX_VALUES + 1);
+        let err = parse_document(over.as_bytes(), 1 << 20).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TooComplex, "{}", err.detail);
+        assert_eq!(err.field.as_deref(), Some("a"));
+        // Every other refusal stays `input.invalid`.
+        let e = parse_document(br#"{"a":[1,]}"#, 100).unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidInput);
+        // Object members count too, and the cap holds across top-level members.
+        let objects = (0..5)
+            .map(|o| {
+                let m: Vec<_> = (0..900).map(|i| format!(r#""k{i}":{o}"#)).collect();
+                format!(r#""o{o}":{{{}}}"#, m.join(","))
+            })
+            .collect::<Vec<_>>();
+        assert!(doc(&format!("{{{}}}", objects[..4].join(","))).is_ok());
+        assert_eq!(
+            doc(&format!("{{{}}}", objects.join(",")))
+                .unwrap_err()
+                .1
+                .as_deref(),
+            Some("o4")
+        );
     }
 
     /// Duplicates are found at any position, before and past the plain-scan size, escaped or not.

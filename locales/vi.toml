@@ -5,6 +5,9 @@ title_fallback = "Trang chưa đặt tên"
 [error]
 page_failed = "Trang này tạm thời chưa hiện được. Bạn thử lại sau một phút nhé."
 
+[error.input]
+too_complex = "Yêu cầu này chứa quá nhiều mục. Bạn gửi ít hơn mỗi lần nhé."
+
 [syslog]
 redacted = "[đã ẩn]"
 

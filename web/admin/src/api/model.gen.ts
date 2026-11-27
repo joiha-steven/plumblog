@@ -26,6 +26,7 @@ export const ERROR_CODES = [
   "webhook.url_blocked",
   "webhook.secret_unreadable",
   "webhook.delivery_failed",
+  "input.too_complex",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 

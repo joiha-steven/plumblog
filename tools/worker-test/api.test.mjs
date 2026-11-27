@@ -404,6 +404,9 @@ describe("api v1", () => {
       const r = await api(w, "POST", "/api/v1/posts", { as: AS.writerToken, body: `{${base}${extra}}` });
       assertError(r, 400, "input.invalid", field);
     }
+    // Over the 4096-value cap (5 x 1000 keys): its own code, refused while parsing.
+    const wide = `,"tags":[${Array(5).fill(`{${Array.from({ length: 1000 }, (_, i) => `"k${i}":0`).join(",")}}`).join(",")}]`;
+    assertError(await api(w, "POST", "/api/v1/posts", { as: AS.writerToken, body: `{${base}${wide}}` }), 413, "input.too_complex", "tags");
     for (const body of ["", "[]", "{", "null", `{${base}} x`]) {
       assertError(await api(w, "POST", "/api/v1/posts", { as: AS.writerToken, body }), 400, "input.invalid");
     }
