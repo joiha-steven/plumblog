@@ -10,13 +10,16 @@ blog guide token
 blog setup --check-token
 blog setup
 blog deploy
+blog deploy --build
 blog deploy --bundle <dir>
 ```
 
 1. `blog guide token` says how to create the token; `--check-token` checks it.
 2. `blog setup` makes the database, media bucket, Worker, secrets, Turnstile and a one-time
    setup code for the owner. Safe to run again. `--domain <host>` adds a custom domain.
-3. `blog deploy` builds in the plumblog repository; elsewhere pass a release bundle. Order:
+3. `blog deploy` downloads this version's release bundle once and checks it against the hash
+   built into `blog` (`--build` builds in the plumblog repository, `--bundle <dir>` takes a
+   folder; a build from source needs one of them). Order:
    token; a Time Travel bookmark (always) and a SQL export into `backups/` (when migrations
    are pending, or with `--export`); migrations; static files; a new Worker version; switch;
    cron; check `/healthz` and `/`. If the check fails within 60 s the previous version goes
@@ -43,7 +46,11 @@ change may already be applied: look before you retry.
 
 ## Updating
 
-`git pull`, then `blog deploy`. Never edit tracked files for one site: a pull must not conflict.
+Run `blog update` (`--check` only asks), then `git pull` for the guides, then `blog deploy`.
+It installs a release only if its signed `SHA256SUMS` checks out; `--to vX.Y.Z` picks one; an
+older one is refused unless you add `--allow-older`. A `release.*` or `update.*` error about a
+hash or signature means a download was not the official file: follow the message, never work
+around it. Never edit tracked files for one site: a pull must not conflict.
 
 ## Not built yet
 

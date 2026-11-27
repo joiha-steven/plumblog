@@ -1,0 +1,157 @@
+#!/bin/sh
+# Packs release files (names and layout: docs/ARCHITECTURE.md, Release bundle). Used by
+# .github/workflows/release.yml and runnable on a contributor's machine.
+#   scripts/package-release version                          print the workspace version
+#   scripts/package-release bundle <bundle-dir> <out-dir>    plumblog-bundle-vX.Y.Z.tar.gz (+ bundle.json inside)
+#   scripts/package-release cli <target> <binary> <out-dir>  blog-vX.Y.Z-<target>.tar.gz (.zip on Windows)
+#   scripts/package-release sums <dir>                       <dir>/SHA256SUMS
+# The bundle is reproducible for a given tar and gzip: sorted entries, fixed mtime, uid, gid and
+# modes, ustar format (no pax atime/ctime, no xattrs), gzip -n. GNU tar (CI) and bsdtar (macOS)
+# write different header bytes, so hashes match per platform, not across them.
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+fail() { echo "package-release: FAIL: $1" >&2; exit 1; }
+
+# 1980-01-01 UTC: the earliest time a zip can hold, so tar and zip entries agree.
+FIXED_TOUCH=198001010000
+TARGETS="aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-msvc"
+
+sha256_of() {
+  if command -v sha256sum > /dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  elif command -v shasum > /dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+  else fail "need sha256sum or shasum"; fi
+}
+
+version() {
+  v=$(awk '/^\[/{s=($0=="[workspace.package]")} s&&/^version[ \t]*=/{gsub(/.*=[ \t]*"|".*/,""); print; exit}' "$root/Cargo.toml")
+  printf '%s\n' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+    || fail "no X.Y.Z version under [workspace.package] in Cargo.toml (got '$v')"
+  printf '%s\n' "$v"
+}
+
+abs_dir() { mkdir -p "$1" && (cd "$1" && pwd); }
+
+# Paths go into JSON and tar file lists unescaped, so only allow characters that need no escaping.
+check_names() {
+  bad=$(cd "$1" && find . \( -type f -o -type d \) -print | LC_ALL=C grep -v '^[A-Za-z0-9._/@+-]*$' || true)
+  [ -z "$bad" ] || fail "unsupported characters in file names under $1 (allowed: A-Z a-z 0-9 . _ / @ + -): $bad"
+  other=$(find "$1" ! -type f ! -type d -print)
+  [ -z "$other" ] || fail "symlinks or special files are not allowed in a release: $other"
+}
+
+# Fixed modes and times, so the archive depends only on names and bytes.
+normalize() { # <dir> <file mode>
+  find "$1" -type d -exec chmod 755 {} +
+  find "$1" -type f -exec chmod "$2" {} +
+  find "$1" -exec env TZ=UTC0 touch -t "$FIXED_TOUCH" {} +
+}
+
+# Writes <out>.tar.gz from the entries listed (one per line, sorted) in <list>, relative to <dir>.
+make_tgz() { # <dir> <list> <out>
+  tmp_tar="$1/.tmp.tar"
+  if tar --version 2> /dev/null | grep -q 'GNU tar'; then
+    (cd "$1" && tar --format=ustar --no-recursion --owner=0 --group=0 --numeric-owner \
+      --mtime='1980-01-01 00:00:00Z' -cf "$tmp_tar" -T "$2") || fail "tar failed for $3"
+  else
+    # bsdtar (macOS, libarchive): mtimes come from normalize(); COPYFILE_DISABLE stops ._ files.
+    (cd "$1" && COPYFILE_DISABLE=1 tar --format ustar -n --uid 0 --gid 0 --numeric-owner \
+      --no-xattrs --no-acls --no-fflags -cf "$tmp_tar" -T "$2") || fail "tar failed for $3"
+  fi
+  gzip -n -9 -c "$tmp_tar" > "$3" || fail "gzip failed for $3"
+  rm -f "$tmp_tar"
+}
+
+cmd_bundle() {
+  [ $# -eq 2 ] || fail "usage: package-release bundle <bundle-dir> <out-dir>"
+  [ -d "$1" ] || fail "bundle dir $1 does not exist (make it with scripts/build-bundle)"
+  src=$(cd "$1" && pwd)
+  out=$(abs_dir "$2")
+  for d in worker assets migrations; do [ -d "$src/$d" ] || fail "bundle dir has no $d/"; done
+  extra=$(cd "$src" && find . -mindepth 1 -maxdepth 1 ! -name worker ! -name assets ! -name migrations)
+  [ -z "$extra" ] || fail "unexpected top-level entries in bundle dir: $extra"
+  check_names "$src"
+  ver=$(version)
+  commit=$(git -C "$root" rev-parse HEAD) || fail "git rev-parse HEAD failed"
+
+  stage=$(mktemp -d)
+  # shellcheck disable=SC2064 # expand now: the path is fixed for this run
+  trap "rm -rf '$stage'" EXIT
+  cp -R "$src/worker" "$src/assets" "$src/migrations" "$stage/" || fail "copying $src failed"
+  files=$(cd "$stage" && find worker assets migrations -type f | LC_ALL=C sort)
+  [ -n "$files" ] || fail "bundle dir $src has no files"
+  {
+    printf '{"version":"%s","commit":"%s","files":{' "$ver" "$commit"
+    sep=""
+    for f in $files; do printf '%s"%s":"%s"' "$sep" "$f" "$(sha256_of "$stage/$f")"; sep=","; done
+    printf '}}\n'
+  } > "$stage/bundle.json"
+  normalize "$stage" 644
+  (cd "$stage" && find bundle.json worker assets migrations | LC_ALL=C sort) > "$stage/.list"
+  name="plumblog-bundle-v$ver.tar.gz"
+  make_tgz "$stage" "$stage/.list" "$out/$name"
+  echo "$out/$name"
+}
+
+cmd_cli() {
+  [ $# -eq 3 ] || fail "usage: package-release cli <target> <binary> <out-dir>"
+  target=$1 bin=$2
+  case " $TARGETS " in *" $target "*) ;; *) fail "unknown target $target (one of: $TARGETS)" ;; esac
+  [ -f "$bin" ] || fail "binary $bin does not exist"
+  out=$(abs_dir "$3")
+  ver=$(version)
+  stage=$(mktemp -d)
+  # shellcheck disable=SC2064 # expand now: the path is fixed for this run
+  trap "rm -rf '$stage'" EXIT
+  case "$target" in *-windows-*) exe=blog.exe ;; *) exe=blog ;; esac
+  cp "$bin" "$stage/$exe" || fail "copying $bin failed"
+  cp "$root/LICENSE" "$stage/LICENSE" || fail "copying LICENSE failed"
+  normalize "$stage" 644
+  chmod 755 "$stage/$exe"
+  case "$target" in
+    *-windows-*)
+      name="blog-v$ver-$target.zip"
+      rm -f "$out/$name"
+      # 7-Zip (preinstalled on windows-latest): -mtc=off drops NTFS times, so only the fixed mtime
+      # is stored. Info-ZIP zip is the fallback for packing a Windows build on macOS or Linux.
+      if command -v 7z > /dev/null 2>&1; then
+        (cd "$stage" && TZ=UTC0 7z a -tzip -mx=9 -mtc=off -bso0 -bsp0 "$out/$name" "$exe" LICENSE) || fail "7z failed"
+      elif command -v zip > /dev/null 2>&1; then
+        (cd "$stage" && TZ=UTC0 zip -X -9 -q "$out/$name" "$exe" LICENSE) || fail "zip failed"
+      else
+        fail "need 7z or zip to make $name"
+      fi
+      ;;
+    *)
+      name="blog-v$ver-$target.tar.gz"
+      printf '%s\n' LICENSE "$exe" > "$stage/.list"
+      make_tgz "$stage" "$stage/.list" "$out/$name"
+      rm -f "$stage/.list"
+      ;;
+  esac
+  echo "$out/$name"
+}
+
+cmd_sums() {
+  [ $# -eq 1 ] || fail "usage: package-release sums <dir>"
+  [ -d "$1" ] || fail "$1 is not a directory"
+  dir=$(cd "$1" && pwd)
+  check_names "$dir"
+  sub=$(find "$dir" -mindepth 1 -type d)
+  [ -z "$sub" ] || fail "release dir must be flat, found: $sub"
+  names=$(cd "$dir" && find . -mindepth 1 -maxdepth 1 ! -name SHA256SUMS ! -name SHA256SUMS.minisig ! -name SHA256SUMS.tmp | sed "s|^\./||" | LC_ALL=C sort)
+  [ -n "$names" ] || fail "no files in $dir"
+  for n in $names; do printf '%s  %s\n' "$(sha256_of "$dir/$n")" "$n"; done > "$dir/SHA256SUMS.tmp"
+  mv "$dir/SHA256SUMS.tmp" "$dir/SHA256SUMS"
+  echo "$dir/SHA256SUMS"
+}
+
+[ $# -ge 1 ] || fail "usage: package-release version|bundle|cli|sums ..."
+sub=$1; shift
+case "$sub" in
+  version) [ $# -eq 0 ] || fail "usage: package-release version"; version ;;
+  bundle) cmd_bundle "$@" ;;
+  cli) cmd_cli "$@" ;;
+  sums) cmd_sums "$@" ;;
+  *) fail "unknown command $sub (version, bundle, cli, sums)" ;;
+esac

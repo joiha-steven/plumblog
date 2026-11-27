@@ -2,7 +2,9 @@
 
 mod deploy;
 mod fake_cf;
+mod fake_release;
 mod setup;
+mod update;
 
 use fake_cf::{Failure, Fake, Owner, State, Token};
 use plumblog_cli::cloudflare::{

@@ -90,8 +90,13 @@ impl Clock for RealClock {
 pub struct Options {
     /// Export the database even with no pending migration.
     pub export: bool,
-    /// A release bundle; without it the bundle is built in the repo.
+    /// A release bundle folder (`--bundle`).
     pub bundle: Option<PathBuf>,
+    /// Build the bundle in the repo (`--build`, for contributors).
+    pub build: bool,
+    /// The release this binary was made for (default when neither of the above): downloaded,
+    /// checked against the baked hash and cached. `None` in a dev build.
+    pub release: Option<crate::release::Release>,
     /// Deploy a bundle that lacks migrations the database already has.
     pub allow_older: bool,
 }
@@ -234,11 +239,27 @@ fn restore_pending(st: &SiteState, cx: &Context) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The bundle: `--bundle`, else built in the repo with [`BUILD_SCRIPT`].
+/// A dev build has no release to download: it deploys only what the owner names.
+fn check_source(opts: &Options, text: &Text) -> Result<(), Failure> {
+    if opts.bundle.is_none() && !opts.build && opts.release.is_none() {
+        return Err(Failure::new(
+            Code::ReleaseDevBuild,
+            text,
+            key!("cli.error.release_dev_build"),
+            &[("page", crate::release::fetch::RELEASES_PAGE.into())],
+        ));
+    }
+    Ok(())
+}
+
+/// The bundle: `--bundle`, else built in the repo with [`BUILD_SCRIPT`] (`--build`), else
+/// this binary's release bundle.
 fn bundle(run: &mut Run, opts: &Options) -> Result<(PathBuf, Bundle), Failure> {
     let text = run.cx.text;
     let dir = if let Some(b) = &opts.bundle {
         b.clone()
+    } else if let (false, Some(r)) = (opts.build, &opts.release) {
+        crate::release::bundle(r, run)?
     } else {
         let script = run.cx.dir.join(BUILD_SCRIPT);
         if !script.is_file() {
@@ -1162,6 +1183,7 @@ pub fn run(
     rt: &Runtime,
     out: &mut dyn Write,
 ) -> Result<(), Failure> {
+    check_source(opts, cx.text)?;
     let _lock = Lock::take(cx)?;
     let (st, site) = start(client, account_id, cx)?;
     restore_pending(&st, cx)?;
