@@ -116,7 +116,9 @@ pub fn neutralize(tex: &str) -> String {
                 }
                 let name = &tex[name_start..name_end];
                 let raw = RAW_TEXT_COMMANDS.contains(&name);
-                if raw || TEXT_COMMANDS.contains(&name) {
+                if raw {
+                    raw_argument(&mut chars, &mut out);
+                } else if TEXT_COMMANDS.contains(&name) {
                     while chars.peek().is_some_and(|&(_, n)| n == ' ') {
                         out.push(' ');
                         chars.next();
@@ -130,6 +132,39 @@ pub fn neutralize(tex: &str) -> String {
         }
     }
     out
+}
+
+/// The argument of a raw-text command, always written as a braced group. pulldown-latex
+/// handles only `\\operatorname{...}`: the star form and a brace-less argument make it
+/// copy the rest of the formula as raw text and parse it again. So the `*` (limits placement,
+/// which it does not support) is dropped, and a single-token argument (`\\operatorname a`,
+/// as in TeX) gets braces.
+fn raw_argument(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>, out: &mut String) {
+    if chars.peek().is_some_and(|&(_, n)| n == '*') {
+        chars.next();
+    }
+    while chars.peek().is_some_and(|&(_, n)| n == ' ') {
+        chars.next();
+    }
+    match chars.peek().map(|&(_, n)| n) {
+        Some('{') => copy_group(chars, out, true),
+        Some('\\') => {
+            // A command as the whole argument: pulldown-latex rejects it either way, and the
+            // caller then shows the source; copy it so that message names the real input.
+            out.push(' ');
+        }
+        Some(c) => {
+            chars.next();
+            out.push('{');
+            match c {
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                _ => out.push(c),
+            }
+            out.push('}');
+        }
+        None => {}
+    }
 }
 
 /// Copies a balanced `{...}` group (escaped braces do not count). With `raw`, `<` and `>`
@@ -354,7 +389,10 @@ mod tests {
             neutralize("\\operatorname{<mtext style=x>}"),
             "\\operatorname{&lt;mtext style=x&gt;}"
         );
-        assert_eq!(neutralize("\\mathop {a>b}<c"), "\\mathop {a&gt;b}\\lt c");
+        assert_eq!(neutralize("\\mathop {a>b}<c"), "\\mathop{a&gt;b}\\lt c");
+        assert_eq!(neutralize("\\operatorname*{a<b}"), "\\operatorname{a&lt;b}");
+        assert_eq!(neutralize("\\operatorname a<b"), "\\operatorname{a}\\lt b");
+        assert_eq!(neutralize("\\operatorname*  <b"), "\\operatorname{&lt;}b");
     }
 
     #[test]
