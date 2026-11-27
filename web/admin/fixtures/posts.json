@@ -1,0 +1,26 @@
+[
+  {
+    "id": 1,
+    "title": "Một tuần ở Đà Lạt: viết chậm giữa mùa sương",
+    "excerpt": "Ghi chép bảy ngày sống chậm trên cao nguyên: chợ sớm, những con dốc, và thói quen viết mỗi sáng.",
+    "lang": "vi",
+    "status": "draft",
+    "updated_at": 1795600000000
+  },
+  {
+    "id": 2,
+    "title": "Vì sao tôi bỏ thói quen đọc tin buổi sáng",
+    "excerpt": "Ba tháng không mở ứng dụng tin tức trước chín giờ.",
+    "lang": "vi",
+    "status": "published",
+    "updated_at": 1795000000000
+  },
+  {
+    "id": 3,
+    "title": "Notes on writing in two languages",
+    "excerpt": "What changes when the same essay has to read well in Vietnamese and English.",
+    "lang": "en",
+    "status": "scheduled",
+    "updated_at": 1794500000000
+  }
+]

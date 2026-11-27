@@ -1,0 +1,63 @@
+Sáng đầu tiên ở Đà Lạt, sương xuống dày tới mức con dốc trước nhà nghỉ chỉ còn là một vệt xám. Tôi pha một ấm trà, mở máy, và tự hứa: tuần này **mỗi sáng viết một trang**, không sửa, không đọc lại cho tới tối.
+
+## Chợ sớm và những con dốc
+
+Chợ Đà Lạt mở từ lúc trời còn tối. Người bán rau từ Trại Mát lên, gánh atisô và cải xoăn còn ướt sương. Tôi đi bộ, vì ở đây *đi bộ là cách duy nhất để thật sự thấy thành phố*.
+
+![Đồi thông sau cơn mưa sáng, nhìn từ dốc Nhà Làng](/admin/mock/doi-thong.svg "Đồi thông sau cơn mưa sáng")
+
+Những thứ tôi mang theo mỗi sáng:
+
+- Một cuốn sổ bìa vải, khổ nhỏ vừa túi áo
+- Bút chì 2B, vì mực hay đông khi trời lạnh
+- Một danh sách câu hỏi viết sẵn từ tối hôm trước
+
+### Lịch một ngày
+
+1. Sáu giờ: trà, viết một trang
+2. Bảy rưỡi: chợ, ăn bánh căn
+3. Chín giờ: đọc lại ghi chép hôm qua, đánh dấu chỗ muốn viết tiếp
+
+> Viết chậm không phải là viết ít. Viết chậm là cho mỗi câu đủ thời gian để biết nó muốn nói gì.
+
+> [!NOTE]
+> Ở độ cao 1.500 mét, nước sôi ở khoảng 95 độ. Trà xanh pha ngon hơn, nhưng mì gói thì lâu chín hơn hẳn.
+
+## Đếm chữ và đếm bước
+
+Tôi ghi lại số chữ mỗi sáng và số bước đi bộ mỗi ngày, rồi thử xem hai con số có liên quan gì không[^1]. Trung bình số chữ của một tuần là
+
+$$
+\bar{x} = \frac{1}{n} \sum_{i=1}^{n} x_i
+$$
+
+và nếu gọi $s$ là số bước, ngày nào $s > 12000$ thì trang viết hôm sau dài hơn thấy rõ.
+
+| Ngày | Số chữ | Số bước |
+| --- | --- | --- |
+| Thứ hai | 412 | 9.800 |
+| Thứ ba | 530 | 13.200 |
+| Thứ tư | 610 | 14.050 |
+
+Để tính nhanh, tôi viết một đoạn Python nhỏ:
+
+```python
+words = [412, 530, 610, 480, 702, 655, 590]
+average = sum(words) / len(words)
+print(f"Trung bình: {average:.0f} chữ mỗi sáng")
+```
+
+![Bàn viết buổi sáng: ấm trà, sổ tay và cửa sổ mờ sương](/admin/mock/ban-viet.svg)
+
+## Những việc còn dang dở
+
+- [x] Viết đủ bảy trang
+- [x] Đi hết các con dốc quanh hồ Xuân Hương
+- [ ] Gửi bản thảo cho hai người bạn đọc trước
+- [ ] Dịch bài này sang tiếng Anh
+
+---
+
+Chiều cuối cùng, sương tan sớm. Tôi đọc lại cả bảy trang một lượt, lần đầu tiên trong tuần, và nhận ra điều đáng giữ nhất không nằm ở câu chữ mà ở ~~thói quen dậy sớm~~ cảm giác được ngồi yên với một ý nghĩ đủ lâu.
+
+[^1]: Không có. Nhưng việc đếm khiến tôi đi bộ nhiều hơn.

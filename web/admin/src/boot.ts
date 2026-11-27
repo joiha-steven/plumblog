@@ -3,6 +3,8 @@ export interface Boot {
   lang: string;
   langs: string[];
   site: string;
+  /** This page's CSP nonce: the editor's base styles go in a `<style>` that must carry it. */
+  nonce: string;
 }
 
 /** A language's UI text: `/admin/i18n/<lang>.js`, built by scripts/admin-build. */
@@ -20,7 +22,7 @@ export function readBoot(): Boot {
   } catch (e) {
     // Without text the UI shows keys; still usable, and the log says why.
     console.error("admin: boot data unreadable", e);
-    return { lang: "en", langs: ["en"], site: "" };
+    return { lang: "en", langs: ["en"], site: "", nonce: "" };
   }
 }
 
