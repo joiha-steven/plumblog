@@ -116,6 +116,13 @@ pub enum Body<'a> {
     NotFound {
         recent: &'a [&'a Post],
     },
+    /// `query` as the reader typed it (empty: show the form only); `more` when the results
+    /// were cut at the route's cap.
+    Search {
+        query: &'a str,
+        posts: &'a [&'a Post],
+        more: bool,
+    },
 }
 
 /// One post row (`entry.html`).

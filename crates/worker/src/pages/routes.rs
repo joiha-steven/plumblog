@@ -3,7 +3,8 @@
 //! `/` and `/page/N` home, `/<slug>` post, `/tag/<slug>` and `/archive/<year>` (each with
 //! `/page/N`). Redirect targets are always built here as `/`-rooted paths with no `//`, so a
 //! request path can never turn into an off-site `Location`.
-//! `page`, `tag`, `archive`, `theme`, `admin` and `api` cannot be post slugs.
+//! `/search?q=`. `page`, `tag`, `archive`, `search`, `theme`, `admin` and `api` cannot be post
+//! slugs.
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Route {
@@ -26,6 +27,8 @@ pub enum Route {
         lang: Option<String>,
         format: FeedFormat,
     },
+    /// `/search?q=`: the query string is read by the caller, not routed.
+    Search,
     Sitemap,
     Robots,
     Llms,
@@ -79,6 +82,7 @@ pub fn parse(path: &str) -> Route {
             (Some(year), Some(page)) => Route::Archive { year, page },
             _ => Route::NotFound,
         },
+        ["search"] => Route::Search,
         ["sitemap.xml"] => Route::Sitemap,
         ["robots.txt"] => Route::Robots,
         ["llms.txt"] => Route::Llms,
@@ -97,7 +101,10 @@ pub fn parse(path: &str) -> Route {
     }
 }
 
-const RESERVED: &[&str] = &["page", "tag", "archive", "theme", "admin", "api"];
+const RESERVED: &[&str] = &["page", "tag", "archive", "search", "theme", "admin", "api"];
+
+/// The search page; results are `?q=` on it.
+pub const SEARCH: &str = "/search";
 
 /// Slugs are lowercase ASCII letters, digits and dashes; anything else is a 404 without a
 /// storage lookup.

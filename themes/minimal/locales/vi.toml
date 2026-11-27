@@ -34,6 +34,7 @@ hint = "Tìm trong tiêu đề và nội dung mọi bài viết."
 count_one = "1 bài cho “{query}”"
 count_other = "{count} bài cho “{query}”"
 none = "Không tìm thấy bài nào cho “{query}”. Thử ít từ hơn hoặc từ khác."
+count_more = "{count} bài mới nhất cho “{query}”. Thêm một từ để thu hẹp."
 
 [comments]
 title = "Bình luận"
