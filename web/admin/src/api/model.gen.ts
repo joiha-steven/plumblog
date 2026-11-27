@@ -26,6 +26,7 @@ export const ERROR_CODES = [
   "webhook.url_blocked",
   "webhook.secret_unreadable",
   "webhook.delivery_failed",
+  "input.too_complex",
   "comments.unavailable",
   "comments.closed",
   "comments.name_invalid",

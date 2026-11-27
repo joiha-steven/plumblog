@@ -230,3 +230,27 @@ for (const sample of samples) {
     }
   });
 }
+
+// api_tokens was rebuilt by 0005 (scope CHECK): the rebuilt table must keep every constraint
+// of the original, not only its rows.
+test("api_tokens after every migration: scopes, unique hash, user cascade, index", () => {
+  const db = makeStateDir();
+  try {
+    wrangler(["d1", "migrations", "apply", "DB", "--local", "--persist-to", db.dir]);
+    const run = (sql) => queryEach(db.dir, [sql]);
+    run(`INSERT INTO users (id, login, slug, display_name, role, created_at, updated_at) VALUES
+      (1, 'a', 'a', 'A', 'owner', 1, 1), (2, 'b', 'b', 'B', 'writer', 1, 1)`);
+    run(`INSERT INTO api_tokens (user_id, name, token_hash, scope, created_at) VALUES
+      (1, 'r', 'h-read', 'read', 1), (1, 'w', 'h-writer', 'writer', 1), (2, 'o', 'h-owner', 'owner', 1)`);
+    const refused = (sql, why) => assert.throws(() => run(sql), /constraint|CHECK|UNIQUE|FOREIGN/i, why);
+    refused(`INSERT INTO api_tokens (user_id, name, token_hash, scope, created_at) VALUES (1, 'x', 'h-x', 'admin', 1)`, "unknown scope");
+    refused(`INSERT INTO api_tokens (user_id, name, token_hash, scope, created_at) VALUES (1, 'x', 'h-read', 'read', 1)`, "duplicate hash");
+    refused(`INSERT INTO api_tokens (user_id, name, token_hash, scope, created_at) VALUES (99, 'x', 'h-y', 'read', 1)`, "missing user");
+    run("DELETE FROM users WHERE id = 1");
+    assert.deepEqual(query(db.dir, "SELECT user_id, scope FROM api_tokens ORDER BY id"), [{ user_id: 2, scope: "owner" }]);
+    assert.deepEqual(query(db.dir, "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'api_tokens' AND name NOT LIKE 'sqlite_autoindex%'"), [{ name: "api_tokens_user" }]);
+    assert.equal(query(db.dir, "SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'api_tokens_new%'")[0].n, 0, "scratch table left behind");
+  } finally {
+    db.remove();
+  }
+});

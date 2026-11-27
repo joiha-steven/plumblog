@@ -341,7 +341,7 @@ describe("fresh site", () => {
     assert.equal((await login(fresh, SITE_A, "owner", OWNER.password, { ip: "198.51.100.60" })).status, 200);
   });
 
-  test("Authorization header is refused until API tokens exist", async () => {
+  test("an Authorization header that is not an API token is 401 (tokens.test.mjs has the rest)", async () => {
     const r = await api(fresh, "GET", "/api/auth/me", { headers: { authorization: "Bearer x" } });
     assertError(r, 401, "auth.unauthenticated");
   });

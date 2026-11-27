@@ -154,8 +154,13 @@ export async function startWorker({ seedSql = null, vars = {} } = {}) {
       // Reads the running Worker's local D1 (test assertions only).
       const query = (sql) =>
         JSON.parse(run(WRANGLER, ["d1", "execute", "DB", "--local", ...common, "--json", "--command", sql]))[0].results;
+      // Size of an object in the running Worker's local R2 bucket, or null when it is absent.
+      const r2Size = (key) => {
+        const r = spawnSync(WRANGLER, ["r2", "object", "get", `plumblog-dev/${key}`, "--local", ...common, "--pipe"], { cwd: ROOT, env: ENV, maxBuffer: 64 << 20 });
+        return r.status === 0 ? r.stdout.length : null;
+      };
       // state: the --persist-to dir, for reading the local D1 with `wrangler d1 execute`.
-      return { url, stop, state: entry.state, log: () => log, query };
+      return { url, stop, state: entry.state, log: () => log, query, r2Size };
     } catch {
       await new Promise((r) => setTimeout(r, 200));
     }

@@ -1,4 +1,4 @@
-use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
+use plumblog_model::{Error, ErrorCode, Result, Role, TokenScope, UserId};
 use plumblog_store::{
     ApiToken, Invite, InviteStore, NewInvite, NewPasskey, NewSession, NewToken, NewUser, Passkey,
     PasskeyStore, Session, SessionStore, TokenStore,
@@ -45,7 +45,7 @@ fn read_token(r: &mut Row) -> Result<ApiToken> {
         user_id: UserId(r.int()?),
         name: r.text()?,
         token_hash: r.text()?,
-        scope: r.code("scope", Role::parse)?,
+        scope: r.code("scope", TokenScope::parse)?,
         created_at: r.int()?,
         expires_at: r.opt_int()?,
         revoked_at: r.opt_int()?,
