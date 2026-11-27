@@ -324,7 +324,7 @@ test("a token is not asked about when there is none", async () => {
   assert.equal(verifyCalls.length, 0, "no siteverify call for an empty token");
 });
 
-test("the rate limit refuses after the limit, with no extra rows and no siteverify call", async () => {
+test("5 valid attempts pass, the 6th is rate_limited, with no extra rows and no siteverify call", async () => {
   const before = count();
   for (let i = 0; i < LIMIT; i++) {
     assert.deepEqual(await send({ name: "R", body: `rate ${i}` }, { client: "rate" }), { status: 303, to: pending });
@@ -339,11 +339,34 @@ test("the rate limit refuses after the limit, with no extra rows and no siteveri
   assert.equal(count(), before + LIMIT + 1);
 });
 
-test("failed checks count against the limit too", async () => {
-  for (let i = 0; i < LIMIT; i++) {
-    await refusedWith("comments.check_failed", { name: "F", body: "x", "cf-turnstile-response": "no" }, { client: "flood" });
+test("failed checks do not count: bad tokens from one address never lock it", async () => {
+  const rows = () => sql("SELECT count(*) AS n FROM login_failures")[0].n;
+  const n = rows();
+  for (let i = 0; i < LIMIT + 2; i++) {
+    await refusedWith("comments.check_failed", { name: "F", body: "x", "cf-turnstile-response": "no" }, { client: "once-bad" });
   }
-  await refusedWith("comments.rate_limited", { name: "F", body: "x", "cf-turnstile-response": "no" }, { client: "flood" });
+  assert.equal(rows(), n, "no limiter row");
+  assert.deepEqual(await send({ name: "F", body: "now valid" }, { client: "once-bad" }), { status: 303, to: pending });
+});
+
+test("a flood of bad tokens from many addresses writes nothing at all", async () => {
+  const rows = () => sql("SELECT count(*) AS n FROM login_failures")[0].n;
+  const limiterBefore = rows();
+  const before = snapshot();
+  for (let i = 0; i < 10; i++) {
+    const r = await send({ name: "Bot", body: "spam", "cf-turnstile-response": "no" }, { client: `bot-${i}` });
+    assert.ok(r.to.endsWith("code=comments.check_failed#comments"), r.to);
+  }
+  assert.equal(rows(), limiterBefore, "0 limiter rows");
+  assert.deepEqual(snapshot(), before, "0 comments, 0 system_log rows, same content version");
+});
+
+test("an address at the cap is refused without a siteverify call, even with a bad token", async () => {
+  for (let i = 0; i < LIMIT; i++) await send({ name: "C", body: `cap ${i}` }, { client: "capped" });
+  verifyCalls.length = 0;
+  await refusedWith("comments.rate_limited", { name: "C", body: "more", "cf-turnstile-response": "no" }, { client: "capped" });
+  await refusedWith("comments.rate_limited", { name: "C", body: "more" }, { client: "capped" });
+  assert.equal(verifyCalls.length, 0);
 });
 
 test("not configured: no site key, or no secret, refuses with comments.unavailable", async () => {

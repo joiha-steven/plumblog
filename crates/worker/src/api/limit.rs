@@ -504,17 +504,10 @@ pub async fn succeeded(ctx: &Ctx, keys: &Keys) -> Result<()> {
     Ok(())
 }
 
-/// Counts one request for this address under `scope`, before anything is written for it.
-/// `Some((count, window_start))` when the address is over `cap` in the window. Without a
-/// usable address nothing is counted (logged as `what`), since limiting everyone together
-/// would let one client lock the rest out.
-async fn count_address(
-    ctx: &Ctx,
-    scope: &str,
-    what: &str,
-    window_ms: i64,
-    cap: i64,
-) -> Result<Option<(i64, i64)>> {
+/// The hashed limiter key of this address under `scope`, or `None` (logged as `what`) when
+/// the address is missing or unusable: limiting everyone together would let one client lock
+/// the rest out.
+async fn address_key(ctx: &Ctx, scope: &str, what: &str) -> Result<Option<String>> {
     let Some(ip) = ctx.ip.as_deref() else {
         worker::console_error!(
             "[{}] {what} not limited: no CF-Connecting-IP",
@@ -529,12 +522,7 @@ async fn count_address(
             return Ok(None);
         }
     };
-    let key = hash_key(ctx, &format!("{scope}:{ip}")).await?;
-    let r = ctx
-        .store
-        .record_failure(&key, ctx.now, window_ms, cap)
-        .await?;
-    Ok((!r.counted).then_some((r.count, r.window_start)))
+    Ok(Some(hash_key(ctx, &format!("{scope}:{ip}")).await?))
 }
 
 /// Most anonymous passkey sign-in options per address in a window: each writes a challenge
@@ -583,36 +571,64 @@ pub async fn options(ctx: &Ctx, turnstile_token: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Comment attempts per address in [`COMMENTS_WINDOW_MS`]. A person writes a comment or two
-/// and retries a typo once or twice; 5 covers that while a bot stays well under a flood.
-/// Every attempt that reaches the gate counts, refused ones included, since each costs a
-/// siteverify call.
+/// Comments an address may send per [`COMMENTS_WINDOW_MS`]. A person writes a comment or
+/// two and retries a typo once or twice; 5 covers that while a bot stays well under a flood.
+/// Only attempts with a valid Turnstile token count (see [`comment_precheck`]), so each
+/// limiter row costs an attacker one solved challenge.
 pub const COMMENTS_PER_WINDOW: i64 = 5;
 /// The comment window: 10 minutes, long enough to blunt a script, short enough that an
 /// honest reader who hit the cap soon writes again.
 pub const COMMENTS_WINDOW_MS: i64 = 10 * 60 * 1000;
 
-/// Counts one comment attempt for this address, before Turnstile is asked.
+fn comments_limited(count: i64, since: i64) -> Error {
+    Error::new(
+        ErrorCode::CommentRateLimited,
+        format!("{count} from this address since {since}, limit {COMMENTS_PER_WINDOW}"),
+    )
+}
+
+/// Before Turnstile is asked: refuses an address already at [`COMMENTS_PER_WINDOW`] from one
+/// read, so it costs no write and no siteverify call.
 ///
 /// # Errors
 ///
-/// `CommentRateLimited` above [`COMMENTS_PER_WINDOW`] in the window; storage and crypto
+/// `CommentRateLimited` at the cap; storage and crypto errors pass through.
+pub async fn comment_precheck(ctx: &Ctx) -> Result<()> {
+    let Some(key) = address_key(ctx, "comments", "comment attempt").await? else {
+        return Ok(());
+    };
+    let (count, since) = ctx
+        .store
+        .failures(&[&key], ctx.now, COMMENTS_WINDOW_MS)
+        .await?
+        .first()
+        .copied()
+        .unwrap_or((0, 0));
+    if count >= COMMENTS_PER_WINDOW {
+        return Err(comments_limited(count, since));
+    }
+    Ok(())
+}
+
+/// After Turnstile passed: counts the attempt in one atomic upsert, so concurrent attempts
+/// cannot all slip under the cap that [`comment_precheck`] read.
+///
+/// # Errors
+///
+/// `CommentRateLimited` when the count would pass [`COMMENTS_PER_WINDOW`]; storage and crypto
 /// errors pass through.
-pub async fn comment_attempt(ctx: &Ctx) -> Result<()> {
-    match count_address(
-        ctx,
-        "comments",
-        "comment attempt",
-        COMMENTS_WINDOW_MS,
-        COMMENTS_PER_WINDOW,
-    )
-    .await?
-    {
-        None => Ok(()),
-        Some((count, since)) => Err(Error::new(
-            ErrorCode::CommentRateLimited,
-            format!("{count} from this address since {since}, limit {COMMENTS_PER_WINDOW}"),
-        )),
+pub async fn comment_record(ctx: &Ctx) -> Result<()> {
+    let Some(key) = address_key(ctx, "comments", "comment attempt").await? else {
+        return Ok(());
+    };
+    let r = ctx
+        .store
+        .record_failure(&key, ctx.now, COMMENTS_WINDOW_MS, COMMENTS_PER_WINDOW)
+        .await?;
+    if r.counted {
+        Ok(())
+    } else {
+        Err(comments_limited(r.count, r.window_start))
     }
 }
 

@@ -2,7 +2,8 @@
 //!
 //! Order, cheapest refusal first, and nothing written before the gate has passed: method and
 //! form shape (64 KB cap) -> post exists, published, comments open -> name and body limits ->
-//! [`CommentGate::allow`] (per-IP limit) -> [`CommentGate::verify`] (Turnstile) -> insert as
+//! [`CommentGate::precheck`] (read-only per-IP cap) -> [`CommentGate::verify`] (Turnstile) ->
+//! [`CommentGate::record`] (count the attempt) -> insert as
 //! pending -> one `comment.created` system log entry (ids only) -> 303 to
 //! `<post>?comment=pending#comments`. Every refusal is a 303 to
 //! `<post>?comment=error&code=<stable code>#comments`: the reader's input is never echoed.
@@ -23,15 +24,18 @@ pub const MAX_FORM_BYTES: usize = 64 * 1024;
 /// The form field Turnstile adds inside the form.
 const TOKEN_FIELD: &str = "cf-turnstile-response";
 
-/// What stands between a form post and the database. `allow` counts the attempt against a
-/// per-IP limit; `verify` proves a person sent it (Turnstile). Both run before any
+/// What stands between a form post and the database, in call order: `precheck` refuses an
+/// address already at its cap from one read; `verify` proves a person sent it (Turnstile);
+/// `record` counts the attempt. Only a valid token is ever counted, so a flood without
+/// tokens writes nothing. All run before any
 /// write, so spam that fails costs no D1 write. Errors carry `comments.unavailable`,
 /// `comments.check_failed` or `comments.rate_limited`.
 // Workers are single-threaded, so futures need not be `Send` (see auth::Crypto).
 #[allow(async_fn_in_trait)]
 pub trait CommentGate {
     async fn verify(&self, token: &str, remote_ip: Option<&str>) -> CoreResult<()>;
-    async fn allow(&self, remote_ip: Option<&str>) -> CoreResult<()>;
+    async fn precheck(&self, remote_ip: Option<&str>) -> CoreResult<()>;
+    async fn record(&self, remote_ip: Option<&str>) -> CoreResult<()>;
 }
 
 /// The gate while Turnstile is not set up (no site key or no `TURNSTILE_SECRET`): refuses
@@ -46,7 +50,10 @@ impl CommentGate for Unconfigured {
     async fn verify(&self, _token: &str, _remote_ip: Option<&str>) -> CoreResult<()> {
         Err(unavailable())
     }
-    async fn allow(&self, _remote_ip: Option<&str>) -> CoreResult<()> {
+    async fn precheck(&self, _remote_ip: Option<&str>) -> CoreResult<()> {
+        Err(unavailable())
+    }
+    async fn record(&self, _remote_ip: Option<&str>) -> CoreResult<()> {
         Err(unavailable())
     }
 }
@@ -58,7 +65,7 @@ fn unavailable() -> Error {
     )
 }
 
-/// The production gate when Turnstile is set up: the per-address limit, then siteverify.
+/// The production gate when Turnstile is set up: limit read, siteverify, limit write.
 /// Reuses sign-in's Turnstile call and limiter store (`api::limit`).
 struct Turnstile {
     ctx: Ctx,
@@ -94,9 +101,19 @@ impl CommentGate for Turnstile {
         }
     }
 
-    async fn allow(&self, _remote_ip: Option<&str>) -> CoreResult<()> {
+    async fn precheck(&self, _remote_ip: Option<&str>) -> CoreResult<()> {
         // The address comes from the context (hashed there); a limiter failure refuses too.
-        limit::comment_attempt(&self.ctx).await.inspect_err(|e| {
+        self.limiter(limit::comment_precheck(&self.ctx).await)
+    }
+
+    async fn record(&self, _remote_ip: Option<&str>) -> CoreResult<()> {
+        self.limiter(limit::comment_record(&self.ctx).await)
+    }
+}
+
+impl Turnstile {
+    fn limiter(&self, r: CoreResult<()>) -> CoreResult<()> {
+        r.inspect_err(|e| {
             if e.code != ErrorCode::CommentRateLimited {
                 console_error!(
                     "[{}] comments: limiter error, comment refused: {} {}",
@@ -122,10 +139,16 @@ impl CommentGate for Gate {
             Self::Turnstile(g) => g.verify(token, remote_ip).await,
         }
     }
-    async fn allow(&self, remote_ip: Option<&str>) -> CoreResult<()> {
+    async fn precheck(&self, remote_ip: Option<&str>) -> CoreResult<()> {
         match self {
-            Self::Unconfigured(g) => g.allow(remote_ip).await,
-            Self::Turnstile(g) => g.allow(remote_ip).await,
+            Self::Unconfigured(g) => g.precheck(remote_ip).await,
+            Self::Turnstile(g) => g.precheck(remote_ip).await,
+        }
+    }
+    async fn record(&self, remote_ip: Option<&str>) -> CoreResult<()> {
+        match self {
+            Self::Unconfigured(g) => g.record(remote_ip).await,
+            Self::Turnstile(g) => g.record(remote_ip).await,
         }
     }
 }
@@ -249,11 +272,15 @@ async fn accept(
     // Built only now: a bad form or a missing post costs no settings read.
     let gate = gate(env, req, scope).await;
     let ip = form.remote_ip.as_deref();
-    // Allow first: a flood is refused by one D1 upsert instead of a siteverify call each.
-    if let Err(e) = gate.allow(ip).await {
+    // An address at its cap is refused by one read, with no siteverify call. Then the token
+    // is checked, and only a valid one is counted: a flood without tokens writes nothing.
+    if let Err(e) = gate.precheck(ip).await {
         return Accept::Refused(e);
     }
     if let Err(e) = gate.verify(&form.token, ip).await {
+        return Accept::Refused(e);
+    }
+    if let Err(e) = gate.record(ip).await {
         return Accept::Refused(e);
     }
     let now = worker::Date::now().as_millis();
