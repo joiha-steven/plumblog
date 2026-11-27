@@ -137,7 +137,7 @@ pub struct CommentId(pub i64);
 pub struct RevisionId(pub i64);
 
 stable_codes! {
-    /// Codes are stored in D1 (`users.role`, `invites.role`, `api_tokens.scope`).
+    /// Codes are stored in D1 (`users.role`, `invites.role`); token scopes are [`TokenScope`].
     pub enum Role {
         Owner => "owner",
         Writer => "writer",
@@ -145,7 +145,7 @@ stable_codes! {
 }
 
 stable_codes! {
-    /// What a role may do. Codes double as API token scope names.
+    /// What a role (or a token scope, see [`TokenScope::can`]) may do.
     pub enum Permission {
         WritePost => "post.write",
         PublishPost => "post.publish",
@@ -190,6 +190,57 @@ impl Role {
     #[must_use]
     pub fn can(self, permission: Permission) -> bool {
         permission.roles().contains(&self)
+    }
+}
+
+stable_codes! {
+    /// What an API token may do, stored in `api_tokens.scope`. Ordered `Read < Writer <
+    /// Owner` (declaration order), so the effective scope is a plain `min`.
+    pub enum TokenScope {
+        Read => "read",
+        Writer => "writer",
+        Owner => "owner",
+    }
+}
+
+impl PartialOrd for TokenScope {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TokenScope {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (*self as u8).cmp(&(*other as u8))
+    }
+}
+
+impl From<Role> for TokenScope {
+    fn from(role: Role) -> Self {
+        match role {
+            Role::Owner => Self::Owner,
+            Role::Writer => Self::Writer,
+        }
+    }
+}
+
+impl TokenScope {
+    /// What a token acts as right now: never more than its user's current role, so a demoted
+    /// owner's owner token acts as writer without touching the token row.
+    #[must_use]
+    pub fn effective(self, role: Role) -> Self {
+        self.min(Self::from(role))
+    }
+
+    /// `Read` holds no permission at all (every [`Permission`] is a write or an owner
+    /// action); `Writer` and `Owner` hold exactly what the role of the same name holds.
+    #[must_use]
+    pub fn can(self, permission: Permission) -> bool {
+        match self {
+            Self::Read => false,
+            Self::Writer => Role::Writer.can(permission),
+            Self::Owner => Role::Owner.can(permission),
+        }
     }
 }
 
@@ -264,6 +315,37 @@ mod tests {
             );
         }
         assert_eq!(Permission::ALL.len(), 12);
+    }
+
+    /// Scope codes are stored in D1 rows; the order and the effective scope are the token
+    /// security model, so every pair is pinned.
+    #[test]
+    fn token_scopes_are_pinned_ordered_and_capped_by_role() {
+        use super::TokenScope::{self, Owner, Read, Writer};
+        let codes: Vec<_> = TokenScope::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(codes, ["read", "writer", "owner"]);
+        for s in TokenScope::ALL {
+            assert_eq!(TokenScope::parse(s.as_str()), Some(*s));
+        }
+        assert_eq!(TokenScope::parse("Read"), None);
+        assert!(Read < Writer && Writer < Owner && Read < Owner);
+        assert_eq!(TokenScope::from(Role::Owner), Owner);
+        assert_eq!(TokenScope::from(Role::Writer), Writer);
+        for (scope, role, want) in [
+            (Read, Role::Owner, Read),
+            (Read, Role::Writer, Read),
+            (Writer, Role::Owner, Writer),
+            (Writer, Role::Writer, Writer),
+            (Owner, Role::Owner, Owner),
+            (Owner, Role::Writer, Writer),
+        ] {
+            assert_eq!(scope.effective(role), want, "{scope:?} of a {role:?}");
+        }
+        for p in Permission::ALL {
+            assert!(!Read.can(*p), "read must not hold {p:?}");
+            assert_eq!(Writer.can(*p), Role::Writer.can(*p), "writer and {p:?}");
+            assert_eq!(Owner.can(*p), Role::Owner.can(*p), "owner and {p:?}");
+        }
     }
 
     #[test]

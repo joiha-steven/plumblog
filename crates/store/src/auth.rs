@@ -1,6 +1,6 @@
 //! Sign-in records: sessions, passkeys, API tokens and invites. Only hashes of secrets.
 
-use plumblog_model::{Result, Role, UserId};
+use plumblog_model::{Result, Role, TokenScope, UserId};
 
 use crate::NewUser;
 
@@ -52,7 +52,7 @@ pub struct ApiToken {
     pub user_id: UserId,
     pub name: String,
     pub token_hash: String,
-    pub scope: Role,
+    pub scope: TokenScope,
     pub created_at: i64,
     /// `None` = never expires.
     pub expires_at: Option<i64>,
@@ -65,7 +65,7 @@ pub struct NewToken {
     pub user_id: UserId,
     pub name: String,
     pub token_hash: String,
-    pub scope: Role,
+    pub scope: TokenScope,
     pub created_at: i64,
     pub expires_at: Option<i64>,
 }

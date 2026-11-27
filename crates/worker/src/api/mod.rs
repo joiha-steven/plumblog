@@ -1,6 +1,7 @@
 //! The JSON API under `/api/`. Every request goes through the same gate, in order:
-//! CSRF (`Origin`), principal (who is asking), then the route, which checks its permission
-//! with [`Principal::require`]. Errors answer `{"error":"<stable code>"}` with a status and
+//! CSRF (`Origin`, skipped for `Authorization: Bearer`, which a browser never sends on its
+//! own), principal (who is asking), then the route, which checks its permission with
+//! [`Principal::require`]. `/api/auth/*` is session only. Errors answer `{"error":"<stable code>"}` with a status and
 //! log the detail with the request id; no user-facing text is produced here.
 
 mod auth;
@@ -10,6 +11,7 @@ mod limit;
 mod passkey;
 mod principal;
 mod site;
+mod tokens;
 
 use plumblog_auth::Crypto;
 use plumblog_auth::base64url;
@@ -251,7 +253,9 @@ pub async fn handle(mut req: Request, env: &Env) -> worker::Result<Response> {
             ip: req.headers().get("cf-connecting-ip").ok().flatten(),
             request_origin,
         };
-        if !matches!(method, Method::Get | Method::Head) {
+        // A token request carries its credential explicitly, and with no CORS a cross-site
+        // page cannot send an `Authorization` header; it also never uses the cookie.
+        if !matches!(method, Method::Get | Method::Head) && !principal::has_authorization(&req) {
             let want = site::configured(&ctx)
                 .await?
                 .map_or_else(|| ctx.request_origin.clone(), |s| s.origin);
@@ -294,6 +298,14 @@ async fn route(
     path: &str,
     body: &[u8],
 ) -> Result<Reply> {
+    if let Principal::Token { name, .. } = p
+        && path.starts_with(AUTH_PREFIX)
+    {
+        return Err(Error::new(
+            ErrorCode::Forbidden,
+            format!("API token {name:?} on {path}: /api/auth/ is session only"),
+        ));
+    }
     match (method, path) {
         (Method::Get, "/api/auth/params") => auth::params(ctx).await,
         (Method::Get, "/api/auth/me") => auth::me(ctx, p).await,
@@ -319,8 +331,27 @@ async fn route(
         (Method::Delete, _) if path.starts_with(passkey::ITEM_PREFIX) => {
             passkey::delete(ctx, p, &path[passkey::ITEM_PREFIX.len()..], body).await
         }
-        (Method::Get, PROBE) if probe_enabled(&ctx.env) => {
+        (Method::Get, tokens::COLLECTION) => tokens::list(ctx, p).await,
+        (Method::Post, tokens::COLLECTION) => tokens::create(ctx, p, body).await,
+        (Method::Delete, _) if path.starts_with(tokens::ITEM_PREFIX) => {
+            tokens::revoke(ctx, p, &path[tokens::ITEM_PREFIX.len()..]).await
+        }
+        (Method::Get, PROBE_OWNER) if probe_enabled(&ctx.env) => {
             p.require(plumblog_model::Permission::ManageSettings)?;
+            Ok(Reply::empty())
+        }
+        (Method::Get, PROBE_READ) if probe_enabled(&ctx.env) => {
+            let user = p.require_read()?;
+            Ok(Reply::json(
+                200,
+                body::object(&[("user", body::Out::Int(user.id.0))]),
+            ))
+        }
+        (Method::Post, PROBE_WRITER) if probe_enabled(&ctx.env) => {
+            p.require(plumblog_model::Permission::WritePost)?;
+            // Stands in for a content write, so tests can see how writes are attributed.
+            ctx.syslog(p.event(ctx, EventKind::ContentChanged).subject("probe"))
+                .await;
             Ok(Reply::empty())
         }
         _ => Err(Error::new(
@@ -330,9 +361,15 @@ async fn route(
     }
 }
 
-/// Test builds only: an owner-only route for permission tests. Same two locks as
-/// `/__contract`: the cargo feature and the variable only tools/wrangler.dev.toml sets.
-const PROBE: &str = "/api/__probe/owner";
+/// Session-only routes: account, sign-in and token management.
+const AUTH_PREFIX: &str = "/api/auth/";
+
+/// Test builds only: routes for permission tests (owner, any signed-in reader, writer write).
+/// Same two locks as `/__contract`: the cargo feature and the variable only
+/// tools/wrangler.dev.toml sets.
+const PROBE_OWNER: &str = "/api/__probe/owner";
+const PROBE_READ: &str = "/api/__probe/read";
+const PROBE_WRITER: &str = "/api/__probe/writer";
 
 #[cfg(feature = "contract-tests")]
 fn probe_enabled(env: &Env) -> bool {

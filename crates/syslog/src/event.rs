@@ -15,6 +15,8 @@ stable_codes! {
         SignOut => "auth.sign_out",
         PasskeyAdded => "auth.passkey_added",
         PasskeyRemoved => "auth.passkey_removed",
+        TokenCreated => "auth.token_created",
+        TokenRevoked => "auth.token_revoked",
         UserCreated => "user.created",
         ContentChanged => "content.changed",
         SettingsChanged => "settings.changed",
@@ -49,6 +51,8 @@ impl EventKind {
             | Self::SignOut
             | Self::PasskeyAdded
             | Self::PasskeyRemoved
+            | Self::TokenCreated
+            | Self::TokenRevoked
             | Self::UserCreated
             | Self::ContentChanged
             | Self::SettingsChanged
@@ -267,6 +271,8 @@ mod tests {
                 (EventKind::SignOut, "auth.sign_out"),
                 (EventKind::PasskeyAdded, "auth.passkey_added"),
                 (EventKind::PasskeyRemoved, "auth.passkey_removed"),
+                (EventKind::TokenCreated, "auth.token_created"),
+                (EventKind::TokenRevoked, "auth.token_revoked"),
                 (EventKind::UserCreated, "user.created"),
                 (EventKind::ContentChanged, "content.changed"),
                 (EventKind::SettingsChanged, "settings.changed"),
@@ -284,6 +290,22 @@ mod tests {
             assert_eq!(EventKind::parse(k.as_str()), Some(*k));
         }
         assert_eq!(EventKind::parse("page.view"), None);
+    }
+
+    /// How API writes are attributed: `via` is `session` or `token`, and `client` names the
+    /// token. "token <name>" in one value would read as a secret and be redacted whole, so the
+    /// name gets its own field. The name stays readable; a pasted secret never does.
+    #[test]
+    fn via_fields_keep_token_names_and_drop_secrets() {
+        let secret = "plb_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
+        let e = Event::new(EventKind::ContentChanged, rid(), 1)
+            .field("via", "token")
+            .field("client", "Claude agent")
+            .field("via", "session")
+            .field("client", secret);
+        let values: Vec<_> = e.fields().iter().map(|(_, v)| v.as_str()).collect();
+        assert_eq!(values[..3], ["token", "Claude agent", "session"]);
+        assert!(!values[3].contains(secret), "{values:?}");
     }
 
     #[test]
