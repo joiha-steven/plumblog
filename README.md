@@ -28,7 +28,7 @@ Your posts never live in this repo. It only holds the code. Updating to a new ve
 
 ## Working on it
 
-You need Rust and Node.js 22 or newer (Node only runs the local Worker tests; people running a blog never need it). Then:
+You need Rust, `jq` (`brew install jq` on a Mac) and Node.js 22 or newer (Node only runs the local Worker tests; people running a blog never need it). Then:
 
 ```sh
 scripts/check

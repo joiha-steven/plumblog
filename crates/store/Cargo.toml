@@ -1,0 +1,13 @@
+[package]
+name = "plumblog-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+plumblog-model.workspace = true
+plumblog-syslog.workspace = true
+
+[lints]
+workspace = true

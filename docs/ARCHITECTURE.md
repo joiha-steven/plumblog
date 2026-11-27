@@ -184,6 +184,8 @@ Not built: offline reading, newsletter (later), reactions.
 - Admin in light and dark; English and Vietnamese UI.
 - Dashboard (drafts, recent posts, last backup time), media library, users/invites, settings, tokens, audit log, update notice from GitHub Releases.
 
+The approved prototype (https://claude.ai/artifact/JEowACAfZPJ5VJydhFcgFt) is the visual reference for every admin screen. Its stylesheets live in `web/admin/css/`: `tokens.css`, `components.css` and `pages/*.css`, loaded in that order; the admin code builds on them rather than restyling. The rules they follow are in Design language below.
+
 ### Design language
 
 Models: Bear and iA Writer for focus; Braun and Dieter Rams (Bauhaus) for the controls. Everything serves writing; the chrome is quiet and practical, and every control reads as a physical key you can press.
