@@ -125,7 +125,6 @@ const MATH_ATTRIBUTES: &[&str] = &[
     "columnspacing",
     "voffset",
     "encoding",
-    "style",
     "notation",
 ];
 
@@ -188,7 +187,9 @@ fn violations(html: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn check_attributes(mut attrs: &str, math: bool) -> Result<(), String> {
+fn check_attributes(attrs: &str, math: bool) -> Result<(), String> {
+    // A self-closing tag (`<mspace width="1em" />`) ends in `/`, which is not an attribute.
+    let mut attrs = attrs.trim_end().strip_suffix('/').unwrap_or(attrs);
     loop {
         attrs = attrs.trim_start();
         if attrs.is_empty() {
@@ -196,6 +197,7 @@ fn check_attributes(mut attrs: &str, math: bool) -> Result<(), String> {
         }
         let name_end = attrs.find(['=', ' ']).unwrap_or(attrs.len());
         let name = &attrs[..name_end];
+        // `style` is never allowed: it would let an author restyle the page (overlays).
         let allowed = if math { MATH_ATTRIBUTES } else { ATTRIBUTES };
         if name.starts_with("on") || !allowed.contains(&name) {
             return Err(format!("attribute not allowed: {name}"));
@@ -209,25 +211,80 @@ fn check_attributes(mut attrs: &str, math: bool) -> Result<(), String> {
         if value.contains(['<', '>']) {
             return Err(format!("raw < or > in {name}={value:?}"));
         }
-        let lower: String = value
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect::<String>()
-            .to_ascii_lowercase();
         if matches!(name, "href" | "src") {
+            // What the browser sees: entities decoded, control and space characters gone.
+            let seen: String = decode_entities(value)
+                .chars()
+                .filter(|c| !c.is_whitespace() && !c.is_control())
+                .collect::<String>()
+                .to_ascii_lowercase();
             for bad in ["javascript:", "data:", "vbscript:"] {
-                if lower.starts_with(bad) {
-                    return Err(format!("{name} with {bad}"));
+                if seen.starts_with(bad) {
+                    return Err(format!("{name} with {bad} in {value:?}"));
                 }
             }
         }
-        if name == "style"
-            && (lower.contains("url(") || lower.contains("expression") || lower.contains('\\'))
-        {
-            return Err(format!("unsafe style {value:?}"));
-        }
         attrs = &v[close + 1..];
     }
+}
+
+/// Decodes numeric and the few named entities that matter for URL schemes.
+fn decode_entities(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let decoded = tail.find(';').and_then(|end| {
+            let body = &tail[1..end];
+            let c = if let Some(hex) = body.strip_prefix("#x").or_else(|| body.strip_prefix("#X")) {
+                u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+            } else if let Some(dec) = body.strip_prefix('#') {
+                dec.parse().ok().and_then(char::from_u32)
+            } else {
+                match body {
+                    "colon" => Some(':'),
+                    "Tab" => Some('\t'),
+                    "NewLine" => Some('\n'),
+                    "amp" => Some('&'),
+                    "quot" => Some('"'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    _ => None,
+                }
+            };
+            c.map(|c| (c, end + 1))
+        });
+        if let Some((c, len)) = decoded {
+            out.push(c);
+            rest = &tail[len..];
+        } else {
+            out.push('&');
+            rest = &tail[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+#[test]
+fn checker_sees_through_obfuscated_schemes() {
+    for href in [
+        "&#106;avascript:alert(1)",
+        "&#x6A;avascript&colon;alert(1)",
+        "java&#9;script:alert(1)",
+        "\u{1}javascript:alert(1)",
+        " JaVaScRiPt:alert(1)",
+        "data:text/html,x",
+    ] {
+        let attrs = format!(" href=\"{href}\"");
+        assert!(
+            check_attributes(&attrs, false).is_err(),
+            "checker missed {href:?}"
+        );
+    }
+    assert!(check_attributes(" width=\"1em\" /", true).is_ok());
+    assert!(check_attributes(" style=\"color:red\"", true).is_err());
 }
 
 #[test]
@@ -254,6 +311,9 @@ const PAYLOADS: &[&str] = &[
     "a < b & c > d",
     "</math><img src=x onerror=alert(1)>",
     "&#60;script&#62;",
+    "<mtext style=\"position:fixed;inset:0;font-size:500px\">PHISH</mtext>",
+    "</mi></math><math><mi>",
+    "<mspace width=\"999em\" />",
 ];
 
 /// Every payload in every context the renderer treats specially.
@@ -300,6 +360,18 @@ fn hostile_inputs_render_safely() {
         let html = render(&src, Options::default()).html;
         if let Err(e) = violations(&html) {
             panic!("input {src:?}\noutput {html:?}\n{e}");
+        }
+        // Author-typed tags must never reach the MathML at all, not even as escaped text
+        // (that would mean they only failed to parse). Inside `\text{}` a `<` is a literal
+        // character and correctly shown as one, so text mode is exempt.
+        if !src.contains("\\text") {
+            for part in html.split("<math").skip(1) {
+                let math = part.split("</math>").next().unwrap_or_default();
+                assert!(
+                    !math.contains("&lt;m") && !math.contains("&lt;/m"),
+                    "author tag text inside <math>\ninput {src:?}\noutput {html:?}"
+                );
+            }
         }
     }
 }

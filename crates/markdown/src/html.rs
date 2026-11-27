@@ -525,7 +525,8 @@ impl Writer {
         let storage = Storage::new();
         // Parse once to find errors: pulldown-latex would print a multi-line diagnostic into
         // the page. Its output is untrusted even without errors, see `mathml`.
-        if let Some(err) = Parser::new(tex, &storage).find_map(Result::err) {
+        let safe_tex = mathml::neutralize(tex);
+        if let Some(err) = Parser::new(&safe_tex, &storage).find_map(Result::err) {
             let first_line = err
                 .to_string()
                 .lines()
@@ -545,7 +546,7 @@ impl Writer {
             ..RenderConfig::default()
         };
         let mut raw = String::new();
-        match push_mathml(&mut raw, Parser::new(tex, &storage), config) {
+        match push_mathml(&mut raw, Parser::new(&safe_tex, &storage), config) {
             Err(err) => self.math_error(tex, &err.to_string()),
             Ok(()) => match mathml::sanitize(&raw) {
                 Some(safe) => self.push(&safe),
