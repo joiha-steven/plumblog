@@ -103,9 +103,12 @@ graph_errors=$(jq -r --arg order "$order" --arg allow "$external_allowlist" '
 if [ -n "$graph_errors" ]; then echo "$graph_errors"; fail "crate dependency graph (see docs/ARCHITECTURE.md, Code layout)"; fi
 # --- end crate dependency graph ---
 
+step "admin build (tsc, esbuild, size budgets)"
+scripts/admin-build || fail "admin build (run scripts/admin-build for details)"
+
 # Own block: the real Worker over HTTP under local wrangler (about 5 s warm). Needs Node.
 step "worker integration (wrangler dev, local D1/R2)"
-scripts/worker-test || fail "worker integration tests (run scripts/worker-test for details)"
+scripts/worker-test --admin-prebuilt || fail "worker integration tests (run scripts/worker-test for details)"
 step "theme script tests (node)"
 node --test "tools/theme-test/*.test.mjs" || fail "theme script tests (run: node --test 'tools/theme-test/*.test.mjs')"
 
@@ -168,7 +171,7 @@ step "no uppercase styling in web/ and themes/"
 # All-caps and small-caps are hard to read, worst for Vietnamese diacritics; write words in normal case.
 bad=""
 for f in "${files[@]}"; do
-  case "$f" in web/*.css|web/*.html|themes/*.css|themes/*.html) ;; *) continue ;; esac
+  case "$f" in web/*.css|web/*.html|web/*.ts|themes/*.css|themes/*.html) ;; *) continue ;; esac
   rc=0
   hits=$(grep -nEi 'text-transform[[:space:]]*:[[:space:]]*(uppercase|capitalize)|font-variant(-caps)?[[:space:]]*:[^;}]*small-caps' "$f") || rc=$?
   [ "$rc" -le 1 ] || fail "grep error while scanning $f"
