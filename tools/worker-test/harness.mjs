@@ -3,7 +3,7 @@
 // (node --test runs files in parallel processes) and sets WORKER_TEST_RUN_DIR.
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -46,7 +46,8 @@ function run(cmd, args) {
 // already in use".
 const PORT_LO = 20_000;
 const PORT_COUNT = 10_000;
-const PORT_DIR = join(tmpdir(), "plumblog-worker-test-ports");
+// Per user: on a shared Linux /tmp another user's directory would refuse us (EACCES).
+export const PORT_DIR = join(tmpdir(), `plumblog-worker-test-ports-${process.getuid?.() ?? "u"}`);
 
 function alive(pid) {
   try {
@@ -57,22 +58,64 @@ function alive(pid) {
   }
 }
 
-/** Takes the lock file for a port; a lock whose owner process is gone is taken over. */
-function claim(lock) {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fd = openSync(lock, "wx");
-      writeFileSync(fd, String(process.pid));
-      closeSync(fd);
-      return true;
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      const owner = Number(readFileSync(lock, "utf8"));
-      if (owner && alive(owner)) return false;
-      rmSync(lock, { force: true });
+/**
+ * Takes the lock file for a port. The pid is in the file from the moment the name exists
+ * (written to a temp file, then link()ed: link fails if the name is taken), so nobody reads an
+ * empty lock. A lock whose owner is gone is taken over by renaming it away first, never by
+ * unlinking: a second process that also saw it stale cannot delete a lock another process has
+ * just created, it finds a live pid in what it renamed and puts it back. Anything unreadable
+ * counts as held; the caller moves on to the next port and verifies with ownsLock().
+ */
+export function claim(lock) {
+  const tmp = `${lock}.${process.pid}.${randomUUID()}`;
+  writeFileSync(tmp, String(process.pid));
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        linkSync(tmp, lock);
+        return true;
+      } catch (e) {
+        if (e.code !== "EEXIST") throw e;
+      }
+      let owner;
+      try {
+        owner = Number(readFileSync(lock, "utf8"));
+      } catch {
+        return false; // released or replaced between the two calls: held by someone
+      }
+      if (!owner || alive(owner)) return false; // no pid at all: not ours to judge
+      const aside = `${lock}.stale.${process.pid}.${randomUUID()}`;
+      try {
+        renameSync(lock, aside);
+      } catch {
+        return false; // someone else took it over first
+      }
+      const moved = Number(readFileSync(aside, "utf8"));
+      if (!moved || alive(moved)) {
+        // It was not the stale lock we read but a live one created meanwhile: give it back.
+        try {
+          linkSync(aside, lock);
+        } catch {
+          // Taken again already; the owner's ownsLock() check will notice.
+        }
+        rmSync(aside, { force: true });
+        return false;
+      }
+      rmSync(aside, { force: true });
     }
+    return false;
+  } finally {
+    rmSync(tmp, { force: true });
   }
-  return false;
+}
+
+/** Whether the lock file still names this process (a takeover race may have moved it). */
+export function ownsLock(lock) {
+  try {
+    return Number(readFileSync(lock, "utf8")) === process.pid;
+  } catch {
+    return false;
+  }
 }
 
 function bindable(port) {
@@ -92,8 +135,8 @@ async function reservePort() {
     const port = PORT_LO + ((first + i) % PORT_COUNT);
     const lock = join(PORT_DIR, String(port));
     if (!claim(lock)) continue;
-    if (await bindable(port)) return { port, lock };
-    rmSync(lock, { force: true }); // held by something that is not a test worker
+    if ((await bindable(port)) && ownsLock(lock)) return { port, lock };
+    if (ownsLock(lock)) rmSync(lock, { force: true }); // held by something that is not a test worker
   }
   throw new Error(`no free port in ${PORT_LO}..${PORT_LO + PORT_COUNT - 1}`);
 }
@@ -103,7 +146,8 @@ async function reservePort() {
 // 10x the slowest test and well under the 20 min a CI cancel takes. Not node:test's `timeout`:
 // that cannot be set once for every test, and `--test-timeout` bounds a whole file.
 // Exiting runs the exit handler below, so the Workers die with the process.
-const TEST_TIMEOUT_MS = 120_000;
+// WORKER_TEST_TEST_TIMEOUT_MS exists for harness.test.mjs only.
+const TEST_TIMEOUT_MS = Number(process.env.WORKER_TEST_TEST_TIMEOUT_MS ?? 120_000);
 let testTimer = null;
 beforeEach((t) => {
   testTimer = setTimeout(() => {
@@ -112,7 +156,10 @@ beforeEach((t) => {
   }, TEST_TIMEOUT_MS);
   testTimer.unref();
 });
-afterEach(() => clearTimeout(testTimer));
+afterEach(() => {
+  clearTimeout(testTimer);
+  testTimer = null;
+});
 
 // Every live wrangler group and temp dir, so Ctrl-C or a crash cannot leak them.
 const live = new Set();
@@ -131,9 +178,13 @@ function cleanupSync(entry) {
   live.delete(entry);
 }
 process.on("exit", () => [...live].forEach(cleanupSync));
-// node:test's own uncaughtException handler rethrows, which ends the process (exit code 7)
-// without an "exit" event, so Workers would outlive the file. Kill them first (prepend: it runs before node:test's).
-process.prependListener("uncaughtException", () => [...live].forEach(cleanupSync));
+// node:test fails the running test on a stray error and carries on, but rethrows one it cannot
+// attribute to a test; that ends the process (exit code 7) without an "exit" event, and
+// the Workers would outlive it. So kill them only when no test is running (testTimer is set
+// between beforeEach and afterEach). Prepend: this runs before node:test's own listener.
+process.prependListener("uncaughtException", () => {
+  if (testTimer === null) [...live].forEach(cleanupSync);
+});
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(sig, () => {
     [...live].forEach(cleanupSync);
@@ -227,7 +278,12 @@ export async function startWorker({ seedSql = null, vars = {}, port: pinned = nu
         cleanupSync(entry);
         return ok();
       }
+      const fallback = setTimeout(() => {
+        cleanupSync(entry);
+        ok();
+      }, 5_000);
       child.once("exit", () => {
+        clearTimeout(fallback);
         cleanupSync(entry);
         ok();
       });
@@ -236,10 +292,6 @@ export async function startWorker({ seedSql = null, vars = {}, port: pinned = nu
       } catch {
         // Already gone between the check and the kill.
       }
-      setTimeout(() => {
-        cleanupSync(entry);
-        ok();
-      }, 5_000);
     });
 
   const deadline = Date.now() + READY_TIMEOUT_MS;

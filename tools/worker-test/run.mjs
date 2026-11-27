@@ -11,9 +11,10 @@ import { fileURLToPath } from "node:url";
 
 // 95 s measured on 16 idle cores (about 2 min on CI, 2 cores). 10 min is 5x CI; a hang is
 // normally caught much sooner by the per-test timer, so this only backstops what that cannot see.
-const TOTAL_MS = 600_000;
+// WORKER_TEST_TOTAL_MS, WORKER_TEST_DIR and WORKER_TEST_REPORTER exist for run.test.mjs only.
+const TOTAL_MS = Number(process.env.WORKER_TEST_TOTAL_MS ?? 600_000);
 
-const dir = dirname(fileURLToPath(import.meta.url));
+const dir = process.env.WORKER_TEST_DIR ?? dirname(fileURLToPath(import.meta.url));
 const files = readdirSync(dir)
   .filter((f) => f.endsWith(".test.mjs"))
   .sort()
@@ -25,8 +26,15 @@ const controller = new AbortController();
 const stream = run({ files, concurrency: Math.max(1, availableParallelism() - 1), signal: controller.signal });
 stream.on("test:summary", (d) => unfinished.delete(d.file));
 stream.on("test:fail", () => (failed = true));
-stream.compose(process.stdout.isTTY ? spec : tap).pipe(process.stdout);
-stream.on("close", () => process.exit(failed ? 1 : 0));
+const reporter = (process.env.WORKER_TEST_REPORTER ?? (process.stdout.isTTY ? "spec" : "tap")) === "spec" ? spec : tap;
+const out = stream.compose(reporter);
+out.pipe(process.stdout);
+// Leave when the reporter has written its last byte (summary included); exiting on the test
+// stream's own end would cut the output short.
+out.on("end", () => {
+  process.exitCode = failed ? 1 : 0;
+  process.stdout.write("", () => process.exit());
+});
 
 setTimeout(() => {
   const names = [...unfinished].map((f) => `  ${f.slice(dir.length + 1)}`).join("\n");
