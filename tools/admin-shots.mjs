@@ -68,6 +68,46 @@ const submitWith = (values, click = "button[type=submit]") => async (page) => {
   await page.click(click);
   await answered(page);
 };
+// Account screen: open the add form, or the remove confirm of the first passkey; `send` types the
+// password and waits for the answer in the form's alert region.
+const PASSKEYS = ".pk-list .pk";
+const addForm = async (page) => {
+  await page.click(".acct-add button");
+  await page.waitForSelector(".acct-panel");
+};
+const removeConfirm = async (page) => {
+  await page.click(".pk .btn");
+  await page.waitForSelector(".confirm");
+  await settle(page, ".pop");
+};
+const send = (form) => async (page) => {
+  await page.fill(`${form} input[type=password]`, "correct horse battery");
+  await page.click(`${form} button[type=submit]`);
+  await page.waitForFunction((f) => document.querySelector(`${f} .auth-alert`)?.textContent, form);
+};
+// Two drafts for user 1 (the mock's user), under keys no editor state opens (editor/drafts.ts).
+const seedDrafts = (page) =>
+  page.evaluate(
+    () =>
+      new Promise((resolve, reject) => {
+        const req = indexedDB.open("plumblog-admin", 2);
+        req.onupgradeneeded = () => {
+          if (req.result.objectStoreNames.contains("drafts")) req.result.deleteObjectStore("drafts");
+          req.result.createObjectStore("drafts");
+        };
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const db = req.result;
+          const tx = db.transaction("drafts", "readwrite");
+          const draft = { title: "A draft", body: "Words kept on this device.", base: null, rev: 1, savedAt: Date.now() };
+          tx.objectStore("drafts").put(draft, "1:new-shot-a");
+          tx.objectStore("drafts").put(draft, "1:new-shot-b");
+          tx.oncomplete = () => (db.close(), resolve());
+          tx.onerror = () => reject(tx.error);
+        };
+      }),
+  );
+
 // [name, path, element to wait for, action before the shot, widths it applies to]
 const STATES = [
   ["posts", "/admin/"],
@@ -170,6 +210,41 @@ const STATES = [
   ["setup-invalid", "/admin/setup?auth=setup_invalid&code=0000-0000", null, submitWith(ACCOUNT)],
   ["invite", "/admin/invite?code=b2d8-44e0"],
   ["invite-invalid", "/admin/invite?auth=invite_invalid&code=0000-0000", null, submitWith(ACCOUNT)],
+  ["account", "/admin/account", PASSKEYS],
+  ["account-empty", "/admin/account?passkeys=0", ".acct .empty"],
+  ["account-add", "/admin/account", PASSKEYS, addForm],
+  ["account-remove-confirm", "/admin/account", PASSKEYS, removeConfirm],
+  [
+    "account-remove-conflict",
+    "/admin/account?auth=conflict",
+    PASSKEYS,
+    async (page) => {
+      await removeConfirm(page);
+      await send(".confirm")(page);
+    },
+  ],
+  [
+    "account-wrong-password",
+    "/admin/account?auth=reauth_wrong",
+    PASSKEYS,
+    async (page) => {
+      await addForm(page);
+      await send(".acct-panel")(page);
+    },
+  ],
+  [
+    "signout-confirm",
+    "/admin/account",
+    PASSKEYS,
+    async (page) => {
+      await seedDrafts(page);
+      await page.click("button.me");
+      await page.waitForSelector(".pop");
+      await page.click(".pop [data-act=signout]");
+      await page.waitForSelector(".confirm");
+      await settle(page, ".pop");
+    },
+  ],
 ];
 
 const only = process.env.ONLY?.split(",");
@@ -182,7 +257,7 @@ try {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const english = ["posts", "no-permission", "editor", "slash", "signin-wrong", "setup-short"];
+        const english = ["posts", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "account", "account-wrong-password", "signout-confirm"];
         const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
         const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);

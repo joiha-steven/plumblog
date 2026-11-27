@@ -5,6 +5,9 @@
  * `?auth=`: `out` (signed out), `wrong|locked|turnstile|origin|setup_invalid|invite_invalid|
  * offline|cancelled` force that failure (`turnstile_hold`: like `turnstile`, then a call with a
  * token never answers, to hold the busy state for a screenshot); otherwise a call succeeds after a short wait.
+ * Adding or removing a passkey (account screen): `reauth_wrong|reauth|conflict|origin|unsupported|turnstile`
+ * fail as the server does (`turnstile`: removing only; adding sends its token after the browser prompt), before any browser prompt (no real WebAuthn runs in shots); `?passkeys=0`
+ * starts with none. Removing works on a list kept in memory.
  */
 
 import me from "../../fixtures/me.json";
@@ -19,8 +22,26 @@ const SIGNED_IN = "pb.mock.signed-in";
 
 type Body = Record<string, string | boolean> | undefined;
 
+interface Key {
+  id: number;
+  name: string;
+  created_at: number;
+  last_used_at: number | null;
+}
+/** The mock's passkeys; reset by a page load, like the rest of the mock. */
+let keys: Key[] | undefined;
+const keyList = (params: URLSearchParams): Key[] =>
+  (keys ??=
+    params.get("passkeys") === "0"
+      ? []
+      : [
+          { id: 1, name: "MacBook Pro", created_at: Date.UTC(2026, 8, 3), last_used_at: Date.UTC(2026, 10, 24) },
+          { id: 2, name: "iPhone 16", created_at: Date.UTC(2026, 10, 12), last_used_at: null },
+        ]);
+
 /** The mock's auth routes; the failure each `?auth=` value forces is the one the real route gives. */
-async function auth<T>(flag: string | null, method: Method, path: string, body: Body): Promise<Result<T>> {
+async function auth<T>(params: URLSearchParams, method: Method, path: string, body: Body): Promise<Result<T>> {
+  const flag = params.get("auth");
   await new Promise((r) => setTimeout(r, 400));
   const done = (value: unknown = {}): Result<T> => ({ ok: true, value: value as T });
   if (flag === "offline") return fail("network", 0);
@@ -56,6 +77,32 @@ async function auth<T>(flag: string | null, method: Method, path: string, body: 
     return done({ publicKey: { challenge: "AAAAAAAAAAAAAAAAAAAAAA", rpId: location.hostname, timeout: 60000, userVerification: "preferred" } });
   }
   if (path === "/api/auth/passkey/login/verify") return signedIn();
+  if (path === "/api/auth/logout") return done();
+  if (path === "/api/auth/me") return done({ ...user, passkeys: keyList(params) });
+  if (path === "/api/auth/passkey" && method === "GET") return done({ passkeys: keyList(params) });
+  if (path === "/api/auth/passkey/register/options") {
+    // The real server checks the proof when the key comes back; the mock fails here instead, so no prompt opens.
+    if (flag === "origin") return fail("settings.origin_missing", 503);
+    if (flag === "unsupported") return fail("unsupported", 0);
+    if (flag === "reauth_wrong") return fail("auth.invalid_credentials", 401);
+    if (flag === "reauth") return fail("auth.reauth_required", 403);
+    return done({ publicKey: { challenge: "AAAAAAAAAAAAAAAAAAAAAA", rp: { id: location.hostname, name: "mock" }, user: { id: "AQ", name: "lan", displayName: "Lan" }, pubKeyCredParams: [{ type: "public-key", alg: -7 }], timeout: 60000 } });
+  }
+  if (path === "/api/auth/passkey/register/verify") {
+    const list = keyList(params);
+    const key = { id: Math.max(0, ...list.map((k) => k.id)) + 1, name: String(body?.["name"] ?? ""), created_at: Date.now(), last_used_at: null };
+    list.push(key);
+    return done({ passkey: key });
+  }
+  const del = /^\/api\/auth\/passkey\/(\d+)$/.exec(path);
+  if (del && method === "DELETE") {
+    if (flag === "reauth_wrong") return fail("auth.invalid_credentials", 401);
+    if (flag === "reauth") return fail("auth.reauth_required", 403);
+    if (flag === "conflict") return fail("store.conflict", 409);
+    if (flag === "turnstile" && !body?.["turnstile_token"]) return fail("auth.turnstile_required", 403);
+    keys = keyList(params).filter((k) => k.id !== Number(del[1]));
+    return done();
+  }
   console.warn(`mock: ${method} ${path} is not served`);
   return fail("bad_response", 501);
 }
@@ -93,6 +140,6 @@ export function mockApi(params: URLSearchParams): Api {
     },
     // The dev Worker's real renderer (crates/worker/src/contract.rs, test builds only).
     previewUrl: "/__preview",
-    call: <T>(method: Method, path: string, body?: Body) => auth<T>(params.get("auth"), method, path, body),
+    call: <T>(method: Method, path: string, body?: Body) => auth<T>(params, method, path, body),
   };
 }

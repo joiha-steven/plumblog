@@ -4,12 +4,12 @@ import { type Api, type Me, type Result, httpApi, session } from "./api/client";
 import { mockApi } from "./api/mock";
 import { loadText, readBoot } from "./boot";
 import { h } from "./dom";
-import { initI18n } from "./i18n";
+import { initI18n, t } from "./i18n";
 import { type Route, current, isAuth, start } from "./router";
 import { screen } from "./screens";
 import { shell } from "./shell";
 import { applyTheme, storedTheme } from "./theme";
-import { closePop, failed, loadingRows, offlineBanner } from "./ui";
+import { closePop, failed, loadingRows, offlineBanner, toast } from "./ui";
 
 const boot = readBoot();
 initI18n(boot, await loadText(boot.lang));
@@ -28,6 +28,19 @@ function toSignIn(): void {
   location.assign(`/admin/signin?next=${encodeURIComponent(location.pathname + location.search)}`);
 }
 
+/** Sign-out (and the confirm before it deletes drafts) is in the auth chunk, loaded on first click. */
+function signOut(anchor: HTMLElement): void {
+  if (!me?.ok) return;
+  const user = me.value;
+  import("./auth/account").then(
+    (m) => m.signOutFlow({ anchor, api, me: user }),
+    (e: unknown) => {
+      console.error("admin: sign-out failed to load", e);
+      toast(t("admin.account.err_signout"), 5000);
+    },
+  );
+}
+
 /** `undefined` while the first answer is on its way. */
 let me: Result<Me> | undefined;
 
@@ -41,7 +54,7 @@ async function editor(route: Route): Promise<void> {
   if (route.id !== undefined) {
     const r = await api.post(route.id);
     if (!r.ok) {
-      const main = shell(root, "posts", boot.site, me?.ok ? me.value : undefined);
+      const main = shell(root, "posts", boot.site, me?.ok ? me.value : undefined, signOut);
       main.append(failed(r.error, () => void editor(route)));
       return;
     }
@@ -54,7 +67,7 @@ async function editor(route: Route): Promise<void> {
   } catch (e) {
     // A chunk that failed to load (offline, new deploy): say so instead of a blank screen.
     console.error("admin: editor failed to load", e);
-    const main = shell(root, "posts", boot.site, me?.ok ? me.value : undefined);
+    const main = shell(root, "posts", boot.site, me?.ok ? me.value : undefined, signOut);
     main.append(failed({ code: "network", status: 0 }, () => void editor(route)));
   }
 }
@@ -67,7 +80,7 @@ function render(): void {
     void editor(route);
     return;
   }
-  const main = shell(root, name, boot.site, me?.ok ? me.value : undefined);
+  const main = shell(root, name, boot.site, me?.ok ? me.value : undefined, signOut);
   if (forceOffline || !navigator.onLine) main.append(offlineBanner());
   if (me === undefined) main.append(loadingRows());
   else if (!me.ok) main.append(failed(me.error, () => void load()));

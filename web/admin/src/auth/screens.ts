@@ -54,12 +54,56 @@ function loadTurnstile(): Promise<Turnstile> {
   return script;
 }
 
-interface Field {
+/** The widget inside `box`: shown on demand, rendered once, reset before each new attempt. */
+export interface TurnstileBox {
+  /** "no_key": the site has no widget set up, so there is nothing to pass; "load_failed": the script did not run. */
+  show(): Promise<"ok" | "no_key" | "load_failed">;
+  /** A single-use token is spent by every attempt: the widget starts over before the next. */
+  reset(): void;
+}
+
+export function turnstileBox(api: Api, box: HTMLElement, onToken: (token: string) => void, onError: () => void): TurnstileBox {
+  let id: string | undefined;
+  const reset = (): void => {
+    const ts = (window as unknown as { turnstile?: Turnstile }).turnstile;
+    if (ts && id !== undefined) ts.reset(id);
+  };
+  return {
+    reset,
+    async show() {
+      const p = await params(api);
+      const key = p.ok ? p.value.turnstile_site_key : null;
+      if (!key) return "no_key";
+      box.hidden = false;
+      try {
+        const ts = await loadTurnstile();
+        if (id !== undefined) ts.reset(id);
+        else {
+          id = ts.render(box, {
+            sitekey: key,
+            callback: onToken,
+            "error-callback": (code: unknown) => {
+              console.error(`auth: turnstile widget error ${String(code)}`);
+              onError();
+            },
+          });
+        }
+        return "ok";
+      } catch (e) {
+        console.error("auth: turnstile failed to load", e);
+        box.hidden = true;
+        return "load_failed";
+      }
+    },
+  };
+}
+
+export interface Field {
   el: HTMLElement;
   input: HTMLInputElement;
 }
 
-function field(o: { id: string; label: string; type?: string; autocomplete: string; value?: string; hint?: string; mono?: boolean }): Field {
+export function field(o: { id: string; label: string; type?: string; autocomplete: string; value?: string; hint?: string; mono?: boolean }): Field {
   const hintId = `${o.id}-hint`;
   const input = h("input", {
     class: o.mono ? "input lg mono" : "input lg",
@@ -78,10 +122,10 @@ function field(o: { id: string; label: string; type?: string; autocomplete: stri
   return { el, input };
 }
 
-const chars = (s: string): number => [...s].length;
+export const chars = (s: string): number => [...s].length;
 
 /** The one message for a failure, or undefined when nothing should be said (a dismissed prompt). */
-function message(e: ApiError, passkey: boolean): string | undefined {
+export function message(e: ApiError, passkey: boolean): string | undefined {
   switch (e.code) {
     case "cancelled":
       return undefined;
@@ -148,42 +192,20 @@ export function mountAuth(o: AuthOptions): void {
     if (passkey) passkey.textContent = on && viaPasskey ? t("admin.auth.passkey_busy") : t("admin.auth.passkey");
   };
 
-  let widget: string | undefined;
   let again: ((token: string) => void) | undefined;
-
-  /** A single-use token is spent by every attempt: the widget starts over before the next. */
-  const resetWidget = (): void => {
-    const ts = (window as unknown as { turnstile?: Turnstile }).turnstile;
-    if (ts && widget !== undefined) ts.reset(widget);
-  };
+  const widget = turnstileBox(
+    api,
+    challenge,
+    (token) => again?.(token),
+    () => say(t("admin.auth.err_turnstile_load")),
+  );
 
   /** Shows the widget and resubmits by itself when the writer passes it. */
   async function challenged(): Promise<void> {
-    const p = await params(api);
-    const key = p.ok ? p.value.turnstile_site_key : null;
+    const r = await widget.show();
     // Without a key there is nothing to pass: the writer can only wait.
-    if (!key) return say(t("admin.auth.err_locked"));
-    say(t("admin.auth.err_turnstile"));
-    challenge.hidden = false;
-    try {
-      const ts = await loadTurnstile();
-      if (widget !== undefined) {
-        ts.reset(widget);
-        return;
-      }
-      widget = ts.render(challenge, {
-        sitekey: key,
-        callback: (token: string) => again?.(token),
-        "error-callback": (code: unknown) => {
-          console.error(`auth: turnstile widget error ${String(code)}`);
-          say(t("admin.auth.err_turnstile_load"));
-        },
-      });
-    } catch (e) {
-      console.error("auth: turnstile failed to load", e);
-      challenge.hidden = true;
-      say(t("admin.auth.err_turnstile_load"));
-    }
+    if (r === "no_key") return say(t("admin.auth.err_locked"));
+    say(r === "ok" ? t("admin.auth.err_turnstile") : t("admin.auth.err_turnstile_load"));
   }
 
   async function attempt(viaPasskey: boolean, run: (token?: string) => Promise<Result<unknown>>, token?: string): Promise<void> {
@@ -198,7 +220,7 @@ export function mountAuth(o: AuthOptions): void {
       return;
     }
     setBusy(false, viaPasskey);
-    if (token) resetWidget();
+    if (token) widget.reset();
     if (r.error.code === "auth.turnstile_required") return challenged();
     say(message(r.error, viaPasskey));
   }
