@@ -9,6 +9,10 @@ publish.workspace = true
 name = "blog"
 path = "src/main.rs"
 
+[[bin]]
+name = "blog-release"
+path = "src/bin/blog-release.rs"
+
 [dependencies]
 clap.workspace = true
 plumblog-i18n.workspace = true
@@ -25,6 +29,9 @@ plumblog-syslog.workspace = true
 getrandom.workspace = true
 # Writing site.local.toml needs the serializer, which the Worker's crates do not.
 toml = { workspace = true, features = ["display", "serde"] }
+# Release signatures and archives (`blog update`, `blog deploy` downloads, `blog-release`).
+ring.workspace = true
+miniz_oxide.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true
