@@ -77,6 +77,8 @@ test("post page", async () => {
   const html = await res.text();
   assert.match(html, /<title>Reading on screens, done properly - Plum Notes<\/title>/);
   assert.match(html, /<section class="footnotes"/);
+  // A footnote cited twice: the theme script must keep one sidenote for it (issue #28).
+  assert.equal((html.match(/href="#fn-1"/g) || []).length, 2);
   assert.match(html, /href="\/tag\/typography" rel="tag"/);
   assert.match(html, /<link rel="canonical" href="http:\/\/127\.0\.0\.1:\d+\/reading-on-screens">/);
 });
