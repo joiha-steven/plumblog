@@ -281,7 +281,7 @@ fn translated() -> Fixture {
 #[test]
 fn each_feed_has_its_own_id_and_pages_link_their_language_feeds() {
     let src = translated();
-    let get = |path| get_from(&src, "https://blog.test", path);
+    let get = |path| get_from(&src, path);
     let (_, _, en) = get("/feed.xml");
     assert_eq!(all(&en, "id")[0], "https://blog.test/feed.xml");
     assert!(en.contains("<link href=\"https://blog.test/\" rel=\"alternate\""));
@@ -309,42 +309,106 @@ fn x_default_points_at_the_default_language_version() {
     let src = translated();
     let x_default = "hreflang=\"x-default\" href=\"https://blog.test/reading-on-screens\"";
     for path in ["/reading-on-screens", "/doc-tren-man-hinh"] {
-        let (_, _, html) = get_from(&src, "https://blog.test", path);
+        let (_, _, html) = get_from(&src, path);
         assert!(html.contains(x_default), "{path}");
     }
-    let (_, _, sitemap) = get_from(&src, "https://blog.test", "/sitemap.xml");
+    let (_, _, sitemap) = get_from(&src, "/sitemap.xml");
     well_formed(&sitemap).unwrap();
     // Both versions carry the whole set: vi, en and x-default.
     assert_eq!(sitemap.matches(x_default).count(), 2);
     assert_eq!(sitemap.matches("hreflang=\"vi\"").count(), 2);
 }
 
+const PUBLIC_PATHS: [&str; 11] = [
+    "/",
+    "/reading-on-screens",
+    "/tag/tools",
+    "/archive/2025",
+    "/feed.xml",
+    "/rss.xml",
+    "/feed.json",
+    "/sitemap.xml",
+    "/robots.txt",
+    "/llms.txt",
+    "/no-such-page",
+];
+
 #[test]
-fn a_spoofed_host_never_reaches_public_urls() {
+fn public_urls_use_the_configured_origin() {
+    // `render` takes no request origin at all, so a Host header cannot reach these.
     let src = Fixture::new(|_, s| s.origin = Some("https://blog.example/".into()));
-    for path in [
-        "/",
-        "/reading-on-screens",
-        "/tag/tools",
-        "/archive/2025",
-        "/feed.xml",
-        "/rss.xml",
-        "/feed.json",
-        "/sitemap.xml",
-        "/robots.txt",
-        "/llms.txt",
-        "/no-such-page",
-    ] {
-        let (_, _, body) = get_from(&src, "https://evil.test", path);
-        assert!(!body.contains("evil.test"), "{path} used the Host header");
+    for path in PUBLIC_PATHS {
+        let (_, _, body) = get_from(&src, path);
         assert!(body.contains("https://blog.example/"), "{path}");
+        assert!(!body.contains("blog.test"), "{path}: sample origin leaked");
         assert!(
             !body.contains("blog.example//"),
             "{path}: trailing slash kept"
         );
     }
-    let (_, _, home) = get_from(&src, "https://evil.test", "/");
+    let (_, _, home) = get_from(&src, "/");
     assert!(home.contains("<link rel=\"canonical\" href=\"https://blog.example/\">"));
+}
+
+#[test]
+fn no_configured_origin_gives_one_fixed_origin_everywhere() {
+    for unset in [None, Some(String::new()), Some("/".to_owned())] {
+        let src = Fixture::new(|_, s| s.origin = unset);
+        for path in PUBLIC_PATHS {
+            let (_, _, body) = get_from(&src, path);
+            assert!(
+                body.contains(&format!("{}/", super::UNSET_ORIGIN)),
+                "{path}"
+            );
+            assert!(!body.contains("blog.test"), "{path}");
+        }
+    }
+}
+
+#[test]
+fn an_empty_site_is_dated_by_its_own_timestamp() {
+    let src = Fixture::new(|posts, _| posts.clear());
+    let (status, _, atom) = get_from(&src, "/feed.xml");
+    assert_eq!(status, 200);
+    assert!(
+        atom.contains("<updated>2026-09-01T12:00:00Z</updated>"),
+        "{atom}"
+    );
+    let (_, _, rss) = get_from(&src, "/rss.xml");
+    let built = all(&rss, "lastBuildDate");
+    assert!(
+        built[0].contains("01 Sep 2026") && is_rfc822(built[0]),
+        "{rss}"
+    );
+    let (_, _, sitemap) = get_from(&src, "/sitemap.xml");
+    assert!(sitemap.contains("<lastmod>2026-09-01T12:00:00Z</lastmod>"));
+    for path in ["/feed.xml", "/rss.xml", "/feed.json", "/sitemap.xml"] {
+        let (_, _, body) = get_from(&src, path);
+        assert!(!body.contains("1970"), "{path} has an epoch date");
+    }
+}
+
+#[test]
+fn editing_a_post_keeps_its_atom_entry_id() {
+    let ids = |src: &Fixture| {
+        let (_, _, xml) = get_from(src, "/feed.xml");
+        all(&xml, "id")
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let before = ids(&Fixture::new(|_, _| {}));
+    let after = ids(&Fixture::new(|posts, _| {
+        let p = posts
+            .iter_mut()
+            .find(|p| p.slug == "reading-on-screens")
+            .unwrap();
+        p.title = "A new title".into();
+        p.body.html = "<p>Rewritten.</p>".into();
+        p.excerpt = Some("New summary".into());
+    }));
+    assert_eq!(before, after);
+    assert!(after.contains(&"https://blog.test/reading-on-screens".to_owned()));
 }
 
 #[test]
@@ -360,7 +424,7 @@ fn hostile_titles_still_parse_as_xml() {
         p.lang = "vi".into();
     });
     for path in ["/vi/feed.xml", "/vi/rss.xml", "/feed.xml", "/sitemap.xml"] {
-        let (status, _, xml) = get_from(&src, "https://blog.test", path);
+        let (status, _, xml) = get_from(&src, path);
         assert_eq!(status, 200, "{path}");
         let doc = roxmltree::Document::parse(&xml).unwrap_or_else(|e| panic!("{path}: {e}"));
         if path.starts_with("/vi/") {

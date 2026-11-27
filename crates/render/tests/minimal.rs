@@ -456,7 +456,7 @@ fn post_seo_uses_cover_translations_and_absolute_urls() {
     ));
     assert!(html.contains("\"image\":[\"https://example.com/media/cover.avif\"]"));
     assert!(html.contains("\"@type\":\"BlogPosting\""));
-    assert!(html.contains("<meta property=\"og:locale\" content=\"en\">"));
+    assert!(html.contains("<meta property=\"og:locale\" content=\"en_US\">"));
     let br = theme
         .render(
             &site(),
@@ -469,6 +469,19 @@ fn post_seo_uses_cover_translations_and_absolute_urls() {
         )
         .unwrap();
     assert!(br.contains("<meta property=\"og:locale\" content=\"pt_BR\">"));
+    // No known territory: no tag rather than a wrong one.
+    let unknown = theme
+        .render(
+            &site(),
+            &page("tlh"),
+            &Body::Home {
+                posts: &[],
+                older_url: None,
+                newer_url: None,
+            },
+        )
+        .unwrap();
+    assert!(!unknown.contains("og:locale"));
 }
 
 #[test]

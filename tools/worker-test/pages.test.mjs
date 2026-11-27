@@ -80,7 +80,7 @@ test("post page", async () => {
   // A footnote cited twice: the theme script must keep one sidenote for it (issue #28).
   assert.equal((html.match(/href="#fn-1"/g) || []).length, 2);
   assert.match(html, /href="\/tag\/typography" rel="tag"/);
-  assert.match(html, /<link rel="canonical" href="http:\/\/127\.0\.0\.1:\d+\/reading-on-screens">/);
+  assert.match(html, /<link rel="canonical" href="https:\/\/blog\.test\/reading-on-screens">/);
 });
 
 test("tag and yearly archive pages", async () => {

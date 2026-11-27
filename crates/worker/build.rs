@@ -94,13 +94,16 @@ fn main() {
     };
     writeln!(
         out,
-        "pub static SAMPLE_SITE: SampleSite = SampleSite {{ title: {:?}, description: {:?}, footer: {:?}, lang: {:?}, per_page: {}, origin: {:?} }};",
+        "pub static SAMPLE_SITE: SampleSite = SampleSite {{ title: {:?}, description: {:?}, footer: {:?}, lang: {:?}, per_page: {}, origin: {:?}, updated: {:?} }};",
         get("title"),
         get("description"),
         get("footer"),
         get("lang"),
         get("per_page").parse::<usize>().expect("sample/site.txt: per_page must be a number"),
         get("origin"),
+        Some(get("updated"))
+            .filter(|d| d.len() == 10)
+            .expect("sample/site.txt: updated must be a YYYY-MM-DD date"),
     )
     .unwrap();
 

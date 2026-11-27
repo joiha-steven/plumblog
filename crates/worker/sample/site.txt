@@ -3,3 +3,5 @@ description: Sample posts the Worker serves until storage lands. Short notes on 
 footer: Written with plumblog
 lang: en
 per_page: 5
+origin: https://blog.test
+updated: 2026-09-01

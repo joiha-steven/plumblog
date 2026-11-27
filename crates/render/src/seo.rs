@@ -19,8 +19,9 @@ pub struct Seo {
     /// Every language version, this page included, plus `x-default`; empty when there is
     /// only one.
     pub alternates: Vec<Alternate>,
-    /// `og:locale`: `pt_BR` form (language lowercase, region uppercase).
-    pub locale: String,
+    /// `og:locale` in `language_TERRITORY` form (`pt_BR`); `None` when the language has no
+    /// known territory, since a wrong value is worse than none.
+    pub locale: Option<String>,
     /// A complete JSON document, safe to print inside `<script type="application/ld+json">`.
     pub json_ld: String,
 }
@@ -195,20 +196,70 @@ pub fn build(
     seo
 }
 
-/// BCP 47 (`pt-br`, `zh-Hant-TW`) to Open Graph's `language_TERRITORY` (`pt_BR`, `zh_TW`):
-/// scripts and variants have no place in it.
-fn og_locale(lang: &str) -> String {
-    let mut parts = lang.split(['-', '_']);
-    let mut out = parts.next().unwrap_or_default().to_ascii_lowercase();
-    let region = parts.find(|p| {
-        (p.len() == 2 && p.bytes().all(|b| b.is_ascii_alphabetic()))
-            || (p.len() == 3 && p.bytes().all(|b| b.is_ascii_digit()))
-    });
-    if let Some(r) = region {
-        out.push('_');
-        out.push_str(&r.to_ascii_uppercase());
+/// Territory for a tag without one: the language's most common Open Graph locale. Keyed by
+/// the lowercase tag, so script tags (`zh-hant`) can pick their own territory.
+const DEFAULT_TERRITORY: &[(&str, &str)] = &[
+    ("ar", "AR"),
+    ("cs", "CZ"),
+    ("da", "DK"),
+    ("de", "DE"),
+    ("el", "GR"),
+    ("en", "US"),
+    ("es", "ES"),
+    ("fa", "IR"),
+    ("fi", "FI"),
+    ("fr", "FR"),
+    ("he", "IL"),
+    ("hi", "IN"),
+    ("hu", "HU"),
+    ("id", "ID"),
+    ("it", "IT"),
+    ("ja", "JP"),
+    ("ko", "KR"),
+    ("ms", "MY"),
+    ("nb", "NO"),
+    ("nl", "NL"),
+    ("pl", "PL"),
+    ("pt", "PT"),
+    ("ro", "RO"),
+    ("ru", "RU"),
+    ("sv", "SE"),
+    ("th", "TH"),
+    ("tr", "TR"),
+    ("uk", "UA"),
+    ("vi", "VN"),
+    ("zh", "CN"),
+    ("zh-hans", "CN"),
+    ("zh-hant", "TW"),
+];
+
+/// BCP 47 (`pt-br`, `zh-Hant-TW`, `vi`) to Open Graph's `language_TERRITORY` (`pt_BR`,
+/// `zh_TW`, `vi_VN`). A two-letter region wins; otherwise the table decides, and a language
+/// it does not know (or a numeric region like `es-419`) gets no tag.
+fn og_locale(lang: &str) -> Option<String> {
+    let lower = lang.to_ascii_lowercase().replace('_', "-");
+    let mut parts = lower.split('-');
+    let language = parts.next().filter(|l| !l.is_empty())?;
+    let rest: Vec<&str> = parts.collect();
+    if rest
+        .iter()
+        .any(|p| p.len() == 3 && p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
     }
-    out
+    let region = rest
+        .iter()
+        .find(|p| p.len() == 2 && p.bytes().all(|b| b.is_ascii_alphabetic()))
+        .map(|r| r.to_ascii_uppercase())
+        .or_else(|| {
+            let script = rest.iter().find(|p| p.len() == 4);
+            let key = script.map_or_else(|| language.to_owned(), |s| format!("{language}-{s}"));
+            DEFAULT_TERRITORY
+                .iter()
+                .find(|(l, _)| *l == key)
+                .map(|(_, t)| (*t).to_owned())
+        })?;
+    Some(format!("{language}_{region}"))
 }
 
 #[cfg(test)]
@@ -216,12 +267,20 @@ mod tests {
     use super::og_locale;
 
     #[test]
-    fn og_locale_is_language_underscore_region() {
-        assert_eq!(og_locale("pt-br"), "pt_BR");
-        assert_eq!(og_locale("EN-us"), "en_US");
-        assert_eq!(og_locale("zh-Hant-TW"), "zh_TW");
-        assert_eq!(og_locale("zh-hant"), "zh");
-        assert_eq!(og_locale("es-419"), "es_419");
-        assert_eq!(og_locale("vi"), "vi");
+    fn og_locale_is_language_underscore_territory() {
+        let cases = [
+            ("pt-br", Some("pt_BR")),
+            ("EN-us", Some("en_US")),
+            ("zh-Hant-TW", Some("zh_TW")),
+            ("zh-hant", Some("zh_TW")),
+            ("vi", Some("vi_VN")),
+            ("en", Some("en_US")),
+            ("es-419", None),
+            ("tlh", None),
+            ("", None),
+        ];
+        for (lang, want) in cases {
+            assert_eq!(og_locale(lang).as_deref(), want, "{lang}");
+        }
     }
 }

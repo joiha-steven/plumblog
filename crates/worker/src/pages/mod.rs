@@ -75,7 +75,7 @@ pub async fn serve(req: &Request, ctx: &Context) -> Result<Response> {
     }
 
     let started = worker::Date::now().as_millis();
-    let outcome = match render(src, &origin, &path).await {
+    let outcome = match render(src, &path).await {
         Ok(o) => o,
         Err(detail) => return Ok(failure(&detail)),
     };
@@ -146,19 +146,12 @@ fn core_text(lang: &str, key: Key) -> String {
 ///
 /// # Errors
 /// A storage or template failure, as a detail for the log.
-pub async fn render(
-    src: &impl ReaderSource,
-    origin: &str,
-    path: &str,
-) -> std::result::Result<Outcome, String> {
+/// Takes no request origin on purpose: the Host header is the client's to choose, so it must
+/// never reach a public URL (canonical, feed and entry ids, sitemap).
+pub async fn render(src: &impl ReaderSource, path: &str) -> std::result::Result<Outcome, String> {
     let theme = theme().map_err(|e| format!("theme: {e}"))?;
     let settings = src.settings().await.map_err(err)?;
-    // The Host header is the client's to choose: public URLs come from the configured origin,
-    // and the request's only when none is set (local development).
-    let origin = settings
-        .origin
-        .as_deref()
-        .map_or(origin, |o| o.trim_end_matches('/'));
+    let origin = public_origin(&settings);
     let p = Pages {
         src,
         theme,
@@ -201,6 +194,25 @@ fn doc(content_type: &'static str, body: String) -> Outcome {
         status: 200,
         content_type,
         body,
+    }
+}
+
+/// Public URLs when the site has no configured origin: fixed, so every host serves the same
+/// ids, and plainly not the real site, so the warning below gets noticed.
+pub const UNSET_ORIGIN: &str = "http://localhost";
+
+fn public_origin(settings: &Settings) -> &str {
+    match settings.origin.as_deref().map(|o| o.trim_end_matches('/')) {
+        Some(o) if !o.is_empty() => o,
+        _ => {
+            // Worker log, not the system log: this runs per page view (docs/ARCHITECTURE.md,
+            // System log). Rendered pages are cached per content version, so it repeats only
+            // once per page per version.
+            warn(&format!(
+                "settings.origin_missing: public URLs use {UNSET_ORIGIN}; set the site origin (blog setup writes it)"
+            ));
+            UNSET_ORIGIN
+        }
     }
 }
 

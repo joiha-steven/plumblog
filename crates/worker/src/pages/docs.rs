@@ -82,10 +82,9 @@ impl<S: ReaderSource> Pages<'_, S> {
             .posts(Filter::All, 0, SITEMAP_LIMIT)
             .await
             .map_err(err)?;
-        let newest = slice.posts.iter().map(|p| p.published_at).max();
         let mut urls = vec![SitemapUrl {
             path: self.site.home_url.clone(),
-            lastmod: newest,
+            lastmod: Some(s.updated_at),
             alternates: Vec::new(),
         }];
         for p in &slice.posts {

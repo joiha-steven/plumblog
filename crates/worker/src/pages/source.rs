@@ -36,7 +36,8 @@ pub struct Settings {
     /// Public origin (`https://example.com`) for canonical URLs, feeds and the sitemap.
     /// Production must set it: otherwise the request's Host header decides public URLs.
     pub origin: Option<String>,
-    /// Unix time of the last publish or settings change (feed date when there are no posts).
+    /// Unix time of the last publish or settings change, at least the site's creation (feed
+    /// date when there are no posts).
     pub updated_at: i64,
 }
 
@@ -95,8 +96,10 @@ pub struct SampleSite {
     pub footer: &'static str,
     pub lang: &'static str,
     pub per_page: usize,
-    /// Empty: no configured origin (local development).
+    /// Empty: no configured origin.
     pub origin: &'static str,
+    /// `YYYY-MM-DD` the sample site was set up: its date even with no posts.
+    pub updated: &'static str,
 }
 
 include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
@@ -199,7 +202,12 @@ impl ReaderSource for SampleSource {
             lang: SAMPLE_SITE.lang.to_owned(),
             per_page: SAMPLE_SITE.per_page,
             origin: (!SAMPLE_SITE.origin.is_empty()).then(|| SAMPLE_SITE.origin.to_owned()),
-            updated_at: self.posts.iter().map(|p| p.published_at).max().unwrap_or(0),
+            // The site's own date, moved forward by posts; never epoch 0 on an empty site.
+            updated_at: self
+                .posts
+                .iter()
+                .map(|p| p.published_at)
+                .fold(unix_from_date(SAMPLE_SITE.updated), i64::max),
         })
     }
 

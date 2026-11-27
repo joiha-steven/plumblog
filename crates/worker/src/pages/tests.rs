@@ -16,23 +16,18 @@ fn run<F: Future>(f: F) -> F::Output {
 }
 
 fn get(path: &str) -> (u16, String) {
-    match run(render(SampleSource::get(), "https://blog.test", path)).unwrap() {
+    match run(render(SampleSource::get(), path)).unwrap() {
         Outcome::Page { status, body, .. } => (status, body),
         Outcome::Redirect(to) => (301, to),
     }
 }
 
 pub(super) fn get_typed(path: &str) -> (u16, &'static str, String) {
-    get_from(SampleSource::get(), "https://blog.test", path)
+    get_from(SampleSource::get(), path)
 }
 
-/// `origin` is what the request says (its Host header).
-pub(super) fn get_from(
-    src: &impl ReaderSource,
-    origin: &str,
-    path: &str,
-) -> (u16, &'static str, String) {
-    match run(render(src, origin, path)).unwrap() {
+pub(super) fn get_from(src: &impl ReaderSource, path: &str) -> (u16, &'static str, String) {
+    match run(render(src, path)).unwrap() {
         Outcome::Page {
             status,
             content_type,
@@ -54,10 +49,10 @@ impl Fixture {
         let mut posts = run(sample.posts(Filter::All, 0, usize::MAX)).unwrap().posts;
         let mut settings = run(sample.settings()).unwrap();
         edit(&mut posts, &mut settings);
-        Self {
-            posts: SampleSource::from_posts(posts),
-            settings,
-        }
+        let posts = SampleSource::from_posts(posts);
+        // The sample's own rule for the site date, applied to the edited posts.
+        settings.updated_at = run(posts.settings()).unwrap().updated_at;
+        Self { posts, settings }
     }
 }
 
