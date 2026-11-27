@@ -214,11 +214,29 @@ fn shell(lang: &str, site: &str, nonce: &str) -> String {
 <link rel=\"stylesheet\" href=\"/admin/app.css\">\n\
 <script type=\"module\" src=\"/admin/app.js\"></script>\n\
 <link rel=\"modulepreload\" href=\"/admin/i18n/{lang}.js\">\n\
-<script id=\"boot\" type=\"application/json\">{boot}</script>\n\
+{fonts}<script id=\"boot\" type=\"application/json\">{boot}</script>\n\
 </head>\n<body>\n<div id=\"app\"></div>\n<noscript>{noscript}</noscript>\n</body>\n</html>\n",
+        fonts = font_preloads(lang),
         title = escape(&text(lang, keys::ADMIN_TITLE, site)),
         noscript = escape(&text(lang, keys::ADMIN_NOSCRIPT, site)),
     )
+}
+
+/// The writing column's faces use `font-display: optional` (scripts/admin-build), so a face
+/// that misses the first paint is skipped rather than swapped in later, which would move every
+/// line under it. Preloading the faces most text needs lets them make the first paint.
+fn font_preloads(lang: &str) -> String {
+    let mut files = vec!["inter-latin", "inter-display-latin"];
+    if lang == "vi" {
+        files.extend(["inter-vietnamese", "inter-display-vietnamese"]);
+    }
+    let mut out = String::new();
+    for f in files {
+        out.push_str("<link rel=\"preload\" href=\"/admin/fonts/");
+        out.push_str(f);
+        out.push_str(".woff2\" as=\"font\" type=\"font/woff2\" crossorigin>\n");
+    }
+    out
 }
 
 fn manifest(lang: &str, site: &str) -> String {
@@ -315,6 +333,23 @@ mod tests {
         assert_eq!(html.matches("<script").count(), 2);
         assert!(html.contains("<script id=\"boot\" type=\"application/json\">"));
         assert!(!html.contains("style="));
+    }
+
+    #[test]
+    fn the_shell_preloads_the_faces_its_language_needs() {
+        let link = |f: &str| {
+            format!(
+                "<link rel=\"preload\" href=\"/admin/fonts/{f}.woff2\" as=\"font\" type=\"font/woff2\" crossorigin>"
+            )
+        };
+        let en = shell("en", "S", "n0");
+        assert!(en.contains(&link("inter-latin")) && en.contains(&link("inter-display-latin")));
+        assert!(!en.contains("vietnamese"));
+        let vi = shell("vi", "S", "n0");
+        assert!(
+            vi.contains(&link("inter-vietnamese"))
+                && vi.contains(&link("inter-display-vietnamese"))
+        );
     }
 
     #[test]

@@ -39,11 +39,18 @@ common=(--bundle --minify --target=es2022 --legal-comments=none --log-level=warn
   || fail "esbuild: admin stylesheet"
 # The writing column's fonts: the default theme's Inter, Inter Display and JetBrains Mono
 # subsets (scripts/subset-fonts), copied rather than linked, so the admin never loads theme
-# files. Browsers fetch a subset only when its characters are on screen.
+# files. Browsers fetch a subset only when its characters are on screen. `optional`, not the
+# theme's `swap`: a face arriving after the first paint would reflow the column and move the
+# writer's text (layout shift on slow networks); it is skipped instead, the Worker's shell
+# preloads the main faces and the service worker keeps them for the next visit.
 fonts=themes/minimal/assets/fonts
 mkdir -p "$out/fonts"
 cp "$fonts"/*.woff2 "$fonts"/license-*.txt "$out/fonts/" || fail "copying $fonts"
-sed 's#{{fonts}}#fonts#g' "$fonts/faces.css" >> "$out/app.css" || fail "reading $fonts/faces.css"
+sed -e 's#{{fonts}}#fonts#g' -e 's#font-display:swap#font-display:optional#g' "$fonts/faces.css" >> "$out/app.css" \
+  || fail "reading $fonts/faces.css"
+if grep -q 'font-display:swap' "$out/app.css"; then
+  fail "a font face still swaps late ($fonts/faces.css changed form?)"
+fi
 # UI text, one module per language from locales/*.toml (crates/i18n `admin`): part of the
 # admin, not the Worker, so it never counts against the wasm budget.
 cargo run -q -p plumblog-i18n --example admin_locales -- locales "$out/i18n" \
@@ -52,9 +59,9 @@ cargo run -q -p plumblog-i18n --example admin_locales -- locales "$out/i18n" \
 # The mock's pictures, at the paths web/admin/fixtures/post-1.txt uses.
 if $mock; then cp -R web/admin/fixtures/media "$out/mock"; fi
 
-# The service worker precaches exactly this build's files, in a cache named after their hash:
+# The service worker precaches exactly this build's scripts, styles and fonts, in a cache named after their hash:
 # a new deploy gets a new cache and the old one (with its old chunks) is deleted.
-files=$(cd "$out" && find . -type f \( -name '*.js' -o -name '*.css' \) | sed 's#^\./#/admin/#' | sort)
+files=$(cd "$out" && find . -type f \( -name '*.js' -o -name '*.css' -o -name '*.woff2' \) | sed 's#^\./#/admin/#' | sort)
 build=$(cd "$out" && find . -type f -print0 | sort -z | xargs -0 cat | shasum -a 256 | cut -c1-12)
 list=$(printf '%s\n' $files | sed 's/.*/"&"/' | paste -sd, -)
 "$bin/esbuild" web/admin/src/sw.ts "${common[@]}" --format=iife --outfile="$out/sw.js" \
