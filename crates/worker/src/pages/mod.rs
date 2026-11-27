@@ -238,7 +238,7 @@ fn failure(detail: &str) -> Response {
     Response::error(text, 500).unwrap_or_else(|_| Response::empty().expect("empty response"))
 }
 
-fn core_text(lang: &str, key: Key) -> String {
+pub(crate) fn core_text(lang: &str, key: Key) -> String {
     let strings = |l: &str| {
         source::CORE_LOCALES
             .iter()

@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+pub mod ts;
+
 /// Engine version, taken from the workspace so it never drifts.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

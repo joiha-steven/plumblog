@@ -10,3 +10,64 @@ redacted = "[đã ẩn]"
 
 [llms]
 posts = "Bài viết"
+
+[admin]
+title = "Quản trị {site}"
+noscript = "Trang quản trị cần JavaScript. Hãy bật JavaScript cho trang này rồi tải lại."
+file_not_found = "Không tìm thấy"
+
+[admin.nav]
+main = "Chính"
+posts = "Bài viết"
+pages = "Trang"
+media = "Ảnh"
+settings = "Cài đặt"
+account = "Tài khoản và tuỳ chọn"
+me = "Tài khoản"
+
+[admin.role]
+owner = "Chủ blog"
+writer = "Người viết"
+
+[admin.me]
+colors = "Sáng / tối"
+language = "Ngôn ngữ quản trị"
+
+[admin.theme]
+light = "Sáng"
+dark = "Tối"
+system = "Theo máy"
+
+[admin.lang]
+en = "English"
+vi = "Tiếng Việt"
+
+[admin.posts]
+new = "Viết bài mới"
+empty = "Chưa có bài nào"
+empty_hint = "Bài bạn viết sẽ hiện ở đây."
+
+[admin.pages]
+empty = "Chưa có trang nào"
+empty_hint = "Trang dành cho nội dung ít thay đổi, như Giới thiệu hay Liên hệ."
+
+[admin.media]
+empty = "Chưa có ảnh nào"
+empty_hint = "Ảnh bạn thêm vào bài sẽ hiện ở đây."
+
+[admin.state]
+loading = "Đang tải"
+retry = "Thử lại"
+error_title = "Có lỗi xảy ra"
+error_hint = "Blog trả lời không như mong đợi ({code}). Hãy thử lại sau ít phút."
+network_title = "Không kết nối được tới blog"
+network_hint = "Kiểm tra kết nối mạng rồi thử lại."
+offline_title = "Đang mất mạng."
+offline_hint = "Nội dung bạn thấy có thể đã cũ cho tới khi có mạng lại."
+no_permission_title = "Chỉ chủ blog mở được Cài đặt"
+no_permission_hint = "Bạn đang đăng nhập với vai trò người viết. Bạn vẫn viết, đăng bài và quản lý ảnh như thường."
+back_to_posts = "Về Bài viết"
+not_found_title = "Không tìm thấy trang"
+not_found_hint = "Địa chỉ này không thuộc trang quản trị."
+building_title = "Chưa làm xong"
+building_hint = "Phần này của trang quản trị đang được làm."
