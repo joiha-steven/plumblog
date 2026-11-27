@@ -4,7 +4,7 @@ use plumblog_store::{
     PasskeyStore, Session, SessionStore, TokenStore,
 };
 
-use super::{D1Store, Row, bound, int, not_found, opt_int, opt_text, text};
+use super::{D1Store, Failure, Row, Stmt, bound, guard, int, not_found, opt_int, opt_text, text};
 
 const SESSION_COLS: &str = "id, token_hash, user_id, created_at, expires_at";
 const PASSKEY_COLS: &str =
@@ -204,6 +204,11 @@ impl PasskeyStore for D1Store {
         Ok(sign_count > old || (sign_count == 0 && old == 0))
     }
 
+    async fn delete_own_passkey(&self, user: UserId, id: i64) -> Result<()> {
+        let stmts = self.delete_own_passkey_stmts(user, id)?;
+        self.run_delete_own_passkey(id, stmts).await
+    }
+
     async fn delete_passkey(&self, id: i64) -> Result<()> {
         let s = self.stmt(
             "delete_passkey",
@@ -212,6 +217,52 @@ impl PasskeyStore for D1Store {
         )?;
         let r = self.exec(s).await?;
         if Self::changes("delete_passkey", &r)? == 0 {
+            return Err(not_found("passkey", id));
+        }
+        Ok(())
+    }
+}
+
+impl D1Store {
+    /// The batch of [`PasskeyStore::delete_own_passkey`]: a guard that the passkey is not the
+    /// last one of a passwordless owner, then the delete. Separate so the D1 self-test can
+    /// prepare it, change the data, and run it late.
+    pub(super) fn delete_own_passkey_stmts(&self, user: UserId, id: i64) -> Result<Vec<Stmt>> {
+        Ok(vec![
+            guard(
+                self,
+                "delete_own_passkey_guard",
+                "NOT EXISTS (SELECT 1 FROM users u WHERE u.id = ? AND u.password_hash IS NULL \
+                 AND EXISTS (SELECT 1 FROM passkeys WHERE id = ? AND user_id = u.id) \
+                 AND (SELECT COUNT(*) FROM passkeys WHERE user_id = u.id) = 1)",
+                &[bound(user.0), bound(id)],
+            )?,
+            self.stmt(
+                "delete_own_passkey",
+                "DELETE FROM passkeys WHERE id = ? AND user_id = ?",
+                &[bound(id), bound(user.0)],
+            )?,
+        ])
+    }
+
+    /// Runs a [`Self::delete_own_passkey_stmts`] batch and names its outcome.
+    pub(super) async fn run_delete_own_passkey(&self, id: i64, stmts: Vec<Stmt>) -> Result<()> {
+        let results = match self.batch_guarded("delete_own_passkey", stmts).await {
+            Ok(r) => r,
+            Err(Failure::Guard) => {
+                return Err(Error::new(
+                    ErrorCode::Conflict,
+                    "last passkey of an account without a password",
+                ));
+            }
+            Err(Failure::Error(e)) => return Err(e),
+        };
+        let deleted = results
+            .get(1)
+            .map(|r| Self::changes("delete_own_passkey", r))
+            .transpose()?
+            .unwrap_or(0);
+        if deleted == 0 {
             return Err(not_found("passkey", id));
         }
         Ok(())

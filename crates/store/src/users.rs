@@ -76,13 +76,16 @@ pub trait UserStore {
     /// holds the login, so the two must land together or the user is locked out). In one
     /// atomic write: sets `password_hash = hash`, writes `profile` if given (bumping the
     /// content version), deletes every session of the user and creates `session` (the
-    /// caller's rotated one). Returns the new session id. `UserNotFound`; `Conflict` on a
-    /// login or slug held by another user, or a duplicate session hash; `InvalidInput` if
-    /// `session.user_id` is not `id`. On error nothing changed.
+    /// caller's rotated one). Returns the new session id. `hash = None` is a passkey-only
+    /// account's login change: the account must have no password at the time of the write
+    /// (else `Conflict`: a password stretched with the old login would stop working), and
+    /// keeps none. `UserNotFound`; `Conflict` on a login or slug held by another user, or a
+    /// duplicate session hash; `InvalidInput` if `session.user_id` is not `id`. On error
+    /// nothing changed.
     async fn change_password(
         &self,
         id: UserId,
-        hash: String,
+        hash: Option<String>,
         profile: Option<ProfileUpdate>,
         session: NewSession,
         now: i64,

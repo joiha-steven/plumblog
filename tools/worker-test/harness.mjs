@@ -79,18 +79,23 @@ export function makeStateDir() {
 
 /**
  * Applies migrations to a fresh local D1 and starts the Worker. Call stop() when done.
- * `seedSql` runs after the migrations, before the Worker starts (test data only); `vars`
+ * `seedSql` runs after the migrations, before the Worker starts (test data only); it may be a
+ * function of the Worker's URL (e.g. to configure the site origin); `vars`
  * become `--var KEY:VALUE` (wrangler dev's way to set vars and secrets per run).
  */
 export async function startWorker({ seedSql = null, vars = {} } = {}) {
   const entry = { state: mkdtempSync(join(RUN_DIR, "plumblog-wrangler-")), pgid: null, pgidFile: null };
   live.add(entry);
   const common = ["--config", CONFIG, "--persist-to", entry.state];
+  const port = await freePort();
+  const inspector = await freePort();
+  const url = `http://127.0.0.1:${port}`;
   try {
     run(WRANGLER, ["d1", "migrations", "apply", "DB", "--local", ...common]);
-    if (seedSql) {
+    const sql = typeof seedSql === "function" ? seedSql(url) : seedSql;
+    if (sql) {
       const file = join(entry.state, "seed.sql");
-      writeFileSync(file, seedSql);
+      writeFileSync(file, sql);
       run(WRANGLER, ["d1", "execute", "DB", "--local", ...common, "--file", file]);
     }
   } catch (e) {
@@ -98,8 +103,6 @@ export async function startWorker({ seedSql = null, vars = {} } = {}) {
     throw e;
   }
 
-  const port = await freePort();
-  const inspector = await freePort();
   // detached: wrangler starts workerd children; killing the group stops them all.
   const child = spawn(
     WRANGLER,
@@ -135,7 +138,6 @@ export async function startWorker({ seedSql = null, vars = {} } = {}) {
       setTimeout(() => cleanupSync(entry), 5_000).unref();
     });
 
-  const url = `http://127.0.0.1:${port}`;
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (exited !== null) {

@@ -55,6 +55,7 @@ stable_codes! {
         PasskeyInvalid => "auth.passkey_invalid",
         SetupInvalid => "setup.invalid",
         RouteNotFound => "api.not_found",
+        OriginMissing => "settings.origin_missing",
     }
 }
 
@@ -210,6 +211,7 @@ mod tests {
                 (ErrorCode::PasskeyInvalid, "auth.passkey_invalid"),
                 (ErrorCode::SetupInvalid, "setup.invalid"),
                 (ErrorCode::RouteNotFound, "api.not_found"),
+                (ErrorCode::OriginMissing, "settings.origin_missing"),
             ]
         );
     }

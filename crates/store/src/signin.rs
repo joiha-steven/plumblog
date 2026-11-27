@@ -30,6 +30,11 @@ pub const SITE_ID_KEY: &str = "site_id";
 /// Settings key holding the Turnstile site key (a JSON string); absent = Turnstile off.
 pub const TURNSTILE_SITE_KEY: &str = "turnstile_site_key";
 
+/// Settings key holding the site's public origin (a JSON string, `https://blog.example`):
+/// the passkey relying party and the host Turnstile answers must name. `blog setup` writes it;
+/// absent, the API falls back to the request's own origin and logs `settings.origin_missing`.
+pub const ORIGIN_KEY: &str = "origin";
+
 /// Settings that must never leave the Worker (API responses, theme data, exports).
 pub const INTERNAL_SETTING_KEYS: &[&str] = &[SETUP_CODE_HASH_KEY, SETUP_CODE_EXPIRES_KEY];
 

@@ -159,6 +159,24 @@ impl PasskeyStore for MemoryStore {
         })
     }
 
+    async fn delete_own_passkey(&self, user: UserId, id: i64) -> Result<()> {
+        self.write(|s| {
+            if s.passkeys.get(&id).is_none_or(|p| p.user_id != user) {
+                return Err(not_found("passkey", id));
+            }
+            let passwordless = s
+                .users
+                .get(&user)
+                .is_some_and(|u| u.password_hash.is_none());
+            let theirs = s.passkeys.values().filter(|p| p.user_id == user).count();
+            if passwordless && theirs == 1 {
+                return Err(conflict("last passkey of an account without a password"));
+            }
+            s.passkeys.remove(&id);
+            Ok(())
+        })
+    }
+
     async fn delete_passkey(&self, id: i64) -> Result<()> {
         self.write(|s| {
             s.passkeys

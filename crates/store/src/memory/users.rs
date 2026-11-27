@@ -137,13 +137,18 @@ impl UserStore for MemoryStore {
     async fn change_password(
         &self,
         id: UserId,
-        hash: String,
+        hash: Option<String>,
         profile: Option<ProfileUpdate>,
         session: NewSession,
         now: i64,
     ) -> Result<i64> {
         self.write(|s| {
-            s.user_mut(id)?;
+            let has_password = s.user_mut(id)?.password_hash.is_some();
+            if hash.is_none() && has_password {
+                return Err(conflict(
+                    "passkey-only change, but the account has a password",
+                ));
+            }
             if session.user_id != id {
                 return Err(invalid(format!(
                     "session for user {} given for user {}",
@@ -169,7 +174,7 @@ impl UserStore for MemoryStore {
                 u.display_name = p.display_name;
                 u.bio = p.bio;
             }
-            u.password_hash = Some(hash);
+            u.password_hash = hash;
             u.updated_at = now;
             if bump {
                 s.bump();

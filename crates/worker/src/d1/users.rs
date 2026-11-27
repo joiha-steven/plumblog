@@ -230,7 +230,7 @@ impl UserStore for D1Store {
     async fn change_password(
         &self,
         id: UserId,
-        hash: String,
+        hash: Option<String>,
         profile: Option<ProfileUpdate>,
         session: NewSession,
         now: i64,
@@ -241,10 +241,17 @@ impl UserStore for D1Store {
                 session.user_id.0, id.0
             )));
         }
+        // Passkey-only (`hash = None`): the account must still have no password when the
+        // batch runs, or an owner reset racing this change would be left unusable.
+        let condition = if hash.is_some() {
+            "EXISTS (SELECT 1 FROM users WHERE id = ?)"
+        } else {
+            "EXISTS (SELECT 1 FROM users WHERE id = ? AND password_hash IS NULL)"
+        };
         let mut stmts = vec![guard(
             self,
             "change_password_guard",
-            "EXISTS (SELECT 1 FROM users WHERE id = ?)",
+            condition,
             &[bound(id.0)],
         )?];
         let write = if let Some(p) = &profile {
@@ -258,7 +265,7 @@ impl UserStore for D1Store {
                     text(&p.slug),
                     text(&p.display_name),
                     text(&p.bio),
-                    text(&hash),
+                    opt_text(hash.as_deref()),
                     int(now)?,
                     bound(id.0),
                 ],
@@ -267,7 +274,7 @@ impl UserStore for D1Store {
             self.stmt(
                 "change_password",
                 "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
-                &[text(&hash), int(now)?, bound(id.0)],
+                &[opt_text(hash.as_deref()), int(now)?, bound(id.0)],
             )?
         };
         stmts.push(write);
@@ -288,6 +295,14 @@ impl UserStore for D1Store {
         )?);
         let results = match self.batch_guarded("change_password", stmts).await {
             Ok(r) => r,
+            Err(Failure::Guard) if hash.is_none() => {
+                // Which half of the guard failed: a missing user, or one with a password.
+                self.get_user(id).await?;
+                return Err(Error::new(
+                    ErrorCode::Conflict,
+                    "passkey-only change, but the account has a password",
+                ));
+            }
             Err(Failure::Guard) => return Err(user_not_found(id)),
             Err(Failure::Error(e)) => return Err(e),
         };

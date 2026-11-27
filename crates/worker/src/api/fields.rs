@@ -7,6 +7,7 @@ const MAX_LOGIN: usize = 64;
 const MAX_SLUG: usize = 64;
 const MAX_DISPLAY_NAME: usize = 100;
 const MAX_BIO: usize = 2000;
+const MAX_PASSKEY_NAME: usize = 64;
 
 fn invalid(field: &str, why: &str) -> Error {
     Error::new(ErrorCode::InvalidInput, format!("{field}: {why}"))
@@ -72,9 +73,21 @@ pub fn bio(value: &str) -> Result<()> {
     plain_text("bio", value, MAX_BIO, true)
 }
 
+/// A passkey's label in the admin: 1-64 characters, not blank, no control characters.
+///
+/// # Errors
+///
+/// `InvalidInput` naming the field.
+pub fn passkey_name(value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(invalid("name", "empty"));
+    }
+    plain_text("name", value, MAX_PASSKEY_NAME, false)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{bio, display_name, login, slug};
+    use super::{bio, display_name, login, passkey_name, slug};
 
     #[test]
     fn accepts_and_refuses() {
@@ -92,5 +105,9 @@ mod tests {
         assert!(bio("line\nline").is_ok());
         assert!(bio("\u{7}").is_err());
         assert!(bio("").is_ok());
+        assert!(passkey_name("Phone").is_ok());
+        for bad in ["", " ", "a\nb", &"x".repeat(65)] {
+            assert!(passkey_name(bad).is_err(), "{bad:?}");
+        }
     }
 }

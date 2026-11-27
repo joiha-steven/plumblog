@@ -15,7 +15,7 @@ use plumblog_syslog::EventKind;
 
 use super::body::{Fields, Out, json_string, object, quote};
 use super::limit::{self, Keys};
-use super::{Ctx, Principal, Reply, fields};
+use super::{Ctx, Principal, Reply, fields, passkey};
 
 /// Random bytes in a new site id (base64url, 22 characters).
 const SITE_ID_BYTES: usize = 16;
@@ -106,7 +106,13 @@ async fn new_session(ctx: &Ctx, user: UserId) -> Result<(NewSession, String)> {
 
 /// Starts a session for `user` and ends the one this request came with (rotation on
 /// sign-in), then answers with the user.
-async fn sign_in(ctx: &Ctx, p: &Principal, user: &User, status: u16, how: &str) -> Result<Reply> {
+pub(super) async fn sign_in(
+    ctx: &Ctx,
+    p: &Principal,
+    user: &User,
+    status: u16,
+    how: &str,
+) -> Result<Reply> {
     let (new, cookie) = new_session(ctx, user.id).await?;
     ctx.store.create_session(new).await?;
     if let Some(old) = p.session_hash()
@@ -155,7 +161,22 @@ fn new_user(f: &Fields, now: i64, hash: String) -> Result<NewUser> {
     })
 }
 
-const NEW_ACCOUNT_FIELDS: &[&str] = &["code", "login", "slug", "display_name", "password"];
+const NEW_ACCOUNT_FIELDS: &[&str] = &[
+    "code",
+    "login",
+    "slug",
+    "display_name",
+    "password",
+    "turnstile_token",
+];
+
+/// One-time codes are guessable only by trying: wrong codes count per address like failed
+/// sign-ins (same thresholds, Turnstile, lock), and are logged.
+async fn code_failed(ctx: &Ctx, keys: &Keys, how: &str) -> Result<()> {
+    limit::failed(ctx, keys, None, how).await?;
+    ctx.syslog(EventKind::SignInFailed, None, how).await;
+    Ok(())
+}
 
 /// `POST /api/auth/setup`: the first owner, with the one-time code `blog setup` printed.
 pub async fn setup(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
@@ -163,11 +184,14 @@ pub async fn setup(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
     let stretched = password::parse_stretched(f.req("password")?)?;
     let hash = code_hash(ctx, f.req("code")?).await?;
     let user = new_user(&f, ctx.now, String::new())?;
+    let keys = Keys::address(ctx).await?;
+    limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
     // The store compares with SQL `=`; compare in constant time here first, as its docs ask.
     let stored = ctx.store.get_setting(SETUP_CODE_HASH_KEY).await?;
     let matches =
         stored.is_some_and(|s| constant_time_eq(s.as_bytes(), setup_hash_json(&hash).as_bytes()));
     if !matches {
+        code_failed(ctx, &keys, "setup code").await?;
         return Err(Error::new(
             ErrorCode::SetupInvalid,
             "setup code does not match, or none is pending",
@@ -177,7 +201,14 @@ pub async fn setup(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
         password_hash: Some(hash_password(&ctx.crypto, &stretched).await?),
         ..user
     };
-    let id = ctx.store.create_first_owner(&hash, user, ctx.now).await?;
+    // Expired, or another setup won the race: the store refuses with SetupInvalid too.
+    let id = match ctx.store.create_first_owner(&hash, user, ctx.now).await {
+        Err(e) if e.code == ErrorCode::SetupInvalid => {
+            code_failed(ctx, &keys, "setup code").await?;
+            return Err(e);
+        }
+        other => other?,
+    };
     // The page normally created the id already (params); make sure it exists.
     site_id(ctx).await?;
     ctx.syslog(EventKind::UserCreated, Some(id), "setup: first owner")
@@ -191,8 +222,17 @@ pub async fn accept_invite(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Repl
     let f = Fields::parse(body, NEW_ACCOUNT_FIELDS)?;
     let stretched = password::parse_stretched(f.req("password")?)?;
     let hash = code_hash(ctx, f.req("code")?).await?;
+    new_user(&f, ctx.now, String::new())?;
+    let keys = Keys::address(ctx).await?;
+    limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
     let user = new_user(&f, ctx.now, hash_password(&ctx.crypto, &stretched).await?)?;
-    let id = ctx.store.accept_invite(&hash, user, ctx.now).await?;
+    let id = match ctx.store.accept_invite(&hash, user, ctx.now).await {
+        Err(e) if e.code == ErrorCode::InviteInvalid => {
+            code_failed(ctx, &keys, "invite code").await?;
+            return Err(e);
+        }
+        other => other?,
+    };
     ctx.syslog(EventKind::UserCreated, Some(id), "invite accepted")
         .await;
     let user = ctx.store.get_user(id).await?;
@@ -212,7 +252,7 @@ pub async fn login(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
         Some(u) if matched && u.disabled_at.is_none() => u,
         other => {
             let actor = other.as_ref().map(|u| u.id);
-            limit::failed(ctx, &keys, actor).await?;
+            limit::failed(ctx, &keys, actor, "password").await?;
             ctx.syslog(EventKind::SignInFailed, actor, "password").await;
             // One answer for unknown login, wrong password and disabled account.
             return Err(wrong_credentials(match other {
@@ -231,6 +271,11 @@ pub async fn logout(ctx: &Ctx, p: &Principal) -> Result<Reply> {
     if let Some(hash) = p.session_hash() {
         ctx.store.delete_session(hash).await?;
     }
+    // Only a live session is a sign-out; a stale cookie is just cleared.
+    if let Ok(user) = p.user() {
+        ctx.syslog(EventKind::SignOut, Some(user.id), "sign-out")
+            .await;
+    }
     Ok(Reply::empty().with_cookie(session::clear_cookie()))
 }
 
@@ -243,7 +288,7 @@ async fn check_current(ctx: &Ctx, user: &User, f: &Fields) -> Result<()> {
     if password_matches(ctx, Some(user), &current).await? {
         limit::succeeded(ctx, &keys, &rows).await
     } else {
-        limit::failed(ctx, &keys, Some(user.id)).await?;
+        limit::failed(ctx, &keys, Some(user.id), "current password").await?;
         ctx.syslog(EventKind::SignInFailed, Some(user.id), "current password")
             .await;
         Err(wrong_credentials("current password does not match"))
@@ -260,7 +305,7 @@ async fn write_password(
     detail: &str,
 ) -> Result<String> {
     let new = password::parse_stretched(f.req("new_password")?)?;
-    let hash = hash_password(&ctx.crypto, &new).await?;
+    let hash = Some(hash_password(&ctx.crypto, &new).await?);
     let (session, cookie) = new_session(ctx, user.id).await?;
     ctx.store
         .change_password(user.id, hash, profile, session, ctx.now)
@@ -286,21 +331,22 @@ pub async fn change_password(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Re
 
 /// `PATCH /api/auth/me`: own profile. A login change also needs `current_password` and
 /// `new_password`, both stretched by the browser: the stretch salt holds the login, so the
-/// password must be re-stretched with the new one.
+/// password must be re-stretched with the new one. An account without a password (passkey
+/// only) re-authenticates with a passkey assertion instead (a challenge from
+/// `/api/auth/passkey/login/options`); the write is the same atomic one, sessions rotate.
 pub async fn update_me(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
     let user = p.user()?;
-    let f = Fields::parse(
-        body,
-        &[
-            "login",
-            "slug",
-            "display_name",
-            "bio",
-            "current_password",
-            "new_password",
-            "turnstile_token",
-        ],
-    )?;
+    let mut allowed = vec![
+        "login",
+        "slug",
+        "display_name",
+        "bio",
+        "current_password",
+        "new_password",
+        "turnstile_token",
+    ];
+    allowed.extend_from_slice(passkey::ASSERTION_FIELDS);
+    let f = Fields::parse(body, &allowed)?;
     let pick =
         |key: &str, now: &str| -> Result<String> { Ok(f.opt(key)?.unwrap_or(now).to_owned()) };
     let profile = ProfileUpdate {
@@ -314,15 +360,39 @@ pub async fn update_me(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
     fields::display_name(&profile.display_name)?;
     fields::bio(&profile.bio)?;
     let has_passwords = f.opt("current_password")?.is_some() || f.opt("new_password")?.is_some();
+    let has_assertion = f.opt("credential_id")?.is_some();
     if profile.login == user.login {
-        if has_passwords {
+        if has_passwords || has_assertion {
             return Err(Error::new(
                 ErrorCode::InvalidInput,
-                "password fields belong to a login change; use /api/auth/password",
+                "password and passkey fields belong to a login change; use /api/auth/password",
             ));
         }
         ctx.store.update_profile(user.id, profile, ctx.now).await?;
         return Ok(user_reply(200, &ctx.store.get_user(user.id).await?));
+    }
+    if user.password_hash.is_none() {
+        if has_passwords {
+            return Err(Error::new(
+                ErrorCode::InvalidInput,
+                "passkey-only account: re-authenticate with a passkey, not a password",
+            ));
+        }
+        passkey::verify(ctx, &f, Some(user.id), "passkey re-auth").await?;
+        let (session, cookie) = new_session(ctx, user.id).await?;
+        // Conflict if a password was set meanwhile (its stretch salt holds the old login).
+        ctx.store
+            .change_password(user.id, None, Some(profile), session, ctx.now)
+            .await?;
+        ctx.syslog(EventKind::PasswordChanged, Some(user.id), "login (passkey)")
+            .await;
+        return Ok(user_reply(200, &ctx.store.get_user(user.id).await?).with_cookie(cookie));
+    }
+    if has_assertion {
+        return Err(Error::new(
+            ErrorCode::InvalidInput,
+            "an account with a password changes its login with current_password",
+        ));
     }
     password::parse_stretched(f.req("new_password")?)?;
     check_current(ctx, user, &f).await?;

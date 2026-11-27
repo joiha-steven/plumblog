@@ -18,41 +18,72 @@ use super::body::json_string;
 /// Cloudflare's endpoint; tests point `TURNSTILE_VERIFY_URL` at a local stub.
 const DEFAULT_VERIFY_URL: &str = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
-/// The hashed rate-limit keys of one attempt: the login, and the client address when known.
-pub struct Keys(Vec<String>);
+/// The hashed rate-limit keys of one attempt: the subject (a login, or a passkey credential id)
+/// when there is one, then the client address when known.
+pub struct Keys {
+    keys: Vec<String>,
+    /// Whether `keys[0]` is the subject's key, which a success clears.
+    subject: bool,
+}
 
 async fn hash_key(ctx: &Ctx, text: &str) -> Result<String> {
     Ok(base64url::hex(&ctx.crypto.sha256(text.as_bytes()).await?))
 }
 
 impl Keys {
+    /// Password sign-in and re-checks: the login and the address.
+    ///
     /// # Errors
     ///
     /// Crypto errors pass through.
     pub async fn new(ctx: &Ctx, login: &str) -> Result<Self> {
-        let mut keys = vec![hash_key(ctx, &ratelimit::login_key(login)).await?];
+        Self::build(ctx, Some(ratelimit::login_key(login))).await
+    }
+
+    /// Passkey sign-in: the credential id the browser named, and the address.
+    ///
+    /// # Errors
+    ///
+    /// Crypto errors pass through.
+    pub async fn passkey(ctx: &Ctx, credential_id: &str) -> Result<Self> {
+        Self::build(ctx, Some(format!("passkey:{credential_id}"))).await
+    }
+
+    /// One-time codes (setup, invites): the address only; a code has no stable subject.
+    ///
+    /// # Errors
+    ///
+    /// Crypto errors pass through.
+    pub async fn address(ctx: &Ctx) -> Result<Self> {
+        Self::build(ctx, None).await
+    }
+
+    async fn build(ctx: &Ctx, subject: Option<String>) -> Result<Self> {
+        let mut keys = Vec::with_capacity(2);
+        if let Some(s) = &subject {
+            keys.push(hash_key(ctx, s).await?);
+        }
         match ctx.ip.as_deref().map(ratelimit::ip_key) {
             Some(Ok(ip)) => keys.push(hash_key(ctx, &ip).await?),
-            // Cloudflare always sets the header; without it, limit by login alone and say so.
+            // Cloudflare always sets the header; without it, limit by the subject alone (or
+            // not at all, for codes) and say so.
             Some(Err(e)) => worker::console_error!(
-                "[{}] rate limit by login only: {e}",
+                "[{}] rate limit without the address: {e}",
                 ctx.request_id.as_str()
             ),
             None => worker::console_error!(
-                "[{}] rate limit by login only: no CF-Connecting-IP",
+                "[{}] rate limit without the address: no CF-Connecting-IP",
                 ctx.request_id.as_str()
             ),
         }
-        Ok(Self(keys))
+        Ok(Self {
+            keys,
+            subject: subject.is_some(),
+        })
     }
 
     fn refs(&self) -> Vec<&str> {
-        self.0.iter().map(String::as_str).collect()
-    }
-
-    /// The login key, the first one.
-    fn login(&self) -> &str {
-        self.0.first().map_or("", String::as_str)
+        self.keys.iter().map(String::as_str).collect()
     }
 }
 
@@ -118,8 +149,12 @@ fn internal(_ctx: &Ctx, what: &str, e: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Internal, format!("turnstile {what}: {e}"))
 }
 
-/// Asks Turnstile whether `token` is valid. The client IP is not sent (privacy; optional).
+/// Asks Turnstile whether `token` is valid and was solved on this site: `success` and a
+/// `hostname` equal to the site host (a token solved on another site that uses the same
+/// widget keys must not count here). The client IP is not sent (privacy; optional).
 async fn turnstile_ok(ctx: &Ctx, secret: &str, token: &str) -> Result<bool> {
+    // Before the network call: without a site origin no answer could be checked.
+    let site = super::site::site(ctx).await?;
     let url = ctx
         .env
         .var("TURNSTILE_VERIFY_URL")
@@ -151,9 +186,24 @@ async fn turnstile_ok(ctx: &Ctx, secret: &str, token: &str) -> Result<bool> {
     // trusted URL, so the runtime's JSON parser reads it.
     let parsed =
         worker::js_sys::JSON::parse(&text).map_err(|e| internal(ctx, "json", format!("{e:?}")))?;
-    let success = worker::js_sys::Reflect::get(&parsed, &JsValue::from_str("success"))
-        .map_err(|e| internal(ctx, "json", format!("{e:?}")))?;
-    Ok(success.as_bool() == Some(true))
+    let field = |name: &str| {
+        worker::js_sys::Reflect::get(&parsed, &JsValue::from_str(name))
+            .map_err(|e| internal(ctx, "json", format!("{e:?}")))
+    };
+    if field("success")?.as_bool() != Some(true) {
+        return Ok(false);
+    }
+    match field("hostname")?.as_string() {
+        Some(h) if h.eq_ignore_ascii_case(&site.host) => Ok(true),
+        other => {
+            worker::console_warn!(
+                "[{}] turnstile token solved on {other:?}, not {:?}",
+                ctx.request_id.as_str(),
+                site.host
+            );
+            Ok(false)
+        }
+    }
 }
 
 /// Gate before checking a password: refuses locked keys, and asks for Turnstile once enough
@@ -189,6 +239,10 @@ pub async fn check(ctx: &Ctx, keys: &Keys, turnstile_token: Option<&str>) -> Res
                 d.error()
                     .unwrap_or_else(|| Error::new(ErrorCode::TurnstileRequired, "turnstile"))
             };
+            if secret.is_some() {
+                // Turnstile is on but cannot be verified: say so, not "solve the challenge".
+                super::site::site(ctx).await?;
+            }
             let (Some(secret), Some(token)) = (secret, turnstile_token.filter(|t| !t.is_empty()))
             else {
                 return Err(refuse());
@@ -210,10 +264,10 @@ pub async fn check(ctx: &Ctx, keys: &Keys, turnstile_token: Option<&str>) -> Res
 /// # Errors
 ///
 /// Storage errors pass through.
-pub async fn failed(ctx: &Ctx, keys: &Keys, actor: Option<UserId>) -> Result<()> {
+pub async fn failed(ctx: &Ctx, keys: &Keys, actor: Option<UserId>, how: &str) -> Result<()> {
     let mut locked = false;
     let mut turnstile_on: Option<bool> = None;
-    for key in &keys.0 {
+    for key in &keys.keys {
         let (count, _) = ctx.store.record_failure(key, ctx.now, WINDOW_MS).await?;
         if count == LOCK_AFTER {
             locked = true;
@@ -225,20 +279,25 @@ pub async fn failed(ctx: &Ctx, keys: &Keys, actor: Option<UserId>) -> Result<()>
         }
     }
     if locked {
-        ctx.syslog(EventKind::SignInLocked, actor, "password").await;
+        ctx.syslog(EventKind::SignInLocked, actor, how).await;
     }
     Ok(())
 }
 
-/// After a successful sign-in: forget the login's failures (the address keeps its count).
-/// Writes only when there was something to forget.
+/// After a success: forget the subject's failures (the address keeps its count). Writes only
+/// when there was something to forget.
 ///
 /// # Errors
 ///
 /// Storage errors pass through.
 pub async fn succeeded(ctx: &Ctx, keys: &Keys, rows: &[Failures]) -> Result<()> {
-    if rows.first().is_some_and(|r| r.count > 0) {
-        ctx.store.clear_failures(keys.login()).await?;
+    if !keys.subject {
+        return Ok(());
+    }
+    if let (Some(key), Some(row)) = (keys.keys.first(), rows.first())
+        && row.count > 0
+    {
+        ctx.store.clear_failures(key).await?;
     }
     Ok(())
 }

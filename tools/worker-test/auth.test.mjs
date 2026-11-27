@@ -95,7 +95,12 @@ before(async () => {
       const form = new URLSearchParams(data);
       stubCalls.push(form);
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ success: form.get("response") === "pass", "error-codes": [] }));
+      // Like Cloudflare: `hostname` is where the widget was solved. "pass-elsewhere" is a real
+      // token from another site.
+      const response = form.get("response");
+      const success = response === "pass" || response === "pass-elsewhere";
+      const hostname = response === "pass" ? "127.0.0.1" : "evil.example";
+      res.end(JSON.stringify({ success, hostname, "error-codes": [] }));
     });
   });
   await new Promise((ok) => stub.listen(0, "127.0.0.1", ok));
@@ -134,7 +139,11 @@ before(async () => {
 
   [fresh, seeded, blank] = await Promise.all([
     startWorker({ seedSql: seedA }),
-    startWorker({ seedSql: seedB, vars: { TURNSTILE_SECRET: TS_SECRET, TURNSTILE_VERIFY_URL: stubUrl } }),
+    // Turnstile checks the host a token names against the configured origin.
+    startWorker({
+      seedSql: (url) => `${seedB}\nINSERT INTO settings (key, value_json, updated_at) VALUES ('origin', ${sq(JSON.stringify(url))}, ${T});`,
+      vars: { TURNSTILE_SECRET: TS_SECRET, TURNSTILE_VERIFY_URL: stubUrl },
+    }),
     startWorker({ seedSql: seedC }),
   ]);
 });
@@ -193,6 +202,19 @@ describe("fresh site", () => {
     ]) {
       assertError(await api(fresh, "POST", "/api/auth/setup", { body }), 400, "input.invalid");
     }
+  });
+
+  test("setup: wrong codes count per address; 5 lock it (Turnstile off), even for the right code", async () => {
+    const ip = "198.51.100.30";
+    const pw = await stretch(SITE_A, OWNER.login, OWNER.password);
+    for (let i = 0; i < 5; i++) {
+      const r = await api(fresh, "POST", "/api/auth/setup", { body: { ...OWNER, code: `guess-${i}`, password: pw }, ip });
+      assertError(r, 403, "setup.invalid");
+    }
+    const right = { ...OWNER, code: SETUP_CODE, password: pw };
+    assertError(await api(fresh, "POST", "/api/auth/setup", { body: right, ip }), 429, "auth.locked");
+    assert.deepEqual(fresh.query("SELECT COUNT(*) AS n FROM users"), [{ n: 0 }]);
+    assert.ok(fresh.query("SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.sign_in_locked' AND detail = 'setup code'")[0].n >= 1);
   });
 
   test("setup: right code creates the owner, signs in, consumes the code; second setup refused", async () => {
@@ -254,7 +276,21 @@ describe("fresh site", () => {
     assertError(await login(fresh, SITE_A, "owner", OWNER.password, { ip }), 429, "auth.locked");
     // Another address still signs in: the lock is per key.
     assert.equal((await login(fresh, SITE_A, "owner", OWNER.password, { ip: "198.51.100.8" })).status, 200);
-    assert.equal(fresh.query("SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.sign_in_locked'")[0].n, 1);
+    assert.equal(fresh.query("SELECT COUNT(*) AS n FROM system_log WHERE kind = 'auth.sign_in_locked' AND detail = 'password'")[0].n, 1);
+  });
+
+  test("no configured origin: passkeys refuse with settings.origin_missing; passwords still work", async () => {
+    for (const [path, opts] of [
+      ["/api/auth/passkey/login/options", {}],
+      ["/api/auth/passkey/register/options", { cookie: ownerCookie }],
+      ["/api/auth/passkey/register/verify", { cookie: ownerCookie, body: { name: "k", client_data_json: "e30", attestation_object: "oA" } }],
+      ["/api/auth/passkey/login/verify", { body: { credential_id: "AAAA", client_data_json: "e30", authenticator_data: "AA", signature: "AA" } }],
+    ]) {
+      assertError(await api(fresh, "POST", path, { ...opts, ip: "198.51.100.60" }), 503, "settings.origin_missing");
+    }
+    // Nothing spent or counted.
+    assert.deepEqual(fresh.query("SELECT COUNT(*) AS n FROM auth_challenges"), [{ n: 0 }]);
+    assert.equal((await login(fresh, SITE_A, "owner", OWNER.password, { ip: "198.51.100.60" })).status, 200);
   });
 
   test("Authorization header is refused until API tokens exist", async () => {
@@ -341,7 +377,7 @@ describe("fresh site", () => {
   test("system log: events recorded, no secrets or addresses", async () => {
     const rows = fresh.query("SELECT kind, detail, request_id FROM system_log ORDER BY id");
     const kinds = new Set(rows.map((r) => r.kind));
-    for (const k of ["user.created", "auth.sign_in", "auth.sign_in_failed", "auth.sign_in_locked", "auth.password_changed"]) {
+    for (const k of ["user.created", "auth.sign_in", "auth.sign_in_failed", "auth.sign_in_locked", "auth.password_changed", "auth.sign_out"]) {
       assert.ok(kinds.has(k), `missing ${k}`);
     }
     const text = JSON.stringify(rows) + JSON.stringify(fresh.query("SELECT * FROM settings"));
@@ -378,6 +414,17 @@ describe("seeded site", () => {
     const last = stubCalls.at(-1);
     assert.equal(last.get("secret"), TS_SECRET);
     assert.equal(last.get("remoteip"), null, "the client address is not sent");
+  });
+
+  test("Turnstile: a token solved on another host is refused", async () => {
+    const ip = "192.0.2.11";
+    for (let i = 0; i < 5; i++) {
+      const r = await api(seeded, "POST", "/api/auth/login", { body: { login: "bob", password: wrong() }, ip });
+      assertError(r, 401, "auth.invalid_credentials");
+    }
+    assertError(await bobLogin({ ip, extra: { turnstile_token: "pass-elsewhere" } }), 403, "auth.turnstile_required");
+    assert.equal(stubCalls.at(-1).get("response"), "pass-elsewhere");
+    assert.equal((await bobLogin({ ip, extra: { turnstile_token: "pass" } })).status, 200);
   });
 
   test("20 failures lock even with a valid Turnstile token", async () => {
@@ -464,6 +511,24 @@ describe("seeded site", () => {
     );
     const signIn = await api(seeded, "POST", "/api/auth/login", { body: { login: "IVY", password: body.password }, ip: "192.0.2.40" });
     assert.equal(signIn.status, 200, signIn.text);
+  });
+
+  test("invite accept: wrong codes count per address; Turnstile after 5, then the code is checked", async () => {
+    const ip = "192.0.2.50";
+    const body = { login: "guess", slug: "guess", display_name: "G", password: await stretch(SITE_B, "guess", "pw") };
+    for (let i = 0; i < 5; i++) {
+      const r = await api(seeded, "POST", "/api/auth/invite/accept", { body: { ...body, code: `guess-${i}` }, ip });
+      assertError(r, 410, "invite.invalid");
+    }
+    assertError(await api(seeded, "POST", "/api/auth/invite/accept", { body: { ...body, code: "guess-5" }, ip }), 403, "auth.turnstile_required");
+    assertError(
+      await api(seeded, "POST", "/api/auth/invite/accept", { body: { ...body, code: "guess-6", turnstile_token: "pass" }, ip }),
+      410,
+      "invite.invalid",
+    );
+    // Another address is not affected; shape errors are not counted.
+    assertError(await api(seeded, "POST", "/api/auth/invite/accept", { body: { ...body, code: "x" }, ip: "192.0.2.51" }), 410, "invite.invalid");
+    assert.equal(seeded.query("SELECT COUNT(*) AS n FROM users WHERE login = 'guess'")[0].n, 0);
   });
 });
 

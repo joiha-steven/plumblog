@@ -125,6 +125,11 @@ pub trait PasskeyStore {
     async fn touch_passkey(&self, id: i64, sign_count: i64, at: i64) -> Result<bool>;
     /// `NotFound`.
     async fn delete_passkey(&self, id: i64) -> Result<()>;
+    /// Deletes passkey `id` of `user`, in one atomic write. `NotFound` if it is not that
+    /// user's; `Conflict` if the user has no password and it is their only passkey (removing it
+    /// would lock the account out). The check runs inside the write, so two removals racing
+    /// for an account's last two passkeys cannot both succeed.
+    async fn delete_own_passkey(&self, user: UserId, id: i64) -> Result<()>;
 }
 
 #[allow(async_fn_in_trait)]

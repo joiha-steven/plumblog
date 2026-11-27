@@ -19,6 +19,30 @@ fn invalid(detail: impl Into<String>) -> Error {
     )
 }
 
+/// The raw `challenge` a `clientDataJSON` names, so the caller can look up (and consume) the
+/// one it issued before calling [`check`], which compares it again.
+///
+/// # Errors
+///
+/// [`ErrorCode::PasskeyInvalid`] when it is not strict JSON of the accepted shape, too long, or
+/// the challenge is missing or not base64url.
+pub fn challenge(json: &[u8]) -> Result<Vec<u8>> {
+    if json.len() > MAX_CLIENT_DATA_LEN {
+        return Err(invalid(format!("{} bytes is too long", json.len())));
+    }
+    let fields = json::parse_object(json, MAX_CLIENT_DATA_LEN).map_err(|e| invalid(e.detail))?;
+    match fields
+        .iter()
+        .find(|(k, _)| k == "challenge")
+        .map(|(_, v)| v)
+    {
+        Some(Json::Str(s)) => {
+            base64url::decode(s).ok_or_else(|| invalid("challenge is not base64url"))
+        }
+        _ => Err(invalid("challenge missing or not a string")),
+    }
+}
+
 /// Checks `type`, `challenge`, `origin` and `crossOrigin` of a `clientDataJSON`.
 ///
 /// # Errors
@@ -65,7 +89,7 @@ pub fn check(
 
 #[cfg(test)]
 mod tests {
-    use super::{TYPE_CREATE, TYPE_GET, check};
+    use super::{TYPE_CREATE, TYPE_GET, challenge, check};
     use crate::testutil::Prng;
     use plumblog_model::ErrorCode;
 
@@ -73,6 +97,25 @@ mod tests {
     const CHALLENGE: [u8; 4] = [1, 2, 3, 4];
     // base64url of CHALLENGE
     const CH: &str = "AQIDBA";
+
+    #[test]
+    fn challenge_reads_the_raw_bytes_or_refuses() {
+        let json = format!(r#"{{"type":"webauthn.get","challenge":"{CH}","origin":"{ORIGIN}"}}"#);
+        assert_eq!(challenge(json.as_bytes()).ok(), Some(CHALLENGE.to_vec()));
+        for bad in [
+            r#"{"type":"webauthn.get"}"#,
+            r#"{"challenge":true}"#,
+            r#"{"challenge":"not base64!"}"#,
+            r#"{"challenge":"AQ","challenge":"AQ"}"#,
+            "[]",
+            "",
+        ] {
+            let e = challenge(bad.as_bytes()).err();
+            assert_eq!(e.map(|e| e.code), Some(ErrorCode::PasskeyInvalid), "{bad}");
+        }
+        let long = format!(r#"{{"challenge":"{}"}}"#, "A".repeat(5000));
+        assert!(challenge(long.as_bytes()).is_err());
+    }
 
     fn ok(json: &str) -> bool {
         check(json.as_bytes(), TYPE_GET, &CHALLENGE, ORIGIN).is_ok()

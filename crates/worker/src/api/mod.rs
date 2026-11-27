@@ -7,7 +7,9 @@ mod auth;
 mod body;
 mod fields;
 mod limit;
+mod passkey;
 mod principal;
+mod site;
 
 use plumblog_auth::Crypto;
 use plumblog_auth::base64url;
@@ -32,6 +34,9 @@ pub struct Ctx {
     pub request_id: RequestId,
     /// `CF-Connecting-IP`, used only for the rate-limit key (hashed), never stored or logged.
     pub ip: Option<String>,
+    /// This request's own origin (from the Host header): the CSRF check's reference while the
+    /// site has no configured origin. Never used for passkeys or Turnstile (see `site`).
+    pub request_origin: String,
 }
 
 impl Ctx {
@@ -105,6 +110,8 @@ fn status(code: ErrorCode) -> u16 {
         ErrorCode::InviteInvalid => 410,
         ErrorCode::Locked => 429,
         ErrorCode::Storage | ErrorCode::Internal => 500,
+        // The site is not set up for this yet (no configured origin): not the client's fault.
+        ErrorCode::OriginMissing => 503,
     }
 }
 
@@ -155,17 +162,13 @@ fn error_reply(e: &Error) -> Reply {
     )
 }
 
-/// Non-GET requests must come from this site's own pages: `Origin` equal to the request's own
-/// scheme and host (the `SameSite=Strict` cookie is the first wall, this is the second).
-fn check_origin(req: &Request, method: &Method) -> Result<()> {
+/// Non-GET requests must come from this site's own pages: `Origin` equal to the configured site
+/// origin, or the request's own one while none is configured (the `SameSite=Strict` cookie is
+/// the first wall, this is the second).
+fn check_origin(req: &Request, method: &Method, want: &str) -> Result<()> {
     if matches!(method, Method::Get | Method::Head) {
         return Ok(());
     }
-    let want = req
-        .url()
-        .map_err(|e| Error::new(ErrorCode::Internal, format!("request url: {e}")))?
-        .origin()
-        .ascii_serialization();
     match req.headers().get("origin").ok().flatten() {
         Some(got) if got == want => Ok(()),
         Some(got) => Err(Error::new(
@@ -186,7 +189,11 @@ pub async fn handle(mut req: Request, env: &Env) -> worker::Result<Response> {
     let mut gate_cookie = None;
     let result = async {
         let crypto = crypto?;
-        check_origin(&req, &method)?;
+        let request_origin = req
+            .url()
+            .map_err(|e| Error::new(ErrorCode::Internal, format!("request url: {e}")))?
+            .origin()
+            .ascii_serialization();
         let ctx = Ctx {
             store: D1Store::new(
                 env.d1("DB")
@@ -198,7 +205,14 @@ pub async fn handle(mut req: Request, env: &Env) -> worker::Result<Response> {
                 .map_err(|_| Error::new(ErrorCode::Internal, "clock out of range"))?,
             request_id: rid.clone(),
             ip: req.headers().get("cf-connecting-ip").ok().flatten(),
+            request_origin,
         };
+        if !matches!(method, Method::Get | Method::Head) {
+            let want = site::configured(&ctx)
+                .await?
+                .map_or_else(|| ctx.request_origin.clone(), |s| s.origin);
+            check_origin(&req, &method, &want)?;
+        }
         let body = if matches!(method, Method::Get | Method::Head) {
             Vec::new()
         } else {
@@ -247,7 +261,22 @@ async fn route(
         (Method::Post, "/api/auth/logout") => auth::logout(ctx, p).await,
         (Method::Post, "/api/auth/invite/accept") => auth::accept_invite(ctx, p, body).await,
         (Method::Post, "/api/auth/password") => auth::change_password(ctx, p, body).await,
-        // Passkey routes (issue #9, later part) plug in here: /api/auth/passkey/*.
+        (Method::Post, "/api/auth/passkey/register/options") => {
+            passkey::register_options(ctx, p, body).await
+        }
+        (Method::Post, "/api/auth/passkey/register/verify") => {
+            passkey::register_verify(ctx, p, body).await
+        }
+        (Method::Post, "/api/auth/passkey/login/options") => {
+            passkey::login_options(ctx, body).await
+        }
+        (Method::Post, "/api/auth/passkey/login/verify") => {
+            passkey::login_verify(ctx, p, body).await
+        }
+        (Method::Get, "/api/auth/passkey") => passkey::list(ctx, p).await,
+        (Method::Delete, _) if path.starts_with(passkey::ITEM_PREFIX) => {
+            passkey::delete(ctx, p, &path[passkey::ITEM_PREFIX.len()..]).await
+        }
         (Method::Get, PROBE) if probe_enabled(&ctx.env) => {
             p.require(plumblog_model::Permission::ManageSettings)?;
             Ok(Reply::empty())
