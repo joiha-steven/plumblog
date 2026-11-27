@@ -19,7 +19,7 @@
   {%- else %}{{ t("search.none", query=query) }}{% endif %}</p>
 {%- if results %}
 <ol class="posts">
-  {%- for post in results %}{{ entry(post, loop.index <= 4, theme.options.list_images) }}{% endfor %}
+  {%- for post in results %}{{ entry(post, loop.index <= 4, theme.options.list_images, 2) }}{% endfor %}
 </ol>
 {%- endif %}
 {%- else %}

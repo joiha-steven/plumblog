@@ -1,9 +1,10 @@
 {#- One markup for every post row (home, search, archives); each style lays it out its own way.
-    Imported without context, so the caller passes `images` (theme option list_images). #}
-{%- macro entry(post, eager, images) %}
+    Imported without context, so the caller passes `images` (theme option list_images) and the
+    heading `level` that follows its page outline. #}
+{%- macro entry(post, eager, images, level=3) %}
 <li>
   <a class="entry{% if post.pinned %} is-pinned{% endif %}" href="{{ post.url }}"{% if post.lang != page.lang %} hreflang="{{ post.lang }}" lang="{{ post.lang }}"{% endif %}>
-    <h3 class="entry-title">{{ post.title }}</h3>
+    <h{{ level }} class="entry-title">{{ post.title }}</h{{ level }}>
     {%- if post.excerpt %}
     <p class="excerpt">{{ post.excerpt }}</p>
     {%- endif %}
