@@ -1,38 +1,22 @@
-use worker::{Context, Env, Request, Response, Result, event};
-
 #[cfg(feature = "contract-tests")]
 mod contract;
 pub mod d1;
+mod pages;
 
-/// Plain function so routing is trivial to unit test without the runtime.
-fn route(method: &str, path: &str) -> (u16, &'static str) {
-    match (method, path) {
-        ("GET", "/healthz") => (200, "ok"),
-        _ => (404, "not found"),
-    }
-}
+use worker::{Context, Env, Request, Response, Result, event};
 
 #[event(fetch)]
-async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
+    // Test builds only: /__contract empties the database, so it never exists in a release build.
     #[cfg(feature = "contract-tests")]
     if let Some(res) = contract::handle(&req, &env).await? {
         return Ok(res);
     }
     #[cfg(not(feature = "contract-tests"))]
     let _ = env;
-    let (status, body) = route(req.method().as_ref(), req.path().as_str());
-    Ok(Response::ok(body)?.with_status(status))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::route;
-
-    #[test]
-    fn health_ok_and_rest_404() {
-        assert_eq!(route("GET", "/healthz"), (200, "ok"));
-        assert_eq!(route("POST", "/healthz").0, 404);
-        assert_eq!(route("GET", "/").0, 404);
-        assert_eq!(route("GET", "/__contract").0, 404);
+    match (req.method().as_ref(), req.path().as_str()) {
+        ("GET", "/healthz") => Response::ok("ok"),
+        ("GET" | "HEAD", _) => pages::serve(&req, &ctx).await,
+        _ => Ok(Response::empty()?.with_status(405)),
     }
 }

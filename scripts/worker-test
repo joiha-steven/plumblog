@@ -40,6 +40,11 @@ contract_target="$PWD/target/contract-tests"
   -- --features contract-tests --target-dir "$contract_target") \
   || fail "worker-build failed"
 
+# Static assets the Worker's pages link to (crates/worker/src/pages THEME_ASSETS_URL).
+rm -rf target/worker-dev/assets
+mkdir -p target/worker-dev/assets/theme
+cp -R themes/minimal/assets target/worker-dev/assets/theme/minimal
+
 # The harness cleans up after itself, even on Ctrl-C. This trap is the second line of
 # defence: kill any wrangler process group it recorded and remove its temp state.
 run_dir=$(mktemp -d "${TMPDIR:-/tmp}/plumblog-worker-test.XXXXXX")

@@ -1,0 +1,27 @@
+title: Reading on screens, done properly
+date: 2026-10-02
+tags: typography, reading
+
+Most of the reading I do happens on a phone, usually in short stretches. A page that respects that has a comfortable line length, enough space between lines, and text large enough that I never pinch to zoom.[^zoom]
+
+## Line length
+
+Around sixty to seventy characters per line is easy to follow. Longer lines make the eye lose its place on the way back; shorter lines break the rhythm of a sentence.
+
+## Line height
+
+Body text wants more space between lines than headings do. Languages with stacked accents, like Vietnamese, need a little more again, or the marks collide with the line above.
+
+| Setting | Body | Headings |
+|---|---|---|
+| Line height | 1.7 | 1.2 |
+| Size on phones | 17 px | 30 px |
+| Size on desktops | 19 px | 38 px |
+
+## Contrast
+
+Near-black on white reads better than pure black, and dark mode looks calmer with off-white text. The difference is small, but over a long article it adds up.
+
+> Typography exists to honor content.
+
+[^zoom]: Pinch to zoom is a sign the page was designed for a different screen.

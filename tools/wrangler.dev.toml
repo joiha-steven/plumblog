@@ -5,6 +5,11 @@ name = "plumblog-dev"
 main = "../target/worker-dev/worker/shim.mjs"
 compatibility_date = "2026-11-01"
 
+# Theme fonts and JS as static assets, at the URL crates/worker pages::THEME_ASSETS_URL names.
+# scripts/worker-test copies themes/minimal/assets here before starting wrangler.
+[assets]
+directory = "../target/worker-dev/assets"
+
 # Binding names are provisional until the store adapters land; keep them in sync with crates/worker.
 [[d1_databases]]
 binding = "DB"

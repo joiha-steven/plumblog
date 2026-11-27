@@ -16,6 +16,8 @@ contract-tests = ["plumblog-store/contract"]
 [dependencies]
 worker.workspace = true
 plumblog-model.workspace = true
+plumblog-markdown.workspace = true
+plumblog-render.workspace = true
 plumblog-store.workspace = true
 plumblog-syslog.workspace = true
 

@@ -1,12 +1,51 @@
-//! Markdown to HTML on save. For now only the output shape and heading ids; the renderer
-//! (pulldown-cmark + own extensions) lands with its own issue.
+//! Markdown to HTML on save (docs/ARCHITECTURE.md, Content > Markdown). Reading a post never
+//! parses Markdown: the worker stores `Rendered` and serves it.
+//!
+//! The HTML follows the theme renderer contract (docs/ARCHITECTURE.md, Themes). Raw HTML in
+//! the source is dropped, every URL is checked against a scheme allowlist, and no element
+//! makes a third-party request until the reader clicks it.
 
-/// What saving a post stores, so reading never parses Markdown.
+mod html;
+mod link;
+mod mathml;
+mod text;
+
+pub use text::heading_id;
+
+/// Knobs that change the output. The excerpt length is the theme option `excerpt_words`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Options {
+    pub excerpt_words: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self { excerpt_words: 55 }
+    }
+}
+
+/// What saving a post stores.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Rendered {
     pub html: String,
     pub toc: Vec<TocEntry>,
+    /// Plain text cut at a word boundary, ending in an ellipsis when cut. Escape before output.
     pub excerpt: String,
+    /// 0 for an empty post, else at least 1.
+    pub reading_minutes: u32,
+    /// Pages load extra assets only when a post needs them.
+    pub has_code: bool,
+    pub has_math: bool,
+    pub has_embed: bool,
+    /// Problems the author should fix; the post still renders. Shown in the editor.
+    pub warnings: Vec<Warning>,
+}
+
+/// `code` is stable and maps to the locale key `warning.<code>`; `detail` is for logs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Warning {
+    pub code: &'static str,
+    pub detail: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,47 +55,9 @@ pub struct TocEntry {
     pub text: String,
 }
 
-use unicode_normalization::UnicodeNormalization;
-
-/// Anchor id for a heading. Letters of any script are kept (HTML ids allow them), so
-/// Vietnamese headings stay readable in links instead of collapsing to dashes. Input is
-/// NFC-normalised first: otherwise decomposed text (macOS input) loses its combining marks.
+/// Renders a post. Never fails: any input is valid Markdown. Invalid `LaTeX` keeps its source
+/// visible in place and is reported in `warnings`.
 #[must_use]
-pub fn heading_id(text: &str) -> String {
-    let mut id = String::with_capacity(text.len());
-    for c in text.nfc().flat_map(char::to_lowercase) {
-        if c.is_alphanumeric() {
-            id.push(c);
-        } else if !id.is_empty() && !id.ends_with('-') {
-            id.push('-');
-        }
-    }
-    while id.ends_with('-') {
-        id.pop();
-    }
-    if id.is_empty() {
-        id.push_str("section");
-    }
-    id
-}
-
-#[cfg(test)]
-mod tests {
-    use super::heading_id;
-
-    #[test]
-    fn heading_ids_are_stable_and_keep_letters() {
-        assert_eq!(heading_id("Hello, World!"), "hello-world");
-        assert_eq!(heading_id("  Rust  &  wasm  "), "rust-wasm");
-        assert_eq!(
-            heading_id("Ti\u{1ebf}ng Vi\u{1ec7}t"),
-            "ti\u{1ebf}ng-vi\u{1ec7}t"
-        );
-        // NFD "Ti\u{1ebf}ng": e + circumflex + acute as separate code points.
-        assert_eq!(
-            heading_id("Tie\u{302}\u{301}ng"),
-            heading_id("Ti\u{1ebf}ng")
-        );
-        assert_eq!(heading_id("!!!"), "section");
-    }
+pub fn render(src: &str, options: Options) -> Rendered {
+    html::render(src, options)
 }

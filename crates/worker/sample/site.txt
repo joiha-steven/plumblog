@@ -1,0 +1,5 @@
+title: Plum Notes
+description: Sample posts the Worker serves until storage lands. Short notes on writing, reading and small tools.
+footer: Written with plumblog
+lang: en
+per_page: 5
