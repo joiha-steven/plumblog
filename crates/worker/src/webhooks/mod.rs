@@ -180,8 +180,17 @@ pub async fn publish_job(store: &D1Store, scope: &Scope) -> u32 {
 /// Sends up to `max` due deliveries, within what is left of the subrequest budget after
 /// `used`; with no room left it makes no call at all.
 /// A missing or malformed `WEBHOOK_KEY` sends nothing and leaves every row due; it is
-/// logged only when some webhook exists, so a blog without webhooks needs no key.
-pub async fn deliver_job(env: &Env, store: &D1Store, scope: &Scope, used: u32, max: u32) {
+/// logged only when some webhook exists, so a blog without webhooks needs no key. The
+/// system log gets it on the `daily` run only (one entry a day, not 144); other runs write
+/// the Worker log line alone.
+pub async fn deliver_job(
+    env: &Env,
+    store: &D1Store,
+    scope: &Scope,
+    used: u32,
+    max: u32,
+    daily: bool,
+) {
     let limit = delivery_limit(used).min(max);
     if limit == 0 {
         return;
@@ -195,6 +204,9 @@ pub async fn deliver_job(env: &Env, store: &D1Store, scope: &Scope, used: u32, m
             _ => {}
         }
         console_error!("{prefix} job.run {DELIVERY_JOB} not sent: {e}");
+        if !daily {
+            return;
+        }
         let event = scope
             .event(EventKind::ScheduledJob, ms(now_ms()))
             .subject(DELIVERY_JOB)

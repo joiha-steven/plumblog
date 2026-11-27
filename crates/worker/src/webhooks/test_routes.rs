@@ -93,6 +93,7 @@ pub async fn handle(req: &Request, env: &Env, ctx: &Context) -> Result<Option<Re
                                 &scope,
                                 3,
                                 super::AFTER_RESPONSE,
+                                true,
                             )
                             .await;
                         }

@@ -10,6 +10,12 @@ stable_codes! {
     pub enum EventKind {
         SignIn => "auth.sign_in",
         SignInFailed => "auth.sign_in_failed",
+        SignInLocked => "auth.sign_in_locked",
+        PasswordChanged => "auth.password_changed",
+        SignOut => "auth.sign_out",
+        PasskeyAdded => "auth.passkey_added",
+        PasskeyRemoved => "auth.passkey_removed",
+        UserCreated => "user.created",
         ContentChanged => "content.changed",
         SettingsChanged => "settings.changed",
         ThemeChanged => "theme.changed",
@@ -39,6 +45,11 @@ impl EventKind {
     pub const fn base_severity(self) -> Severity {
         match self {
             Self::SignIn
+            | Self::PasswordChanged
+            | Self::SignOut
+            | Self::PasskeyAdded
+            | Self::PasskeyRemoved
+            | Self::UserCreated
             | Self::ContentChanged
             | Self::SettingsChanged
             | Self::ThemeChanged
@@ -47,7 +58,7 @@ impl EventKind {
             | Self::Migration
             | Self::ScheduledJob
             | Self::WebhookDelivery => Severity::Info,
-            Self::SignInFailed | Self::PluginDisabled => Severity::Warning,
+            Self::SignInFailed | Self::SignInLocked | Self::PluginDisabled => Severity::Warning,
             Self::Error => Severity::Error,
         }
     }
@@ -251,6 +262,12 @@ mod tests {
             [
                 (EventKind::SignIn, "auth.sign_in"),
                 (EventKind::SignInFailed, "auth.sign_in_failed"),
+                (EventKind::SignInLocked, "auth.sign_in_locked"),
+                (EventKind::PasswordChanged, "auth.password_changed"),
+                (EventKind::SignOut, "auth.sign_out"),
+                (EventKind::PasskeyAdded, "auth.passkey_added"),
+                (EventKind::PasskeyRemoved, "auth.passkey_removed"),
+                (EventKind::UserCreated, "user.created"),
                 (EventKind::ContentChanged, "content.changed"),
                 (EventKind::SettingsChanged, "settings.changed"),
                 (EventKind::ThemeChanged, "theme.changed"),
@@ -282,6 +299,14 @@ mod tests {
         assert_eq!(
             Event::new(EventKind::SignInFailed, rid(), 1).severity(),
             Severity::Warning
+        );
+        assert_eq!(
+            Event::new(EventKind::SignInLocked, rid(), 1).severity(),
+            Severity::Warning
+        );
+        assert_eq!(
+            Event::new(EventKind::PasskeyRemoved, rid(), 1).severity(),
+            Severity::Info
         );
     }
 

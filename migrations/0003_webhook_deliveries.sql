@@ -1,6 +1,9 @@
 -- Outgoing webhook deliveries, retried without a queue (issue #18). One row per webhook per
 -- event; the cron run claims due rows, sends them and records the outcome. Rows are pruned
 -- a while after they finish. 0002 is taken by another change; numbers may have gaps.
+-- `webhooks.secret` (0001, "readable by design") now holds the sealed form
+-- `v1:<nonce>:<ciphertext>` (AES-256-GCM under the Worker secret WEBHOOK_KEY); a row in any
+-- other form is refused when sending. No data change: no webhook existed before this.
 -- IF NOT EXISTS: re-running the file by hand is harmless; it only adds a new table.
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
   id            INTEGER PRIMARY KEY,

@@ -50,7 +50,8 @@ pub async fn run(env: &Env, scheduled_ms: f64) {
     };
     // Subrequests used so far (see webhooks::SUBREQUESTS); deliveries get what is left.
     let mut used = webhooks::publish_job(&store, &scope).await;
-    if is_daily(scheduled_ms) {
+    let daily = is_daily(scheduled_ms);
+    if daily {
         let now = worker::Date::now().as_millis();
         let report = |m: &str| console_error!("{m}");
         match retention_job(&store, &scope, Retention::default(), now, report).await {
@@ -64,7 +65,15 @@ pub async fn run(env: &Env, scheduled_ms: f64) {
         }
         used += webhooks::DAILY_JOBS;
     }
-    webhooks::deliver_job(env, &store, &scope, used, plumblog_webhook::MAX_PER_RUN).await;
+    webhooks::deliver_job(
+        env,
+        &store,
+        &scope,
+        used,
+        plumblog_webhook::MAX_PER_RUN,
+        daily,
+    )
+    .await;
 }
 
 #[cfg(test)]

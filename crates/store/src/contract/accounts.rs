@@ -462,6 +462,60 @@ pub async fn passkeys<S: Store>(db: &S) -> Check {
     )
 }
 
+/// Only the owner of a passkey removes it with `delete_own_passkey`, and a passwordless
+/// account keeps its last one; an account with a password may remove all of them.
+pub async fn delete_own_passkey<S: Store>(db: &S) -> Check {
+    let a = user(db, "pia").await?;
+    let b = user(db, "ben").await?;
+    let a1 = ok("add_passkey", db.add_passkey(passkey(a, "pa1")).await)?;
+    let a2 = ok("add_passkey", db.add_passkey(passkey(a, "pa2")).await)?;
+    let b1 = ok("add_passkey", db.add_passkey(passkey(b, "pb1")).await)?;
+    fails(
+        "delete_own_passkey of another user",
+        db.delete_own_passkey(a, b1).await,
+        ErrorCode::NotFound,
+    )?;
+    fails(
+        "delete_own_passkey missing",
+        db.delete_own_passkey(a, a1.max(a2).max(b1) + 1000).await,
+        ErrorCode::NotFound,
+    )?;
+    ok("delete_own_passkey a1", db.delete_own_passkey(a, a1).await)?;
+    fails(
+        "delete_own_passkey of the last passkey, no password",
+        db.delete_own_passkey(a, a2).await,
+        ErrorCode::Conflict,
+    )?;
+    fails(
+        "delete_own_passkey of b's last passkey by a",
+        db.delete_own_passkey(a, b1).await,
+        ErrorCode::NotFound,
+    )?;
+    let left: Vec<i64> = ok("list_passkeys", db.list_passkeys(a).await)?
+        .iter()
+        .map(|p| p.id)
+        .collect();
+    eq!("refusals keep the passkeys", left, vec![a2])?;
+    eq!(
+        "b's passkey kept",
+        ok("find_passkey", db.find_passkey("pb1").await)?.map(|p| p.id),
+        Some(b1),
+    )?;
+    ok(
+        "password set",
+        db.set_password(a, Some("h".into()), T0).await,
+    )?;
+    ok(
+        "delete_own_passkey last, with a password",
+        db.delete_own_passkey(a, a2).await,
+    )?;
+    eq!(
+        "all gone",
+        ok("list_passkeys", db.list_passkeys(a).await)?.len(),
+        0,
+    )
+}
+
 /// The counter never goes back; only a higher value, or 0 after 0, is accepted, and only an
 /// accepted sign-in is recorded.
 pub async fn passkey_sign_count<S: Store>(db: &S) -> Check {
