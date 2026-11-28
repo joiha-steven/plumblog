@@ -22,6 +22,8 @@ interface Entry {
 const ENTRIES: readonly Entry[] = [
   { key: "general", href: HREF.settings, label: () => t("admin.settings.general"), permission: "settings.manage" },
   { key: "users", href: "/admin/settings/users", label: () => t("admin.settings.users"), permission: "user.manage" },
+  { key: "appearance", href: "/admin/settings/appearance", label: () => t("admin.settings.appearance"), permission: "theme.manage" },
+  { key: "plugins", href: "/admin/settings/plugins", label: () => t("admin.settings.plugins"), permission: "plugin.manage" },
   { key: "log", href: HREF.syslog, label: () => t("admin.syslog.title"), permission: "syslog.view" },
 ];
 
@@ -53,6 +55,7 @@ export function mountSettings(box: HTMLElement, api: Api, o: SettingsOptions): v
   box.replaceChildren(h("div", { class: "settings" }, nav, content));
   if (active === "general") general(content, api, o.offline);
   else if (active === "users") usersSection(content, api, o);
+  else if (active === "appearance" || active === "plugins") options(content, api, o.offline, active);
 }
 
 /** People is its own chunk: the General form never carries it. */
@@ -64,6 +67,21 @@ function usersSection(content: HTMLElement, api: Api, o: SettingsOptions): void 
       (e: unknown) => {
         // A chunk that failed to load (offline, new deploy): say so instead of a blank screen.
         console.error("admin: people failed to load", e);
+        content.replaceChildren(failed({ code: "network", status: 0 }, load));
+      },
+    );
+  };
+  load();
+}
+
+/** Appearance and Plugins draw forms from declarations: a chunk of their own, loaded when asked for. */
+function options(content: HTMLElement, api: Api, offline: () => boolean, which: "appearance" | "plugins"): void {
+  const load = (): void => {
+    content.replaceChildren(loadingRows(3));
+    import("./options/index").then(
+      (m) => (which === "appearance" ? m.mountAppearance(content, api, offline) : m.mountPlugins(content, api, offline)),
+      (e: unknown) => {
+        console.error("admin: options failed to load", e);
         content.replaceChildren(failed({ code: "network", status: 0 }, load));
       },
     );

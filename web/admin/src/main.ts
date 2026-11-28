@@ -145,6 +145,11 @@ if (isAuth(first)) {
     startEarly(api, ["/api/v1/users", "/api/v1/invites"]);
     void import("./settings").catch(() => undefined);
     void import("./users").catch(() => undefined);
+  } else if (first === "settings" && (current().section === "appearance" || current().section === "plugins")) {
+    // Appearance and Plugins, the same way: their first list and both chunks alongside `me`.
+    startEarly(api, [current().section === "appearance" ? "/api/v1/themes" : "/api/v1/plugins"]);
+    void import("./settings").catch(() => undefined);
+    void import("./options/index").catch(() => undefined);
   }
   void load();
 }

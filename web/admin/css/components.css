@@ -75,6 +75,7 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 
 /* ===== Fields: wells recessed into the surface ===== */
 .field { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-6); align-content: start; }
+.field > .seg { justify-self: start; }
 .two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--sp-16); }
 @media (max-width: 767px) { .two { grid-template-columns: minmax(0, 1fr); } }
 .input, .select, .textarea { width: 100%; height: var(--ctl); padding: 0 var(--sp-12); border-radius: var(--r-10); border: 1px solid var(--line-ctl); background-color: var(--well); font: var(--type-field); --raise: var(--sh-well); }
@@ -110,6 +111,11 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 /* Read-only value with a copy key. */
 .copyrow { display: flex; gap: var(--sp-8); }
 .copyrow .input { font: var(--type-mono); min-width: 0; }
+/* Native color picker, sized as a square key beside its hex field. */
+.input.swatch { width: var(--ctl); flex: none; padding: var(--sp-4); cursor: pointer; }
+.input.swatch::-webkit-color-swatch-wrapper { padding: 0; }
+.input.swatch::-webkit-color-swatch { border: 0; border-radius: var(--r-6); }
+.input.swatch::-moz-color-swatch { border: 0; border-radius: var(--r-6); }
 /* List field: one input per line. */
 .list-f { display: grid; gap: var(--sp-6); }
 .list-row { display: flex; gap: var(--sp-4); align-items: center; }
@@ -304,9 +310,9 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 /* ===== Sections: plain blocks separated by hairlines, no cards ===== */
 .sec { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-16); padding-bottom: var(--sp-32); margin-bottom: var(--sp-32); border-bottom: 1px solid var(--line); max-width: var(--measure); }
 .sec:last-child { border-bottom: 0; margin-bottom: 0; }
-.sec h2, .panel-head h2, .pubpop h3 { font: var(--type-section); }
-.sec h2.grp { display: flex; align-items: center; gap: var(--sp-8); }
-.sec h2.grp svg { color: var(--muted); }
+.sec h2, .sec h3.grp, .panel-head h2, .pubpop h3 { font: var(--type-section); }
+.sec :is(h2, h3).grp { display: flex; align-items: center; gap: var(--sp-8); }
+.sec :is(h2, h3).grp svg { color: var(--muted); }
 .psec { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-12); padding: var(--sp-16) 0; border-bottom: 1px solid var(--line); }
 .psec:last-child { border-bottom: 0; }
 .prow { display: grid; grid-template-columns: var(--kv-key) minmax(0, 1fr); gap: var(--sp-12); align-items: center; font: var(--type-small); }
