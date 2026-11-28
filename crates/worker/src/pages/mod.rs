@@ -551,7 +551,7 @@ impl<S: ReaderSource> Pages<'_, S> {
         };
         let slice = self
             .src
-            .posts(Filter::All, offset, self.per)
+            .posts(Filter::Home(&self.settings.lang), offset, self.per)
             .await
             .map_err(err)?;
         // Decided from the count: a page past the last one is a 404 (page 1 of an empty
@@ -575,16 +575,19 @@ impl<S: ReaderSource> Pages<'_, S> {
         let post = self.to_render(&n.post);
         let older = n.older.as_ref().map(|p| self.to_render(p));
         let newer = n.newer.as_ref().map(|p| self.to_render(p));
-        // A failed read shows the post without its comments rather than failing the page;
-        // the page is then not cached (see `complete`).
-        // Comments are for posts: a static page shows no form (the comment route refuses it).
-        let comments = match ext.comments(&n.post, &self.settings.lang).await {
-            Ok(_) if n.post.is_page => None,
-            Ok(c) => c,
-            Err(e) => {
-                warn(&format!("comments.read_failed slug={slug} detail={e}"));
-                self.complete.set(false);
-                None
+        // Comments are for posts: a static page shows no form (the comment route refuses it),
+        // so it reads none. A failed read shows the post without its comments rather than
+        // failing the page; the page is then not cached (see `complete`).
+        let comments = if n.post.is_page {
+            None
+        } else {
+            match ext.comments(&n.post, &self.settings.lang).await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn(&format!("comments.read_failed slug={slug} detail={e}"));
+                    self.complete.set(false);
+                    None
+                }
             }
         };
         self.show(&Body::Post {
@@ -664,7 +667,7 @@ impl<S: ReaderSource> Pages<'_, S> {
     async fn not_found(&self) -> std::result::Result<String, String> {
         let recent = self
             .src
-            .posts(Filter::All, 0, NOT_FOUND_SUGGESTIONS)
+            .posts(Filter::Home(&self.settings.lang), 0, NOT_FOUND_SUGGESTIONS)
             .await
             .map_err(err)?;
         let posts = self.render_posts(&recent.posts);

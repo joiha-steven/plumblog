@@ -28,6 +28,10 @@ changing it moves that language's posts to `/<slug>` and breaks old links.
 ## Where a post is
 
 - Default language (`site_lang`): `/<slug>`. Any other language: `/<lang>/<slug>`, never at `/<slug>`.
+- Not usable as a slug in the default language: `page`, `tag`, `archive`, `search`, `theme`,
+  `plugin`, `media`, `admin`, `api`, `healthz` (400 on `slug`); another language may.
+- `status: published` with a future `published_at` is 400 `post.published_in_future`: use
+  `scheduled`. The home page lists the default language only.
 - Only published posts and pages are public; drafts, scheduled and trashed posts are 404.
 - Unpublish: `PATCH` the post with `status: "draft"` and `published_at: null`.
 - Listings are numbered (`/page/2`); a page past the last, or past 10,000 posts, is a 404.

@@ -59,7 +59,7 @@ pub(super) struct Fixture {
 impl Fixture {
     pub(super) fn new(edit: impl FnOnce(&mut Vec<StoredPost>, &mut Settings)) -> Self {
         let sample = SampleSource::get();
-        let mut posts = run(sample.posts(Filter::All, 0, usize::MAX)).unwrap().posts;
+        let mut posts = sample.all_posts().to_vec();
         let mut settings = run(sample.settings()).unwrap();
         // The sample's own translated pair is covered by the worker tests; these fixtures
         // build their own languages from a single-language site.
@@ -69,13 +69,14 @@ impl Fixture {
         }
         edit(&mut posts, &mut settings);
         let posts = SampleSource::from_posts(posts);
-        // The sample's own rule for the site date, applied to the edited posts.
-        settings.updated_at = run(posts.settings()).unwrap().updated_at;
         Self { posts, settings }
     }
 }
 
 impl ReaderSource for Fixture {
+    async fn settings_updated(&self) -> Result<Option<i64>> {
+        self.posts.settings_updated().await
+    }
     fn settings(&self) -> impl Future<Output = Result<Settings>> {
         std::future::ready(Ok(self.settings.clone()))
     }
@@ -99,6 +100,20 @@ impl ReaderSource for Fixture {
     }
     async fn years(&self) -> Result<Vec<i32>> {
         self.posts.years().await
+    }
+}
+
+/// Every first path segment the Worker or its assets answer is never a post.
+#[test]
+fn router_owned_segments_are_not_posts() {
+    for owned in [
+        "page", "tag", "archive", "search", "theme", "plugin", "media", "admin", "api", "healthz",
+    ] {
+        assert!(
+            !matches!(parse(&format!("/{owned}")), Route::Post { .. }),
+            "/{owned}"
+        );
+        assert!(super::routes::RESERVED.contains(&owned), "{owned}");
     }
 }
 

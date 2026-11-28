@@ -62,9 +62,14 @@ pub async fn reader_posts_published_only<S: Store>(db: &S) -> Check {
     ok("trash_post", db.trash_post(gone, 700).await)?;
 
     eq!(
-        "All: pinned first, then newest, id DESC on a tie",
-        ids(db, ReaderFilter::All, 0, 10).await?,
-        (5, vec![pd, pc, pb, px, pa])
+        "Home vi: pinned first, then newest, id DESC on a tie",
+        ids(db, ReaderFilter::Home("vi"), 0, 10).await?,
+        (4, vec![pd, pc, pb, pa])
+    )?;
+    eq!(
+        "Home en: its own language only",
+        ids(db, ReaderFilter::Home("en"), 0, 10).await?,
+        (1, vec![px])
     )?;
     eq!(
         "Lang vi: by date only, pinned not first",
@@ -119,28 +124,28 @@ pub async fn reader_posts_offset_and_count<S: Store>(db: &S) -> Check {
     all.reverse();
     eq!(
         "offset 0 limit 2",
-        ids(db, ReaderFilter::All, 0, 2).await?,
+        ids(db, ReaderFilter::Home("vi"), 0, 2).await?,
         (5, all[0..2].to_vec())
     )?;
     eq!(
         "offset 2 limit 2",
-        ids(db, ReaderFilter::All, 2, 2).await?,
+        ids(db, ReaderFilter::Home("vi"), 2, 2).await?,
         (5, all[2..4].to_vec())
     )?;
     eq!(
         "offset 4 limit 10: the last row",
-        ids(db, ReaderFilter::All, 4, 10).await?,
+        ids(db, ReaderFilter::Home("vi"), 4, 10).await?,
         (5, all[4..].to_vec())
     )?;
     eq!(
         "limit 0",
-        ids(db, ReaderFilter::All, 0, 0).await?,
+        ids(db, ReaderFilter::Home("vi"), 0, 0).await?,
         (5, vec![])
     )?;
     for offset in [5, 6, READER_MAX_OFFSET, u32::MAX] {
         eq!(
             &format!("offset {offset}: past the end, total kept"),
-            ids(db, ReaderFilter::All, offset, 10).await?,
+            ids(db, ReaderFilter::Home("vi"), offset, 10).await?,
             (5, vec![])
         )?;
     }
@@ -215,7 +220,7 @@ pub async fn reader_tags_and_tag_filter<S: Store>(db: &S) -> Check {
         (0, vec![])
     )?;
 
-    let home = page(db, ReaderFilter::All, 0, 10).await?;
+    let home = page(db, ReaderFilter::Home("vi"), 0, 10).await?;
     let row_tags: Vec<(PostId, Vec<ReaderTag>)> =
         home.rows.into_iter().map(|r| (r.post.id, r.tags)).collect();
     eq!(

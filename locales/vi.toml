@@ -9,6 +9,9 @@ page_not_found = "Trang này không tồn tại."
 [error.input]
 too_complex = "Yêu cầu này chứa quá nhiều mục. Bạn gửi ít hơn mỗi lần nhé."
 
+[error.post]
+published_in_future = "Bài đã đăng không thể có ngày ở tương lai. Hãy hẹn giờ đăng, hoặc đăng ngay."
+
 [syslog]
 redacted = "[đã ẩn]"
 

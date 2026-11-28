@@ -1,5 +1,5 @@
-//! Reader reads (`ReaderStore`): published posts only. The index each query uses is named in
-//! `migrations/0006_reader_indexes.sql` and `0001_init.sql`.
+//! Reader reads (`ReaderStore`): published posts only. The SQL is in `reader_sql`, where a test
+//! checks the plan of each query against the index it is meant to use.
 
 use plumblog_model::{PostId, Result, TagId};
 use plumblog_store::{
@@ -9,16 +9,9 @@ use plumblog_store::{
 use worker::js_sys::{Array, JSON};
 use worker::wasm_bindgen::{JsCast, JsValue};
 
-use super::posts::{POST_COLS, SUMMARY_COLS, read_post, read_summary};
+use super::posts::{read_post, read_summary};
+use super::reader_sql as sql;
 use super::{D1Store, Row, bound, int, limit, storage, text};
-
-/// Tags of `p` as JSON `[[id, slug, name], ...]`: names may hold any character, so no
-/// separator-joined list. JSON order is not relied on; [`read_tags`] sorts by id.
-const TAGS_COL: &str = "(SELECT json_group_array(json_array(t.id, t.slug, t.name)) \
-     FROM post_tags pt JOIN tags t ON t.id = pt.tag_id WHERE pt.post_id = p.id)";
-
-/// Every reader listing: published posts, never pages.
-const LISTED: &str = "p.status = 'published' AND p.kind = 'post'";
 
 fn read_tags(name: &'static str, r: &mut Row) -> Result<Vec<ReaderTag>> {
     let json = r.text()?;
@@ -47,33 +40,20 @@ fn read_link(r: &mut Row) -> Result<ReaderLink> {
     })
 }
 
-/// FROM and WHERE of a listing, the extra sort column and parameters. A tag drives from
-/// `post_tags_tag` (CROSS JOIN fixes the join order), so a tag page reads its own posts,
-/// not every published post.
+/// FROM and WHERE of a listing and its parameters; `None` for a year outside 1..=9999.
 fn listing(filter: ReaderFilter<'_>) -> Result<Option<(String, Vec<JsValue>)>> {
-    Ok(Some(match filter {
-        ReaderFilter::All => (format!("posts p WHERE {LISTED}"), Vec::new()),
-        ReaderFilter::Tag(TagId(t)) => (
-            format!(
-                "post_tags pt CROSS JOIN posts p ON p.id = pt.post_id \
-                 WHERE pt.tag_id = ? AND {LISTED}"
-            ),
-            vec![bound(t)],
-        ),
+    let Some(from) = sql::listing_from(filter) else {
+        return Ok(None);
+    };
+    let params = match filter {
+        ReaderFilter::Tag(TagId(t)) => vec![bound(t)],
         ReaderFilter::Year(y) => {
-            let Some((from, to)) = year_bounds(y) else {
-                return Ok(None);
-            };
-            (
-                format!("posts p WHERE {LISTED} AND p.published_at >= ? AND p.published_at < ?"),
-                vec![int(from)?, int(to)?],
-            )
+            let (from, to) = year_bounds(y).ok_or_else(|| storage("reader_posts", "year"))?;
+            vec![int(from)?, int(to)?]
         }
-        ReaderFilter::Lang(l) => (
-            format!("posts p WHERE {LISTED} AND p.lang = ?"),
-            vec![text(l)],
-        ),
-    }))
+        ReaderFilter::Home(l) | ReaderFilter::Lang(l) => vec![text(l)],
+    };
+    Ok(Some((from, params)))
 }
 
 impl ReaderStore for D1Store {
@@ -91,11 +71,7 @@ impl ReaderStore for D1Store {
                 rows: Vec::new(),
             });
         };
-        let s = self.stmt(
-            "reader_count",
-            &format!("SELECT COUNT(*) FROM {from}"),
-            &params,
-        )?;
+        let s = self.stmt("reader_count", &sql::count(&from), &params)?;
         let total = match self.row(s).await? {
             Some(mut r) => r.uint()?,
             None => return Err(storage("reader_count", "COUNT returned no row")),
@@ -106,30 +82,11 @@ impl ReaderStore for D1Store {
                 rows: Vec::new(),
             });
         }
-        // The inner query pages over the index alone (ids and sort keys); only the page's
-        // rows are then read in full, with their tags.
-        let (keys, inner_order, outer_order) = if filter == ReaderFilter::All {
-            (
-                "p.id, p.pinned, p.published_at",
-                "p.pinned DESC, p.published_at DESC, p.id DESC",
-                "k.pinned DESC, k.published_at DESC, k.id DESC",
-            )
-        } else {
-            (
-                "p.id, p.published_at",
-                "p.published_at DESC, p.id DESC",
-                "k.published_at DESC, k.id DESC",
-            )
-        };
         let mut params = params;
         params.extend([limit(limit_n), JsValue::from(offset)]);
         let s = self.stmt(
             "reader_posts",
-            &format!(
-                "SELECT {SUMMARY_COLS}, {TAGS_COL} FROM \
-                 (SELECT {keys} FROM {from} ORDER BY {inner_order} LIMIT ? OFFSET ?) k \
-                 CROSS JOIN posts p ON p.id = k.id ORDER BY {outer_order}"
-            ),
+            &sql::rows(&from, matches!(filter, ReaderFilter::Home(_))),
             &params,
         )?;
         let rows = self
@@ -148,14 +105,7 @@ impl ReaderStore for D1Store {
 
     // 1 query (post page): the post, its tag ids and its tags.
     async fn reader_post(&self, lang: &str, slug: &str) -> Result<Option<ReaderPost>> {
-        let s = self.stmt(
-            "reader_post",
-            &format!(
-                "SELECT {POST_COLS}, {TAGS_COL} FROM posts p \
-                 WHERE p.lang = ? AND p.slug = ? AND p.status = 'published'"
-            ),
-            &[text(lang), text(slug)],
-        )?;
+        let s = self.stmt("reader_post", &sql::post(), &[text(lang), text(slug)])?;
         match self.row(s).await? {
             Some(mut r) => Ok(Some(ReaderPost {
                 post: read_post(&mut r)?,
@@ -165,35 +115,17 @@ impl ReaderStore for D1Store {
         }
     }
 
-    // 1 query (translation switcher, hreflang).
+    // 1 query (translation switcher, hreflang), by posts_group_lang.
     async fn reader_translations(&self, group: PostId) -> Result<Vec<ReaderLink>> {
-        let s = self.stmt(
-            "reader_translations",
-            "SELECT lang, slug, title FROM posts \
-             WHERE translation_group = ? AND status = 'published' ORDER BY lang",
-            &[bound(group.0)],
-        )?;
+        let s = self.stmt("reader_translations", sql::TRANSLATIONS, &[bound(group.0)])?;
         self.rows(s).await?.iter_mut().map(read_link).collect()
     }
 
     // 1 query: two LIMIT 1 range reads on posts_listing (lang, then date).
     async fn reader_neighbours(&self, post: PostId) -> Result<ReaderNeighbours> {
-        let side = |cmp: &str, order: &str, tag: &str| {
-            format!(
-                "SELECT * FROM (SELECT '{tag}', p.lang, p.slug, p.title \
-                 FROM posts me JOIN posts p ON {LISTED} AND p.lang = me.lang \
-                 AND (p.published_at, p.id) {cmp} (me.published_at, me.id) \
-                 WHERE me.id = ? AND me.status = 'published' AND me.kind = 'post' \
-                 ORDER BY p.published_at {order}, p.id {order} LIMIT 1)"
-            )
-        };
         let s = self.stmt(
             "reader_neighbours",
-            &format!(
-                "{} UNION ALL {}",
-                side("<", "DESC", "older"),
-                side(">", "ASC", "newer")
-            ),
+            &sql::neighbours(),
             &[bound(post.0), bound(post.0)],
         )?;
         let mut out = ReaderNeighbours {
@@ -223,15 +155,7 @@ impl ReaderStore for D1Store {
     async fn reader_years(&self) -> Result<Vec<i32>> {
         let (from, _) = year_bounds(1).ok_or_else(|| storage("reader_years", "year 1"))?;
         let (_, to) = year_bounds(9999).ok_or_else(|| storage("reader_years", "year 9999"))?;
-        let s = self.stmt(
-            "reader_years",
-            &format!(
-                "SELECT DISTINCT CAST(strftime('%Y', p.published_at / 1000.0, 'unixepoch') \
-                 AS INTEGER) AS y FROM posts p WHERE {LISTED} \
-                 AND p.published_at >= ? AND p.published_at < ? ORDER BY y DESC"
-            ),
-            &[int(from)?, int(to)?],
-        )?;
+        let s = self.stmt("reader_years", &sql::years(), &[int(from)?, int(to)?])?;
         self.rows(s)
             .await?
             .iter_mut()
@@ -244,14 +168,7 @@ impl ReaderStore for D1Store {
 
     // 1 query: the newest posts of one language on posts_listing, bodies and tags included.
     async fn reader_feed(&self, lang: &str, limit_n: u32) -> Result<Vec<ReaderPost>> {
-        let s = self.stmt(
-            "reader_feed",
-            &format!(
-                "SELECT {POST_COLS}, {TAGS_COL} FROM posts p WHERE {LISTED} AND p.lang = ? \
-                 ORDER BY p.published_at DESC, p.id DESC LIMIT ?"
-            ),
-            &[text(lang), limit(limit_n)],
-        )?;
+        let s = self.stmt("reader_feed", &sql::feed(), &[text(lang), limit(limit_n)])?;
         self.rows(s)
             .await?
             .iter_mut()
@@ -264,39 +181,34 @@ impl ReaderStore for D1Store {
             .collect()
     }
 
-    // 1 query: the date index alone, no bodies.
+    // 1 query: the newest posts and the newest pages, each by posts_by_date (no sort), merged
+    // here; at most 2 x limit rows, and pages are few.
     async fn reader_sitemap(&self, limit_n: u32) -> Result<Vec<ReaderSitemapRow>> {
+        let n = limit_n.min(READER_SITEMAP_MAX);
         let s = self.stmt(
             "reader_sitemap",
-            "SELECT p.lang, p.slug, p.updated_at, p.translation_group FROM posts p \
-             WHERE p.status = 'published' ORDER BY p.published_at DESC, p.id DESC LIMIT ?",
-            &[JsValue::from(limit_n.min(READER_SITEMAP_MAX))],
+            &sql::sitemap(),
+            &[JsValue::from(n), JsValue::from(n)],
         )?;
-        self.rows(s)
-            .await?
-            .iter_mut()
-            .map(|r| {
-                Ok(ReaderSitemapRow {
-                    lang: r.text()?,
-                    slug: r.text()?,
-                    updated_at: r.int()?,
-                    translation_group: PostId(r.int()?),
-                })
-            })
-            .collect()
+        let mut rows = Vec::new();
+        for r in &mut self.rows(s).await? {
+            let row = ReaderSitemapRow {
+                lang: r.text()?,
+                slug: r.text()?,
+                updated_at: r.int()?,
+                translation_group: PostId(r.int()?),
+            };
+            rows.push((r.int()?, r.int()?, row));
+        }
+        // Newest first, like every reader list: published_at DESC, id DESC.
+        rows.sort_by_key(|(at, id, _)| std::cmp::Reverse((*at, *id)));
+        rows.truncate(usize::try_from(n).unwrap_or(usize::MAX));
+        Ok(rows.into_iter().map(|(_, _, row)| row).collect())
     }
 
     // 1 query: each tag stops at its first published post (post_tags_tag, then the post).
     async fn reader_tags(&self) -> Result<Vec<Tag>> {
-        let s = self.stmt(
-            "reader_tags",
-            &format!(
-                "SELECT t.id, t.slug, t.name FROM tags t WHERE EXISTS (SELECT 1 \
-                 FROM post_tags pt CROSS JOIN posts p ON p.id = pt.post_id \
-                 WHERE pt.tag_id = t.id AND {LISTED}) ORDER BY t.name, t.id"
-            ),
-            &[],
-        )?;
+        let s = self.stmt("reader_tags", &sql::tags(), &[])?;
         self.rows(s)
             .await?
             .iter_mut()

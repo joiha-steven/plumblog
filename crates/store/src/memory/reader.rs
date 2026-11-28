@@ -43,11 +43,10 @@ impl State {
 
     fn matches(filter: ReaderFilter<'_>, p: &Post) -> bool {
         match filter {
-            ReaderFilter::All => true,
+            ReaderFilter::Home(l) | ReaderFilter::Lang(l) => p.lang == l,
             ReaderFilter::Tag(t) => p.tag_ids.contains(&t),
             ReaderFilter::Year(y) => year_bounds(y)
                 .is_some_and(|(a, b)| p.published_at.is_some_and(|at| (a..b).contains(&at))),
-            ReaderFilter::Lang(l) => p.lang == l,
         }
     }
 }
@@ -76,7 +75,7 @@ impl ReaderStore for MemoryStore {
                     rows: Vec::new(),
                 };
             }
-            let pinned_first = filter == ReaderFilter::All;
+            let pinned_first = matches!(filter, ReaderFilter::Home(_));
             rows.sort_by_key(|p| Reverse((pinned_first && p.pinned, date_key(p))));
             let rows = rows
                 .into_iter()

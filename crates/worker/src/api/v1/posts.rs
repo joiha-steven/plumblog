@@ -8,14 +8,16 @@ use plumblog_model::{
 };
 use plumblog_store::{
     NewRevision, Post, PostCursor, PostKind, PostOrder, PostQuery, PostStatus, PostStore,
-    PostSummary, SavePost,
+    PostSummary, SavePost, SettingsStore,
 };
 use plumblog_syslog::EventKind;
 
 use super::post_body;
 use super::{Input, Nullable, Principal};
-use crate::api::body::{Out, object, quote};
+use crate::api::body::{Out, json_string, object, quote};
 use crate::api::{Ctx, Reply};
+use crate::pages::reader_db::SITE_LANG_KEY;
+use crate::pages::routes::RESERVED;
 
 const MAX_SLUG: usize = 100;
 const MAX_TITLE: usize = 300;
@@ -49,6 +51,28 @@ fn slug(v: &str) -> Result<()> {
     } else {
         Err(invalid("slug", "1-100 of a-z, 0-9 and inner hyphens"))
     }
+}
+
+/// Refuses a slug the router owns (`pages::routes::RESERVED`) in the site's default language,
+/// where posts live at `/<slug>`; another language's posts are at `/<lang>/<slug>`. Reads the
+/// default language only for such a slug.
+async fn not_reserved(ctx: &Ctx, post_lang: &str, post_slug: &str) -> Result<()> {
+    if !RESERVED.contains(&post_slug) {
+        return Ok(());
+    }
+    let default = ctx
+        .store
+        .get_setting(SITE_LANG_KEY)
+        .await?
+        .and_then(|v| json_string(&v))
+        .unwrap_or_else(|| "en".to_owned());
+    if post_lang == default {
+        return Err(invalid(
+            "slug",
+            "reserved: the site uses this address for something else",
+        ));
+    }
+    Ok(())
 }
 
 /// A language tag as used in URLs: `en`, `vi`, `pt-br`, `zh-hant`.
@@ -97,8 +121,8 @@ fn status(input: &Input) -> Result<Option<PostStatus>> {
         .transpose()
 }
 
-/// `published_at` for a save: none for a draft, now when publishing without one, a future
-/// time for scheduling. `checked` is false for an update that leaves both alone, so an old
+/// `published_at` for a save: none for a draft, now when publishing without one (a future
+/// time is refused: that is `scheduled`), a future time for scheduling. `checked` is false for an update that leaves both alone, so an old
 /// scheduled post can still be edited after its time passed.
 fn published_at(
     status: PostStatus,
@@ -111,7 +135,15 @@ fn published_at(
             Err(invalid("published_at", "drafts have none"))
         }
         PostStatus::Draft | PostStatus::Trashed => Ok(None),
-        PostStatus::Published => Ok(Some(at.unwrap_or(now))),
+        PostStatus::Published => match at {
+            // A future date on a published post would hide it while the API says "published".
+            Some(t) if checked && t > now => Err(Error::new(
+                ErrorCode::PostPublishedInFuture,
+                "published_at: in the future; use status scheduled",
+            )
+            .at("published_at")),
+            t => Ok(Some(t.unwrap_or(now))),
+        },
         PostStatus::Scheduled => match at {
             None => Err(invalid("published_at", "required to schedule")),
             Some(t) if checked && t <= now => Err(invalid("published_at", "in the past")),
@@ -403,6 +435,12 @@ pub async fn create(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
         .excerpt
         .filter(|e| !e.is_empty())
         .unwrap_or_else(|| r.excerpt.clone());
+    not_reserved(
+        ctx,
+        input.str("lang").unwrap_or_default(),
+        input.str("slug").unwrap_or_default(),
+    )
+    .await?;
     let id = save(
         ctx,
         SavePost {
@@ -490,6 +528,35 @@ fn body_for_update(old: &Post, markdown: Option<&str>, excerpt: Option<&str>) ->
     }
 }
 
+/// [`not_reserved`] for an update that changes the address; an old post stays editable.
+async fn not_reserved_if_moved(ctx: &Ctx, input: &Input, old: &Post) -> Result<()> {
+    if !(input.has("lang") || input.has("slug")) {
+        return Ok(());
+    }
+    let lang = input.str("lang").unwrap_or(&old.lang);
+    let slug = input.str("slug").unwrap_or(&old.slug);
+    not_reserved(ctx, lang, slug).await
+}
+
+/// The `published_at` an update saves. Publishing a scheduled post without a date means now,
+/// not its scheduled time.
+fn update_published_at(
+    input: &Input,
+    old: &Post,
+    status: PostStatus,
+    status_sent: bool,
+    now: i64,
+) -> Result<Option<i64>> {
+    let publish_now = status == PostStatus::Published
+        && old.status == PostStatus::Scheduled
+        && !input.has("published_at");
+    let at = input
+        .int_or_null("published_at")
+        .or(old.published_at.filter(|_| !publish_now));
+    let checked = status_sent || input.has("published_at");
+    published_at(status, at, now, checked)
+}
+
 /// `PATCH /api/v1/posts/<id>`: changes only the fields given. `expected_version` must be
 /// the stored one, else 409 `store.conflict` with the current `version`, so a client never
 /// overwrites changes it did not see. Another author's post needs `post.edit_any`; making
@@ -510,9 +577,8 @@ pub async fn update(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
     {
         p.require(Permission::PublishPost)?;
     }
-    let at = input.int_or_null("published_at").or(old.published_at);
-    let checked = new_status.is_some() || input.has("published_at");
-    let at = published_at(status, at, ctx.now, checked)?;
+    let at = update_published_at(input, &old, status, new_status.is_some(), ctx.now)?;
+    not_reserved_if_moved(ctx, input, &old).await?;
     let new_markdown = input.str("markdown");
     let Body {
         html,
@@ -639,6 +705,7 @@ pub async fn delete(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
 #[cfg(test)]
 mod tests {
     use super::{decode_cursor, encode_cursor, lang, published_at, slug};
+    use plumblog_model::ErrorCode;
     use plumblog_model::PostId;
     use plumblog_store::{PostCursor, PostOrder, PostStatus};
 
@@ -678,6 +745,14 @@ mod tests {
         }
         assert_eq!(
             published_at(PostStatus::Published, None, 7, true).unwrap(),
+            Some(7)
+        );
+        // Published in the future is refused with its own code, not silently scheduled.
+        let early = published_at(PostStatus::Published, Some(9), 7, true).unwrap_err();
+        assert_eq!(early.code, ErrorCode::PostPublishedInFuture);
+        assert_eq!(early.field.as_deref(), Some("published_at"));
+        assert_eq!(
+            published_at(PostStatus::Published, Some(7), 7, true).unwrap(),
             Some(7)
         );
         assert!(published_at(PostStatus::Scheduled, Some(5), 7, true).is_err());

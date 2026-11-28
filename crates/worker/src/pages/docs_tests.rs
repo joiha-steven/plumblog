@@ -386,7 +386,8 @@ fn an_empty_site_is_dated_by_its_own_timestamp() {
         "{rss}"
     );
     let (_, _, sitemap) = get_from(&src, "/sitemap.xml");
-    assert!(sitemap.contains("<lastmod>2026-09-01T12:00:00Z</lastmod>"));
+    // No post, so no page date to state: the home entry has no lastmod.
+    assert!(!sitemap.contains("<lastmod>"), "{sitemap}");
     for path in ["/feed.xml", "/rss.xml", "/feed.json", "/sitemap.xml"] {
         let (_, _, body) = get_from(&src, path);
         assert!(!body.contains("1970"), "{path} has an epoch date");

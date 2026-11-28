@@ -66,7 +66,8 @@ ring = { version = "0.17.14", default-features = false }
 # The gzip/tar/zip containers around it are a few small, strict readers in crates/cli.
 miniz_oxide = { version = "0.8.9", default-features = false, features = ["with-alloc"] }
 # Tests only: the fake Cloudflare D1 (crates/cli/tests/fake_cf) runs the repo's migrations and
-# setup's SQL in real SQLite, so tests assert the rows the Worker reads. Bundled: no system
+# setup's SQL in real SQLite, so tests assert the rows the Worker reads; the Worker's tests
+# run EXPLAIN QUERY PLAN on the reader queries. Bundled: no system
 # SQLite, and FTS5 is compiled in. Never linked into `blog` or the Worker.
 rusqlite = { version = "0.39", features = ["bundled"] }
 # Pinned to the stub back end of `idna` (via `url`, only through `worker`): no Unicode tables, so

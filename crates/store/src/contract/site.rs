@@ -261,6 +261,11 @@ pub async fn comment_versions<S: Store>(db: &S) -> Check {
 
 pub async fn settings_round_trip<S: Store>(db: &S) -> Check {
     let mut v = version(db).await?;
+    eq!(
+        "settings_updated_at without settings",
+        ok("settings_updated_at", db.settings_updated_at().await)?,
+        None
+    )?;
     ok("put_setting", db.put_setting("title", "\"Blog\"", T0).await)?;
     ok("put_setting", db.put_setting("lang", "\"vi\"", T0).await)?;
     v += 2;
@@ -271,6 +276,11 @@ pub async fn settings_round_trip<S: Store>(db: &S) -> Check {
     )?;
     v += 1;
     version_is(db, "put_setting upsert", v).await?;
+    eq!(
+        "settings_updated_at: the newest write",
+        ok("settings_updated_at", db.settings_updated_at().await)?,
+        Some(T0 + 1)
+    )?;
     eq!(
         "all_settings by key",
         ok("all_settings", db.all_settings().await)?,

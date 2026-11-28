@@ -17,6 +17,10 @@ impl SettingsStore for MemoryStore {
         }))
     }
 
+    async fn settings_updated_at(&self) -> Result<Option<i64>> {
+        Ok(self.read(|s| s.settings.values().map(|(_, at)| *at).max()))
+    }
+
     async fn get_setting(&self, key: &str) -> Result<Option<String>> {
         Ok(self.read(|s| s.settings.get(key).map(|(v, _)| v.clone())))
     }

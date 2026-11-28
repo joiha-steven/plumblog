@@ -3,8 +3,7 @@
 //! `/` and `/page/N` home, `/<slug>` post in the default language, `/<lang>/<slug>` in another, `/tag/<slug>` and `/archive/<year>` (each with
 //! `/page/N`). Redirect targets are always built here as `/`-rooted paths with no `//`, so a
 //! request path can never turn into an off-site `Location`.
-//! `/search?q=`. `page`, `tag`, `archive`, `search`, `theme`, `admin` and `api` cannot be post
-//! slugs.
+//! `/search?q=`. The names in [`RESERVED`] cannot be post slugs.
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Route {
@@ -125,7 +124,11 @@ pub fn comments(lang: &str, default_lang: &str, slug: &str) -> String {
     format!("{}/comments", post_in(lang, default_lang, slug))
 }
 
-const RESERVED: &[&str] = &["page", "tag", "archive", "search", "theme", "admin", "api"];
+/// First path segments the router, the static assets or the API own, so none is a post
+/// slug in the default language (the posts API refuses them too, from this list).
+pub(crate) const RESERVED: &[&str] = &[
+    "page", "tag", "archive", "search", "theme", "plugin", "media", "admin", "api", "healthz",
+];
 
 /// The search page; results are `?q=` on it.
 pub const SEARCH: &str = "/search";

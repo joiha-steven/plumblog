@@ -20,8 +20,9 @@ pub const READER_SITEMAP_MAX: u32 = 50_000;
 /// Which published posts (kind `post`) a reader listing covers, and in which order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReaderFilter<'a> {
-    /// Every language; pinned first, then by date. Pinning is a home page feature.
-    All,
+    /// One language, pinned first, then by date: the home page. Pinning is a home page
+    /// feature.
+    Home(&'a str),
     /// By date only, like every filter below.
     Tag(TagId),
     /// Calendar year in UTC: `published_at` from Jan 1 00:00:00.000 up to the next Jan 1.
@@ -118,7 +119,7 @@ pub fn year_of(ms: i64) -> i64 {
 #[allow(async_fn_in_trait)]
 pub trait ReaderStore {
     /// Published posts of kind `post` matching `filter`, `published_at` DESC, id DESC; for
-    /// [`ReaderFilter::All`] pinned posts come first. `limit` is capped at `MAX_PAGE`.
+    /// [`ReaderFilter::Home`] pinned posts come first. `limit` is capped at `MAX_PAGE`.
     ///
     /// Guard: the count runs first (1 query). When `offset` is at or past the count, or at
     /// or past [`READER_MAX_OFFSET`], no rows are read and the page is empty with the true

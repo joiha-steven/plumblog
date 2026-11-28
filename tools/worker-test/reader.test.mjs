@@ -52,6 +52,11 @@ test("an empty site renders with defaults, never a 500", async () => {
     assert.equal((await text(path)).status, 200, path);
   }
   assert.doesNotMatch((await text("/feed.xml")).body, /<entry>/);
+  // The site's own setting writes date the feeds; the sitemap states no date it does not have.
+  for (const path of ["/feed.xml", "/rss.xml", "/feed.json", "/sitemap.xml"]) {
+    assert.doesNotMatch((await text(path)).body, /1970/, path);
+  }
+  assert.doesNotMatch((await text("/sitemap.xml")).body, /<lastmod>/);
   for (const path of ["/nothing", "/page/2", "/tag/none", "/archive/2025", "/vi/nothing"]) {
     assert.equal((await text(path)).status, 404, path);
   }
@@ -92,6 +97,19 @@ test("published posts appear everywhere; drafts and scheduled posts do not", asy
   }
 });
 
+test("published with a future date is refused, and reserved slugs are not for the default language", async () => {
+  const future = await api("POST", "/posts", { lang: "en", slug: "too-early", title: "T", markdown: "x", status: "published", published_at: T + DAY });
+  assert.equal(future.status, 400, future.raw);
+  assert.deepEqual(future.json, { error: "post.published_in_future", field: "published_at" });
+  for (const slug of ["page", "tag", "archive", "search", "theme", "plugin", "media", "admin", "api", "healthz"]) {
+    const r = await api("POST", "/posts", { lang: "en", slug, title: "T", markdown: "x", status: "draft" });
+    assert.deepEqual(r.json, { error: "input.invalid", field: "slug" }, slug);
+  }
+  // Another language lives under /<lang>/, where the word is free.
+  const vi = await api("POST", "/posts", { lang: "vi", slug: "page", title: "T", markdown: "x", status: "draft" });
+  assert.equal(vi.status, 201, vi.raw);
+});
+
 test("another language lives under /<lang>/, with alternates both ways", async () => {
   const en = hello;
   await create({ lang: "vi", slug: "chao-the-gioi", title: "Chao the gioi", status: "published", translation_of: en.id });
@@ -111,6 +129,9 @@ test("another language lives under /<lang>/, with alternates both ways", async (
   assert.match(moved.location, /^https?:\/\/[^/]+\/hello-world$/);
   assert.equal((await text("/vi/hello-world")).status, 404, "a post is in one language");
 
+  // The home page and /page/N are the default language only, like the feed.
+  assert.doesNotMatch((await text("/")).body, /chao-the-gioi/);
+  assert.doesNotMatch((await text("/nothing")).body, /chao-the-gioi/);
   assert.match((await text("/vi/feed.xml")).body, /chao-the-gioi/);
   assert.doesNotMatch((await text("/feed.xml")).body, /chao-the-gioi/);
   const map = (await text("/sitemap.xml")).body;

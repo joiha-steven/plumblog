@@ -8,7 +8,6 @@ use super::reader_db::{
     SITE_TITLE_KEY,
 };
 use super::sample::{SAMPLE_SITE, SampleSource};
-use super::source::{Filter, ReaderSource};
 use crate::api::body::quote;
 use plumblog_model::{PostId, Role};
 use plumblog_store::{
@@ -29,8 +28,10 @@ async fn sample_settings<S: SettingsStore>(db: &S) -> Result<(), String> {
         (SITE_PER_PAGE_KEY, SAMPLE_SITE.per_page.to_string()),
         (ORIGIN_KEY, quote(SAMPLE_SITE.origin)),
     ];
+    // Written the day the sample site was set up, in ms: a real date for an empty feed.
+    let at = super::sample::unix_from_date(SAMPLE_SITE.updated) * 1000;
     for (key, value) in rows {
-        db.put_setting(key, &value, 0)
+        db.put_setting(key, &value, at)
             .await
             .map_err(|e| format!("put_setting {key}: {e}"))?;
     }
@@ -47,11 +48,7 @@ pub async fn sample_posts<S: UserStore + PostStore + SettingsStore + TaxonomySto
 ) -> Result<usize, String> {
     sample_settings(db).await?;
     let src = SampleSource::get();
-    let posts = src
-        .posts(Filter::All, 0, usize::MAX)
-        .await
-        .map_err(|e| e.to_string())?
-        .posts;
+    let posts = src.all_posts().to_vec();
     let owner = db
         .create_user(NewUser {
             login: "sample".to_owned(),

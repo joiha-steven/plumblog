@@ -30,7 +30,7 @@ impl<S: ReaderSource> Pages<'_, S> {
         s: &'m Settings,
         lang: Option<&'m str>,
         paths: &'m [String; 3],
-        newest: Option<i64>,
+        updated: Option<i64>,
     ) -> FeedMeta<'m> {
         FeedMeta {
             title: &s.title,
@@ -42,9 +42,17 @@ impl<S: ReaderSource> Pages<'_, S> {
             rss_path: &paths[1],
             json_path: &paths[2],
             author: self.site.author.as_deref(),
-            // No site clock exists: the newest post dates the feed (a fixed date, so the same
-            // content version always gives the same bytes), the settings' date when empty.
-            updated: newest.unwrap_or(s.updated_at),
+            updated,
+        }
+    }
+
+    /// The feed's date: its newest post, else the site's last real change (its newest setting
+    /// write, one query), else none: the store has no site clock, and 1970 is not a date the
+    /// site had. Fixed per content version, so cached bytes never drift.
+    async fn feed_date(&self, newest: Option<i64>) -> std::result::Result<Option<i64>, String> {
+        match newest {
+            Some(t) => Ok(Some(t)),
+            None => self.src.settings_updated().await.map_err(err),
         }
     }
 
@@ -71,7 +79,10 @@ impl<S: ReaderSource> Pages<'_, S> {
         let refs: Vec<&Post> = posts.iter().collect();
         let paths =
             [FeedFormat::Atom, FeedFormat::Rss, FeedFormat::Json].map(|f| routes::feed(lang, f));
-        let m = self.meta(s, lang, &paths, stored.first().map(|p| p.published_at));
+        let updated = self
+            .feed_date(stored.first().map(|p| p.published_at))
+            .await?;
+        let m = self.meta(s, lang, &paths, updated);
         Ok(Some(match format {
             FeedFormat::Atom => feeds::atom(&m, &refs),
             FeedFormat::Rss => feeds::rss(&m, &refs),
@@ -87,11 +98,8 @@ impl<S: ReaderSource> Pages<'_, S> {
         let url = |p: &SitemapPost| routes::post_in(&p.lang, &s.lang, &p.slug);
         let mut urls = vec![SitemapUrl {
             path: self.site.home_url.clone(),
-            lastmod: posts
-                .iter()
-                .map(|p| p.updated_at)
-                .max()
-                .or(Some(s.updated_at)),
+            // None on a site with no posts: no 1970 date.
+            lastmod: posts.iter().map(|p| p.updated_at).max(),
             alternates: Vec::new(),
         }];
         let alternates = sitemap_alternates(&posts, &s.lang);
@@ -131,9 +139,11 @@ impl<S: ReaderSource> Pages<'_, S> {
         let paths =
             [FeedFormat::Atom, FeedFormat::Rss, FeedFormat::Json].map(|f| routes::feed(None, f));
         let heading = core_text(&s.lang, keys::LLMS_POSTS);
-        let newest = slice.posts.first().map(|p| p.published_at);
+        let updated = self
+            .feed_date(slice.posts.first().map(|p| p.published_at))
+            .await?;
         Ok(feeds::llms(
-            &self.meta(s, None, &paths, newest),
+            &self.meta(s, None, &paths, updated),
             &heading,
             &refs,
         ))

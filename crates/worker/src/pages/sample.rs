@@ -62,6 +62,11 @@ impl SampleSource {
         Self { posts }
     }
 
+    /// Every sample post in every language, pinned first (for `/__seed` and fixtures).
+    pub fn all_posts(&self) -> &[StoredPost] {
+        &self.posts
+    }
+
     fn by_date(&self) -> Vec<&StoredPost> {
         let mut all: Vec<&StoredPost> = self.posts.iter().collect();
         all.sort_by_key(|p| std::cmp::Reverse(p.published_at));
@@ -128,7 +133,7 @@ fn to_post(p: &SamplePost) -> StoredPost {
 }
 
 /// `YYYY-MM-DD` at noon UTC (noon keeps the calendar day in every time zone a reader is in).
-fn unix_from_date(date: &str) -> i64 {
+pub(super) fn unix_from_date(date: &str) -> i64 {
     let mut parts = date.split('-').map(|p| p.parse::<i64>().unwrap_or(1));
     let (y, m, d) = (
         parts.next().unwrap_or(1970),
@@ -176,18 +181,16 @@ impl ReaderSource for SampleSource {
                 .collect(),
             per_page: SAMPLE_SITE.per_page,
             origin: (!SAMPLE_SITE.origin.is_empty()).then(|| SAMPLE_SITE.origin.to_owned()),
-            // The site's own date, moved forward by posts; never epoch 0 on an empty site.
-            updated_at: self
-                .posts
-                .iter()
-                .map(|p| p.published_at)
-                .fold(unix_from_date(SAMPLE_SITE.updated), i64::max),
         })
+    }
+
+    async fn settings_updated(&self) -> Result<Option<i64>> {
+        Ok(Some(unix_from_date(SAMPLE_SITE.updated)))
     }
 
     async fn posts(&self, filter: Filter<'_>, offset: usize, limit: usize) -> Result<Slice> {
         let matching: Vec<&StoredPost> = match filter {
-            Filter::All => self.posts.iter().collect(),
+            Filter::Home(l) => self.posts.iter().filter(|p| p.lang == l).collect(),
             // Lists other than home are by date only; pinning is a home page feature.
             Filter::Tag(t) => self
                 .by_date()

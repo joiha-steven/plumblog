@@ -47,14 +47,12 @@ pub struct Settings {
     /// Public origin (`https://example.com`) for canonical URLs, feeds and the sitemap.
     /// Production must set it: otherwise the request's Host header decides public URLs.
     pub origin: Option<String>,
-    /// Feed and sitemap date for a site with no posts. The store has no site clock, so a
-    /// stored site leaves it 0 and feeds use their newest post instead.
-    pub updated_at: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Filter<'a> {
-    All,
+    /// One language, pinned first, then by date: the home page.
+    Home(&'a str),
     Tag(&'a Tag),
     Year(i32),
     /// One language, newest first (feeds).
@@ -89,6 +87,9 @@ pub struct Neighbours {
 /// The content version comes from the store (`db::ExtSource`), not from here.
 pub trait ReaderSource {
     async fn settings(&self) -> Result<Settings>;
+    /// Unix seconds the site last changed (its newest setting write), for a feed with no
+    /// posts; `None` when it has no settings at all. 1 query.
+    async fn settings_updated(&self) -> Result<Option<i64>>;
     /// Published posts, pinned first, then newest first.
     async fn posts(&self, filter: Filter<'_>, offset: usize, limit: usize) -> Result<Slice>;
     /// The published post at `/<lang>/<slug>` with its neighbours and translations.

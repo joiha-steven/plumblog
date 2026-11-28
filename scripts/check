@@ -75,6 +75,7 @@ external_allowlist='
 worker   worker                 # the Cloudflare runtime; the only crate that does I/O
 worker   idna_adapter           # pins the IDNA back end of url, for size (see Cargo.toml)
 worker   roxmltree              # tests only: feeds and sitemap parse as real XML
+worker   rusqlite               # tests only: EXPLAIN QUERY PLAN of every reader query
 cli      clap                   # argument parsing for the `blog` binary
 cli      ureq                   # blocking HTTPS to the Cloudflare REST API (setup, deploy)
 cli      serde                  # typed Cloudflare API responses

@@ -87,7 +87,6 @@ pub fn parse_settings(rows: &[(String, String)]) -> Settings {
         languages,
         per_page,
         origin: text(ORIGIN_KEY).filter(|o| !o.is_empty()),
-        updated_at: 0,
     }
 }
 
@@ -198,10 +197,19 @@ impl<S: SettingsStore + ReaderStore + TaxonomyStore> ReaderSource for Db<'_, S> 
         Ok(parse_settings(&self.0.all_settings().await?))
     }
 
+    // 1 query.
+    async fn settings_updated(&self) -> Result<Option<i64>> {
+        Ok(self
+            .0
+            .settings_updated_at()
+            .await?
+            .map(|ms| ms.div_euclid(1000)))
+    }
+
     // 2 queries (count, rows); 1 when the page is past the end or the offset cap.
     async fn posts(&self, filter: Filter<'_>, offset: usize, limit: usize) -> Result<Slice> {
         let f = match filter {
-            Filter::All => ReaderFilter::All,
+            Filter::Home(l) => ReaderFilter::Home(l),
             Filter::Tag(t) => ReaderFilter::Tag(t.id),
             Filter::Year(y) => ReaderFilter::Year(y),
             Filter::Lang(l) => ReaderFilter::Lang(l),

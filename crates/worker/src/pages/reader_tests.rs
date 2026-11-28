@@ -155,3 +155,90 @@ fn a_static_page_shows_no_comment_form() {
         "the comment target refuses pages"
     );
 }
+
+/// Page data from the store, but a comment read is a bug: a static page must not make one.
+struct NoComments<'a>(Db<'a, MemoryStore>);
+
+impl super::db::ExtSource for NoComments<'_> {
+    async fn content_version(&self) -> Result<u64, String> {
+        self.0.content_version().await
+    }
+    async fn theme_options(&self, theme: &str) -> Result<Vec<(String, String)>, String> {
+        self.0.theme_options(theme).await
+    }
+    async fn enabled_plugins(&self) -> Result<Vec<(String, Vec<(String, String)>)>, String> {
+        self.0.enabled_plugins().await
+    }
+    fn comments(
+        &self,
+        post: &super::source::StoredPost,
+        _: &str,
+    ) -> impl Future<Output = Result<Option<plumblog_render::Comments>, String>> {
+        std::future::ready(Err(format!("comments read for {}", post.slug)))
+    }
+}
+
+#[test]
+fn a_static_page_reads_no_comments_and_stays_cacheable() {
+    let db = seeded();
+    run(db.put_setting("comments.enabled", "true", 1)).unwrap();
+    commentable(&db, PostKind::Page, "about");
+    commentable(&db, PostKind::Post, "a-post");
+    let ext = NoComments(Db(&db));
+    let cacheable = |path: &str| match run(render(&Db(&db), &ext, &Db(&db), path, "")).unwrap() {
+        Outcome::Page {
+            status: 200,
+            cacheable,
+            ..
+        } => cacheable,
+        other => panic!("{path}: {other:?}"),
+    };
+    assert!(cacheable("/about"), "no comment read, so a complete page");
+    assert!(
+        !cacheable("/a-post"),
+        "a post does read them (and this read fails)"
+    );
+}
+
+#[test]
+fn home_pages_and_404_suggestions_show_the_default_language_only() {
+    let db = seeded();
+    // The vi post is the oldest, so it would be on the last page if languages were mixed.
+    for path in ["/", "/page/2", "/nope"] {
+        let (_, html) = get(&db, path);
+        assert!(
+            !html.contains("bai-viet-dau-tien"),
+            "{path} lists a vi post"
+        );
+        assert!(html.contains("href=\"/"), "{path}");
+    }
+    assert!(
+        get(&db, "/page/2").1.contains("/first-post"),
+        "the oldest en post is last"
+    );
+    assert_eq!(get(&db, "/page/3").0, 404, "9 en posts at 5 per page");
+}
+
+#[test]
+fn an_empty_feed_is_dated_by_a_real_time_or_not_at_all() {
+    let db = MemoryStore::default();
+    for path in ["/feed.xml", "/rss.xml", "/sitemap.xml"] {
+        let body = get(&db, path).1;
+        assert!(!body.contains("1970"), "{path}");
+        assert!(
+            !body.contains("<updated>")
+                && !body.contains("lastBuildDate")
+                && !body.contains("<lastmod>"),
+            "{path} states a date the site never had: {body}"
+        );
+    }
+    // A setting write is a time the site really has (ms).
+    run(db.put_setting("site_title", "\"T\"", 1_790_942_400_000)).unwrap();
+    assert!(
+        get(&db, "/feed.xml")
+            .1
+            .contains("<updated>2026-10-02T12:00:00Z</updated>")
+    );
+    assert!(get(&db, "/rss.xml").1.contains("<lastBuildDate>"));
+    assert!(!get(&db, "/sitemap.xml").1.contains("<lastmod>"));
+}
