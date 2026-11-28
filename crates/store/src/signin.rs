@@ -65,6 +65,11 @@ pub const TURNSTILE_SITE_KEY: &str = "turnstile_site_key";
 /// absent, the API falls back to the request's own origin and logs `settings.origin_missing`.
 pub const ORIGIN_KEY: &str = "origin";
 
+/// Settings key holding the site's default language (a JSON string, `vi`): the language of the
+/// reader site and the auth pages. `blog setup` writes it once, never over an existing value.
+/// The reader's own constant (`SITE_LANG_KEY`) must name the same key; a worker test checks it.
+pub const SITE_LANG_KEY: &str = "site_lang";
+
 /// Settings that must never leave the Worker (API responses, theme data, exports).
 pub const INTERNAL_SETTING_KEYS: &[&str] = &[
     SETUP_CODE_HASH_KEY,
@@ -201,6 +206,10 @@ pub trait SetupStore {
     /// the stored value, in one atomic write: two first visitors racing both get the same
     /// id, so a password stretched with it stays valid. Never overwrites. No version bump.
     async fn ensure_site_id(&self, value_json: &str, now: i64) -> Result<String>;
+    /// Whether a setup code could still create the first owner as far as users go: true only
+    /// while no user row exists (disabled or demoted ones count, exactly as in
+    /// [`Self::create_first_owner`]). One read, no code involved; never writes.
+    async fn setup_open(&self) -> Result<bool>;
     /// Writes [`SETUP_CODE_HASH_KEY`] and [`SETUP_CODE_EXPIRES_KEY`] together, replacing any
     /// earlier code. No version bump (readers never see them).
     async fn put_setup_code(&self, code_hash: &str, expires_at: i64, now: i64) -> Result<()>;

@@ -279,6 +279,10 @@ impl SetupStore for MemoryStore {
         })
     }
 
+    async fn setup_open(&self) -> Result<bool> {
+        Ok(self.read(|s| s.users.is_empty()))
+    }
+
     async fn create_first_owner(&self, code_hash: &str, user: NewUser, now: i64) -> Result<UserId> {
         self.write(|s| {
             let code_ok = s

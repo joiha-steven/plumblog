@@ -9,7 +9,12 @@ import { startWorker } from "./harness.mjs";
 
 let worker;
 before(async () => {
-  worker = await startWorker();
+  // An owner exists, so a signed-out visit means "sign in": with no user row the sign-in page
+  // sends the visitor to /admin/setup instead (`setup_required`, tested in auth.test.mjs).
+  const T = Date.now();
+  worker = await startWorker({
+    seedSql: `INSERT INTO users (id, login, slug, display_name, role, password_hash, disabled_at, created_at, updated_at) VALUES (1, 'olga', 'olga', 'Olga', 'owner', NULL, NULL, ${T}, ${T});`,
+  });
 });
 after(async () => {
   await worker?.stop();
@@ -187,6 +192,20 @@ test("signed out, the client runs under the CSP and sends the writer to a plain 
     assert.deepEqual(problems, []);
   } finally {
     await browser.close();
+  }
+});
+
+test("a site with no users sends /admin/signin to /admin/setup, in a real browser", async () => {
+  const empty = await startWorker({});
+  const browser = await chromium.launch({ channel: "chrome", headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, locale: "en-US" });
+    await page.goto(`${empty.url}/admin/signin`, { waitUntil: "networkidle" });
+    await page.waitForURL(/\/admin\/setup$/);
+    assert.equal(new URL(page.url()).pathname, "/admin/setup");
+  } finally {
+    await browser.close();
+    await empty.stop();
   }
 });
 
