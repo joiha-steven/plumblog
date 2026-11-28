@@ -155,6 +155,7 @@ pub fn media(key: &str, created_at: i64) -> NewMedia {
         variants_json: "{}".to_owned(),
         uploaded_by: None,
         created_at,
+        sha256: None,
     }
 }
 

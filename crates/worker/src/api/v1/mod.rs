@@ -20,7 +20,7 @@ use worker::Method;
 
 use super::body::{Out, object, quote};
 use super::{Ctx, Principal, Reply};
-pub use input::{Input, Nullable};
+pub use input::{Input, Nullable, write_json};
 
 pub const PREFIX: &str = "/api/v1/";
 
@@ -51,7 +51,7 @@ pub fn raw_body(m: &Method, path: &str) -> bool {
         .is_some_and(|(r, _)| r.body == Body::Original)
 }
 
-fn access(p: &Principal, route: &Route) -> Result<()> {
+pub(super) fn access(p: &Principal, route: &Route) -> Result<()> {
     match route.access {
         Access::Read => p.require_read()?,
         Access::Require(perm) => p.require(perm)?,
@@ -169,7 +169,7 @@ pub async fn dispatch(
     }
 }
 
-fn access_text(a: Access) -> &'static str {
+pub(super) fn access_text(a: Access) -> &'static str {
     match a {
         Access::Read => "read",
         Access::Require(p) => p.as_str(),
@@ -209,6 +209,16 @@ fn route_json(r: &Route) -> String {
             "variants",
             r.variants
                 .map_or(Out::Null, |v| Out::Str(v.as_str().to_owned())),
+        ),
+        (
+            "dedupe",
+            r.dedupe.map_or(Out::Null, |d| {
+                Out::Raw(object(&[
+                    ("by", Out::Str(d.as_str().to_owned())),
+                    ("field", Out::Str(d.field().to_owned())),
+                    ("status", Out::Int(i64::from(d.status()))),
+                ]))
+            }),
         ),
         ("status", Out::Int(i64::from(r.status))),
         ("response", Out::Str(r.response.to_owned())),

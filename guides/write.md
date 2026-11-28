@@ -10,8 +10,7 @@ blog guide api
 
 ## Token and requests
 
-The owner creates a token while signed in at `<origin>/admin` (no admin screen for it yet):
-in the browser console run
+The owner creates a token while signed in at `<origin>/admin` (no admin screen yet), in the console:
 `await (await fetch('/api/auth/tokens', {method: 'POST', body: JSON.stringify({name: 'agent', scope: 'writer'})})).json()`.
 Scopes: `read` (look only), `writer` (posts, media), `owner` (also settings, themes, plugins).
 The answer shows the token once; keep it in an environment variable, never in a file in git.
@@ -48,11 +47,12 @@ the body at `##`.
 
 ## Media
 
-Upload the original bytes: `POST /api/v1/media?name=heron.jpg&mime=image/jpeg&width=1600&height=1067&alt=...`
-with `curl --data-binary @heron.jpg`. `width` and `height` must be the file's own (read them,
-never guess); AVIF, WebP, JPEG, PNG or GIF, at most 20 MiB. Use the answer's `src` in Markdown.
-Always write `alt` (set it later with `PATCH /api/v1/media/{id}`). A writer deletes only their
-own uploads (the owner any); media used by a post cannot be deleted, the 409 lists the posts.
+Upload the original bytes: `POST /api/v1/media?name=heron.jpg&mime=image/jpeg&width=1600&height=1067&sha256=...&alt=...`
+with `curl --data-binary @heron.jpg`. `width`, `height`: the file's own (read them, never guess);
+AVIF, WebP, JPEG, PNG or GIF, at most 20 MiB. Use the answer's `src` in Markdown. Always send
+`sha256`, the lowercase hex SHA-256 of the bytes you send: if it matches one of your items, that
+item is the answer (200, unchanged, these bytes not checked); else R2 checks it (wrong: 400).
+Always write `alt` (later: `PATCH /api/v1/media/{id}`). Delete own uploads only (owner: any); used: 409.
 
 ## Not built yet
 

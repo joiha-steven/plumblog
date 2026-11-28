@@ -20,6 +20,7 @@ Guides are embedded in the binary, so they always match the version you are runn
 |---|---|
 | Create the site, deploy, roll back, first owner | `blog guide setup` |
 | Write, edit, publish posts and media; API token | `blog guide write` |
+| Connect an AI client over MCP | `blog guide connect` |
 | Site title, languages, post URLs | `blog guide site` |
 | Translate posts | `blog guide translate` |
 | Change the look | `blog guide theme` |

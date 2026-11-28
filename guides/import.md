@@ -27,8 +27,9 @@ Images: from the export's uploads folder, or download the URLs the posts use.
    problem (missing image, slug clash, unsupported block), and show the owner before writing.
 2. Tags and series: create each once (`POST /api/v1/tags` with `slug`, `name`), keep a map
    from the old name to the new id.
-3. Images: upload each file once (`POST /api/v1/media`), keep a map from every old URL
-   (full size and resized variants) to the answer's `src`.
+3. Images: upload each file (`POST /api/v1/media`) with `sha256`, the lowercase hex SHA-256
+   of its bytes, and keep a map from every old URL (full size and resized variants) to the
+   answer's `src`.
 4. Posts: convert the body to Markdown, rewrite image and internal links with the maps, then
    `POST /api/v1/posts` with the old `slug` (folded to `a-z0-9-`), `lang`, `title`,
    `excerpt`, `tags`, `kind`, and status: published posts as `published` with the original
@@ -47,5 +48,6 @@ Images: from the export's uploads folder, or download the URLs the posts use.
 - The title is the post's top heading: shift body headings so they start at `##`.
 - Comments, authors and users are not imported (no API route); say so in the report.
 
-Re-running is safe only if you skip posts whose `(lang, slug)` already exists (409 on `slug`)
-and reuse media from your log: a repeated upload makes a second copy.
+Re-running is safe only if you skip posts whose `(lang, slug)` already exists (409 on `slug`).
+Media is safe to re-send with `sha256`: the same bytes from the same user answer the first
+item (200) instead of a second copy; without `sha256` a repeated upload makes a second copy.
