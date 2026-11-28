@@ -100,6 +100,7 @@ cases! {
     listing::post_paging_series_asc,
     listing::post_filters,
     listing::post_counts_by_status,
+    listing::probe_row_past_max_page,
     listing::limits_cap_at_max_page,
     reader::reader_posts_published_only,
     reader::reader_posts_offset_and_count,

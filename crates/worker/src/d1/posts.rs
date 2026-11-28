@@ -9,7 +9,9 @@ use plumblog_store::{
 };
 use worker::wasm_bindgen::JsValue;
 
-use super::{D1Store, Row, bound, bump_if, flag, int, invalid, limit, not_found, storage, text};
+use super::{
+    D1Store, Row, bound, bump_if, flag, int, invalid, limit, not_found, probe_limit, storage, text,
+};
 
 /// Every `posts` column, in [`read_post`] order, with tag ids as one text column so a post
 /// and its tags are one query.
@@ -193,7 +195,7 @@ fn listing_sql(q: &PostQuery) -> Result<(String, Vec<JsValue>)> {
     } else {
         format!("WHERE {}", wh.join(" AND "))
     };
-    params.push(limit(q.limit));
+    params.push(probe_limit(q.limit));
     Ok((format!("{where_sql} ORDER BY {order} LIMIT ?"), params))
 }
 

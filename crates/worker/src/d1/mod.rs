@@ -307,6 +307,11 @@ pub(crate) fn limit(n: u32) -> JsValue {
     JsValue::from(n.min(plumblog_store::MAX_PAGE))
 }
 
+/// `LIMIT` value for a list paged by a probe row (see `plumblog_store::probe_len`).
+pub(crate) fn probe_limit(n: u32) -> JsValue {
+    JsValue::from(n.min(plumblog_store::MAX_PAGE + 1))
+}
+
 /// How many times a read-then-write method retries when a guard fires: each retry re-reads,
 /// so it either succeeds on fresh data or returns the error that data calls for.
 pub(crate) const GUARD_RETRIES: usize = 3;

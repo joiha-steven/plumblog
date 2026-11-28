@@ -3,7 +3,7 @@ use plumblog_store::{Media, MediaQuery, MediaStore, NewMedia};
 
 use super::{
     D1Store, Failure, GUARD_RETRIES, Row, bound, bump_if, changed_concurrently, flag, guard, int,
-    limit, not_found, opt_int, text,
+    not_found, opt_int, probe_limit, text,
 };
 
 const MEDIA_COLS: &str =
@@ -81,7 +81,7 @@ impl MediaStore for D1Store {
                 flag(q.missing_alt_only),
                 at,
                 id,
-                limit(q.limit),
+                probe_limit(q.limit),
                 flag(q.unused_only),
             ],
         )?;
