@@ -52,7 +52,7 @@ one from newer code (`restore.backup_newer`: update `blog` first) or a cut one (
 counts). It saves a bookmark, imports (ids used since the backup are never handed out again),
 reruns missing migrations and moves the cache version past every value used before. Fewer
 rows than the file in a table the site never prunes is `restore.count_mismatch`; if that or a
-migration fails, give the owner the undo command it prints (deploy names the same one).
+migration fails, give the owner the undo command it prints (deploy names the same one). Last, it signs everyone out and revokes every token, invite and code; if that fails or a run dies, run `blog restore --reset-credentials --yes`. The owner signs in again, makes new tokens, redoes password, passkey and user changes since the backup, and checks webhooks. Passwords and passkeys are as they were then, passkey counters too: sign in once with each passkey, and remove any the owner does not recognise.
 
 ## Not covered yet
 
