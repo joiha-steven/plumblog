@@ -20,6 +20,7 @@ newer_posts = "Bài mới hơn"
 page_title = "{title} - {site}"
 reading_time = "{minutes} phút đọc"
 tag = "#{name}"
+series = "Loạt bài:"
 posts = "Bài viết"
 previous = "Bài trước"
 next = "Bài sau"
@@ -80,6 +81,10 @@ month_12 = "thg 12"
 
 [tag]
 title = "#{name}"
+
+[series]
+earlier_posts = "Các phần trước"
+later_posts = "Các phần sau"
 
 [archive]
 title = "Bài viết năm {year}"

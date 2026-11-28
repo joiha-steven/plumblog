@@ -2,7 +2,8 @@
 //! rendering and for `/__seed`, which copies it into the store. The Worker never serves it.
 
 use super::source::{
-    Filter, Neighbours, ReaderSource, Settings, SitemapPost, Slice, StoredPost, Tag,
+    Filter, Neighbours, ReaderSource, SeriesInfo, Settings, SitemapPost, Slice, StoredPost, Tag,
+    TaxonPage,
 };
 use plumblog_markdown::Options;
 use plumblog_model::{PostId, Result, TagId};
@@ -130,6 +131,7 @@ fn to_post(p: &SamplePost) -> StoredPost {
             })
             .collect(),
         translations: Vec::new(),
+        series: None,
     }
 }
 
@@ -194,11 +196,13 @@ impl ReaderSource for SampleSource {
         let matching: Vec<&StoredPost> = match filter {
             Filter::Home(l) => self.posts.iter().filter(|p| p.lang == l).collect(),
             // Lists other than home are by date only; pinning is a home page feature.
-            Filter::Tag(t) => self
+            Filter::Tag(t, l) => self
                 .by_date()
                 .into_iter()
-                .filter(|p| p.tags.iter().any(|x| x.slug == t.slug))
+                .filter(|p| p.lang == l && p.tags.iter().any(|x| x.slug == t.slug))
                 .collect(),
+            // The samples have no series.
+            Filter::Series(..) => Vec::new(),
             Filter::Year(y) => self
                 .by_date()
                 .into_iter()
@@ -272,15 +276,50 @@ impl ReaderSource for SampleSource {
             .cloned())
     }
 
-    async fn tags(&self) -> Result<Vec<Tag>> {
-        let mut tags: Vec<Tag> = self
-            .posts
+    async fn series(&self, _slug: &str) -> Result<Option<SeriesInfo>> {
+        Ok(None)
+    }
+
+    async fn tag_pages(&self, langs: &[String]) -> Result<Vec<TaxonPage>> {
+        let mut pages: Vec<TaxonPage> = Vec::new();
+        for l in langs {
+            for t in self
+                .posts
+                .iter()
+                .filter(|p| p.lang == *l)
+                .flat_map(|p| &p.tags)
+            {
+                if !pages.iter().any(|x| x.slug == t.slug && x.lang == *l) {
+                    pages.push(TaxonPage {
+                        slug: t.slug.clone(),
+                        name: t.name.clone(),
+                        lang: l.clone(),
+                    });
+                }
+            }
+        }
+        pages.sort_by(|a, b| a.slug.cmp(&b.slug));
+        Ok(pages)
+    }
+
+    async fn series_pages(&self, _langs: &[String]) -> Result<Vec<TaxonPage>> {
+        Ok(Vec::new())
+    }
+
+    async fn tag_langs(&self, tag: &Tag, langs: &[String]) -> Result<Vec<String>> {
+        Ok(langs
             .iter()
-            .flat_map(|p| p.tags.iter().cloned())
-            .collect();
-        tags.sort_by(|a, b| a.slug.cmp(&b.slug));
-        tags.dedup_by(|a, b| a.slug == b.slug);
-        Ok(tags)
+            .filter(|l| {
+                self.posts
+                    .iter()
+                    .any(|p| p.lang == **l && p.tags.iter().any(|x| x.slug == tag.slug))
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn series_langs(&self, _series: &SeriesInfo, _langs: &[String]) -> Result<Vec<String>> {
+        Ok(Vec::new())
     }
 
     async fn years(&self) -> Result<Vec<i32>> {

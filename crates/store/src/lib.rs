@@ -48,8 +48,8 @@ pub use posts::{
 };
 pub use reader::{
     READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderCover, ReaderFilter, ReaderLink, ReaderNeighbours,
-    ReaderPage, ReaderPost, ReaderRow, ReaderSitemapRow, ReaderStore, ReaderTag, year_bounds,
-    year_of,
+    ReaderPage, ReaderPost, ReaderRow, ReaderSeries, ReaderSitemapRow, ReaderStore, ReaderTag,
+    ReaderTaxonPage, year_bounds, year_of,
 };
 pub use redirects::{Redirect, RedirectStore};
 pub use settings::{OptionOwner, PluginState, SettingsStore};
