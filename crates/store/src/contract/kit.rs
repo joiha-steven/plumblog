@@ -2,6 +2,9 @@
 //! panicking, because a panic in wasm aborts the Worker that runs the suite on D1.
 
 use std::fmt::Debug;
+use std::future::{Future, poll_fn};
+use std::pin::pin;
+use std::task::Poll;
 
 use plumblog_model::{ErrorCode, PostId, RequestId, Result, Role, UserId};
 use plumblog_syslog::{Event, EventKind};
@@ -118,6 +121,7 @@ pub fn post(author: UserId, lang: &str, slug: &str, status: PostStatus) -> SaveP
         media_ids: Vec::new(),
         search_text: String::new(),
         revision: None,
+        client_id: None,
         now: T0,
     }
 }
@@ -173,4 +177,31 @@ pub fn asc<T: Ord + Copy>(ids: &[T]) -> Vec<T> {
     let mut v = ids.to_vec();
     v.sort_unstable();
     v
+}
+
+/// Runs `a` and `b` at once (both polled until both finish), so two store calls can race; a
+/// store without real concurrency (memory) simply runs them one after the other.
+pub async fn both<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
+    let (mut a, mut b) = (pin!(a), pin!(b));
+    let (mut ra, mut rb) = (None, None);
+    poll_fn(|cx| {
+        if ra.is_none()
+            && let Poll::Ready(v) = a.as_mut().poll(cx)
+        {
+            ra = Some(v);
+        }
+        if rb.is_none()
+            && let Poll::Ready(v) = b.as_mut().poll(cx)
+        {
+            rb = Some(v);
+        }
+        if ra.is_some()
+            && rb.is_some()
+            && let (Some(x), Some(y)) = (ra.take(), rb.take())
+        {
+            return Poll::Ready((x, y));
+        }
+        Poll::Pending
+    })
+    .await
 }

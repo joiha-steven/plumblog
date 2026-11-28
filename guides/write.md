@@ -6,8 +6,7 @@ Create, edit, publish and delete posts and media through the HTTP API, and how t
 blog guide api
 ```
 
-`blog guide api` is the full route reference (fields, access, answers); this guide does not
-repeat it. Other guides use the conventions below.
+`blog guide api` is the full route reference (fields, access, answers); this guide does not repeat it. Other guides use the conventions below.
 
 ## Token and requests
 
@@ -25,16 +24,17 @@ The answer shows the token once; keep it in an environment variable, never in a 
 
 - Create: `POST /api/v1/posts` with `lang`, `slug`, `title`, `markdown`; `status` is `draft`
   (default), `scheduled` (needs a future `published_at`) or `published` (`published_at`
-  defaults to now; a past time is allowed). `kind`: `post` (default) or `page`.
+  defaults to now; a past time is allowed). `kind`: `post` (default) or `page`. Add a new
+  `client_id` (a UUID) per post to retry a create with no answer: it returns the same post.
+  Never reuse a `client_id` for another post: a repeated one returns the existing post whatever the body.
 - Slug: `a-z`, `0-9` and inner `-`, 1-100 characters. Never use `page`, `tag`, `archive`,
   `search`, `theme`, `admin` or `api`: the API saves them but readers can never open them.
   One `(lang, slug)` per site (409 on `slug`).
 - Edit: `GET /api/v1/posts/{id}` for the full post and its `version`, then
   `PATCH /api/v1/posts/{id}` with only the changed fields and `expected_version`. A 409
-  `store.conflict` means someone else saved: read again, merge, never overwrite.
+  `store.conflict` means someone else saved: read again, merge, never overwrite (a retried PATCH that already landed gets 200).
 - Tags and series are ids: find or create them first (`/api/v1/tags`, `/api/v1/series`; lists are paged, follow `next_cursor`).
-- Delete: `POST /api/v1/posts/{id}/trash` (undo with `/restore`); `DELETE` only from the trash
-  and only when the owner asked.
+- Delete: `POST /api/v1/posts/{id}/trash` (undo with `/restore`); `DELETE` only from the trash and only when the owner asked.
 - The answer may carry `warnings` (for example `markdown.math_invalid`): fix and save again.
 
 ## Markdown
