@@ -8,32 +8,53 @@ never backed up. Run commands in the site's folder; see `blog guide setup` for t
 ## What already exists
 
 - **Time Travel**: D1 can return to any minute of the last 7 days (free plan). Every
-  `blog deploy` records a bookmark under `deploys` in `site.local.toml`.
-- **SQL exports**: `blog deploy` writes `backups/<utc>-<database>.sql` (mode 0600, ignored by
-  git) when migrations are pending, or always with `--export`. The database answers no queries
-  while the export runs, so do it when traffic is low.
+  `blog deploy` and `blog backup` records a bookmark in `site.local.toml`.
+- **SQL dumps**: `blog` reads the database page by page and writes
+  `backups/<utc>-<database>.sql` itself (mode 0600, ignored by git); Cloudflare's own export
+  refuses a database with a search index, which every blog has. The site stays up, but every
+  row read counts against D1's daily read limit (5 million on the free plan). The copy is not
+  one instant: its first lines name the bookmark taken just before, its last lines the rows
+  per table. `blog deploy` writes one when migrations are pending, or always with `--export`.
+- **`blog backup`**: a dump without deploying, plus every media file (originals and resized
+  variants) from R2 to `backups/media/<r2 key>`. Long rows go in pieces under D1's limit of
+  100,000 bytes per statement; a row added during the copy brings the rows it points to.
 
 ```sh
-blog deploy --export
+blog backup
 ```
 
-There is no export without a deploy yet; `--export` redeploys the code you already run, which
-is safe. Copy `backups/` somewhere off this machine: it holds password hashes and drafts, so
-keep it private.
+`--no-media` copies only the database; `--out <dir>` picks another folder than `backups/`.
+Media copying resumes: `backups/media/manifest.json` lists each file's size and SHA-256, and a
+re-run fetches only what is missing or changed. Each file is checked against the size the
+database records, and against R2's checksum when it is a plain MD5. A file that fails is not
+saved; the run goes on and ends with exit code 1 (`backup.incomplete`) and a list: run it
+again to retry. A file not in R2 (`backup.object_missing`) also ends with exit code 1; if all
+are missing, suspect the token's R2 permission (`blog guide token`) or the bucket first.
+
+Each run records itself as the site's `last_backup` setting (`at`, `database`, `media`
+counts or null, `complete`) and in `site.local.toml`; only `blog backup` writes it.
+
+Copy `backups/` off this machine and keep it private: it holds password hashes and drafts.
 
 ## Restore
 
+To a Time Travel bookmark (within 7 days), or from a `.sql` file of any age:
+
 ```sh
 blog rollback --db <bookmark> --yes
+blog restore backups/<utc>-<database>.sql --yes
 ```
 
-Overwrites the whole database with its state at the bookmark (within 7 days) and cancels
-running queries. It prints a bookmark that undoes it; keep that line. Ask the owner first.
+Both overwrite the whole database and cancel running queries; ask the owner first, and keep
+the undo command they print. Without `--yes`, `blog restore` only checks the file and prints
+its plan. It refuses a file that is not a blog backup, another site's (`--allow-other-site`),
+one from newer code (`restore.backup_newer`: update `blog` first) or a cut one (no row
+counts). It saves a bookmark, imports (ids used since the backup are never handed out again),
+reruns missing migrations and moves the cache version past every value used before. Fewer
+rows than the file in a table the site never prunes is `restore.count_mismatch`; if that or a
+migration fails, give the owner the undo command it prints (deploy names the same one).
 
 ## Not covered yet
 
-- Media in R2: no route reads an original back, so plumblog cannot copy media yet.
-- Restoring from a `.sql` file older than 7 days: no `blog` command.
-- Recording "last backup" for the admin dashboard: no command or setting yet.
-
-Tell the owner these gaps instead of improvising with other tools.
+Restoring media from `backups/media` has no `blog` command. Tell the owner this gap instead
+of improvising with other tools.

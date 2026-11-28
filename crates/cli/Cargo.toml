@@ -19,7 +19,10 @@ plumblog-i18n.workspace = true
 plumblog-render.workspace = true
 ureq.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# float_roundtrip: the dump reads a REAL from D1's JSON reply and must get its exact bits
+# (crates/cli/src/dump.rs); the default parser may be off by one unit in the last place.
+# Only `blog` turns it on, so the Worker's wasm is unchanged.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 plumblog-auth.workspace = true
 plumblog-store.workspace = true
 # `blog guide api` prints the route table; the deploy and migration entries in the site's system
@@ -32,6 +35,7 @@ toml = { workspace = true, features = ["display", "serde"] }
 # Release signatures and archives (`blog update`, `blog deploy` downloads, `blog-release`).
 ring.workspace = true
 miniz_oxide.workspace = true
+md-5.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true

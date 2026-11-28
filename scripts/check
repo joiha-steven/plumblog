@@ -83,6 +83,7 @@ cli      getrandom              # WEBHOOK_KEY, site id and setup code randomness
 cli      toml                   # site.local.toml (read and write)
 cli      ring                   # Ed25519 release signatures (already linked through rustls)
 cli      miniz_oxide            # DEFLATE for release .tar.gz/.zip (pure Rust)
+cli      md-5                   # MD5 of R2 objects: single-part ETags (`blog backup`, later restore)
 cli      rusqlite               # tests only: the fake D1 runs real SQLite
 markdown unicode-normalization  # NFC before heading ids (pure Rust, no I/O)
 render   minijinja              # theme templates (pure Rust, no I/O)

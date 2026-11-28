@@ -180,6 +180,32 @@ pub fn put_setting(db: &Database, key: &str, value_json: &str, now: i64) -> Resu
         .map(drop)
 }
 
+/// After `blog restore`: above both the restored value and the one before (`?`), so no
+/// version a page was cached under before the restore is used again.
+const BUMP_ABOVE: &str = "UPDATE site SET content_version = \
+     max(content_version, CAST(? AS INTEGER)) + 1 WHERE id = 1";
+
+/// The content version, if the `site` row exists.
+///
+/// # Errors
+/// As [`Database::query`].
+pub fn content_version(db: &Database) -> Result<Option<i64>, ApiError> {
+    Ok(db
+        .rows("SELECT content_version FROM site WHERE id = 1", &[])?
+        .first()
+        .and_then(|r| r.get("content_version"))
+        .and_then(Value::as_i64))
+}
+
+/// The bump of [`put_setting`], but past `at_least` too: a restored database may carry an
+/// older version than the one pages were cached under.
+///
+/// # Errors
+/// As [`Database::query`].
+pub fn bump_content_version_above(db: &Database, at_least: i64) -> Result<(), ApiError> {
+    db.query(BUMP_ABOVE, &[&at_least.to_string()]).map(drop)
+}
+
 /// `delete_setting`'s bump condition and delete (crates/worker/src/d1/settings.rs).
 const BUMP_IF_SETTING: &str = "UPDATE site SET content_version = content_version + 1 \
      WHERE id = 1 AND (EXISTS (SELECT 1 FROM settings WHERE key = ?))";

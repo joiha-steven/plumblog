@@ -986,6 +986,18 @@ pub(crate) fn apply_migrations(
     db: &Database,
     clear_failed: bool,
 ) -> Result<(), Failure> {
+    apply_migrations_undoing_to(run, db, clear_failed, None)
+}
+
+/// [`apply_migrations`], but a failure names `undo` instead of the bookmark taken just before
+/// the migrations: `blog restore` passes its own pre-import bookmark, since the one taken
+/// after its import holds the old backup, and restoring that would lose newer data again.
+pub(crate) fn apply_migrations_undoing_to(
+    run: &mut Run,
+    db: &Database,
+    clear_failed: bool,
+    undo: Option<&str>,
+) -> Result<(), Failure> {
     // A recorded failure means the database may be half migrated: a new bookmark now would
     // capture that state and replace the clean one, so nothing runs until it is restored.
     if let Some(f) = run.state.migrations.failed.clone() {
@@ -1037,13 +1049,15 @@ pub(crate) fn apply_migrations(
         }) => {
             // Record what did apply and the bookmark; no step after this runs, so no
             // settings are written on a database in an unknown state.
+            let taken = bookmark;
+            let bookmark = undo.map_or_else(|| taken.clone(), str::to_string);
             run.update(|s| {
                 for a in applied {
                     if !s.migrations.applied.contains(&a) {
                         s.migrations.applied.push(a);
                     }
                 }
-                s.migrations.last_bookmark = Some(bookmark.clone());
+                s.migrations.last_bookmark = Some(taken.clone());
                 s.migrations.failed = Some(FailedMigration {
                     name: name.clone(),
                     bookmark: bookmark.clone(),

@@ -20,8 +20,9 @@ blog deploy --bundle <dir>
 3. `blog deploy` downloads this version's release bundle once and checks it against the hash
    built into `blog` (`--build` builds in the plumblog repository, `--bundle <dir>` takes a
    folder; a build from source needs one of them). Order:
-   token; a Time Travel bookmark (always) and a SQL export into `backups/` (when migrations
-   are pending, or with `--export`); migrations; static files; a new Worker version; switch;
+   token; a Time Travel bookmark (always) and a SQL dump into `backups/` (when migrations
+   are pending, or with `--export`; read through the query API, so the site stays up and the
+   reads count against D1's daily limit); migrations; static files; a new Worker version; switch;
    cron; check `/healthz` and `/`. If the check fails within 60 s the previous version goes
    back by itself (`deploy.smoke_failed`). Steps are recorded under `deploys` in
    `site.local.toml`.

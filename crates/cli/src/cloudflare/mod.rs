@@ -8,6 +8,6 @@ pub mod client;
 pub mod endpoint;
 pub mod token;
 
-pub use client::{ApiError, ApiErrorKind, Call, Client, CloudflareMessage};
+pub use client::{ApiError, ApiErrorKind, Call, Client, CloudflareMessage, Object};
 pub use endpoint::{Endpoint, Permission};
 pub use token::{Account, ApiToken, Credentials, TokenError, TokenKind, Verified};
