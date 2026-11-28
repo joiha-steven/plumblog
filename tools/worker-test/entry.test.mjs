@@ -95,6 +95,7 @@ describe("embedded theme", () => {
     "/reading-on-screens",
     "/vi/bai-viet-dau-tien",
     "/tag/tools",
+    "/vi/tag/life",
     "/feed.xml",
     "/sitemap.xml",
     "/archive/2025",

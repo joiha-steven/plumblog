@@ -96,6 +96,12 @@ const FRAGILE = themeJson("paper", (f) => ({
   "templates/post.html": f["templates/post.html"].replace("<h1>{{ post.title }}</h1>", "<h1>{{ post.nope.deeper }}</h1>"),
 }));
 
+/** A theme pushed before series pages: it has no templates/series.html. */
+const NO_SERIES = themeJson("paper", (f) => {
+  const { "templates/series.html": _gone, ...rest } = f;
+  return rest;
+});
+
 const seed = [
   `INSERT INTO users (id, login, slug, display_name, role, password_hash, disabled_at, created_at, updated_at) VALUES
     (1, 'olga', 'olga', 'Olga', 'owner', NULL, NULL, ${T}, ${T});`,
@@ -108,6 +114,12 @@ const postSeed = [
   `INSERT INTO posts (kind, translation_group, lang, slug, status, published_at, author_id, title, markdown, html, created_at, updated_at)
     VALUES ('post', 0, 'en', 'real-post', 'published', ${T - 1000}, 1, 'Real post', 'x', '<p>x</p>', ${T}, ${T});`,
   "UPDATE posts SET translation_group = id WHERE slug = 'real-post';",
+].join("\n");
+
+const seriesSeed = [
+  postSeed,
+  "INSERT INTO series (id, slug, title, description) VALUES (1, 'trip', 'The Trip', 'Told in order.');",
+  "UPDATE posts SET series_id = 1, series_position = 1 WHERE slug = 'real-post';",
 ].join("\n");
 
 const put = (w, path, value) =>
@@ -139,6 +151,7 @@ describe("pushed theme", () => {
       overcap: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", OVER_CAP) },
       missing: { vars: { PLUMBLOG_THEME: "ghost" }, assets: assetsWith("other", null) },
       embedded: {},
+      oldtheme: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", NO_SERIES), seedSql: seriesSeed },
       fragile: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", FRAGILE), seedSql: postSeed },
     };
     for (const s of Object.values(setups)) if (s.assets) dirs.push(s.assets);
@@ -169,6 +182,20 @@ describe("pushed theme", () => {
     const log = workers.pushed.log();
     assert.equal(count(log, "theme.pushed_loaded name=paper"), 1, log);
     assert.ok(!log.includes("theme.pushed_invalid") && !log.includes("theme.pushed_missing"), log);
+  });
+
+  test("a pushed theme without series.html shows series pages with the default template, cached", async () => {
+    const w = workers.oldtheme;
+    const res = await fetch(`${w.url}/series/trip`);
+    const html = await res.text();
+    assert.equal(res.status, 200, html);
+    assert.match(html, /<h1 class="list-title">The Trip<\/h1>/);
+    assert.match(html, new RegExp(`--c-accent:light-dark\\(${MARKER_ACCENT},`), "the pushed theme's look");
+    assert.equal(res.headers.get("x-plumblog-theme"), tagOf(NO_SERIES), "served by the pushed theme, not the fallback");
+    assert.match(res.headers.get("cache-control"), /s-maxage/);
+    assert.ok(res.headers.get("etag"), "cacheable like any page");
+    assert.equal((await fetch(`${w.url}/series/trip`)).headers.get("x-plumblog-cache"), "hit");
+    assert.doesNotMatch(w.log(), /theme\.pushed_render_failed|theme\.pushed_invalid/, w.log());
   });
 
   test("option writes are checked against the pushed theme", async () => {

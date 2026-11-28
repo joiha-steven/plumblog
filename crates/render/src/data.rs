@@ -72,6 +72,15 @@ pub struct PageInfo {
     pub origin: String,
 }
 
+/// The series a post belongs to: its page and the post's place in it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SeriesRef {
+    pub name: String,
+    /// The series page in the post's language.
+    pub url: String,
+    pub position: Option<i64>,
+}
+
 /// A published post as the reader site needs it. `body` is the HTML stored on save, so reading
 /// never parses Markdown.
 #[derive(Clone, Debug)]
@@ -90,6 +99,8 @@ pub struct Post {
     pub thumb: Option<Image>,
     /// Other language versions of this post (hreflang, sitemap).
     pub translations: Vec<Alternate>,
+    /// Set on the post page only.
+    pub series: Option<SeriesRef>,
 }
 
 /// What a page shows; picks the template.
@@ -111,6 +122,15 @@ pub enum Body<'a> {
         posts: &'a [&'a Post],
         older_url: Option<String>,
         newer_url: Option<String>,
+    },
+    /// A series page: `series.url` is its first page; `description` may be empty.
+    Series {
+        series: &'a Link,
+        description: &'a str,
+        posts: &'a [&'a Post],
+        /// Reading order: the page before and the page after.
+        prev_url: Option<String>,
+        next_url: Option<String>,
     },
     Archive {
         year: i32,
@@ -214,6 +234,7 @@ pub(crate) struct PostData<'a> {
     /// Click-to-load embed facades are in the post.
     pub has_embed: bool,
     pub tags: &'a [Link],
+    pub series: Option<&'a SeriesRef>,
     pub prev: Option<LinkData<'a>>,
     pub next: Option<LinkData<'a>>,
 }

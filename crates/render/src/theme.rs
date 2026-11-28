@@ -450,9 +450,9 @@ impl Theme {
         self.render_reporting_with(site, page, body, &[])
     }
 
-    /// [`Theme::render_reporting`] for a home page that has language versions:
+    /// [`Theme::render_reporting`] for a home, tag or series page that has language versions:
     /// `home_alternates` (site-relative hreflang set, this page included) go in its head.
-    /// Other pages take theirs from their post and ignore it.
+    /// A post page takes its own from its translations and ignores it.
     ///
     /// # Errors
     /// A template error, with template name and line.
@@ -521,29 +521,7 @@ impl Theme {
                 prev,
                 next,
                 comments,
-            } => {
-                let entry = self.entry(post);
-                let description = entry.excerpt.clone();
-                let data = PostData {
-                    entry,
-                    html: &post.body.html,
-                    has_code: post.body.has_code,
-                    has_math: post.body.has_math,
-                    has_embed: post.body.has_embed,
-                    tags: &post.tags,
-                    prev: link(*prev),
-                    next: link(*next),
-                };
-                let comments = comments.map(|c| self.comments(&post.lang, c));
-                (
-                    PageKind::Post,
-                    description,
-                    ser(PostPage {
-                        post: data,
-                        comments,
-                    }),
-                )
-            }
+            } => self.post_data(post, *prev, *next, *comments),
             Body::Tag {
                 tag,
                 posts,
@@ -559,6 +537,28 @@ impl Theme {
                     newer_url: newer_url.as_deref(),
                 }),
             ),
+            Body::Series {
+                series,
+                description,
+                posts,
+                prev_url,
+                next_url,
+            } => {
+                let data = SeriesData {
+                    series,
+                    description,
+                    posts: entries(posts),
+                    prev_url: prev_url.as_deref(),
+                    next_url: next_url.as_deref(),
+                };
+                // A series' own description is the page's, else the site's.
+                let meta = if description.trim().is_empty() {
+                    site.description.clone()
+                } else {
+                    (*description).to_owned()
+                };
+                (PageKind::Series, meta, ser(data))
+            }
             Body::Archive {
                 year,
                 posts,
@@ -595,6 +595,38 @@ impl Theme {
         }
     }
 
+    /// The post page's template data and meta description.
+    fn post_data(
+        &self,
+        post: &Post,
+        prev: Option<&Post>,
+        next: Option<&Post>,
+        comments: Option<&Comments>,
+    ) -> (PageKind, String, Value) {
+        let entry = self.entry(post);
+        let description = entry.excerpt.clone();
+        let data = PostData {
+            entry,
+            html: &post.body.html,
+            has_code: post.body.has_code,
+            has_math: post.body.has_math,
+            has_embed: post.body.has_embed,
+            tags: &post.tags,
+            series: post.series.as_ref(),
+            prev: link(prev),
+            next: link(next),
+        };
+        let comments = comments.map(|c| self.comments(&post.lang, c));
+        (
+            PageKind::Post,
+            description,
+            ser(PostPage {
+                post: data,
+                comments,
+            }),
+        )
+    }
+
     /// Renders `kind`'s template with a fresh missing-key collector for this render only.
     fn run(&self, kind: PageKind, ctx: Value, data: Value) -> Result<Report, ThemeError> {
         let missing = Arc::new(RenderMissing::default());
@@ -628,6 +660,7 @@ impl Theme {
             Body::Tag { tag, .. } => {
                 Some(self.text(lang, keys::TAG_TITLE, &[("name", tag.name.clone())]))
             }
+            Body::Series { series, .. } => Some(series.name.clone()),
             Body::Archive { year, .. } => {
                 Some(self.text(lang, keys::ARCHIVE_TITLE, &[("year", year.to_string())]))
             }
@@ -770,6 +803,15 @@ struct TagData<'a> {
     posts: Vec<EntryData<'a>>,
     older_url: Option<&'a str>,
     newer_url: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct SeriesData<'a> {
+    series: &'a crate::Link,
+    description: &'a str,
+    posts: Vec<EntryData<'a>>,
+    prev_url: Option<&'a str>,
+    next_url: Option<&'a str>,
 }
 
 #[derive(Serialize)]

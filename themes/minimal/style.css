@@ -185,6 +185,8 @@ td[align="right"], th[align="right"] { text-align: right; }
 /* Post */
 .post-head { margin-bottom: 2.75em; }
 .post-head .meta { margin-bottom: 1em; }
+.series { margin: 0 0 .5em; font-size: var(--t-sm); color: var(--c-text-2); }
+.series a { display: inline-block; min-width: var(--tap); padding-block: .7em; } /* finger-sized */
 .standfirst { margin: .7em 0 0; font-size: var(--t-md); line-height: 1.55; color: var(--c-text-2); }
 /* Cover runs wider than the text on large screens. */
 .cover { margin: 2.25em 0 0; }
@@ -268,6 +270,7 @@ textarea.field { resize: vertical; line-height: 1.55; }
 .search-title { margin: 0 0 .6em; }
 /* Tag, archive and 404 pages: a title over the style's post list. */
 .list-title { margin: 0 0 1em; }
+.list-desc { margin: -.4em 0 1.6em; font-size: var(--t-md); line-height: 1.55; color: var(--c-text-2); }
 .list-sub { margin: 2.5em 0 1.2em; font-size: var(--t-md); }
 .older.years { justify-content: flex-start; flex-wrap: wrap; gap: 0 1.25em; }
 .older.years a[aria-current="page"] { color: var(--c-text-2); text-decoration: none; }
