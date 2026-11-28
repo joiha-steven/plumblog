@@ -2,11 +2,18 @@ use std::collections::HashMap;
 
 use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 use plumblog_store::{
-    ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewUser, Recorded,
-    SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore, setup_hash_json,
+    ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewSession, NewUser,
+    OWNER_RESET_AT_KEY, OWNER_RESET_EXPIRES_KEY, OWNER_RESET_HASH_KEY, OWNER_RESET_KEEP_TOKENS_KEY,
+    OWNER_RESET_KEYS, OWNER_RESET_SINCE_MARGIN_MS, OWNER_RESET_USER_KEY, ProfileUpdate, Proof,
+    Recorded, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore,
+    setup_hash_json,
 };
+use worker::wasm_bindgen::JsValue;
 
-use super::{D1Store, Failure, bound, guard, int, invalid, opt_int, opt_text, storage, text};
+use super::{
+    D1Store, Failure, Stmt, bound, bump, guard, int, invalid, opt_int, opt_text, proof_guard,
+    storage, text,
+};
 
 /// `window_start + window_ms <= now` in SQL, with the two values bound in that order.
 const WINDOW_ENDED: &str = "window_start + ? <= ?";
@@ -356,4 +363,232 @@ impl SetupStore for D1Store {
             Err(Failure::Error(e)) => Err(e),
         }
     }
+    async fn put_owner_reset(
+        &self,
+        code_hash: &str,
+        user: UserId,
+        expires_at: i64,
+        keep_tokens: bool,
+        now: i64,
+    ) -> Result<()> {
+        // Hash first: a code half written by `blog admin reset` (REST, not atomic) is one
+        // nobody was shown, and the previous code stops working at once.
+        let mut stmts = Vec::new();
+        for (name, key, value) in [
+            (
+                "put_owner_reset_hash",
+                OWNER_RESET_HASH_KEY,
+                setup_hash_json(code_hash),
+            ),
+            (
+                "put_owner_reset_user",
+                OWNER_RESET_USER_KEY,
+                user.0.to_string(),
+            ),
+            (
+                "put_owner_reset_expiry",
+                OWNER_RESET_EXPIRES_KEY,
+                expires_at.to_string(),
+            ),
+            ("put_owner_reset_at", OWNER_RESET_AT_KEY, now.to_string()),
+            (
+                "put_owner_reset_keep",
+                OWNER_RESET_KEEP_TOKENS_KEY,
+                keep_tokens.to_string(),
+            ),
+        ] {
+            stmts.push(self.stmt(name, PUT_OWNER_RESET, &[text(key), text(&value), int(now)?])?);
+        }
+        self.batch("put_owner_reset", stmts).await.map(drop)
+    }
+
+    async fn take_owner_reset(&self, code_hash: &str, now: i64) -> Result<Option<UserId>> {
+        // One batch (a transaction): the read and the deletes see the same rows, so of two
+        // takes racing only the first reads a row. Every delete is conditioned on the hash,
+        // and the hash row goes last, so a wrong code deletes nothing.
+        let hash = setup_hash_json(code_hash);
+        let read = self.stmt(
+            "take_owner_reset_read",
+            "SELECT u.value_json AS user, e.value_json AS expires FROM settings h \
+             LEFT JOIN settings u ON u.key = ? LEFT JOIN settings e ON e.key = ? \
+             WHERE h.key = ? AND h.value_json = ?",
+            &[
+                text(OWNER_RESET_USER_KEY),
+                text(OWNER_RESET_EXPIRES_KEY),
+                text(OWNER_RESET_HASH_KEY),
+                text(&hash),
+            ],
+        )?;
+        let rest = self.stmt(
+            "take_owner_reset_rest",
+            "DELETE FROM settings WHERE key IN (?, ?, ?, ?) \
+             AND EXISTS (SELECT 1 FROM settings WHERE key = ? AND value_json = ?)",
+            &[
+                text(OWNER_RESET_USER_KEY),
+                text(OWNER_RESET_EXPIRES_KEY),
+                text(OWNER_RESET_AT_KEY),
+                text(OWNER_RESET_KEEP_TOKENS_KEY),
+                text(OWNER_RESET_HASH_KEY),
+                text(&hash),
+            ],
+        )?;
+        let consume = self.stmt(
+            "take_owner_reset_hash",
+            "DELETE FROM settings WHERE key = ? AND value_json = ?",
+            &[text(OWNER_RESET_HASH_KEY), text(&hash)],
+        )?;
+        let results = self
+            .batch("take_owner_reset", vec![read, rest, consume])
+            .await?;
+        let rows: Vec<HashMap<String, Option<String>>> = results
+            .first()
+            .ok_or_else(|| storage("take_owner_reset", "batch returned no read result"))?
+            .results()
+            .map_err(|e| storage("take_owner_reset", &format!("{e}")))?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        // Exactly a JSON integer, as the memory store and the setup expiry require.
+        let int_of = |k: &str| {
+            row.get(k)
+                .cloned()
+                .flatten()
+                .and_then(|v| v.parse::<i64>().ok().filter(|n| n.to_string() == v))
+        };
+        let fresh = int_of("expires").is_some_and(|at| at > now);
+        Ok(int_of("user").map(UserId).filter(|_| fresh))
+    }
+
+    async fn redeem_owner_reset(
+        &self,
+        id: UserId,
+        hash: String,
+        profile: Option<ProfileUpdate>,
+        session: NewSession,
+        now: i64,
+    ) -> Result<i64> {
+        if session.user_id != id || !matches!(session.proof, Proof::ResetCode(_)) {
+            return Err(invalid(
+                "redeem needs a reset-code session of the same user",
+            ));
+        }
+        // One batch: the code is checked, spent and acted on together. A login another user
+        // holds fails the update and rolls everything back, so the code still works.
+        let mut stmts = vec![
+            proof_guard(self, id, &session.proof, now)?,
+            guard(
+                self,
+                "redeem_owner_reset_owner",
+                "EXISTS (SELECT 1 FROM users WHERE id = ? AND role = 'owner' \
+                 AND disabled_at IS NULL)",
+                &[bound(id.0)],
+            )?,
+        ];
+        if let Some(p) = &profile {
+            stmts.push(bump(self)?);
+            stmts.push(self.stmt(
+                "redeem_owner_reset_user",
+                "UPDATE users SET login = ?, slug = ?, display_name = ?, bio = ?, \
+                 password_hash = ?, updated_at = ? WHERE id = ?",
+                &[
+                    text(&p.login),
+                    text(&p.slug),
+                    text(&p.display_name),
+                    text(&p.bio),
+                    text(&hash),
+                    int(now)?,
+                    bound(id.0),
+                ],
+            )?);
+        } else {
+            stmts.push(self.stmt(
+                "redeem_owner_reset_user",
+                "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+                &[text(&hash), int(now)?, bound(id.0)],
+            )?);
+        }
+        stmts.extend(self.redeem_cleanup(id, now)?);
+        stmts.push(self.stmt(
+            "redeem_owner_reset_session",
+            "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            &[
+                text(&session.token_hash),
+                bound(id.0),
+                int(session.created_at)?,
+                int(session.expires_at)?,
+            ],
+        )?);
+        match self.batch_guarded("redeem_owner_reset", stmts).await {
+            Ok(r) => {
+                let last = r
+                    .last()
+                    .ok_or_else(|| storage("redeem_owner_reset", "batch returned no results"))?;
+                Self::last_row_id("redeem_owner_reset_session", last)
+            }
+            Err(Failure::Guard) => Err(Error::new(
+                ErrorCode::SetupInvalid,
+                "reset code wrong, expired or used, or its user is not an active owner",
+            )),
+            Err(Failure::Error(e)) => Err(e),
+        }
+    }
 }
+
+impl D1Store {
+    /// The redeem's removals: every session and passkey of `id`, its tokens and unused
+    /// invites (any role) since the reset, and the reset keys.
+    fn redeem_cleanup(&self, id: UserId, now: i64) -> Result<Vec<Stmt>> {
+        let mut out = Vec::new();
+        let user = [bound(id.0)];
+        out.push(self.stmt(
+            "redeem_owner_reset_sessions",
+            "DELETE FROM sessions WHERE user_id = ?",
+            &user,
+        )?);
+        out.push(self.stmt(
+            "redeem_owner_reset_passkeys",
+            "DELETE FROM passkeys WHERE user_id = ?",
+            &user,
+        )?);
+        // Absent keys (a code from an older `blog`): every token and unused invite goes.
+        let since = format!(
+            "(COALESCE((SELECT CAST(value_json AS INTEGER) FROM settings WHERE key = ?), 0) - {OWNER_RESET_SINCE_MARGIN_MS})"
+        );
+        out.push(self.stmt(
+            "redeem_owner_reset_tokens",
+            &format!(
+                "UPDATE api_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL \
+                 AND (COALESCE((SELECT value_json FROM settings WHERE key = ?), 'false') \
+                 <> 'true' OR created_at >= {since})"
+            ),
+            &[
+                int(now)?,
+                bound(id.0),
+                text(OWNER_RESET_KEEP_TOKENS_KEY),
+                text(OWNER_RESET_AT_KEY),
+            ],
+        )?);
+        out.push(self.stmt(
+            "redeem_owner_reset_invites",
+            &format!(
+                "DELETE FROM invites WHERE created_by = ? AND used_at IS NULL \
+                 AND created_at >= {since}"
+            ),
+            &[bound(id.0), text(OWNER_RESET_AT_KEY)],
+        )?);
+        let keys: Vec<JsValue> = OWNER_RESET_KEYS.iter().map(|k| text(k)).collect();
+        let marks = vec!["?"; keys.len()].join(", ");
+        out.push(self.stmt(
+            "redeem_owner_reset_keys",
+            &format!("DELETE FROM settings WHERE key IN ({marks})"),
+            &keys,
+        )?);
+        Ok(out)
+    }
+}
+
+/// The reset code upsert, one statement per key. `blog admin reset` sends the same SQL
+/// (crates/cli/src/d1.rs `PUT_OWNER_RESET`).
+const PUT_OWNER_RESET: &str = "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) \
+     ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, \
+     updated_at = excluded.updated_at";

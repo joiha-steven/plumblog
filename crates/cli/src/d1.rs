@@ -145,6 +145,12 @@ const PUT_SETUP_CODE: &str = "INSERT INTO settings (key, value_json, updated_at)
      ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, \
      updated_at = excluded.updated_at";
 
+/// `put_owner_reset`'s upsert, one statement per key (crates/worker/src/d1/signin.rs
+/// `PUT_OWNER_RESET`): `blog admin reset` sends it inside its own batch.
+pub(crate) const PUT_OWNER_RESET: &str = "INSERT INTO settings (key, value_json, updated_at) \
+     VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, \
+     updated_at = excluded.updated_at";
+
 /// `value_json` of the given settings keys that exist.
 ///
 /// # Errors

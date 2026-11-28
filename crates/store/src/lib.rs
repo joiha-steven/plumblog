@@ -30,7 +30,7 @@ mod webhooks;
 
 pub use auth::{
     ApiToken, Invite, InviteStore, NewInvite, NewPasskey, NewSession, NewToken, Passkey,
-    PasskeyStore, Session, SessionStore, TokenStore,
+    PasskeyStore, Proof, Session, SessionStore, TokenStore,
 };
 pub use comments::{Actor, Checked, Comment, CommentStatus, CommentStore, Moderation, NewComment};
 /// Comment rules shared by every caller (limits, open, moderation).
@@ -54,9 +54,11 @@ pub use redirects::{Redirect, RedirectStore};
 pub use settings::{OptionOwner, PluginState, SettingsStore};
 pub use signin::{
     ChallengePurpose, ChallengeStore, INTERNAL_SETTING_KEYS, LAST_BACKUP_KEY, LoginLimitStore,
-    MAX_FAILURE_KEYS, ORIGIN_KEY, Recorded, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY,
-    SITE_ID_KEY, SetupStore, TURNSTILE_SITE_KEY, is_internal_setting, public_settings,
-    setup_hash_json,
+    MAX_FAILURE_KEYS, ORIGIN_KEY, OWNER_RESET_AT_KEY, OWNER_RESET_EXPIRES_KEY,
+    OWNER_RESET_HASH_KEY, OWNER_RESET_KEEP_TOKENS_KEY, OWNER_RESET_KEYS,
+    OWNER_RESET_SINCE_MARGIN_MS, OWNER_RESET_USER_KEY, Recorded, SETUP_CODE_EXPIRES_KEY,
+    SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore, TURNSTILE_SITE_KEY, is_internal_setting,
+    public_settings, setup_hash_json,
 };
 pub use taxonomy::{NewSeries, Series, Tag, TaxonomyStore};
 pub use users::{NewUser, ProfileUpdate, SiteStore, User, UserStore};

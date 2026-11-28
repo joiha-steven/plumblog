@@ -1,5 +1,6 @@
 //! The Cloudflare client and token checks against the fake API (no real network).
 
+mod admin;
 mod backup;
 mod deploy;
 mod dump;
