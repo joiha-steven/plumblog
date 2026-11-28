@@ -412,7 +412,7 @@ export async function startWorker({ seedSql = null, vars = {}, port: pinned = nu
   // The inspector port 0 lets the OS pick: nothing here connects to it.
   const child = spawn(
     WRANGLER,
-    ["dev", join(OUT, "worker/shim.mjs"), "--assets", assets, ...common, "--ip", "127.0.0.1", "--port", String(port), "--inspector-port", "0",
+    ["dev", join(OUT, "entry.mjs"), "--assets", assets, ...common, "--ip", "127.0.0.1", "--port", String(port), "--inspector-port", "0",
       "--show-interactive-dev-session=false", "--log-level", "log",
       // Serves /__scheduled so tests can fire the cron trigger.
       "--test-scheduled",
