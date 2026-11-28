@@ -115,9 +115,9 @@ pub struct Site {
     /// `/` reports this theme tag (`None`: no `x-plumblog-theme`) while the given version is
     /// active, instead of the one its binding and `theme.json` give (a Worker that fell back).
     pub theme_tag: Option<(String, Option<String>)>,
-    /// Like `theme_tag`, but only for the second `/` of each pair a version gets (smoke asks twice): a cache hit
-    /// served by a JS fast path that trusts a binding.
-    pub hit_theme_tag: Option<(String, Option<String>)>,
+    /// Pretend this version's `PLUMBLOG_THEME_TAG` binding holds this value (`None`: unset),
+    /// instead of what it was uploaded with.
+    pub binding_tag: Option<(String, Option<String>)>,
     /// The active version at each `/` request so far.
     pub home_seen: Vec<String>,
     pub hits: usize,
@@ -410,6 +410,17 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// `PLUMBLOG_THEME_TAG` in the metadata `version` was uploaded with.
+fn version_binding_tag(st: &State, version: &str) -> Option<String> {
+    let meta = &st.versions.iter().find(|v| v.id == version)?.metadata;
+    meta["bindings"]
+        .as_array()?
+        .iter()
+        .find(|b| b["name"] == "PLUMBLOG_THEME_TAG")?["text"]
+        .as_str()
+        .map(str::to_string)
+}
+
 /// What the Worker would send as `x-plumblog-theme` for `version`: the first 16 hex digits
 /// of the hash in the `theme.json` its `PLUMBLOG_THEME` binding names, if it serves one.
 fn served_theme_tag(st: &State, version: &str) -> Option<String> {
@@ -469,22 +480,30 @@ fn serve_public(st: &mut State, req: &Recorded) -> Option<(u16, String, String)>
                 _ => 200,
             };
             let a = active(st);
-            let mut tag = match (&st.site.theme_tag, &a) {
+            let tag = match (&st.site.theme_tag, &a) {
                 (Some((v, t)), Some(a)) if v == a => t.clone(),
                 _ => a.clone().and_then(|a| served_theme_tag(st, &a)),
             };
-            if let (Some((v, t)), Some(a)) = (&st.site.hit_theme_tag, &a)
-                && v == a
-                && st.site.home_seen.iter().filter(|x| *x == a).count() % 2 == 1
-            {
-                tag.clone_from(t);
-            }
-            if let Some(a) = a {
-                st.site.home_seen.push(a);
-            }
-            let header = tag
+            // A real JS entry answers from the page cache only when the key its binding
+            // builds equals the one wasm stored under (the Rust tag); then it copies the
+            // stored headers and adds its own. Any other binding is a miss into wasm.
+            let mut header = tag
+                .as_ref()
                 .map(|t| format!("x-plumblog-theme: {t}\r\n"))
                 .unwrap_or_default();
+            if let Some(a) = a {
+                let stored = st.site.home_seen.contains(&a);
+                let binding = match &st.site.binding_tag {
+                    Some((v, b)) if *v == a => b.clone(),
+                    _ => version_binding_tag(st, &a),
+                };
+                if stored && binding == tag {
+                    header.push_str("x-plumblog-entry: js\r\nx-plumblog-cache: hit\r\n");
+                } else {
+                    header.push_str("x-plumblog-cache: miss\r\n");
+                }
+                st.site.home_seen.push(a);
+            }
             Some((status, "<html></html>".into(), header))
         }
         ("PUT", p) if p.starts_with("/__upload/") => Some(upload(st, req, p)),

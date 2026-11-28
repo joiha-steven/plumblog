@@ -595,8 +595,9 @@ fn a_slow_site_within_the_budget_passes() {
     fake.state().site.ready_after = 4;
     let r = deploy(&fake, &dir, &bundle);
     ok(&r);
-    // Waited 1 + 2 + 4 + 8 s of virtual time (plus the real milliseconds of the calls).
-    assert!(r.clock >= Duration::from_secs(15) && r.clock < Duration::from_secs(16));
+    // Waited 1 + 2 + 4 + 8 s of virtual time, plus 1 s before the JS-hit probe (and the real
+    // milliseconds of the calls).
+    assert!(r.clock >= Duration::from_secs(16) && r.clock < Duration::from_secs(17));
     assert_eq!(
         fake.requests()
             .iter()
