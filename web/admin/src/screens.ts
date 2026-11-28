@@ -1,6 +1,6 @@
 /**
- * The screens of the admin shell. The posts and pages lists are in lists.ts; media is empty
- * until its API lands (issue #10).
+ * The screens of the admin shell. The posts and pages lists are in lists.ts; the media library
+ * (media/) and the account page (auth/) are lazy chunks.
  */
 
 import type { Api, Me } from "./api/client";
@@ -21,21 +21,46 @@ const newPost = (folding: boolean): HTMLElement =>
     folding ? h("span", { class: "new-label" }, t("admin.posts.new")) : t("admin.posts.new"),
   );
 
-/** The account screen lives in the auth chunk: the shell never carries it. */
-function accountBox(me: Me, api: Api): HTMLElement {
+/** A screen that lives in its own chunk, which the shell never carries; `mount` loads it into the box. */
+function lazyBox(cls: string, what: string, mount: (box: HTMLElement) => Promise<void>): HTMLElement {
   const wait = (): HTMLElement => {
     const rows = loadingRows(2);
     rows.classList.add("flush");
     return rows;
   };
-  const box = h("div", { class: "acct" }, wait());
+  const box = h("div", { class: cls }, wait());
   const load = (): void => {
     box.replaceChildren(wait());
-    import("./auth/account").then(
-      (m) => m.mountAccount(box, me, api),
+    mount(box).catch((e: unknown) => {
+      // A chunk that failed to load (offline, new deploy): say so instead of a blank screen.
+      console.error(`admin: ${what} failed to load`, e);
+      box.replaceChildren(failed({ code: "network", status: 0 }, load));
+    });
+  };
+  load();
+  return box;
+}
+
+const accountBox = (me: Me, api: Api): HTMLElement =>
+  lazyBox("acct", "account page", async (box) => (await import("./auth/account")).mountAccount(box, me, api));
+
+const mediaBox = (me: Me, api: Api): HTMLElement =>
+  lazyBox("media", "media library", async (box) => {
+    const { mountMedia } = await import("./media/index");
+    box.replaceChildren();
+    mountMedia(box, me, api);
+  });
+
+/** Settings lives in its own chunk: the shell never carries it. */
+function settingsBox(me: Me, api: Api, section: string | undefined): HTMLElement {
+  const box = h("div", { class: "settings-box" });
+  const load = (): void => {
+    box.replaceChildren(loadingRows(3));
+    import("./settings").then(
+      (m) => m.mountSettings(box, api, { role: me.role, section, offline: () => !navigator.onLine }),
       (e: unknown) => {
         // A chunk that failed to load (offline, new deploy): say so instead of a blank screen.
-        console.error("admin: account page failed to load", e);
+        console.error("admin: settings failed to load", e);
         box.replaceChildren(failed({ code: "network", status: 0 }, load));
       },
     );
@@ -44,14 +69,14 @@ function accountBox(me: Me, api: Api): HTMLElement {
   return box;
 }
 
-export function screen(name: Screen, me: Me, api: Api): Child[] {
+export function screen(name: Screen, me: Me, api: Api, section?: string): Child[] {
   switch (name) {
     case "posts":
       return [head(t("admin.nav.posts"), newPost(true)), postsList(api, { user: me.id, newPost: () => newPost(false) })];
     case "pages":
       return [head(t("admin.nav.pages")), pagesList(api)];
     case "media":
-      return [head(t("admin.nav.media")), empty({ icon: "media", title: t("admin.media.empty"), hint: t("admin.media.empty_hint") })];
+      return [head(t("admin.nav.media")), mediaBox(me, api)];
     case "settings":
       if (!PERMISSION_ROLES["settings.manage"].includes(me.role)) {
         return [
@@ -65,7 +90,7 @@ export function screen(name: Screen, me: Me, api: Api): Child[] {
           }),
         ];
       }
-      return [head(t("admin.nav.settings")), building()];
+      return [head(t("admin.nav.settings")), settingsBox(me, api, section)];
     case "account":
       return [head(t("admin.account.title")), accountBox(me, api)];
     case "new":
@@ -89,6 +114,3 @@ export function screen(name: Screen, me: Me, api: Api): Child[] {
       ];
   }
 }
-
-const building = (): HTMLElement =>
-  empty({ icon: "settings", title: t("admin.state.building_title"), hint: t("admin.state.building_hint"), full: true });

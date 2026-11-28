@@ -95,6 +95,9 @@ stable_codes! {
         // A demote, disable or delete that would leave no active (not disabled) owner:
         // make another user owner first.
         LastOwner => "user.last_owner",
+        // A rendered page could not be copied to R2 (system log only): it was served, and
+        // other data centres render it until a later miss stores it.
+        PageStoreFailed => "pages.store_failed",
     }
 }
 
@@ -350,6 +353,7 @@ mod tests {
                 (ErrorCode::ThemeUnavailable, "theme.unavailable"),
                 (ErrorCode::ResetExpired, "auth.reset_expired"),
                 (ErrorCode::LastOwner, "user.last_owner"),
+                (ErrorCode::PageStoreFailed, "pages.store_failed"),
             ]
         );
     }

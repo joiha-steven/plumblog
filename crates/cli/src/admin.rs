@@ -37,10 +37,10 @@ pub struct Options {
 
 /// An active owner, as read before anything changes.
 #[derive(Clone)]
-struct Owner {
-    id: i64,
-    login: String,
-    role: String,
+pub(crate) struct Owner {
+    pub(crate) id: i64,
+    pub(crate) login: String,
+    pub(crate) role: String,
     created_at: i64,
 }
 
@@ -49,8 +49,9 @@ fn fail(run: &Run, code: Code, k: Key, args: &[(&str, String)]) -> Failure {
 }
 
 /// The Worker serving this folder's name carries this folder's marker, and the database
-/// carries the site id `blog setup` recorded. Anything else is someone else's site.
-fn check_ours(run: &Run, worker: &str, db: &Database) -> Result<(), Failure> {
+/// carries the site id `blog setup` recorded. Anything else is someone else's site. `blog
+/// token` makes the same check.
+pub(crate) fn check_ours(run: &Run, worker: &str, db: &Database) -> Result<(), Failure> {
     let bindings = setup::script_bindings(run.client, worker).map_err(|e| run.api(&e))?;
     let marker = bindings
         .iter()
@@ -95,7 +96,7 @@ fn check_ours(run: &Run, worker: &str, db: &Database) -> Result<(), Failure> {
     ))
 }
 
-fn owners(run: &Run, db: &Database) -> Result<Vec<Owner>, Failure> {
+pub(crate) fn owners(run: &Run, db: &Database) -> Result<Vec<Owner>, Failure> {
     let rows = db
         .rows(
             "SELECT id, login, role, created_at FROM users WHERE role = 'owner' AND disabled_at IS NULL \

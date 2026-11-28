@@ -191,7 +191,7 @@ describe("mcp tools", () => {
     const want = ref.routes
       .filter((r) => !r.session_only)
       .map((r) => `${r.method} ${r.path}`)
-      .filter((k) => !["GET /api/v1/reference", "POST /api/v1/media", "GET /api/v1/media/{id}/original"].includes(k))
+      .filter((k) => !["GET /api/v1/reference", "POST /api/v1/media", "GET /api/v1/media/{id}/original", "POST /api/v1/media/{id}/variants"].includes(k))
       .sort();
     const r = await rpc("tools/list");
     const tools = r.json.result.tools;

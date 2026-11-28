@@ -8,7 +8,6 @@ const MAX_SLUG: usize = 64;
 const MAX_DISPLAY_NAME: usize = 100;
 const MAX_BIO: usize = 2000;
 const MAX_PASSKEY_NAME: usize = 64;
-const MAX_TOKEN_NAME: usize = 64;
 
 fn invalid(field: &str, why: &str) -> Error {
     Error::new(ErrorCode::InvalidInput, format!("{field}: {why}"))
@@ -86,17 +85,13 @@ pub fn passkey_name(value: &str) -> Result<()> {
     plain_text("name", value, MAX_PASSKEY_NAME, false)
 }
 
-/// An API token's name: 1-64 characters, not blank, no control characters. It names the
-/// client in the system log, so it must be readable.
+/// An API token's name: the rule `blog token create` shares.
 ///
 /// # Errors
 ///
 /// `InvalidInput` naming the field.
 pub fn token_name(value: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        return Err(invalid("name", "empty"));
-    }
-    plain_text("name", value, MAX_TOKEN_NAME, false)
+    plumblog_auth::api_token::check_name(value)
 }
 
 #[cfg(test)]

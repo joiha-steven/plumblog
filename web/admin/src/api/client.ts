@@ -29,6 +29,8 @@ export interface ApiError {
   field?: string;
   /** The server's current version, present on a stale `expected_version`. */
   version?: number;
+  /** The posts that use a picture, present on a refused delete (409 `store.conflict`). */
+  posts?: number[];
 }
 
 /** Any JSON value; request bodies are built from it. */
@@ -61,6 +63,36 @@ export interface Media {
   height: number;
 }
 
+/**
+ * One library item (`/api/v1/media`, crates/worker/src/api/v1/media.rs `media_json`). `usage`
+ * (the ids of the posts that use it) comes only with a single item, never in a list.
+ */
+export interface MediaItem {
+  id: number;
+  /** Where the picture is served: `/media/<id>/<name>`. */
+  src: string;
+  mime: string;
+  bytes: number;
+  width: number;
+  height: number;
+  alt: string;
+  uploaded_by: number | null;
+  created_at: number;
+  usage?: number[];
+}
+
+export interface MediaPage {
+  media: MediaItem[];
+  next_cursor: string | null;
+}
+
+export interface MediaListQuery {
+  missing_alt?: boolean;
+  unused?: boolean;
+  cursor?: string;
+  limit?: number;
+}
+
 /** Called with the share of an upload sent so far, 0 to 1. */
 export type Progress = (sent: number) => void;
 
@@ -84,11 +116,19 @@ export interface Api {
    * or empty answer resolves to `undefined`.
    */
   call<T>(method: Method, path: string, body?: JsonBody): Promise<Result<T>>;
+  /** One page of the media library, newest first; `next_cursor` goes back in as `cursor`. */
+  media(q: MediaListQuery): Promise<Result<MediaPage>>;
+  /** One item with `usage`. */
+  mediaItem(id: number): Promise<Result<MediaItem>>;
+  /** Sets the description (alt text); any writer may. */
+  setMediaAlt(id: number, alt: string): Promise<Result<MediaItem>>;
+  /** 403 `auth.forbidden` unless the caller uploaded it or is the owner; 409 `store.conflict` with `posts` while in use. */
+  deleteMedia(id: number): Promise<Result<undefined>>;
   /** Stores a picture; `progress` follows the upload. */
   upload(file: File, progress: Progress, signal?: AbortSignal): Promise<Result<Media>>;
 }
 
-export type Method = "GET" | "POST" | "PATCH" | "DELETE";
+export type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 /**
  * Set by the sign-in screens: runs when a call outside `/api/auth/` answers 401
@@ -126,7 +166,7 @@ export async function flushLocal(ms = 2000): Promise<void> {
  */
 export const REQUEST_MS = 20_000;
 
-export const fail = <T>(code: ApiError["code"], status: number, extra: Pick<ApiError, "field" | "version"> = {}): Result<T> => ({
+export const fail = <T>(code: ApiError["code"], status: number, extra: Pick<ApiError, "field" | "version" | "posts"> = {}): Result<T> => ({
   ok: false,
   error: { code, status, ...extra },
 });
@@ -187,7 +227,7 @@ async function answer<T>(
     return fail("bad_response", res.status);
   }
   if (!res.ok) {
-    const err = parsed as { error?: unknown; field?: unknown; version?: unknown } | null;
+    const err = parsed as { error?: unknown; field?: unknown; version?: unknown; posts?: unknown } | null;
     const code = err?.error;
     console.warn(`api: ${method} ${path}: ${res.status} ${String(code)}`);
     if (res.status === 401 && code === "auth.unauthenticated" && !path.startsWith("/api/auth/")) {
@@ -197,9 +237,10 @@ async function answer<T>(
         console.error("api: session.expired hook failed", e);
       }
     }
-    const extra: Pick<ApiError, "field" | "version"> = {};
+    const extra: Pick<ApiError, "field" | "version" | "posts"> = {};
     if (typeof err?.field === "string") extra.field = err.field;
     if (typeof err?.version === "number") extra.version = err.version;
+    if (Array.isArray(err?.posts)) extra.posts = err.posts.filter((p): p is number => typeof p === "number");
     return fail(isCode(code) ? code : "bad_response", res.status, extra);
   }
   return { ok: true, value: parsed as T };
@@ -213,10 +254,39 @@ function bodyOf(input: PostCreateInput | PostUpdateInput): JsonBody {
 }
 
 
-/** `POST /api/media` with the file as multipart `file`. XHR, not fetch: fetch reports no upload
- * progress. The posts and media API is issue #10; this follows its draft. */
-function upload(file: File, progress: Progress, signal?: AbortSignal): Promise<Result<Media>> {
-  const path = "/api/media";
+/** A list request's `?a=b&c=d` (empty when nothing is set); keys left undefined are not sent. */
+const queryOf = (q: object): string => {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(q)) if (v !== undefined) qs.set(k, String(v));
+  const s = qs.toString();
+  return s ? `?${s}` : "";
+};
+
+/** The picture's pixel size, as the browser decodes it; the API checks it against the file header. */
+async function sizeOf(file: File): Promise<[number, number] | undefined> {
+  try {
+    const bmp = await createImageBitmap(file);
+    const size: [number, number] = [bmp.width, bmp.height];
+    bmp.close();
+    return size;
+  } catch (e) {
+    console.error(`api: ${file.name} is not a picture this browser can read`, e);
+    return undefined;
+  }
+}
+
+/**
+ * `POST /api/v1/media`: the file's own bytes as the body, its metadata in the query. XHR, not
+ * fetch: fetch reports no upload progress.
+ */
+async function upload(file: File, progress: Progress, signal?: AbortSignal): Promise<Result<Media>> {
+  if (signal?.aborted) return fail("cancelled", 0);
+  const size = await sizeOf(file);
+  // Cancelled while the browser was reading the picture: nothing is sent.
+  if (signal?.aborted) return fail("cancelled", 0);
+  if (!size) return fail("input.invalid", 0);
+  const q = new URLSearchParams({ name: file.name, mime: file.type, width: String(size[0]), height: String(size[1]) });
+  const path = `/api/v1/media?${q}`;
   return new Promise((resolve) => {
     const x = new XMLHttpRequest();
     x.open("POST", path);
@@ -226,22 +296,21 @@ function upload(file: File, progress: Progress, signal?: AbortSignal): Promise<R
       if (e.lengthComputable) progress(e.loaded / e.total);
     };
     x.onerror = () => {
-      console.error(`api: POST ${path}: no response`);
+      console.error("api: POST /api/v1/media: no response");
       resolve(fail("network", 0));
     };
     x.onload = () => {
       const body: unknown = x.response;
-      if (x.status >= 200 && x.status < 300 && body && typeof (body as Media).url === "string") {
-        resolve({ ok: true, value: body as Media });
+      // 201 for a new item, 200 for the caller's own identical one.
+      if (x.status >= 200 && x.status < 300 && body && typeof (body as MediaItem).src === "string") {
+        const m = body as MediaItem;
+        resolve({ ok: true, value: { id: m.id, url: m.src, width: m.width, height: m.height } });
         return;
       }
       const code = (body as { error?: unknown } | null)?.error;
-      console.warn(`api: POST ${path}: ${x.status} ${String(code)}`);
+      console.warn(`api: POST /api/v1/media: ${x.status} ${String(code)}`);
       resolve(fail(isCode(code) ? code : "bad_response", x.status));
     };
-    const form = new FormData();
-    form.append("file", file);
-    if (signal?.aborted) return resolve(fail("cancelled", 0));
     signal?.addEventListener(
       "abort",
       () => {
@@ -250,7 +319,9 @@ function upload(file: File, progress: Progress, signal?: AbortSignal): Promise<R
       },
       { once: true },
     );
-    x.send(form);
+    // An abort that came before the listener existed fires no event.
+    if (signal?.aborted) return resolve(fail("cancelled", 0));
+    x.send(file);
   });
 }
 
@@ -262,17 +333,16 @@ export function httpApi(ms = REQUEST_MS): Api {
       const r = await getJson<{ user: Me }>("/api/auth/me");
       return r.ok ? { ok: true, value: r.value.user } : r;
     },
-    posts(q) {
-      const qs = new URLSearchParams();
-      for (const [k, v] of Object.entries(q)) if (v !== undefined) qs.set(k, String(v));
-      const s = qs.toString();
-      return getJson<PostPage>(`/api/v1/posts${s ? `?${s}` : ""}`);
-    },
+    posts: (q) => getJson<PostPage>(`/api/v1/posts${queryOf(q)}`),
     post: (id) => getJson<Post>(`/api/v1/posts/${id}`),
     createPost: (input) => request<Post>("POST", "/api/v1/posts", bodyOf(input), false, 0),
     updatePost: (id, input) => request<Post>("PATCH", `/api/v1/posts/${id}`, bodyOf(input), false, ms),
     previewUrl: undefined,
     call: (method, path, body) => request(method, path, body, true, ms),
+    media: (q) => getJson<MediaPage>(`/api/v1/media${queryOf(q)}`),
+    mediaItem: (id) => getJson<MediaItem>(`/api/v1/media/${id}`),
+    setMediaAlt: (id, alt) => request<MediaItem>("PATCH", `/api/v1/media/${id}`, { alt }, false, ms),
+    deleteMedia: (id) => request<undefined>("DELETE", `/api/v1/media/${id}`, undefined, true, ms),
     upload,
   };
 }

@@ -1,0 +1,116 @@
+[
+ {
+  "id": 9,
+  "src": "/admin/mock/suong-mu.svg",
+  "mime": "image/svg+xml",
+  "bytes": 21330,
+  "width": 1200,
+  "height": 800,
+  "alt": "Sương mù trên đồi chè lúc bình minh",
+  "uploaded_by": 1,
+  "created_at": 1789740800000,
+  "usage": [
+   2
+  ]
+ },
+ {
+  "id": 8,
+  "src": "/admin/mock/cho-dem.svg",
+  "mime": "image/svg+xml",
+  "bytes": 19960,
+  "width": 1200,
+  "height": 800,
+  "alt": "",
+  "uploaded_by": 2,
+  "created_at": 1789481600000,
+  "usage": []
+ },
+ {
+  "id": 7,
+  "src": "/admin/mock/ban-viet.svg",
+  "mime": "image/svg+xml",
+  "bytes": 18200,
+  "width": 1200,
+  "height": 800,
+  "alt": "Bàn viết buổi sáng: ấm trà, sổ tay và cửa sổ mờ sương",
+  "uploaded_by": 1,
+  "created_at": 1789222400000,
+  "usage": [
+   1
+  ]
+ },
+ {
+  "id": 6,
+  "src": "/admin/mock/ca-phe-sang.svg",
+  "mime": "image/svg+xml",
+  "bytes": 17220,
+  "width": 1200,
+  "height": 800,
+  "alt": "",
+  "uploaded_by": 1,
+  "created_at": 1788963200000,
+  "usage": []
+ },
+ {
+  "id": 5,
+  "src": "/admin/mock/doi-thong.svg",
+  "mime": "image/svg+xml",
+  "bytes": 24100,
+  "width": 1200,
+  "height": 800,
+  "alt": "Đồi thông sau cơn mưa sáng, nhìn từ dốc Nhà Làng",
+  "uploaded_by": 1,
+  "created_at": 1788704000000,
+  "usage": [
+   1
+  ]
+ },
+ {
+  "id": 4,
+  "src": "/admin/mock/cong-lang.svg",
+  "mime": "image/svg+xml",
+  "bytes": 14480,
+  "width": 1200,
+  "height": 800,
+  "alt": "Cổng làng buổi sớm",
+  "uploaded_by": 2,
+  "created_at": 1788444800000,
+  "usage": []
+ },
+ {
+  "id": 3,
+  "src": "/admin/mock/cho-dem.svg",
+  "mime": "image/svg+xml",
+  "bytes": 13110,
+  "width": 1200,
+  "height": 800,
+  "alt": "",
+  "uploaded_by": null,
+  "created_at": 1788185600000,
+  "usage": []
+ },
+ {
+  "id": 2,
+  "src": "/admin/mock/suong-mu.svg",
+  "mime": "image/svg+xml",
+  "bytes": 11740,
+  "width": 1200,
+  "height": 800,
+  "alt": "Sương mù",
+  "uploaded_by": 1,
+  "created_at": 1787926400000,
+  "usage": []
+ },
+ {
+  "id": 1,
+  "src": "/admin/mock/ca-phe-sang.svg",
+  "mime": "image/svg+xml",
+  "bytes": 10370,
+  "width": 1200,
+  "height": 800,
+  "alt": "Một tách cà phê đen",
+  "uploaded_by": 1,
+  "created_at": 1787667200000,
+  "usage": []
+ }
+]

@@ -3,6 +3,7 @@ use plumblog_cli::cloudflare::{Client, Credentials, TokenError, TokenKind, endpo
 use plumblog_cli::help;
 use plumblog_cli::release::{self, Version, fetch::Source};
 use plumblog_cli::text::{Code, Text, pick_lang};
+use plumblog_cli::token as api_token_cmd;
 use plumblog_cli::{admin, backup, deploy, migrations, restore, setup, theme};
 use plumblog_i18n::{Key, key};
 use std::{fmt::Write, path::Path, process::ExitCode};
@@ -161,9 +162,16 @@ enum Command {
         out: Option<std::path::PathBuf>,
     },
     Restore {
-        file: std::path::PathBuf,
+        #[arg(required_unless_present = "reset_credentials")]
+        file: Option<std::path::PathBuf>,
         #[arg(long)]
         yes: bool,
+        #[arg(
+            long,
+            requires = "yes",
+            conflicts_with_all = ["file", "bundle", "build", "allow_other_site"]
+        )]
+        reset_credentials: bool,
         #[arg(long, conflicts_with = "build")]
         bundle: Option<std::path::PathBuf>,
         #[arg(long)]
@@ -202,6 +210,34 @@ enum Command {
     Admin {
         #[command(subcommand)]
         action: AdminAction,
+    },
+    Token {
+        #[command(subcommand)]
+        action: TokenAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TokenAction {
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "writer")]
+        scope: String,
+        #[arg(long)]
+        login: Option<String>,
+        // Hyphen values reach our own check, which answers `-1` in the user's language.
+        #[arg(long, allow_hyphen_values = true)]
+        expires: Option<String>,
+    },
+    List {
+        #[arg(long)]
+        login: Option<String>,
+    },
+    Revoke {
+        id: i64,
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -279,6 +315,44 @@ fn admin_help(c: clap::Command, text: &Text) -> clap::Command {
         })
 }
 
+/// `blog token`'s help texts.
+fn token_help(c: clap::Command, text: &Text) -> clap::Command {
+    let t = |k: Key| text.t(k, &[]);
+    let login = |a: clap::Arg, help: Key| {
+        a.help(t(help))
+            .value_name(leak(t(key!("cli.token.login_value"))))
+    };
+    c.about(t(key!("cli.token.about")))
+        .mut_subcommand("create", |c| {
+            c.about(t(key!("cli.token.create_about")))
+                .mut_arg("name", |a| {
+                    a.help(t(key!("cli.token.name_help")))
+                        .value_name(leak(t(key!("cli.token.name_value"))))
+                })
+                .mut_arg("scope", |a| {
+                    a.help(t(key!("cli.token.scope_help")))
+                        .value_name(leak(t(key!("cli.token.scope_value"))))
+                })
+                .mut_arg("login", |a| login(a, key!("cli.token.login_help")))
+                .mut_arg("expires", |a| {
+                    a.help(t(key!("cli.token.expires_help")))
+                        .value_name(leak(t(key!("cli.token.expires_value"))))
+                })
+        })
+        .mut_subcommand("list", |c| {
+            c.about(t(key!("cli.token.list_about")))
+                .mut_arg("login", |a| login(a, key!("cli.token.list_login_help")))
+        })
+        .mut_subcommand("revoke", |c| {
+            c.about(t(key!("cli.token.revoke_about")))
+                .mut_arg("id", |a| {
+                    a.help(t(key!("cli.token.id_help")))
+                        .value_name(leak(t(key!("cli.token.id_value"))))
+                })
+                .mut_arg("yes", |a| a.help(t(key!("cli.token.yes_help"))))
+        })
+}
+
 /// `blog restore`'s help texts.
 fn restore_help(c: clap::Command, text: &Text) -> clap::Command {
     let t = |k: Key| text.t(k, &[]);
@@ -295,6 +369,9 @@ fn restore_help(c: clap::Command, text: &Text) -> clap::Command {
         .mut_arg("build", |a| a.help(t(key!("cli.restore.build_help"))))
         .mut_arg("allow_other_site", |a| {
             a.help(t(key!("cli.restore.allow_other_site_help")))
+        })
+        .mut_arg("reset_credentials", |a| {
+            a.help(t(key!("cli.restore.reset_credentials_help")))
         })
 }
 
@@ -455,6 +532,7 @@ fn command(text: &Text) -> clap::Command {
         .mut_subcommand("theme", |c| theme_help(c, text))
         .mut_subcommand("plugin", |c| plugin_help(c, text))
         .mut_subcommand("admin", |c| admin_help(c, text))
+        .mut_subcommand("token", |c| token_help(c, text))
         .mut_subcommand("rollback", |c| {
             c.about(t(key!("cli.rollback.about")))
                 .mut_arg("to", |a| {
@@ -670,6 +748,23 @@ fn restore(text: &Text, mut opts: restore::Options) -> Result<String, (Code, Str
     Ok(String::new())
 }
 
+/// `blog restore --reset-credentials --yes`: only the restore's credential reset.
+fn restore_reset(text: &Text) -> Result<String, (Code, String)> {
+    let creds = Credentials::load(Path::new(".")).map_err(|e| (e.code(), e.message(text)))?;
+    let mut client = Client::from_env(creds.token).map_err(|e| (e.code(), e.message(text)))?;
+    let migrations = migrations::bundled();
+    let cx = setup::Context {
+        dir: Path::new("."),
+        migrations: &migrations,
+        now_ms: now_ms(),
+        text,
+    };
+    let mut out = std::io::stdout().lock();
+    restore::reset_credentials(&mut client, creds.account_id.as_deref(), &cx, &mut out)
+        .map_err(|f| (f.code, f.message))?;
+    Ok(String::new())
+}
+
 /// `blog admin reset`: the plan, then the code, to stdout.
 fn admin_reset(text: &Text, action: AdminAction) -> Result<String, (Code, String)> {
     let AdminAction::Reset {
@@ -696,6 +791,44 @@ fn admin_reset(text: &Text, action: AdminAction) -> Result<String, (Code, String
         &mut client,
         creds.account_id.as_deref(),
         opts,
+        &cx,
+        &mut out,
+    )
+    .map_err(|f| (f.code, f.message))?;
+    Ok(String::new())
+}
+
+/// `blog token`: the result, and a new token once, to stdout.
+fn token_command(text: &Text, action: TokenAction) -> Result<String, (Code, String)> {
+    let action = match action {
+        TokenAction::Create {
+            name,
+            scope,
+            login,
+            expires,
+        } => api_token_cmd::Action::Create(api_token_cmd::Create {
+            name,
+            scope,
+            login,
+            expires,
+        }),
+        TokenAction::List { login } => api_token_cmd::Action::List { login },
+        TokenAction::Revoke { id, yes } => api_token_cmd::Action::Revoke { id, yes },
+    };
+    let creds = Credentials::load(Path::new(".")).map_err(|e| (e.code(), e.message(text)))?;
+    let mut client = Client::from_env(creds.token).map_err(|e| (e.code(), e.message(text)))?;
+    let migrations = migrations::bundled();
+    let cx = setup::Context {
+        dir: Path::new("."),
+        migrations: &migrations,
+        now_ms: now_ms(),
+        text,
+    };
+    let mut out = std::io::stdout().lock();
+    api_token_cmd::run(
+        &mut client,
+        creds.account_id.as_deref(),
+        &action,
         &cx,
         &mut out,
     )
@@ -908,15 +1041,20 @@ fn run(text: &Text, args: &[String]) -> Outcome {
         Some(c @ Command::Deploy { .. }) => deploy_command(text, c),
         Some(Command::Backup { no_media, out }) => backup(text, &backup::Options { no_media, out }),
         Some(Command::Restore {
+            reset_credentials: true,
+            ..
+        }) => restore_reset(text),
+        Some(Command::Restore {
             file,
             yes,
             bundle,
             build,
             allow_other_site,
+            reset_credentials: false,
         }) => restore(
             text,
             restore::Options {
-                file,
+                file: file.unwrap_or_default(),
                 yes,
                 bundle,
                 build,
@@ -947,6 +1085,7 @@ fn run(text: &Text, args: &[String]) -> Outcome {
         ),
         Some(c @ (Command::Theme { .. } | Command::Plugin { .. })) => theme_command(text, c),
         Some(Command::Admin { action }) => admin_reset(text, action),
+        Some(Command::Token { action }) => token_command(text, action),
         None => return Outcome::Help(help::render(&cmd, &[], text)),
     };
     match result {
@@ -1273,6 +1412,16 @@ mod tests {
         }
         // English and Vietnamese differ for every case.
         assert!((0..3).all(|i| seen[i] != seen[i + 3]));
+    }
+
+    /// Every `--expires` value reaches `blog token`'s own check (a translated error), not
+    /// clap's English one.
+    #[test]
+    fn token_expires_is_parsed_by_blog_token() {
+        for v in ["-1", "70000", "abc", "1.5", ""] {
+            let argv = ["blog", "token", "create", "--name", "a", "--expires", v];
+            assert!(command(&en()).try_get_matches_from(argv).is_ok(), "{v:?}");
+        }
     }
 
     #[test]
