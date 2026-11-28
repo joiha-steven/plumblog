@@ -47,9 +47,9 @@ pub use posts::{
     PostStore, PostSummary, Revision, SavePost, Saved, valid_client_id,
 };
 pub use reader::{
-    READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage,
-    ReaderPost, ReaderRow, ReaderSeries, ReaderSitemapRow, ReaderStore, ReaderTag, ReaderTaxonPage,
-    year_bounds, year_of,
+    READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderCover, ReaderFilter, ReaderLink, ReaderNeighbours,
+    ReaderPage, ReaderPost, ReaderRow, ReaderSeries, ReaderSitemapRow, ReaderStore, ReaderTag,
+    ReaderTaxonPage, year_bounds, year_of,
 };
 pub use redirects::{Redirect, RedirectStore};
 pub use settings::{OptionOwner, PluginState, SettingsStore};
@@ -62,7 +62,7 @@ pub use signin::{
     public_settings, setup_hash_json,
 };
 pub use taxonomy::{NewSeries, Series, Tag, TaxonomyStore};
-pub use users::{NewUser, ProfileUpdate, SiteStore, User, UserStore};
+pub use users::{Admin, NewUser, ProfileUpdate, SiteStore, User, UserStore};
 pub use webhooks::{
     AttemptResult, Delivery, DeliveryStore, NewDelivery, NewWebhook, Webhook, WebhookStore,
 };

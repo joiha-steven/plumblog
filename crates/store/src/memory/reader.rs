@@ -6,8 +6,8 @@ use plumblog_model::{PostId, Result, SeriesId, TagId};
 
 use super::{MemoryStore, State, count};
 use crate::{
-    Post, PostKind, PostStatus, PostSummary, READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderFilter,
-    ReaderLink, ReaderNeighbours, ReaderPage, ReaderPost, ReaderRow, ReaderSeries,
+    Post, PostKind, PostStatus, PostSummary, READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderCover,
+    ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage, ReaderPost, ReaderRow, ReaderSeries,
     ReaderSitemapRow, ReaderStore, ReaderTag, ReaderTaxonPage, Tag, page_len, year_bounds, year_of,
 };
 
@@ -110,6 +110,17 @@ impl ReaderStore for MemoryStore {
                             slug: x.slug.clone(),
                             title: x.title.clone(),
                         }),
+                    cover: p
+                        .cover_media_id
+                        .and_then(|id| s.media.get(&id))
+                        .map(|m| ReaderCover {
+                            id: m.id,
+                            r2_key: m.r2_key.clone(),
+                            width: m.width,
+                            height: m.height,
+                            alt: m.alt.clone(),
+                            variants_json: m.variants_json.clone(),
+                        }),
                 })
         }))
     }
@@ -198,6 +209,7 @@ impl ReaderStore for MemoryStore {
                     post: p.clone(),
                     tags: s.reader_tags_of(p),
                     series: None,
+                    cover: None,
                 })
                 .collect()
         }))
@@ -221,23 +233,6 @@ impl ReaderStore for MemoryStore {
                     is_page: p.kind == PostKind::Page,
                 })
                 .collect()
-        }))
-    }
-
-    async fn reader_tags(&self) -> Result<Vec<Tag>> {
-        Ok(self.read(|s| {
-            let mut tags: Vec<Tag> = s
-                .tags
-                .values()
-                .filter(|t| {
-                    s.posts
-                        .values()
-                        .any(|p| listed(p) && p.tag_ids.contains(&t.id))
-                })
-                .cloned()
-                .collect();
-            tags.sort_by(|a, b| (&a.name, a.id).cmp(&(&b.name, b.id)));
-            tags
         }))
     }
 

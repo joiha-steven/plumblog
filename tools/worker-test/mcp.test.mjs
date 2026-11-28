@@ -22,6 +22,8 @@ const TOK = {
   owner: newSecret(),
   read: newSecret(),
   writer: newSecret(),
+  // The owner's own token, capped to writer scope: scope, not the user's role, decides.
+  ownerWriter: newSecret(),
   expired: newSecret(),
   revoked: newSecret(),
   disabled: newSecret(),
@@ -40,6 +42,7 @@ before(async () => {
     `INSERT INTO api_tokens (user_id, name, token_hash, scope, created_at, expires_at, revoked_at) VALUES
       (1, 'owner', ${sq(sha256hex(TOK.owner))}, 'owner', ${T}, NULL, NULL),
       (1, 'reader', ${sq(sha256hex(TOK.read))}, 'read', ${T}, NULL, NULL),
+      (1, 'owner-writer', ${sq(sha256hex(TOK.ownerWriter))}, 'writer', ${T}, NULL, NULL),
       (2, 'writer', ${sq(sha256hex(TOK.writer))}, 'writer', ${T}, NULL, NULL),
       (2, 'expired', ${sq(sha256hex(TOK.expired))}, 'writer', ${T - 2 * DAY}, ${T - DAY}, NULL),
       (2, 'revoked', ${sq(sha256hex(TOK.revoked))}, 'writer', ${T}, NULL, ${T}),
@@ -187,7 +190,9 @@ describe("mcp transport", () => {
 describe("mcp tools", () => {
   test("an owner sees every /api/v1 route but the reference and the raw-bytes routes", async () => {
     const ref = await fetch(`${w.url}/api/v1/reference`, { headers: { authorization: `Bearer ${TOK.owner}` } }).then((r) => r.json());
+    // Session-only routes (user admin) are never tools: MCP is token only.
     const want = ref.routes
+      .filter((r) => !r.session_only)
       .map((r) => `${r.method} ${r.path}`)
       .filter((k) => !["GET /api/v1/reference", "POST /api/v1/media", "GET /api/v1/media/{id}/original", "POST /api/v1/media/{id}/variants"].includes(k))
       .sort();
@@ -196,6 +201,10 @@ describe("mcp tools", () => {
     const got = tools.map((t) => t.description.split(";")[0]).sort();
     assert.deepEqual(got, want);
     assert.equal(new Set(tools.map((t) => t.name)).size, tools.length);
+    assert.ok(ref.routes.some((r) => r.session_only && r.path === "/api/v1/invites"));
+    for (const name of ["user_role", "user_disabled", "user_delete", "invite_list", "invite_create", "invite_revoke"]) {
+      assert.ok(!tools.some((t) => t.name === name), name);
+    }
     const update = tools.find((t) => t.name === "post_update");
     assert.equal(update.inputSchema.additionalProperties, false);
     assert.deepEqual(update.inputSchema.required, ["id", "expected_version"]);
@@ -240,7 +249,7 @@ describe("mcp tools", () => {
     assert.deepEqual(gone, { content: [{ type: "text", text: "{}" }], structuredContent: {}, isError: false });
   });
 
-  test("log_list: the owner reads the system log, a writer or read token is refused and does not see the tool", async () => {
+  test("log_list: the owner reads the system log, a writer or read token (the owner's writer-scope one too) is refused and does not see the tool", async () => {
     const own = result(await callTool("log_list", { limit: 5 })).structuredContent;
     assert.ok(Array.isArray(own.entries));
     assert.ok(own.entries.every((e) => e.at !== undefined && e.level && e.request_id));
@@ -249,7 +258,10 @@ describe("mcp tools", () => {
     const bad = result(await callTool("log_list", { kind: "nope" }));
     assert.equal(bad.isError, true);
     assert.deepEqual(bad.structuredContent, { error: "input.invalid", field: "kind" });
-    for (const bearer of [TOK.writer, TOK.read]) {
+    for (const bearer of [TOK.writer, TOK.read, TOK.ownerWriter]) {
+      const http = await fetch(`${w.url}/api/v1/log`, { headers: { authorization: `Bearer ${bearer}` } });
+      assert.equal(http.status, 403);
+      assert.equal((await http.json()).error, "auth.forbidden");
       const r = result(await callTool("log_list", {}, { bearer }));
       assert.equal(r.isError, true);
       assert.deepEqual(r.structuredContent, { error: "auth.forbidden" });

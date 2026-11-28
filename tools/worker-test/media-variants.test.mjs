@@ -11,7 +11,7 @@ import { startWorker } from "./harness.mjs";
 const COOKIE = "__Host-plumblog_session";
 const DAY = 86_400_000;
 const T = Date.now();
-const MAX_MEDIA_BODY = 20 * 1024 * 1024;
+const MAX_VARIANT_BODY = 8 * 1024 * 1024;
 const sha256hex = (s) => createHash("sha256").update(s).digest("hex");
 const b64u = (buf) => Buffer.from(buf).toString("base64url");
 const sq = (s) => `'${String(s).replaceAll("'", "''")}'`;
@@ -34,6 +34,18 @@ function jpeg(w, h) {
   const sof = Buffer.from([0xff, 0xc0, 0, 11, 8, h >> 8, h & 255, w >> 8, w & 255, 1, 1, 0x11, 0]);
   const app0 = Buffer.from([0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0]);
   return Buffer.concat([Buffer.from([0xff, 0xd8]), app0, sof, Buffer.from([0xff, 0xd9])]);
+}
+/** PNG signature and IHDR: an original that carries no orientation. */
+const png = (w, h) => Buffer.concat([Buffer.from("\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR", "latin1"), u32(w), u32(h), Buffer.from([8, 2, 0, 0, 0])]);
+/** An extended WebP header (`VP8X`): the canvas size only. */
+function webp(w, h) {
+  const b = Buffer.alloc(30);
+  b.write("RIFF", 0);
+  b.write("WEBPVP8X", 8);
+  b.writeUInt32LE(10, 16);
+  b.writeUIntLE(w - 1, 24, 3);
+  b.writeUIntLE(h - 1, 27, 3);
+  return b;
 }
 /** AVIF boxes up to `ispe`: enough for the header check, for the many widths of the cap test. */
 function avif(w, h) {
@@ -99,10 +111,11 @@ after(async () => {
 });
 
 let n = 0;
-/** A new 1600x1200 original uploaded by `as`; its id and R2 key. */
-async function original(as, name = `heron-${++n}.jpg`) {
-  const q = new URLSearchParams({ name, mime: "image/jpeg", width: 1600, height: 1200 });
-  const r = await api(w, "POST", `/api/v1/media?${q}`, { as, raw: jpeg(1600, 1200) });
+/** A new original uploaded by `as` (JPEG, 1600x1200 unless given); its id and R2 key. */
+async function original(as, name = `heron-${++n}.jpg`, width = 1600, height = 1200, mime = "image/jpeg") {
+  const q = new URLSearchParams({ name, mime, width, height });
+  const raw = mime === "image/png" ? png(width, height) : jpeg(width, height);
+  const r = await api(w, "POST", `/api/v1/media?${q}`, { as, raw });
   assert.equal(r.status, 201, r.text);
   return { id: r.json.id, key: w.query(`SELECT r2_key FROM media WHERE id = ${r.json.id}`)[0].r2_key };
 }
@@ -111,10 +124,11 @@ const variantPath = (id, q) => `/api/v1/media/${id}/variants?${new URLSearchPara
 /** Adds `bytes` as a size of item `id`; `q` overrides the query fields. */
 const add = (as, id, bytes, mime, width, height, q = {}) =>
   api(w, "POST", variantPath(id, { mime, width, height, sha256: sha256hex(bytes), ...q }), { as, raw: bytes });
+const version = () => w.query("SELECT content_version AS v FROM site WHERE id = 1")[0].v;
 const stored = (id) => JSON.parse(w.query(`SELECT variants_json FROM media WHERE id = ${id}`)[0].variants_json);
 const dirOf = (key) => key.slice(0, key.lastIndexOf("/") + 1);
-/** The R2 key of a size: next to the original, `<stem>-<width>-<sha8>.<ext>`. */
-const vkey = (key, stem, width, bytes, ext) => `${dirOf(key)}${stem}-${width}-${sha256hex(bytes).slice(0, 8)}.${ext}`;
+/** The R2 key of a size: next to the original, `<stem>-<width>-<sha256>.<ext>`. */
+const vkey = (key, stem, width, bytes, ext) => `${dirOf(key)}${stem}-${width}-${sha256hex(bytes)}.${ext}`;
 
 describe("media variants", () => {
   test("the route is in the reference: raw body, media.upload, owner-or-delete_any, sha256 required", async () => {
@@ -123,7 +137,7 @@ describe("media variants", () => {
     assert.equal(v.body, "original");
     assert.equal(v.access, "media.upload");
     assert.deepEqual(v.also, ["media.delete_any"]);
-    assert.equal(v.max_body, MAX_MEDIA_BODY);
+    assert.equal(v.max_body, MAX_VARIANT_BODY);
     assert.equal(v.status, 201);
     assert.equal(v.response, "media");
     assert.deepEqual(v.fields.filter((f) => f.required).map((f) => f.name).sort(), ["height", "id", "mime", "sha256", "width"]);
@@ -151,11 +165,11 @@ describe("media variants", () => {
     assert.equal((await add(AS.writerToken, id, AVIF480, "image/avif", 480, 360)).status, 201);
   });
 
-  test("/media/<id>/<stem>-480-<sha8>.avif serves the stored size once a published post uses the item", async () => {
+  test("/media/<id>/<stem>-480-<sha256>.avif serves the stored size once a published post uses the item", async () => {
     const { id } = await original(AS.owner, "Kingfisher.jpg");
     assert.equal((await add(AS.owner, id, AVIF480, "image/avif", 480, 360)).status, 201);
     const name = stored(id)[0].key.split("/").pop();
-    assert.equal(name, `kingfisher-480-${sha256hex(AVIF480).slice(0, 8)}.avif`);
+    assert.equal(name, `kingfisher-480-${sha256hex(AVIF480)}.avif`);
     const url = `${w.url}/media/${id}/${name}`;
     assert.equal((await fetch(url)).status, 404, "not public while no published post uses it");
     const post = await api(w, "POST", "/api/v1/posts", {
@@ -198,6 +212,8 @@ describe("media variants", () => {
     const cases = [
       ["upscale (wider than the original)", avif(2000, 1500), "image/avif", 2000, 1500, {}, "width"],
       ["one pixel wider than the original", avif(1601, 1201), "image/avif", 1601, 1201, {}, "width"],
+      ["not a standard width", avif(500, 375), "image/avif", 500, 375, {}, "width"],
+      ["a standard width wider than the original", avif(2400, 1800), "image/avif", 2400, 1800, {}, "width"],
       ["wrong aspect", avif(480, 400), "image/avif", 480, 400, {}, "height"],
       ["a type that is not AVIF or WebP", jpeg(480, 360), "image/jpeg", 480, 360, {}, "mime"],
       ["magic bytes of another type", WEBP480, "image/avif", 480, 360, {}, "mime"],
@@ -219,6 +235,18 @@ describe("media variants", () => {
     assert.equal((await add(AS.writer, id, avif(480, 361), "image/avif", 480, 361)).status, 201);
     // The original's own width is a format conversion, not an upscale.
     assert.equal((await add(AS.writer, id, avif(1600, 1200), "image/avif", 1600, 1200)).status, 201);
+    // An odd original width is allowed as itself, never as a resize target.
+    const odd = await original(AS.writer, "odd.jpg", 1234, 926);
+    assert.equal((await add(AS.writer, odd.id, avif(1234, 926), "image/avif", 1234, 926)).status, 201);
+    assert.equal((await add(AS.writer, odd.id, avif(960, 720), "image/avif", 960, 720)).status, 201);
+    assertError(await add(AS.writer, odd.id, avif(1233, 925), "image/avif", 1233, 925), 400, "input.invalid", "width");
+  });
+
+  test("only JPEG and AVIF originals take a quarter-turned size: a PNG keeps its own aspect", async () => {
+    const { id } = await original(AS.writer, "flat.png", 4000, 3000, "image/png");
+    assertError(await add(AS.writer, id, avif(960, 1280), "image/avif", 960, 1280), 400, "input.invalid", "height");
+    assert.equal((await add(AS.writer, id, avif(960, 720), "image/avif", 960, 720)).status, 201);
+    assert.equal(stored(id).length, 1);
   });
 
   test("an original stored a quarter turned (3x4 header) takes sizes in display order (4x3)", async () => {
@@ -227,7 +255,8 @@ describe("media variants", () => {
     assert.equal(up.status, 201, up.text);
     const id = up.json.id;
     assert.equal((await add(AS.writer, id, AVIF480, "image/avif", 480, 360)).status, 201);
-    assert.equal((await add(AS.writer, id, avif(360, 480), "image/avif", 360, 480)).status, 201);
+    // One size per (mime, width): the portrait one goes in the other type.
+    assert.equal((await add(AS.writer, id, webp(480, 640), "image/webp", 480, 640)).status, 201);
     // Never wider than the matching orientation: 4x3 is at most 1600 wide, 3x4 at most 1200.
     assert.equal((await add(AS.writer, id, avif(1600, 1200), "image/avif", 1600, 1200)).status, 201);
     assertError(await add(AS.writer, id, avif(1604, 1203), "image/avif", 1604, 1203), 400, "input.invalid", "width");
@@ -251,24 +280,56 @@ describe("media variants", () => {
   });
 
   test("at most 8 sizes: the 9th is 409 and stores nothing", async () => {
-    const { id, key } = await original(AS.writer);
-    for (let i = 1; i <= 8; i++) {
-      const r = await add(AS.writer, id, avif(160 * i, 120 * i), "image/avif", 160 * i, 120 * i);
-      assert.equal(r.status, 201, `size ${i}: ${r.text}`);
+    // 3000 px wide: five allowed widths in two types, so the cap, not the widths, refuses.
+    const { id, key } = await original(AS.writer, `heron-${++n}.jpg`, 3000, 2250);
+    const sizes = [480, 960, 1600, 2400].flatMap((x) => [
+      [avif(x, x * 0.75), "image/avif", x],
+      [webp(x, x * 0.75), "image/webp", x],
+    ]);
+    for (const [bytes, mime, x] of sizes) {
+      const r = await add(AS.writer, id, bytes, mime, x, x * 0.75);
+      assert.equal(r.status, 201, `${mime} ${x}: ${r.text}`);
     }
-    assertError(await add(AS.writer, id, avif(1520, 1140), "image/avif", 1520, 1140), 409, "store.conflict", "variants");
+    assertError(await add(AS.writer, id, avif(3000, 2250), "image/avif", 3000, 2250), 409, "store.conflict", "variants");
     assert.equal(stored(id).length, 8);
-    assert.equal(w.r2Size(vkey(key, `heron-${n}`, 1520, avif(1520, 1140), "avif")), null);
+    assert.equal(w.r2Size(vkey(key, `heron-${n}`, 3000, avif(3000, 2250), "avif")), null);
   });
 
-  test("a body over the cap is 413 before access or the body are looked at", async () => {
+  test("a body over the 8 MiB cap is 413 before access or the body are looked at", async () => {
     const { id } = await original(AS.writer);
-    const big = Buffer.alloc(MAX_MEDIA_BODY + 1);
+    const big = Buffer.alloc(MAX_VARIANT_BODY + 1);
     AVIF480.copy(big);
     for (const as of [AS.writer, AS.writer2, {}]) {
       assertError(await add(as, id, big, "image/avif", 480, 360), 413, "api.body_too_large");
     }
     assert.deepEqual(stored(id), []);
+  });
+
+  test("a path id that is not an id is 404", async () => {
+    // Refused before the body is read (a unit test in api/v1/mod.rs proves the order:
+    // wrangler dev takes in the whole body before the Worker answers, so HTTP cannot show it).
+    for (const bad of ["abc", "0", "-1"]) {
+      assertError(await add(AS.writer, bad, AVIF480, "image/avif", 480, 360), 404, "store.not_found");
+    }
+  });
+
+  test("a size bumps the content version only when a published post uses the item", async () => {
+    const { id } = await original(AS.owner);
+    const v = version();
+    assert.equal((await add(AS.owner, id, AVIF480, "image/avif", 480, 360)).status, 201);
+    assert.equal(version(), v, "unused: on no reader page");
+    const name = stored(id)[0].key.split("/").pop();
+    const post = await api(w, "POST", "/api/v1/posts", {
+      as: AS.owner,
+      body: { lang: "en", slug: `bump-${id}`, title: "Bump", markdown: `![x](/media/${id}/${name})`, status: "published" },
+    });
+    assert.equal(post.status, 201, post.text);
+    const v2 = version();
+    assert.equal((await add(AS.owner, id, WEBP480, "image/webp", 480, 360)).status, 201);
+    assert.equal(version(), v2 + 1, "in a published post's srcset");
+    // The same bytes again write nothing, so nothing to bump.
+    assert.equal((await add(AS.owner, id, WEBP480, "image/webp", 480, 360)).status, 200);
+    assert.equal(version(), v2 + 1);
   });
 
   test("two sizes added at once are both kept", async () => {

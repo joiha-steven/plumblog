@@ -40,6 +40,7 @@ pub const LOG_KINDS: &[&str] = &[
     "auth.token_created",
     "auth.token_revoked",
     "user.created",
+    "user.changed",
     "content.changed",
     "settings.changed",
     "theme.changed",
@@ -325,6 +326,23 @@ const OPTION_CHOICE: &[Prop] = &[
     p("label_key", Ty::Str),
 ];
 
+/// An unused invite (`GET /api/v1/invites`): never the code or its hash. `role` is a `Role`
+/// code; an invite past `expires_at` is listed until revoked, so the admin can show it as
+/// expired.
+const INVITE: &[Prop] = &[
+    p("id", Ty::Int),
+    p("role", Ty::Str),
+    p("created_by", Ty::Int),
+    p("created_at", Ty::Int),
+    p("expires_at", Ty::Int),
+];
+
+/// `POST /api/v1/invites`: the invite plus its code, in this answer only (only its hash is
+/// stored). The admin turns it into the `/admin/invite?code=` link.
+const INVITE_CREATED: &[Prop] = &[p("code", Ty::Str)];
+
+const INVITE_LIST: &[Prop] = &[list("invites", Ty::Shape("invite"))];
+
 const CONFLICT: &[Prop] = &[
     p("error", Ty::Str),
     p("field", Ty::Str),
@@ -409,6 +427,21 @@ pub const SHAPES: &[Shape] = &[
         name: "log_page",
         extends: None,
         props: LOG_PAGE,
+    },
+    Shape {
+        name: "invite",
+        extends: None,
+        props: INVITE,
+    },
+    Shape {
+        name: "invite_created",
+        extends: Some("invite"),
+        props: INVITE_CREATED,
+    },
+    Shape {
+        name: "invite_list",
+        extends: None,
+        props: INVITE_LIST,
     },
     Shape {
         name: "conflict",

@@ -81,8 +81,8 @@ pub trait MediaStore {
     /// Sets `variants_json` to `new` only while it still is `expected`, the text the caller
     /// read: R2 and D1 share no transaction, so two sizes added at once each read, append and
     /// swap, and the loser re-reads instead of dropping the winner's size. `NotFound`;
-    /// `Conflict` when the row changed since. Bumps the content version (sizes are in
-    /// reader `srcset`s).
+    /// `Conflict` when the row changed since. Bumps the content version only when a
+    /// published post uses the item (sizes are in reader `srcset`s).
     async fn replace_media_variants(&self, id: MediaId, expected: &str, new: &str) -> Result<()>;
     /// `NotFound`. `Conflict` while any post uses it (see `media_usage`); the detail lists
     /// those post ids and nothing is deleted. Never bumps the content version: unused media

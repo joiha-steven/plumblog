@@ -15,6 +15,10 @@
  * taken slug; trash and restore work on the same list. `?create=slow` leaves every create
  * unanswered (the editor's "still saving" message).
  *
+ * The system log (`logList`) answers as `GET /api/v1/log` does: filters, opaque cursor, newest first,
+ * `auth.forbidden` for a writer. fixtures/log.json holds fixed times; the mock shifts them so the
+ * newest entry is 20 minutes old, which keeps "Last 24 hours" and the day headings meaningful.
+ * `?log=loading|error|offline|empty` forces a state on the log alone.
  * The media library lives in memory too (fixtures/media.json; `?mock=empty` empties it, `?media=error`
  * fails only its list; delete answers 403 for another's picture to a writer and 409 with the posts while in use).
  * Settings (`/api/v1/settings`): a map kept in memory from fixtures/settings.json (`?mock=empty`: every key
@@ -30,13 +34,14 @@
  */
 
 import me from "../../fixtures/me.json";
+import logEntries from "../../fixtures/log.json";
 import mediaFixtures from "../../fixtures/media.json";
 import posts from "../../fixtures/posts.json";
 import settingsFixture from "../../fixtures/settings.json";
 import tokenFixtures from "../../fixtures/tokens.json";
 import longPost from "../../fixtures/post-1.txt";
-import { type Api, type JsonBody, type Me, type Media, type MediaItem, type MediaPage, type Method, type Result, fail } from "./client";
-import type { Post, PostCreateInput, PostPage, PostUpdateInput, RenderWarning } from "./model.gen";
+import { type Api, type JsonBody, type LogQuery, type Me, type MediaItem, type MediaPage, type Method, type Result, fail } from "./client";
+import { LOG_KINDS, LOG_LEVELS, type LogEntry, type LogPage, type Post, type PostCreateInput, type PostPage, type PostUpdateInput, type RenderWarning } from "./model.gen";
 
 /** Cloudflare's public always-pass Turnstile key: the real widget works in dev. */
 const TEST_SITE_KEY = "1x00000000000000000000AA";
@@ -176,6 +181,25 @@ async function auth<T>(params: URLSearchParams, method: Method, path: string, bo
 }
 
 const PAGE = 20;
+const LOG_PAGE = 50;
+const LOG_LEVEL_RANK: Record<string, number> = Object.fromEntries(LOG_LEVELS.map((l, i) => [l, i]));
+const LOG_NEWEST_AGO = 20 * 60_000;
+
+/** Whether an entry passes the filters, as the server applies them (`level` is a minimum). */
+function logMatches(e: LogEntry, q: LogQuery): boolean {
+  if (q.kind !== undefined && e.kind !== q.kind) return false;
+  if (q.level !== undefined && (LOG_LEVEL_RANK[e.level] ?? 0) < (LOG_LEVEL_RANK[q.level] ?? 0)) return false;
+  if (q.code !== undefined && e.error_code !== q.code) return false;
+  if (q.actor !== undefined && e.actor_id !== q.actor) return false;
+  if (q.from !== undefined && e.at < q.from) return false;
+  if (q.to !== undefined && e.at >= q.to) return false;
+  if (q.q !== undefined) {
+    const needle = q.q.toLowerCase();
+    const hit = e.request_id === q.q || e.subject.toLowerCase().includes(needle) || e.fields.some((f) => f.value.toLowerCase().includes(needle));
+    if (!hit) return false;
+  }
+  return true;
+}
 
 /** The mock's settings; reset by a page load, like the rest of the mock. */
 let settings: Record<string, unknown> | undefined;
@@ -212,6 +236,9 @@ export function mockApi(params: URLSearchParams): Api {
   let mediaId = 100;
   const role = params.get("role") === "writer" ? "writer" : "owner";
   const store: Post[] = (posts as Post[]).map((p) => structuredClone(p));
+  // Fixed times in the fixture, shifted once so the newest entry is 20 minutes old.
+  const newest = Math.max(...(logEntries as LogEntry[]).map((e) => e.at));
+  const logStore: LogEntry[] = (logEntries as LogEntry[]).map((e) => ({ ...structuredClone(e), at: e.at + Date.now() - LOG_NEWEST_AGO - newest }));
   const library: MediaItem[] = (mediaFixtures as MediaItem[]).map((m) => structuredClone(m));
   const first = store.find((p) => p.id === 1);
   if (first) first.markdown = longPost;
@@ -268,6 +295,32 @@ export function mockApi(params: URLSearchParams): Api {
       if (mode === "offline") return fail("network", 0);
       const p = store.find((x) => x.id === id);
       return p ? { ok: true, value: structuredClone(p) } : fail("post.not_found", 404);
+    },
+    async logList(q) {
+      // `?log=loading|error|offline|empty` forces a state on the log alone (`?mock=` also stops `me`, so the shell fails first).
+      const state = params.get("log") ?? mode;
+      if (state === "loading") await new Promise(() => undefined);
+      await new Promise((r) => setTimeout(r, 150));
+      if (state === "error") return fail("internal", 500);
+      if (state === "offline") return fail("network", 0);
+      if (role !== "owner") return fail("auth.forbidden", 403);
+      if (q.kind !== undefined && !(LOG_KINDS as readonly string[]).includes(q.kind)) return fail("input.invalid", 400, { field: "kind" });
+      if (q.q !== undefined && (q.q.length < 1 || q.q.length > 100)) return fail("input.invalid", 400, { field: "q" });
+      const limit = q.limit ?? LOG_PAGE;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) return fail("input.invalid", 400, { field: "limit" });
+      let offset = 0;
+      if (q.cursor !== undefined) {
+        try {
+          offset = Number(atob(q.cursor));
+        } catch {
+          offset = -1;
+        }
+        if (!Number.isInteger(offset) || offset < 0) return fail("input.invalid", 400, { field: "cursor" });
+      }
+      const all = state === "empty" ? [] : logStore.filter((e) => logMatches(e, q)).map((e) => structuredClone(e));
+      all.sort((a, b) => b.at - a.at || b.id - a.id);
+      const next = offset + limit < all.length ? btoa(String(offset + limit)) : null;
+      return { ok: true, value: { entries: all.slice(offset, offset + limit), next_cursor: next } };
     },
     async createPost(input: PostCreateInput) {
       await settle();
@@ -435,8 +488,13 @@ export function mockApi(params: URLSearchParams): Api {
         img.onerror = () => resolve([0, 0]);
         img.src = url;
       });
-      const media: Media = { id: ++mediaId, url, width: size[0], height: size[1] };
-      return { ok: true, value: media };
+      if (up === "refuse") return fail("input.invalid", 400, { field: "sha256" });
+      // `?upload=dup`: the caller's own first picture answers, as the server does for a known hash.
+      const known = up === "dup" ? library[0] : undefined;
+      if (known) return { ok: true, value: { id: known.id, url: known.src, width: known.width, height: known.height, item: known, existing: true } };
+      const item: MediaItem = { id: ++mediaId, src: url, mime: file.type, bytes: file.size, width: size[0], height: size[1], alt: "", uploaded_by: me.user.id, created_at: Date.now() };
+      library.unshift(item);
+      return { ok: true, value: { id: item.id, url, width: size[0], height: size[1], item, existing: false } };
     },
   };
 }

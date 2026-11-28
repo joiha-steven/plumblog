@@ -1,11 +1,11 @@
 //! Reader reads (`ReaderStore`): published posts only. The SQL is in `reader_sql`, where a test
 //! checks the plan of each query against the index it is meant to use.
 
-use plumblog_model::{PostId, Result, SeriesId, TagId};
+use plumblog_model::{MediaId, PostId, Result, SeriesId, TagId};
 use plumblog_store::{
-    READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage,
-    ReaderPost, ReaderRow, ReaderSeries, ReaderSitemapRow, ReaderStore, ReaderTag, ReaderTaxonPage,
-    Tag, year_bounds,
+    READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderCover, ReaderFilter, ReaderLink, ReaderNeighbours,
+    ReaderPage, ReaderPost, ReaderRow, ReaderSeries, ReaderSitemapRow, ReaderStore, ReaderTag,
+    ReaderTaxonPage, year_bounds,
 };
 use worker::js_sys::{Array, JSON};
 use worker::wasm_bindgen::{JsCast, JsValue};
@@ -31,6 +31,25 @@ fn read_tags(name: &'static str, r: &mut Row) -> Result<Vec<ReaderTag>> {
     }
     tags.sort_by(|a, b| a.0.total_cmp(&b.0));
     Ok(tags.into_iter().map(|(_, t)| t).collect())
+}
+
+/// The cover columns of [`sql::post`]; all NULL (so `None`) without a cover.
+fn read_cover(r: &mut Row) -> Result<Option<ReaderCover>> {
+    let Some(id) = r.opt_int()? else {
+        // Still consume the other five columns of the join.
+        for _ in 0..5 {
+            r.opt_text()?;
+        }
+        return Ok(None);
+    };
+    Ok(Some(ReaderCover {
+        id: MediaId(id),
+        r2_key: r.text()?,
+        width: r.int()?,
+        height: r.int()?,
+        alt: r.text()?,
+        variants_json: r.text()?,
+    }))
 }
 
 fn read_link(r: &mut Row) -> Result<ReaderLink> {
@@ -110,7 +129,8 @@ impl ReaderStore for D1Store {
         Ok(ReaderPage { total, rows })
     }
 
-    // 1 query (post page): the post, its tags and its series.
+    // 1 query (post page): the post, its tags, its series and its cover (series by primary key,
+    // media by primary key).
     async fn reader_post(&self, lang: &str, slug: &str) -> Result<Option<ReaderPost>> {
         let s = self.stmt("reader_post", &sql::post(), &[text(lang), text(slug)])?;
         match self.row(s).await? {
@@ -121,6 +141,7 @@ impl ReaderStore for D1Store {
                     (Some(slug), Some(title)) => Some(ReaderSeries { slug, title }),
                     _ => None,
                 },
+                cover: read_cover(&mut r)?,
             })),
             None => Ok(None),
         }
@@ -223,6 +244,7 @@ impl ReaderStore for D1Store {
                     post: read_post(r)?,
                     tags: read_tags("reader_feed", r)?,
                     series: None,
+                    cover: None,
                 })
             })
             .collect()
@@ -254,22 +276,6 @@ impl ReaderStore for D1Store {
         rows.sort_by_key(|(at, id, _)| std::cmp::Reverse((*at, *id)));
         rows.truncate(usize::try_from(n).unwrap_or(usize::MAX));
         Ok(rows.into_iter().map(|(_, _, row)| row).collect())
-    }
-
-    // 1 query: each tag stops at its first published post (post_tags_tag, then the post).
-    async fn reader_tags(&self) -> Result<Vec<Tag>> {
-        let s = self.stmt("reader_tags", &sql::tags(), &[])?;
-        self.rows(s)
-            .await?
-            .iter_mut()
-            .map(|r| {
-                Ok(Tag {
-                    id: TagId(r.int()?),
-                    slug: r.text()?,
-                    name: r.text()?,
-                })
-            })
-            .collect()
     }
 
     // 1 query (none for an empty list): an EXISTS on post_tags_tag per tag and language.

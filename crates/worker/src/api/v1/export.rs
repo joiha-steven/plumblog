@@ -73,7 +73,7 @@ fn comment_json(c: &Comment) -> String {
 
 /// Key for key as `shape::USER`. Fields are named one by one so a secret added to [`User`]
 /// never reaches the answer by default.
-fn user_json(u: &User) -> String {
+pub(super) fn user_json(u: &User) -> String {
     object(&[
         ("id", Out::Int(u.id.0)),
         ("login", Out::Str(u.login.clone())),

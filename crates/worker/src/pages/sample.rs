@@ -118,6 +118,7 @@ fn to_post(p: &SamplePost) -> StoredPost {
         published_at: unix_from_date(p.date),
         pinned: p.pinned,
         excerpt: (!p.excerpt.is_empty()).then(|| p.excerpt.to_owned()),
+        cover: None,
         // What saving a post does; done once per isolate for the embedded samples.
         body: plumblog_markdown::render(p.markdown, Options::default()),
         tags: p

@@ -107,10 +107,14 @@ pub(super) fn rows_series(from: &str) -> String {
     )
 }
 
-/// A post page: `posts_lang_slug`, then the tags through the `post_tags` primary key.
+/// A post page: `posts_lang_slug`, then the tags through the `post_tags` primary key, the
+/// series through the `series` primary key and the cover through the `media` primary key
+/// (LEFT JOIN: no cover is all NULL).
 pub(super) fn post() -> String {
     format!(
-        "SELECT {POST_COLS}, {TAGS_COL}, {SERIES_COLS} FROM posts p \
+        "SELECT {POST_COLS}, {TAGS_COL}, {SERIES_COLS}, \
+         m.id, m.r2_key, m.width, m.height, m.alt, m.variants_json \
+         FROM posts p LEFT JOIN media m ON m.id = p.cover_media_id \
          WHERE p.lang = ? AND p.slug = ? AND p.status = 'published'"
     )
 }
@@ -201,15 +205,6 @@ pub(super) fn langs_with_posts(n: usize) -> String {
     )
 }
 
-/// Tags with a published post: each tag stops at its first one (`post_tags_tag`, then the post).
-pub(super) fn tags() -> String {
-    format!(
-        "SELECT t.id, t.slug, t.name FROM tags t WHERE EXISTS (SELECT 1 \
-         FROM post_tags pt CROSS JOIN posts p ON p.id = pt.post_id \
-         WHERE pt.tag_id = t.id AND {LISTED}) ORDER BY t.name, t.id"
-    )
-}
-
 /// `(SELECT ? AS v, 0 AS o) UNION ALL ...`: `n` languages, `o` keeping the caller's order.
 fn lang_values(n: usize) -> String {
     (0..n)
@@ -219,8 +214,8 @@ fn lang_values(n: usize) -> String {
 }
 
 /// Tag pages that exist: each (tag, language) stops at its first published post
-/// (`post_tags_tag`, then the post). Binds the `n` languages. `tags` is read whole, like
-/// [`tags`]; the sort is of the tags.
+/// (`post_tags_tag`, then the post). Binds the `n` languages. `tags` is read whole; the
+/// sort is of the tags.
 pub(super) fn tag_pages(n: usize) -> String {
     format!(
         "SELECT t.slug, t.name, l.v FROM tags t CROSS JOIN ({}) l WHERE EXISTS (SELECT 1 \
@@ -542,7 +537,18 @@ mod plans {
             false,
         );
 
-        check(&c, "post", &post(), &["posts_lang_slug"], false);
+        // The cover and the series are primary-key lookups, not scans of `media` or `series`.
+        check(
+            &c,
+            "post",
+            &post(),
+            &[
+                "posts_lang_slug",
+                "SEARCH m USING INTEGER PRIMARY KEY",
+                "SEARCH s USING INTEGER PRIMARY KEY",
+            ],
+            false,
+        );
         // The D1 engine chose posts_admin (status) here and read every published row; the
         // SQLite bundled for tests does not, so the pin itself is asserted as well.
         assert!(TRANSLATIONS.contains("INDEXED BY posts_group_lang"));
@@ -561,7 +567,6 @@ mod plans {
             &["COVERING INDEX posts_by_date"],
             true,
         );
-        check_scans(&c, "tags", &tags(), &["post_tags_tag"], true, &["t"]);
         check(&c, "feed", &feed(), &["posts_listing"], false);
         // The sitemap also reads each row's kind (language homes skip pages): same plan.
         assert!(sitemap().contains("p.kind = 'page'"));

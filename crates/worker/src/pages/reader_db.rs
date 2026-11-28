@@ -136,6 +136,7 @@ fn from_summary(s: PostSummary, row_tags: Vec<ReaderTag>) -> StoredPost {
         // The store keeps one excerpt, written or automatic, so it is always the "stored"
         // one the theme cuts to `excerpt_words`.
         excerpt: None,
+        cover: None,
         body: Rendered {
             excerpt: s.excerpt,
             reading_minutes: u32::try_from(s.reading_minutes).unwrap_or(0),
@@ -171,6 +172,7 @@ fn from_full(r: ReaderPost) -> StoredPost {
         comments_enabled: p.comments_enabled,
         excerpt: None,
         body,
+        cover: r.cover.as_ref().map(super::cover::build),
         tags: tags(r.tags),
         translations: Vec::new(),
         series: r.series.map(|s| PostSeries {
@@ -193,6 +195,7 @@ fn from_link(l: ReaderLink) -> StoredPost {
         is_page: false,
         comments_enabled: false,
         excerpt: None,
+        cover: None,
         body: Rendered::default(),
         tags: Vec::new(),
         translations: Vec::new(),

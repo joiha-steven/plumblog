@@ -82,13 +82,7 @@ impl MediaStore for D1Store {
     async fn public_media(&self, id: MediaId) -> Result<Option<Media>> {
         let s = self.stmt(
             "public_media",
-            &format!(
-                "SELECT {MEDIA_COLS} FROM media WHERE id = ?1 AND (\
-                 EXISTS (SELECT 1 FROM post_media pm JOIN posts p ON p.id = pm.post_id \
-                 WHERE pm.media_id = ?1 AND p.status = 'published') \
-                 OR EXISTS (SELECT 1 FROM posts WHERE cover_media_id = ?1 \
-                 AND status = 'published'))"
-            ),
+            &format!("SELECT {MEDIA_COLS} FROM media WHERE id = ?1 AND ({ON_PUBLISHED})"),
             &[bound(id.0)],
         )?;
         self.row(s)
@@ -159,8 +153,15 @@ impl MediaStore for D1Store {
     }
 
     async fn replace_media_variants(&self, id: MediaId, expected: &str, new: &str) -> Result<()> {
-        let unchanged = "EXISTS (SELECT 1 FROM media WHERE id = ?1 AND variants_json = ?2)";
-        let bump = bump_if(self, unchanged, &[bound(id.0), text(expected)])?;
+        // Sizes are in reader `srcset`s only where a published post uses the item.
+        let bump = bump_if(
+            self,
+            &format!(
+                "EXISTS (SELECT 1 FROM media WHERE id = ?1 AND variants_json = ?2) \
+                 AND ({ON_PUBLISHED})"
+            ),
+            &[bound(id.0), text(expected)],
+        )?;
         let s = self.stmt(
             "replace_media_variants",
             "UPDATE media SET variants_json = ?3 WHERE id = ?1 AND variants_json = ?2",
@@ -216,6 +217,11 @@ impl MediaStore for D1Store {
         Err(changed_concurrently("delete_media"))
     }
 }
+
+/// SQL true while a published post uses media `?1` in its body or as cover.
+const ON_PUBLISHED: &str = "EXISTS (SELECT 1 FROM post_media pm JOIN posts p ON p.id = pm.post_id \
+     WHERE pm.media_id = ?1 AND p.status = 'published') \
+     OR EXISTS (SELECT 1 FROM posts WHERE cover_media_id = ?1 AND status = 'published')";
 
 /// SQL true while a post uses `media.id` in its body or as cover.
 const IN_USE: &str = "EXISTS (SELECT 1 FROM post_media WHERE media_id = media.id) \

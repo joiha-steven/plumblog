@@ -204,8 +204,12 @@ async fn last_owner_guard_in_batch(db: &D1Store) -> Result<(), String> {
     let e = |e: plumblog_model::Error| e.to_string();
     let a = owner(db, "a").await?;
     let b = owner(db, "b").await?;
-    let demote_a = db.demote_stmts(a, Role::Writer, 2_000).map_err(e)?;
-    db.set_role(b, Role::Writer, 2_000).await.map_err(e)?;
+    let by = plumblog_store::Admin {
+        id: a,
+        proof: Proof::Unchecked,
+    };
+    let demote_a = db.demote_stmts(&by, a, Role::Writer, 2_000).map_err(e)?;
+    db.set_role(&by, b, Role::Writer, 2_000).await.map_err(e)?;
     let out = db.batch_guarded("set_role", demote_a).await;
     check(
         "demoting the last owner fires the guard",

@@ -19,6 +19,9 @@ CSS_BUDGET=$((20 * 1024))
 # The sign-in, setup, invite and account screens: a lazy part like the editor, but small, so
 # it gets its own line well under the chunk budget (it loads before anything else when signed out).
 AUTH_JS_BUDGET=$((12 * 1024))
+# The image encoder (web/admin/src/encode): its worker script plus the AVIF wasm, together.
+# Fetched on the first upload only, never part of a page load or of any chunk above.
+ENCODER_BUDGET=$((1536 * 1024))
 
 fail() { echo "admin-build: FAIL: $1" >&2; exit 1; }
 mock=false
@@ -33,11 +36,31 @@ bin=tools/node_modules/.bin
 export NODE_PATH="$PWD/tools/node_modules"
 if $mock; then out=target/admin-dev; else out=target/admin; fi
 meta="$out.meta.json" # beside the output, not in it: it is not served
-rm -rf "$out" "$meta" "$out.preload"
+rm -rf "$out" "$meta" "$out.preload" "$out.encode.meta.json"
 mkdir -p "$out"
 common=(--bundle --minify --target=es2022 --legal-comments=none --log-level=warning --charset=utf8 --loader:.txt=text)
+# The image encoder is built first: its two files carry content hashes in their names, and the
+# admin script is told those URLs (the encode module starts the worker by URL; nothing in the
+# shell imports the worker or the wasm). Own folder: not a chunk, not precached by the service
+# worker (its 3.4 MB wasm would be fetched on every install), cached for good by its hashed names.
+enc="$out/encode"
+encmeta="$out.encode.meta.json"
+wasm_src=tools/node_modules/@jsquash/avif/codec/enc/avif_enc.wasm
+[ -f "$wasm_src" ] || fail "missing $wasm_src (@jsquash/avif, tools/package.json)"
+mkdir -p "$enc"
+wasm_name="avif-$(shasum -a 256 "$wasm_src" | cut -c1-12).wasm"
+cp "$wasm_src" "$enc/$wasm_name"
+# Notices next to the wasm: the package's Apache-2.0 text, and libavif's and libaom's (BSD-2-Clause,
+# libaom's patent grant), which the npm package lacks (web/admin/src/encode/notices.txt says where from).
+cp tools/node_modules/@jsquash/avif/LICENSE "$enc/license-jsquash-avif.txt" || fail "copying the @jsquash/avif license"
+cp web/admin/src/encode/notices.txt "$enc/license-libavif-libaom.txt" || fail "copying the encoder notices"
+"$bin/esbuild" web/admin/src/encode/worker.ts "${common[@]}" --format=esm \
+  --outdir="$enc" --entry-names='worker-[hash]' --metafile="$encmeta" || fail "esbuild: image encoder worker"
+worker_name=$(cd "$enc" && ls worker-*.js)
+[ "$(echo "$worker_name" | wc -w | tr -d ' ')" = 1 ] || fail "expected one encoder worker file, got: $worker_name"
 "$bin/esbuild" web/admin/src/main.ts "${common[@]}" --format=esm --splitting \
   --outdir="$out" --entry-names=app --chunk-names='chunks/[name]-[hash]' --define:MOCK="$mock" \
+  --define:ENCODER_WORKER_URL="\"/admin/encode/$worker_name\"" --define:ENCODER_WASM_URL="\"/admin/encode/$wasm_name\"" \
   --metafile="$meta" || fail "esbuild: admin script"
 "$bin/esbuild" web/admin/src/app.css "${common[@]}" --outfile="$out/app.css" \
   || fail "esbuild: admin stylesheet"
@@ -65,7 +88,7 @@ if $mock; then cp -R web/admin/fixtures/media "$out/mock"; fi
 
 # The service worker precaches exactly this build's scripts, styles and fonts, in a cache named after their hash:
 # a new deploy gets a new cache and the old one (with its old chunks) is deleted.
-files=$(cd "$out" && find . -type f \( -name '*.js' -o -name '*.css' -o -name '*.woff2' \) | sed 's#^\./#/admin/#' | sort)
+files=$(cd "$out" && find . -type f -not -path './encode/*' \( -name '*.js' -o -name '*.css' -o -name '*.woff2' \) | sed 's#^\./#/admin/#' | sort)
 build=$(cd "$out" && find . -type f -print0 | sort -z | xargs -0 cat | shasum -a 256 | cut -c1-12)
 list=$(printf '%s\n' $files | sed 's/.*/"&"/' | paste -sd, -)
 "$bin/esbuild" web/admin/src/sw.ts "${common[@]}" --format=iife --outfile="$out/sw.js" \
@@ -75,6 +98,8 @@ list=$(printf '%s\n' $files | sed 's/.*/"&"/' | paste -sd, -)
 # is seen on the next load.
 cat > "$out/_headers" <<'HEADERS'
 /admin/chunks/*
+  Cache-Control: public, max-age=31536000, immutable
+/admin/encode/*
   Cache-Control: public, max-age=31536000, immutable
 /admin/app.js
   Cache-Control: no-cache
@@ -145,4 +170,15 @@ for f in $auth_files; do auth_size=$((auth_size + $(gz "$f"))); done
 echo "admin-build: auth ($(echo $auth_files | wc -w | tr -d ' ') files) gzip = $auth_size bytes (budget $AUTH_JS_BUDGET)"
 [ "$auth_size" -le "$AUTH_JS_BUDGET" ] || over+="auth $auth_size > $AUTH_JS_BUDGET; "
 check_size "$out/app.css" "$CSS_BUDGET" "css"
+encoder_size=$(($(gz "$enc/$worker_name") + $(gz "$enc/$wasm_name")))
+echo "admin-build: encoder ($worker_name + $wasm_name) gzip = $encoder_size bytes (budget $ENCODER_BUDGET)"
+[ "$encoder_size" -le "$ENCODER_BUDGET" ] || over+="encoder $encoder_size > $ENCODER_BUDGET; "
+# What the encoder worker bundles (its glue and the codec) must not be in the admin script
+# bundle: nothing in the shell or in any chunk may carry it, only the worker file does.
+node -e '
+  const codec = /node_modules\/@jsquash\/|\/encode\/worker\.ts$/;
+  const enc = Object.keys(require(process.argv[1]).inputs).filter((f) => codec.test(f));
+  const leaked = Object.keys(require(process.argv[2]).inputs).filter((f) => codec.test(f));
+  if (enc.length < 2 || leaked.length) { console.error("encoder inputs:", enc.length, "in the admin bundle:", leaked.join(", ")); process.exit(1); }
+' "$PWD/$encmeta" "$PWD/$meta" || fail "the image encoder leaked into the admin script bundle (shell or chunks)"
 [ -z "$over" ] || fail "over budget: $over"

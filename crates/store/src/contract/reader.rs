@@ -166,7 +166,7 @@ fn tag(slug: &str, name: &str) -> ReaderTag {
     }
 }
 
-/// The tag filter, tag rows with awkward names in id order, and the tag list.
+/// The tag filter and tag rows with awkward names in id order.
 pub async fn reader_tags_and_tag_filter<S: Store>(db: &S) -> Check {
     let u = user(db, "alice").await?;
     let comma = ok("ensure_tag comma", db.ensure_tag("comma", "a, b").await)?;
@@ -246,19 +246,6 @@ pub async fn reader_tags_and_tag_filter<S: Store>(db: &S) -> Check {
             tag("comma", "a, b"),
             tag("quote", "say \"hi\" 'there' \\ ]")
         ])
-    )?;
-
-    let list = ok("reader_tags", db.reader_tags().await)?;
-    eq!(
-        "reader_tags: published posts only, by name",
-        list.iter()
-            .map(|t| (t.id, t.name.as_str()))
-            .collect::<Vec<_>>(),
-        vec![
-            (viet, VIET),
-            (comma, "a, b"),
-            (quote, "say \"hi\" 'there' \\ ]"),
-        ]
     )
 }
 

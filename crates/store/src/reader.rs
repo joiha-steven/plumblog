@@ -5,9 +5,9 @@
 //! Admin and API lists stay keyset. The guards that keep OFFSET cheap are in
 //! [`ReaderStore::reader_posts`].
 
-use plumblog_model::{PostId, Result, SeriesId, TagId};
+use plumblog_model::{MediaId, PostId, Result, SeriesId, TagId};
 
-use crate::{Post, PostSummary, Tag};
+use crate::{Post, PostSummary};
 
 /// Largest OFFSET a reader listing runs, whatever the count says: a crawler asking for
 /// `/page/9999999` gets an empty page after one count, never a deep scan.
@@ -74,6 +74,20 @@ pub struct ReaderSeries {
     pub title: String,
 }
 
+/// The cover media of a post page: what the head and the cover figure need, read in the
+/// post's own query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReaderCover {
+    pub id: MediaId,
+    pub r2_key: String,
+    pub width: i64,
+    pub height: i64,
+    /// `""` = no description.
+    pub alt: String,
+    /// JSON the store never parses.
+    pub variants_json: String,
+}
+
 /// A published post or page with its tags.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReaderPost {
@@ -81,6 +95,8 @@ pub struct ReaderPost {
     pub tags: Vec<ReaderTag>,
     /// Filled by `reader_post` only (the post page); `None` in feeds, which do not show it.
     pub series: Option<ReaderSeries>,
+    /// `None` without a cover, and in feeds (they do not read it).
+    pub cover: Option<ReaderCover>,
 }
 
 /// Enough of a post to link to it.
@@ -165,9 +181,6 @@ pub trait ReaderStore {
     async fn reader_neighbours(&self, post: PostId) -> Result<ReaderNeighbours>;
     /// UTC years with a published post (kind `post`), newest first. 1 query.
     async fn reader_years(&self) -> Result<Vec<i32>>;
-    /// Tags with at least one published post (kind `post`), ordered by name then id.
-    /// 1 query.
-    async fn reader_tags(&self) -> Result<Vec<Tag>>;
     /// Every (tag, language) among `langs` with a published post (kind `post`): the tag pages
     /// that exist. Ordered by name, tag id, then the order of `langs`. 1 query; none for an
     /// empty list.
