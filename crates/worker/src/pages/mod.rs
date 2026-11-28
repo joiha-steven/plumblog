@@ -5,6 +5,7 @@ mod cache;
 mod cover;
 mod db;
 mod docs;
+mod prerender;
 pub(crate) mod reader_db;
 pub(crate) mod routes;
 #[cfg(any(test, feature = "contract-tests"))]
@@ -24,6 +25,8 @@ use search::SearchSource;
 use source::{Filter, ReaderSource, Settings, StoredPost};
 use std::cell::Cell;
 use worker::{Context, Env, Headers, Request, Response, Result, console_error};
+
+pub(crate) use prerender::cron as store_cron;
 
 /// Where the default theme's `assets/` folder is served (Workers static assets).
 pub const THEME_ASSETS_URL: &str = "/theme/minimal";
@@ -125,6 +128,15 @@ fn cache_policy(status: u16, cacheable: bool) -> (bool, &'static str) {
     }
 }
 
+/// Same content version, theme and engine build means the same bytes, so browsers may
+/// revalidate.
+fn etag(version: u64) -> String {
+    format!(
+        "\"{version}{}-{VERSION}\"",
+        crate::theme_runtime::cache_tag()
+    )
+}
+
 /// Serves a reader page, from cache when possible.
 pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> {
     let url = req.url()?;
@@ -148,11 +160,7 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
         Ok(v) => v,
         Err(e) => return Ok(failure(&format!("content version: {e}"))),
     };
-    // Same content version and engine build means the same bytes, so browsers may revalidate.
-    let etag = format!(
-        "\"{version}{}-{VERSION}\"",
-        crate::theme_runtime::cache_tag()
-    );
+    let etag = etag(version);
     if req.headers().get("if-none-match")?.as_deref() == Some(etag.as_str()) {
         let h = Headers::new();
         h.set("etag", &etag)?;
@@ -256,6 +264,7 @@ fn stored_copy(
     }
     Ok(Some(cache::Stored {
         key,
+        version_id: id,
         body: body.as_bytes().to_vec(),
         content_type,
         etag: etag.to_owned(),
@@ -263,6 +272,54 @@ fn stored_copy(
         theme,
         path: path.to_owned(),
         cf_ray: headers.get("cf-ray")?,
+    }))
+}
+
+/// `path` as a reader miss renders it, for the cron to store in R2 under version id `id`:
+/// the same render, cache policy and store guards (an anonymous GET), so the object is the
+/// one a miss would have put. `None` when a miss would not store it either: a redirect, a
+/// page the Cache API would not keep, or one the active theme's templates fail on (readers
+/// get the default theme's uncached fallback, which never goes to R2).
+///
+/// # Errors
+/// A storage failure, as a detail for the log.
+async fn render_stored(
+    env: &Env,
+    d1: &D1Store,
+    id: &str,
+    version: u64,
+    path: &str,
+) -> std::result::Result<Option<cache::Stored>, String> {
+    let db = Db(d1);
+    let outcome = match render(&db, &db, &db, path, "").await {
+        Ok(o) => o,
+        Err(RenderError::Theme(_)) => return Ok(None),
+        Err(RenderError::Other(d)) => return Err(d),
+    };
+    let Outcome::Page {
+        status,
+        content_type,
+        body,
+        cacheable,
+    } = outcome
+    else {
+        return Ok(None);
+    };
+    let (store, cache_control) = cache_policy(status, cacheable);
+    let key = cache::store_key(id, version, crate::theme_runtime::cache_tag(), path);
+    if !store || !cache::may_store(true, false, body.len(), &key, cache::store_limit(env)) {
+        return Ok(None);
+    }
+    Ok(Some(cache::Stored {
+        key,
+        version_id: id.to_owned(),
+        body: body.into_bytes(),
+        content_type,
+        etag: etag(version),
+        cache_control,
+        theme: crate::theme_runtime::served_tag(),
+        path: path.to_owned(),
+        cf_ray: None,
     }))
 }
 
@@ -664,20 +721,32 @@ fn doc(content_type: &'static str, body: String) -> Outcome {
 /// ids, and plainly not the real site, so the warning below gets noticed.
 pub const UNSET_ORIGIN: &str = plumblog_render::UNSET_ORIGIN;
 
-/// A post's public URL for webhook payloads, by the same origin and language rules as reader
-/// pages. 1 query.
-pub async fn post_url(store: &D1Store, lang: &str, slug: &str) -> String {
+/// Posts' public URLs for webhook payloads, by the same origin and language rules as reader
+/// pages. What [`PostUrls::url`] needs: the origin and default language, or `None` when the
+/// settings could not be read (logged once, by [`post_urls`]).
+pub struct PostUrls(Option<(String, String)>);
+
+/// Reads the settings post URLs need, once: a cron run publishing many posts makes one
+/// query for all of them, not one each (`webhooks::PUBLISH_FIXED`). 1 query.
+pub async fn post_urls(store: &D1Store) -> PostUrls {
     match Db(store).settings().await {
-        Ok(s) => format!(
-            "{}{}",
-            public_origin(&s),
-            routes::post_in(lang, &s.lang, slug)
-        ),
+        Ok(s) => PostUrls(Some((public_origin(&s).to_owned(), s.lang.clone()))),
         Err(e) => {
             warn(&format!(
                 "webhook.post_url: settings unreadable ({e}); using {UNSET_ORIGIN}"
             ));
-            format!("{UNSET_ORIGIN}/{lang}/{slug}")
+            PostUrls(None)
+        }
+    }
+}
+
+impl PostUrls {
+    /// The public URL of the post `slug` in `lang`.
+    #[must_use]
+    pub fn url(&self, lang: &str, slug: &str) -> String {
+        match &self.0 {
+            Some((origin, default)) => format!("{origin}{}", routes::post_in(lang, default, slug)),
+            None => format!("{UNSET_ORIGIN}/{lang}/{slug}"),
         }
     }
 }

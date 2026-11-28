@@ -10,6 +10,7 @@ mod jobs;
 mod keys;
 mod media;
 mod pages;
+mod subrequests;
 mod theme_runtime;
 mod webcrypto;
 pub mod webhooks;

@@ -1340,4 +1340,6 @@ theme_unavailable = "The theme did not load"
 auth_reset_expired = "The reset link expired"
 pages_store_failed = "A page was shown but could not be saved for other regions; it will be saved on a later visit"
 user_last_owner = "The last active owner was kept"
+pages_prerender_failed = "Pages could not be prepared in advance; readers still get them, the first visit is just slower"
+pages_cleanup_failed = "Old saved copies of pages could not be removed yet; the next run tries again"
 

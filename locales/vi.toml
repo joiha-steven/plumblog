@@ -1323,4 +1323,6 @@ theme_unavailable = "Giao diện không tải được"
 auth_reset_expired = "Liên kết đặt lại đã hết hạn"
 pages_store_failed = "Trang vẫn hiện bình thường nhưng chưa lưu được bản sao cho các vùng khác; lần xem sau sẽ lưu lại"
 user_last_owner = "Giữ lại chủ blog cuối cùng"
+pages_prerender_failed = "Chưa chuẩn bị sẵn được các trang; người đọc vẫn xem được, chỉ lần xem đầu chậm hơn"
+pages_cleanup_failed = "Chưa xoá được các bản sao cũ của trang; lần chạy sau sẽ thử lại"
 

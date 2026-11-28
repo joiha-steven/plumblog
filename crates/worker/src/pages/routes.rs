@@ -281,6 +281,9 @@ pub fn series_in(lang: &str, default_lang: &str, slug: &str, n: usize) -> String
 /// The default language's search page; results are `?q=` on it.
 pub const SEARCH: &str = "/search";
 
+/// The sitemap (`Route::Sitemap`).
+pub const SITEMAP: &str = "/sitemap.xml";
+
 /// A language's search page: the default language's at the root, any other under `/<lang>/`.
 pub fn search_in(lang: &str, default_lang: &str) -> String {
     if lang == default_lang {
