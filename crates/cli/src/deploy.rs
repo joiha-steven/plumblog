@@ -528,7 +528,16 @@ fn upload_version(
         // The Worker renders this pushed theme (its files are among this version's assets).
         if let Some(t) = theme {
             list.push(json!({"type": "plain_text", "name": THEME_BINDING, "text": t.name}));
-            let tag = plumblog_render::pushed::theme_tag(&t.hash);
+            // From the theme.json bytes this version uploads, never from a record: a stale
+            // tag would make the JS fast path serve another theme's cached pages.
+            let tag = uploaded_theme_tag(&b.assets, &t.name).map_err(|(path, reason)| {
+                Failure::new(
+                    Code::BundleInvalid,
+                    run.cx.text,
+                    key!("cli.error.bundle_invalid"),
+                    &[("path", path), ("reason", reason)],
+                )
+            })?;
             list.push(json!({"type": "plain_text", "name": THEME_TAG_BINDING, "text": tag}));
         }
         for name in secrets {
@@ -566,6 +575,28 @@ fn upload_version(
         .ok_or_else(|| run.api(&malformed(Endpoint::VersionUpload, "no id")))?;
     run.line(key!("cli.deploy.version"), &[("version", id.clone())]);
     Ok(id)
+}
+
+/// [`plumblog_render::pushed::theme_tag`] of the `hash` in the `theme.json` among `assets`,
+/// read from the file the upload sends and checked against its listed hash: what the Worker
+/// derives from the document it fetches.
+///
+/// # Errors
+/// `(path, reason)`: no such asset, unreadable, changed since listed, or not a theme document.
+fn uploaded_theme_tag(assets: &[bundle::Asset], name: &str) -> Result<String, (String, String)> {
+    let path = plumblog_render::pushed::document_path(name);
+    let a = assets
+        .iter()
+        .find(|a| a.path == path)
+        .ok_or_else(|| (path.clone(), "not among the assets".to_string()))?;
+    let here = |e: String| (a.file.display().to_string(), e);
+    let bytes = fs::read(&a.file).map_err(|e| here(e.to_string()))?;
+    if bundle::asset_hash(&bytes, &a.path) != a.hash {
+        return Err(here("changed after it was listed".into()));
+    }
+    let text = String::from_utf8(bytes).map_err(|e| here(e.to_string()))?;
+    let doc = plumblog_render::PushedTheme::parse(&text, name).map_err(here)?;
+    Ok(plumblog_render::pushed::theme_tag(&doc.hash).to_string())
 }
 
 /// The version serving most traffic now: first deployment (wrangler
@@ -648,6 +679,8 @@ enum Seen {
     Version(String),
     /// `/` rendered with another theme than wanted: `(got, want)`, `None` = the default.
     Theme(Option<String>, Option<String>),
+    /// The second `/` (a cache hit) carried another theme: `(got, want)`, `None` = no header.
+    HitTheme(Option<String>, Option<String>),
 }
 
 impl Seen {
@@ -657,6 +690,7 @@ impl Seen {
             Self::Status(p, s) => format!("{p} http-{s}"),
             Self::Version(v) => format!("/healthz version {v}"),
             Self::Theme(got, _) => format!("/ theme {}", got.as_deref().unwrap_or("-")),
+            Self::HitTheme(got, _) => format!("/ hit theme {}", got.as_deref().unwrap_or("-")),
         }
     }
 
@@ -673,6 +707,13 @@ impl Seen {
             Self::Version(v) => text.t(
                 key!("cli.deploy.seen_version"),
                 &[("got", v.clone()), ("want", want.to_string())],
+            ),
+            Self::HitTheme(got, w) => text.t(
+                key!("cli.deploy.seen_theme_hit"),
+                &[
+                    ("got", got.clone().unwrap_or_else(|| "-".into())),
+                    ("want", w.clone().unwrap_or_else(|| "-".into())),
+                ],
             ),
             Self::Theme(None, Some(w)) => text.t(
                 key!("cli.deploy.seen_theme_default"),
@@ -741,7 +782,20 @@ fn smoke_once(
         .map(printable);
     theme
         .check(got.as_deref())
-        .map_err(|want| Seen::Theme(got, want))
+        .map_err(|want| Seen::Theme(got, want))?;
+    if matches!(theme, ThemeWant::Any) {
+        return Ok(());
+    }
+    // Again: now a cache hit, which the Worker's JS entry may serve from a binding.
+    let again = get("/")?;
+    let got = again
+        .headers()
+        .get(plumblog_render::pushed::THEME_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(printable);
+    theme
+        .check(got.as_deref())
+        .map_err(|want| Seen::HitTheme(got, want))
 }
 
 /// `GET <base>/healthz` until it answers 200 with `x-plumblog-version: <version>`, then
@@ -1841,6 +1895,41 @@ fn restore_db(run: &mut Run, site: &Site, bookmark: &str, clear: bool) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tag follows the uploaded `theme.json`, whatever a record says; a file changed after
+    /// listing, or a missing one, is refused.
+    #[test]
+    fn theme_tag_comes_from_the_uploaded_bytes() {
+        let dir = std::env::temp_dir().join(format!("plumblog-tag-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let hash = "ab".repeat(32);
+        let doc = format!(
+            r#"{{"api":{},"name":"paper","version":"1","hash":"{hash}","files":{{}},"assets":{{}}}}"#,
+            plumblog_render::THEME_API
+        );
+        let file = dir.join("theme.json");
+        fs::write(&file, &doc).unwrap();
+        let path = plumblog_render::pushed::document_path("paper");
+        let asset = bundle::Asset {
+            hash: bundle::asset_hash(doc.as_bytes(), &path),
+            size: doc.len() as u64,
+            path,
+            file: file.clone(),
+        };
+        // A stale record would hold another hash; the tag is the uploaded document's.
+        let stale = ThemeRecord {
+            name: "paper".into(),
+            version: "1".into(),
+            hash: "cd".repeat(32),
+        };
+        let got = uploaded_theme_tag(std::slice::from_ref(&asset), &stale.name).unwrap();
+        assert_eq!(got, hash[..16]);
+        assert_ne!(got, stale.hash[..16]);
+        assert!(uploaded_theme_tag(&[], "paper").is_err());
+        fs::write(&file, doc.replace("\"1\"", "\"2\"")).unwrap();
+        assert!(uploaded_theme_tag(&[asset], "paper").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn utc_formats() {

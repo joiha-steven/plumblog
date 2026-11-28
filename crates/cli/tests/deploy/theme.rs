@@ -623,6 +623,43 @@ fn a_push_the_site_does_not_serve_rolls_back() {
 }
 
 #[test]
+fn a_cache_hit_with_another_theme_rolls_back() {
+    // The first `/` is right; the second (a cache hit once the JS fast path serves it) carries
+    // a stale tag, or none.
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    let theme = paper(&dir);
+    fake.state().site.hit_theme_tag = Some((V2.into(), Some("0123456789abcdef".into())));
+    let r = run(&fake, &dir, &bundle, 1, Cmd::Push(Some(&theme)));
+    assert_eq!(code(&r), Code::SmokeFailed, "{}", r.out);
+    let msg = r.result.as_ref().unwrap_err().message.clone();
+    assert!(msg.contains("from the cache"), "{msg}");
+    assert_eq!(active(&fake), P);
+    let rec = load(&dir).deploys.last().unwrap().clone();
+    assert_eq!(rec.outcome, "rolled_back");
+    assert_eq!(rec.smoke.as_deref(), Some("/ hit theme 0123456789abcdef"));
+    // No header on a hit for a pushed theme is a mismatch too.
+    fake.state().site.hit_theme_tag = Some((V3.into(), None));
+    let r = run(&fake, &dir, &bundle, 2, Cmd::Push(Some(&theme)));
+    assert_eq!(code(&r), Code::SmokeFailed, "{}", r.out);
+    assert_eq!(active(&fake), P);
+    assert_eq!(
+        load(&dir).deploys.last().unwrap().smoke.as_deref(),
+        Some("/ hit theme -")
+    );
+    // The right tag on the hit passes.
+    fake.state().site.hit_theme_tag = None;
+    ok(&run(&fake, &dir, &bundle, 3, Cmd::Push(Some(&theme))));
+    // The default theme: a hit that carries a tag fails, one without passes.
+    let tag = served_tag(&fake, &active(&fake));
+    let v5 = "00000000-0000-4000-8000-000000000005";
+    fake.state().site.hit_theme_tag = Some((v5.into(), Some(tag)));
+    let r = run(&fake, &dir, &bundle, 4, Cmd::Push(None));
+    assert_eq!(code(&r), Code::SmokeFailed, "{}", r.out);
+    fake.state().site.hit_theme_tag = None;
+    ok(&run(&fake, &dir, &bundle, 5, Cmd::Push(None)));
+}
+
+#[test]
 fn a_default_push_or_deploy_checks_the_theme_too() {
     let (fake, dir, bundle) = set_up(&migrations::bundled());
     let theme = paper(&dir);

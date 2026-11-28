@@ -322,6 +322,8 @@ fn happy_deploy_runs_the_steps_in_order_with_the_documented_shapes() {
             format!("POST {w}/deployments"),
             format!("GET {HOST}/healthz"),
             format!("GET {HOST}/"),
+            // The second `/` checks the cache-hit theme.
+            format!("GET {HOST}/"),
             format!("PUT {w}/schedules"),
         ]
     );
@@ -1281,6 +1283,7 @@ fn a_new_custom_domain_is_checked_on_workers_dev_and_only_warned_about() {
     assert_eq!(
         smoke_hosts(&fake, 0),
         [
+            "plumblog.steven.workers.dev",
             "plumblog.steven.workers.dev",
             "plumblog.steven.workers.dev",
             "blog.example.com"

@@ -115,6 +115,11 @@ pub struct Site {
     /// `/` reports this theme tag (`None`: no `x-plumblog-theme`) while the given version is
     /// active, instead of the one its binding and `theme.json` give (a Worker that fell back).
     pub theme_tag: Option<(String, Option<String>)>,
+    /// Like `theme_tag`, but only for the second `/` of each pair a version gets (smoke asks twice): a cache hit
+    /// served by a JS fast path that trusts a binding.
+    pub hit_theme_tag: Option<(String, Option<String>)>,
+    /// The active version at each `/` request so far.
+    pub home_seen: Vec<String>,
     pub hits: usize,
     /// `/healthz` answers only after this long (a slow site).
     pub delay: std::time::Duration,
@@ -464,10 +469,19 @@ fn serve_public(st: &mut State, req: &Recorded) -> Option<(u16, String, String)>
                 _ => 200,
             };
             let a = active(st);
-            let tag = match (&st.site.theme_tag, &a) {
+            let mut tag = match (&st.site.theme_tag, &a) {
                 (Some((v, t)), Some(a)) if v == a => t.clone(),
-                _ => a.and_then(|a| served_theme_tag(st, &a)),
+                _ => a.clone().and_then(|a| served_theme_tag(st, &a)),
             };
+            if let (Some((v, t)), Some(a)) = (&st.site.hit_theme_tag, &a)
+                && v == a
+                && st.site.home_seen.iter().filter(|x| *x == a).count() % 2 == 1
+            {
+                tag.clone_from(t);
+            }
+            if let Some(a) = a {
+                st.site.home_seen.push(a);
+            }
             let header = tag
                 .map(|t| format!("x-plumblog-theme: {t}\r\n"))
                 .unwrap_or_default();

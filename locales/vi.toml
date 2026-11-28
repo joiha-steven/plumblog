@@ -202,6 +202,7 @@ seen_version = "/healthz trả lời bằng phiên bản {got}, không phải {w
 seen_theme_default = "/ được dựng bằng giao diện mặc định, không phải giao diện đã đẩy lên {want} (gói cũ, hoặc tệp giao diện không được phục vụ)"
 seen_theme_still = "/ vẫn được dựng bằng giao diện đã đẩy lên {got}, không phải giao diện mặc định"
 seen_theme_other = "/ được dựng bằng giao diện {got}, không phải {want}"
+seen_theme_hit = "/ được trả từ bộ nhớ đệm với giao diện {got}, không phải {want} (- là không có): đường cache-hit không khớp giao diện của phiên bản này"
 log_failed = "Lưu ý: không ghi được lần đưa lên này vào nhật ký hệ thống của trang: {error}"
 done = "Đã đưa phiên bản {version} lên {origin}."
 theme_default_help = "Chuyển về giao diện mặc định: không mang giao diện đã đẩy lên sang phiên bản mới"
