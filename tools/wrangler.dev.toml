@@ -18,7 +18,7 @@ binding = "ASSETS"
 
 # Binding names are provisional until the store adapters land; keep them in sync with crates/worker.
 # One cron, every 10 minutes (crates/worker jobs): publish due posts, send due webhook
-# deliveries; the 03:10 UTC run also prunes the system log and old deliveries. Tests fire it
+# deliveries, pre-render and clean up R2 pages; the 03:10 UTC run also prunes the system log and old deliveries. Tests fire it
 # through /__scheduled (pass &time= to pick the slot).
 [triggers]
 crons = ["*/10 * * * *"]

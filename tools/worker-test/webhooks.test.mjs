@@ -7,6 +7,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { after, before, beforeEach, test } from "node:test";
 import { d1Sql, startWorker } from "./harness.mjs";
+import { cron } from "./subreq.mjs";
 
 const MIN_MS = 60_000;
 let worker;
@@ -167,8 +168,7 @@ test("failure then retry: 500 schedules +10 min; cron resends the same id and bo
   assert.match(log1[0].detail, /\nreason\tstatus/);
 
   sql(`UPDATE webhook_deliveries SET next_at_ms = ${Date.now()} WHERE id = ${first.id}`);
-  const res = await fetch(`${worker.url}/__scheduled?cron=${encodeURIComponent("*/10 * * * *")}`);
-  assert.equal(res.status, 200);
+  await cron(worker);
   await until("attempt 2", () => recv.hits.length >= 2);
   const second = deliveries()[0];
   console.log("after attempt 2:", JSON.stringify(second));
@@ -244,8 +244,7 @@ test("SSRF: refused URLs save nothing; a tampered row is checked again before se
   // The cron path (test policy here, which still refuses everything but http://127.0.0.1).
   sql(`UPDATE webhooks SET url = 'https://169.254.169.254/latest/meta-data' WHERE id = ${hook.id}`);
   sql(`UPDATE webhook_deliveries SET next_at_ms = ${Date.now()}, last_error = NULL WHERE id = ${row.id}`);
-  const res = await fetch(`${worker.url}/__scheduled?cron=${encodeURIComponent("*/10 * * * *")}`);
-  assert.equal(res.status, 200);
+  await cron(worker);
   const cronRow = await until("cron attempt", () => {
     const d = deliveries()[0];
     return d.last_error && d;
@@ -266,8 +265,7 @@ test("cron publish_due: a scheduled post that is due sends post.published", asyn
       `SELECT 'post', 0, 'en', 'due-now', 'scheduled', ${now - 1000}, id, 'Due now', 'x', '<p>x</p>', ${now}, ${now} FROM users ORDER BY id LIMIT 1; ` +
       "UPDATE posts SET translation_group = id WHERE slug = 'due-now';",
   );
-  const res = await fetch(`${worker.url}/__scheduled?cron=${encodeURIComponent("*/10 * * * *")}`);
-  assert.equal(res.status, 200);
+  await cron(worker);
   const hit = await until("post.published", () => recv.hits.find((h) => JSON.parse(h.body).data.slug === "due-now"));
   const body = JSON.parse(hit.body);
   const status = sql("SELECT status FROM posts WHERE slug = 'due-now'")[0].status;

@@ -28,6 +28,8 @@ pub struct DirFiles {
     pub lossy: BTreeMap<String, String>,
     /// Files outside `assets/` that are not UTF-8 text (a push cannot carry them as text).
     pub not_text: Vec<String>,
+    /// Every file that is not UTF-8, below `assets/` too.
+    non_utf8: Vec<String>,
     pub too_many: bool,
     /// TOML files outside `assets/` as JSON, by [`convert::json_name`].
     converted: BTreeMap<String, String>,
@@ -61,9 +63,19 @@ impl DirFiles {
                 Err(e) => self.convert_errors.push((path.clone(), e)),
             }
         }
+        // A carried file below assets/ must be text, as for any file the push puts in the
+        // document (`store::build` refuses it).
+        if let Some(m) = self.converted.get("theme.toml.json").cloned() {
+            for p in plumblog_render::pushed::document_assets(&m) {
+                if self.non_utf8.contains(&p) {
+                    self.not_text.push(p);
+                }
+            }
+        }
     }
 
-    /// The text files outside `assets/` as a push carries them: TOML as its JSON form.
+    /// The files as a push carries them: text files outside `assets/` (TOML as its JSON form)
+    /// plus the files below it the loader reads (`plumblog_render::pushed::document_assets`).
     #[must_use]
     pub fn document(&self) -> BTreeMap<&str, &str> {
         let own = self
@@ -72,7 +84,21 @@ impl DirFiles {
             .filter(|(p, _)| !p.starts_with("assets/") && convert::json_name(p).is_none())
             .map(|(p, t)| (p.as_str(), t.as_str()));
         let json = self.converted.iter().map(|(p, t)| (p.as_str(), t.as_str()));
-        own.chain(json).collect()
+        // Files below assets/ that the loader reads (`fonts.faces`).
+        let carried = self
+            .converted
+            .get("theme.toml.json")
+            .map(|m| plumblog_render::pushed::document_assets(m))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|p| {
+                let i = self
+                    .entries
+                    .binary_search_by(|(e, _)| e.as_str().cmp(&p))
+                    .ok()?;
+                Some((self.entries[i].0.as_str(), self.entries[i].1.as_str()))
+            });
+        own.chain(json).chain(carried).collect()
     }
 
     fn walk(&mut self, dir: &Path, prefix: &str) -> std::io::Result<()> {
@@ -108,6 +134,7 @@ impl DirFiles {
                         String::new()
                     }
                     Err(e) => {
+                        self.non_utf8.push(rel.clone());
                         if !rel.starts_with("assets/") {
                             self.not_text.push(rel.clone());
                         }

@@ -2,7 +2,7 @@
 
 use plumblog_model::{CommentId, Role, UserId};
 
-use super::kit::{Check, T0, eq, new_user, ok, post, save, user};
+use super::kit::{ADMIN, Check, T0, eq, new_user, ok, post, save, user};
 use super::posts::comment;
 use crate::{Comment, CommentStatus, MAX_PAGE, PostStatus, Store, User};
 
@@ -74,7 +74,7 @@ pub async fn users_by_id_pages<S: Store>(db: &S) -> Check {
     let c = user(db, "carol").await?;
     ok(
         "set_disabled",
-        db.set_disabled(c, Some(T0 + 5), T0 + 5).await,
+        db.set_disabled(&ADMIN, c, Some(T0 + 5), T0 + 5).await,
     )?;
 
     let (first, more) = ok("users_by_id", db.users_by_id(None, 2).await)?;

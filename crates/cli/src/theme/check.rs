@@ -425,6 +425,8 @@ pub fn check_theme(files: &DirFiles) -> Vec<Finding> {
             return out;
         }
     };
+    // What a push carries must load on its own: the Worker never sees the folder.
+    out.extend(push_document_finding(files, &default));
     if let Some(m) = &manifest {
         out.extend(contrast_findings(src, m));
     }
@@ -432,6 +434,7 @@ pub fn check_theme(files: &DirFiles) -> Vec<Finding> {
     out.extend(asset_name_findings(files));
     out.extend(document_size_finding(files));
     out.extend(missing_asset_findings(files, src, manifest.as_ref()));
+    out.extend(fallback_template_findings(files));
     out.extend(render_findings(&theme, files));
     for (path, text) in files.iter() {
         if has_ext(path, "css") && !path.starts_with("assets/") {
@@ -442,6 +445,24 @@ pub fn check_theme(files: &DirFiles) -> Vec<Finding> {
         }
     }
     out
+}
+
+/// The files as a push carries them ([`DirFiles::document`]), loaded the way the Worker loads
+/// them. Skipped when the folder itself does not load (that is reported first).
+fn push_document_finding(files: &DirFiles, default: &Embedded) -> Option<Finding> {
+    struct Doc<'a>(BTreeMap<&'a str, &'a str>);
+    impl ThemeFiles for Doc<'_> {
+        fn read(&self, path: &str) -> Option<&str> {
+            self.0.get(path).copied()
+        }
+        fn paths(&self) -> Vec<&str> {
+            self.0.keys().copied().collect()
+        }
+    }
+    let doc = Doc(files.document());
+    Theme::load(&doc, Some(default), Vec::new(), ASSETS_URL)
+        .err()
+        .map(|e| Finding::new(Level::Error, Kind::ThemePushed, "", None).arg("detail", e.detail))
 }
 
 /// Asset names are URL path segments as they are: a push serves them at the same path, and
@@ -666,6 +687,24 @@ fn size_findings(
         );
     }
     out
+}
+
+/// Templates added after themes were first pushed: a theme without one is still served (the
+/// default theme's template fills in), so this is a warning.
+fn fallback_template_findings(files: &DirFiles) -> Vec<Finding> {
+    ["series.html"]
+        .into_iter()
+        .filter(|name| files.read(&format!("templates/{name}")).is_none())
+        .map(|name| {
+            Finding::new(
+                Level::Warning,
+                Kind::ThemeTemplateDefault,
+                format!("templates/{name}").as_str(),
+                None,
+            )
+            .arg("file", name)
+        })
+        .collect()
 }
 
 /// Renders every page kind over the sample blog; each failure or missing text key is a

@@ -10,7 +10,8 @@ import { icon } from "../icons";
 import { lang, t } from "../i18n";
 import { editHref } from "../router";
 import { closePop, empty, failed, openPop, toast } from "../ui";
-import { FILTERS, type Filter, canDelete, dimensions, filterOf, formatBytes, kindOf, mergePage, nameOf, queryFor } from "./logic";
+import { FILTERS, type Filter, canDelete, canUpload, dimensions, filterOf, formatBytes, kindOf, mergePage, nameOf, queryFor } from "./logic";
+import { guardFileDrops, mountUpload } from "./upload";
 
 const when = (ms: number): string => new Intl.DateTimeFormat(lang(), { dateStyle: "medium", timeStyle: "short" }).format(ms);
 const metaOf = (m: MediaItem): string => `${formatBytes(m.bytes, lang())} \u00b7 ${dimensions(m)}`;
@@ -41,6 +42,12 @@ export function mountMedia(box: HTMLElement, me: Me, api: Api): void {
   let selected: MediaItem | undefined;
   /** The main column's scroll before a phone opened the details, which replace the grid there. */
   let scrolled = 0;
+  /** The "drop pictures here" line, for those who may upload. */
+  let hint: HTMLElement | undefined;
+  /** The first page failed and shows Try again; an upload must not replace that. */
+  let loadFailed = false;
+  /** Pictures uploaded while the first page was loading (or after it failed); merged on top when a page lands. */
+  let pending: MediaItem[] = [];
 
   const tiles = new Map<number, HTMLElement>();
   const body = h("div", { class: "media-body" });
@@ -66,8 +73,18 @@ export function mountMedia(box: HTMLElement, me: Me, api: Api): void {
   };
   for (const f of FILTERS) buttons.set(f, h("button", { type: "button", "aria-pressed": String(f === filter), onclick: () => pick(f) }, filterName(f)));
   const filters = h("div", { class: "filters" }, h("div", { class: "seg", role: "group", "aria-label": t("admin.media.filter") }, ...buttons.values()));
-  main.append(filters, body, tail);
+  const bar = h("div", { class: "media-bar" }, h("div", { class: "media-bar-f" }, filters));
+  main.append(bar, body, tail);
   box.append(layout);
+
+  // ---- upload (only for those the API lets add pictures) ---------------------------------
+  guardFileDrops(box, main);
+  if (canUpload(me)) {
+    const up = mountUpload({ api, box, main, added: addNew, existing: showExisting, show: (m) => select(m) });
+    bar.append(up.button);
+    bar.after(up.list);
+    hint = up.hint;
+  }
 
   // ---- grid -----------------------------------------------------------------------------
   function tile(m: MediaItem): HTMLElement {
@@ -117,6 +134,25 @@ export function mountMedia(box: HTMLElement, me: Me, api: Api): void {
     else if (err) tail.querySelector("button")?.focus();
   }
 
+  /** A picture just uploaded goes to the top of the grid (every filter takes it: it is unused and has no description). */
+  function addNew(m: MediaItem): void {
+    if (items.some((x) => x.id === m.id) || pending.some((x) => x.id === m.id)) return;
+    // The page in flight may not know it, and a failed one shows Try again, which stays: keep it for the next page.
+    if (loadFailed || body.querySelector(".grid[aria-busy]")) return void pending.push(m);
+    items.unshift(m);
+    const grid = body.querySelector<HTMLElement>(".grid:not([aria-busy])");
+    if (!grid) return show();
+    const el = tile(m);
+    tiles.set(m.id, el);
+    grid.prepend(el);
+  }
+
+  /** The caller already had this picture: open it, instead of a second tile. On a phone the details replace the grid, so while other files are still sending they keep it. */
+  function showExisting(m: MediaItem, busy: boolean): void {
+    tiles.get(m.id)?.scrollIntoView({ block: "nearest" });
+    if (!busy || !narrow()) select(m);
+  }
+
   function emptyState(): HTMLElement {
     if (filter === "missing_alt") return empty({ icon: "media", title: t("admin.media.empty_alt") });
     if (filter === "unused") return empty({ icon: "media", title: t("admin.media.empty_unused") });
@@ -135,6 +171,7 @@ export function mountMedia(box: HTMLElement, me: Me, api: Api): void {
     } else {
       items = [];
       cursor = null;
+      loadFailed = false;
       tail.replaceChildren();
       body.replaceChildren(loadingTiles());
     }
@@ -143,14 +180,24 @@ export function mountMedia(box: HTMLElement, me: Me, api: Api): void {
     if (!r.ok) {
       if (r.error.code === "auth.unauthenticated") return;
       console.error(`admin media: loading the library failed: ${r.error.code} (${r.error.status})`);
-      if (!items.length) body.replaceChildren(failed(r.error, () => void load(false)));
+      if (!items.length) {
+        loadFailed = true;
+        body.replaceChildren(failed(r.error, () => void load(false)));
+      }
       else show(r.error);
       return;
     }
     const before = items.length;
     items = mergePage(items, r.value);
+    if (!append && pending.length) {
+      const known = new Set(items.map((x) => x.id));
+      items = [...pending.filter((x) => !known.has(x.id)).reverse(), ...items];
+      pending = [];
+    }
     cursor = r.value.next_cursor;
     show(undefined, append ? before : undefined);
+    // Added once the first page is drawn, below it, so it never moves anything on screen.
+    if (hint && !hint.isConnected) tail.after(hint);
   }
 
   // ---- details --------------------------------------------------------------------------

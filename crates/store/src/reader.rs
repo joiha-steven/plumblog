@@ -5,9 +5,9 @@
 //! Admin and API lists stay keyset. The guards that keep OFFSET cheap are in
 //! [`ReaderStore::reader_posts`].
 
-use plumblog_model::{PostId, Result, TagId};
+use plumblog_model::{MediaId, PostId, Result, SeriesId, TagId};
 
-use crate::{Post, PostSummary, Tag};
+use crate::{Post, PostSummary};
 
 /// Largest OFFSET a reader listing runs, whatever the count says: a crawler asking for
 /// `/page/9999999` gets an empty page after one count, never a deep scan.
@@ -23,8 +23,11 @@ pub enum ReaderFilter<'a> {
     /// One language, pinned first, then by date: the home page. Pinning is a home page
     /// feature.
     Home(&'a str),
-    /// By date only, like every filter below.
-    Tag(TagId),
+    /// One language's posts with a tag, by date only, like every filter below.
+    Tag(TagId, &'a str),
+    /// One language's posts of a series in reading order: `series_position` ASC, then
+    /// `published_at` ASC, then id ASC (a post without a position first, as SQLite sorts NULL).
+    Series(SeriesId, &'a str),
     /// Calendar year in UTC: `published_at` from Jan 1 00:00:00.000 up to the next Jan 1.
     /// Years outside 1..=9999 match nothing.
     Year(i32),
@@ -37,6 +40,15 @@ pub enum ReaderFilter<'a> {
 pub struct ReaderTag {
     pub slug: String,
     pub name: String,
+}
+
+/// A tag or series page of one language, for the sitemap: its URL slug, visible name and the
+/// language it has published posts in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReaderTaxonPage {
+    pub slug: String,
+    pub name: String,
+    pub lang: String,
 }
 
 /// A listing row: the post without bodies and its tags, ascending by tag id (the same order
@@ -55,11 +67,36 @@ pub struct ReaderPage {
     pub rows: Vec<ReaderRow>,
 }
 
+/// The series a post belongs to, as its page shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReaderSeries {
+    pub slug: String,
+    pub title: String,
+}
+
+/// The cover media of a post page: what the head and the cover figure need, read in the
+/// post's own query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReaderCover {
+    pub id: MediaId,
+    pub r2_key: String,
+    pub width: i64,
+    pub height: i64,
+    /// `""` = no description.
+    pub alt: String,
+    /// JSON the store never parses.
+    pub variants_json: String,
+}
+
 /// A published post or page with its tags.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReaderPost {
     pub post: Post,
     pub tags: Vec<ReaderTag>,
+    /// Filled by `reader_post` only (the post page); `None` in feeds, which do not show it.
+    pub series: Option<ReaderSeries>,
+    /// `None` without a cover, and in feeds (they do not read it).
+    pub cover: Option<ReaderCover>,
 }
 
 /// Enough of a post to link to it.
@@ -144,9 +181,18 @@ pub trait ReaderStore {
     async fn reader_neighbours(&self, post: PostId) -> Result<ReaderNeighbours>;
     /// UTC years with a published post (kind `post`), newest first. 1 query.
     async fn reader_years(&self) -> Result<Vec<i32>>;
-    /// Tags with at least one published post (kind `post`), ordered by name then id.
-    /// 1 query.
-    async fn reader_tags(&self) -> Result<Vec<Tag>>;
+    /// Every (tag, language) among `langs` with a published post (kind `post`): the tag pages
+    /// that exist. Ordered by name, tag id, then the order of `langs`. 1 query; none for an
+    /// empty list.
+    async fn reader_tag_pages(&self, langs: &[String]) -> Result<Vec<ReaderTaxonPage>>;
+    /// As [`ReaderStore::reader_tag_pages`] for series (`name` is the title), ordered by
+    /// title, series id, then the order of `langs`.
+    async fn reader_series_pages(&self, langs: &[String]) -> Result<Vec<ReaderTaxonPage>>;
+    /// The `langs` in which tag `tag` has a published post (kind `post`), in the order given.
+    /// 1 query; none for an empty list.
+    async fn reader_tag_langs(&self, tag: TagId, langs: &[String]) -> Result<Vec<String>>;
+    /// As [`ReaderStore::reader_tag_langs`] for a series.
+    async fn reader_series_langs(&self, series: SeriesId, langs: &[String]) -> Result<Vec<String>>;
     /// The newest published posts of kind `post` in one language with their bodies: what a
     /// feed needs. `published_at` DESC, id DESC; `limit` is capped at `MAX_PAGE`. 1 query.
     async fn reader_feed(&self, lang: &str, limit: u32) -> Result<Vec<ReaderPost>>;

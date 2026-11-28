@@ -11,6 +11,7 @@
 import { chromium } from "playwright-core";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { crc32, deflateSync } from "node:zlib";
 
 const [base, out, auditFile] = process.argv.slice(2);
 if (!base || !out) {
@@ -202,6 +203,27 @@ const openDetails = (n) => async (page) => {
   // Where it is used arrives with its own request (the mock answers in 150 ms).
   await page.waitForTimeout(500);
 };
+// Upload states of the library, on the mock API: `?upload=slow` holds each file for seconds, `dup`
+// answers with a picture the caller already has, `refuse` is a server 400 on a field.
+const solidPng = (w, h, [r, g, b]) => {
+  const chunk = (type, data) => {
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(data.length);
+    head.write(type, 4, "latin1");
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), data])));
+    return Buffer.concat([head, data, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr.set([8, 2, 0, 0, 0], 8);
+  const row = Buffer.concat([Buffer.from([0]), Buffer.from(Array.from({ length: w }, () => [r, g, b]).flat())]);
+  const raw = Buffer.concat(Array.from({ length: h }, () => row));
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
+};
+const pic = (name, rgb) => ({ name, mimeType: "image/png", buffer: solidPng(64, 48, rgb) });
+const pick = (page, ...files) => page.locator(".up-add input[type=file]").setInputFiles(files);
 const STATES = [
   ["posts", "/admin/", ROWS],
   ["posts-draft", "/admin/?status=draft", ROWS],
@@ -257,6 +279,37 @@ const STATES = [
     await page.waitForSelector(".del-note .chip");
   }],
   ["media-writer", "/admin/media?role=writer", MEDIA_GRID, openDetails(1)],
+  ["media-upload-progress", "/admin/media?upload=slow", MEDIA_GRID, async (page) => {
+    await mediaLoaded(page);
+    await pick(page, pic("harbour-at-dawn.png", [196, 86, 31]), pic("quiet-street.png", [95, 122, 98]), pic("lamp.png", [154, 166, 173]));
+    // Two are out, the third waits; the bars have moved a little.
+    await page.waitForFunction(() => [...document.querySelectorAll(".up-state")].filter((s) => s.textContent.includes("%")).length === 2 && document.querySelectorAll(".up-row").length === 3);
+    await page.waitForTimeout(3600);
+  }],
+  ["media-upload-drop", "/admin/media", MEDIA_GRID, async (page) => {
+    await mediaLoaded(page);
+    await page.evaluate(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array(4)], "x.png", { type: "image/png" }));
+      document.querySelector(".media-main").dispatchEvent(new DragEvent("dragenter", { dataTransfer: dt, bubbles: true, cancelable: true }));
+    });
+    await page.waitForSelector(".media-main.over");
+  }],
+  ["media-upload-exists", "/admin/media?upload=dup", MEDIA_GRID, async (page) => {
+    await mediaLoaded(page);
+    await pick(page, pic("harbour.png", [196, 86, 31]));
+    // On a phone the details cover the row, and the toast says it.
+    await page.waitForSelector(".up-row.is-dup", { state: "attached" });
+    await page.waitForSelector(".toast");
+    await page.waitForSelector(".insp-card .kv dd");
+    await mediaLoaded(page);
+    await page.waitForTimeout(500);
+  }],
+  ["media-upload-error", "/admin/media?upload=refuse", MEDIA_GRID, async (page) => {
+    await mediaLoaded(page);
+    await pick(page, pic("lies.png", [196, 86, 31]), { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hello") });
+    await page.waitForFunction(() => document.querySelectorAll(".up-row.is-err").length === 2);
+  }],
   ["empty", "/admin/?mock=empty", "main .empty"],
   ["loading", "/admin/?mock=loading"],
   ["error", "/admin/?mock=error", "main [role=alert]"],
@@ -266,6 +319,72 @@ const STATES = [
   ["settings-empty", "/admin/settings?mock=empty", "#set-site_title"],
   ["settings-loading", "/admin/settings?mock=loading"],
   ["settings-error", "/admin/settings?mock=error", "main [role=alert]"],
+  // Settings > People: the list, its states, a confirm, the server's refusal, and the invitations.
+  ["users", "/admin/settings/users", ".usr"],
+  ["users-empty", "/admin/settings/users?mock=empty", ".settings-main .empty"],
+  ["users-loading", "/admin/settings/users?mock=loading"],
+  ["users-error", "/admin/settings/users?users=error", ".settings-main [role=alert] .empty"],
+  [
+    "users-offline",
+    "/admin/settings/users",
+    ".usr",
+    async (page) => {
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, "onLine", { get: () => false });
+        dispatchEvent(new Event("offline"));
+      });
+      await page.waitForSelector(".usr select:disabled");
+    },
+  ],
+  [
+    "users-confirm-delete",
+    "/admin/settings/users",
+    ".usr",
+    async (page) => {
+      await page.locator('.usr[data-id="4"] [data-act=delete]').click();
+      await page.waitForSelector(".confirm");
+      await settle(page, ".pop");
+    },
+  ],
+  [
+    "users-last-owner",
+    "/admin/settings/users?users=last_owner",
+    ".usr",
+    async (page) => {
+      await page.locator('.usr[data-id="2"] select').selectOption("writer");
+      await page.waitForSelector(".auth-alert:not(:empty)");
+    },
+  ],
+  [
+    "users-invites",
+    "/admin/settings/users",
+    ".inv",
+    async (page) => {
+      await page.locator("#inv-h").scrollIntoViewIfNeeded();
+    },
+  ],
+  [
+    "users-invite-form",
+    "/admin/settings/users",
+    ".inv",
+    async (page) => {
+      await page.locator(".usr-add > button").click();
+      await page.locator(".usr-add .seg button").nth(1).click();
+      await page.locator("#inv-h").scrollIntoViewIfNeeded();
+      await page.locator(".usr-add").scrollIntoViewIfNeeded();
+    },
+  ],
+  [
+    "users-invite-created",
+    "/admin/settings/users",
+    ".inv",
+    async (page) => {
+      await page.locator(".usr-add > button").click();
+      await page.locator(".usr-add button[type=submit]").click();
+      await page.waitForSelector("input[readonly]");
+      await page.locator("#inv-h").scrollIntoViewIfNeeded();
+    },
+  ],
   [
     "settings-offline",
     "/admin/settings",
@@ -309,6 +428,121 @@ const STATES = [
       await page.waitForSelector("#set-site_per_page-err:not([hidden])");
     },
   ],
+  // Appearance and Plugins (generated from declarations; the mock's flags force each state).
+  ["appearance", "/admin/settings/appearance", "#app-excerpt_words"],
+  ["appearance-bare", "/admin/settings/appearance?options=bare", "main .empty"],
+  ["appearance-unavailable", "/admin/settings/appearance?options=unavailable", "main [role=alert]"],
+  [
+    "appearance-saved",
+    "/admin/settings/appearance",
+    "#app-excerpt_words",
+    async (page) => {
+      await page.fill("#app-excerpt_words", "60");
+      await page.click("button[type=submit]");
+      await page.waitForFunction(() => document.querySelector("[role=status]")?.textContent?.trim());
+      await page.waitForTimeout(900);
+    },
+  ],
+  [
+    "appearance-field-error",
+    "/admin/settings/appearance?options=invalid",
+    "#app-excerpt_words",
+    async (page) => {
+      await page.fill("#app-excerpt_words", "60");
+      await page.click("button[type=submit]");
+      await page.waitForSelector("#app-excerpt_words-err:not([hidden])");
+    },
+  ],
+  [
+    "appearance-invalid",
+    "/admin/settings/appearance",
+    "#app-excerpt_words",
+    async (page) => {
+      await page.fill("#app-excerpt_words", "500");
+      await page.click("button[type=submit]");
+      await page.waitForSelector("#app-excerpt_words-err:not([hidden])");
+    },
+  ],
+  [
+    "appearance-reset-all",
+    "/admin/settings/appearance",
+    "#app-excerpt_words",
+    async (page) => {
+      await page.getByRole("button", { name: "Reset all to defaults" }).or(page.getByRole("button", { name: "\u0110\u1eb7t l\u1ea1i t\u1ea5t c\u1ea3 v\u1ec1 m\u1eb7c \u0111\u1ecbnh" })).click();
+      await page.waitForSelector("form .btn-row[role=group]:not([hidden])");
+    },
+  ],
+  [
+    "appearance-offline",
+    "/admin/settings/appearance",
+    "#app-excerpt_words",
+    async (page) => {
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, "onLine", { get: () => false });
+        dispatchEvent(new Event("offline"));
+      });
+      await page.waitForSelector(".banner");
+    },
+  ],
+  ["plugins", "/admin/settings/plugins", "#plg-newsletter-heading"],
+  ["plugins-empty", "/admin/settings/plugins?mock=empty", "main .empty"],
+  [
+    "plugin-tab",
+    "/admin/settings/plugins",
+    "#plg-newsletter-heading",
+    async (page) => {
+      await page.click(".seg button:nth-child(2)");
+      await page.waitForSelector("#plg-reading-progress-height");
+    },
+  ],
+  [
+    "plugin-switch-error",
+    "/admin/settings/plugins?options=plugin-error",
+    "#plg-newsletter-heading",
+    async (page) => {
+      await page.click("section.sec label.opt >> nth=1");
+      await page.waitForSelector("section.sec .err:not([hidden])");
+    },
+  ],
+  ["syslog", "/admin/settings/log", ".log-btn"],
+  [
+    "syslog-detail",
+    "/admin/settings/log",
+    ".log-btn",
+    async (page) => {
+      // The webhook failure: an error code, a very long value, a level mark.
+      const row = page.locator(".log-btn", { has: page.locator(".log-err") }).first();
+      await row.click();
+      await row.scrollIntoViewIfNeeded();
+    },
+  ],
+  [
+    "syslog-detail-redacted",
+    "/admin/settings/log?kind=auth.token_created",
+    ".log-btn",
+    async (page) => {
+      await page.locator(".log-btn").first().click();
+    },
+  ],
+  ["syslog-filtered", "/admin/settings/log?level=error&kind=job.run&range=24h&q=zzz", "main .empty"],
+  ["syslog-warnings", "/admin/settings/log?level=warning&range=7d", ".log-btn"],
+  ["syslog-empty", "/admin/settings/log?log=empty", "main .empty"],
+  ["syslog-loading", "/admin/settings/log?log=loading", ".rows[aria-busy]"],
+  ["syslog-error", "/admin/settings/log?log=error", "main [role=alert]"],
+  [
+    "syslog-offline",
+    "/admin/settings/log?log=offline",
+    "main [role=alert]",
+    async (page) => {
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, "onLine", { get: () => false });
+        dispatchEvent(new Event("offline"));
+      });
+      await page.waitForSelector(".banner");
+      await page.waitForSelector("main [role=alert]");
+    },
+  ],
+  ["syslog-writer", "/admin/settings/log?role=writer", ".empty"],
   ["not-found", "/admin/nope"],
   [
     "menu",
@@ -665,7 +899,7 @@ try {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const english = ["posts", "posts-strip", "pages", "media", "media-details", "media-in-use", "no-permission", "settings", "settings-saved", "settings-field-error", "settings-offline", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow", "account-tokens", "account-tokens-secret", "account-tokens-writer"];
+        const english = ["syslog", "syslog-detail", "syslog-filtered", "syslog-writer", "posts", "posts-strip", "pages", "media", "media-details", "media-in-use", "media-upload-progress", "media-upload-drop", "media-upload-exists", "media-upload-error", "no-permission", "settings", "settings-saved", "settings-field-error", "settings-offline", "users", "users-offline", "users-confirm-delete", "users-last-owner", "users-invites", "users-invite-created", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow", "account-tokens", "account-tokens-secret", "account-tokens-writer", "appearance", "appearance-saved", "appearance-field-error", "appearance-offline", "appearance-unavailable", "plugins", "plugins-empty", "plugin-tab"];
         const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
         const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);

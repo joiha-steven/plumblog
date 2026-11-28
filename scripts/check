@@ -4,7 +4,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ENTRY_GZIP_BUDGET_BYTES=3072 # 2048 until the R2 page read path (docs/ARCHITECTURE.md budgets)
-WASM_GZIP_BUDGET_BYTES=$((1024 * 1024)) # Workers free plan allows 3 MiB gzipped; keep headroom.
+# Not a platform limit (Workers allow 64 MiB uncompressed, no compressed limit): growth
+# discipline and startup cost. Why these numbers: docs/ARCHITECTURE.md, Budgets.
+WASM_GZIP_BUDGET_BYTES=$((1536 * 1024))
+WASM_RAW_BUDGET_BYTES=$((4 * 1024 * 1024))
 
 fail() { echo "check: FAIL: $1" >&2; exit 1; }
 step() { echo "check: $1"; }
@@ -61,6 +64,9 @@ WASM_FILE=target/worker-release/index_bg.wasm
 size=$(gzip -9 -c "$WASM_FILE" | wc -c | tr -d ' ')
 echo "check: worker.wasm gzip = $size bytes (budget $WASM_GZIP_BUDGET_BYTES; deployed form, after wasm-opt)"
 [ "$size" -le "$WASM_GZIP_BUDGET_BYTES" ] || fail "worker wasm gzip $size > budget $WASM_GZIP_BUDGET_BYTES"
+raw=$(wc -c < "$WASM_FILE" | tr -d ' ')
+echo "check: worker.wasm raw = $raw bytes (budget $WASM_RAW_BUDGET_BYTES)"
+[ "$raw" -le "$WASM_RAW_BUDGET_BYTES" ] || fail "worker wasm raw $raw > budget $WASM_RAW_BUDGET_BYTES"
 # The JS entry is what every fresh isolate parses before the wasm loads: keep it tiny.
 scripts/worker-entry target/worker-release || fail "worker entry (above)"
 size=$(gzip -9 -c target/worker-release/entry.mjs | wc -c | tr -d ' ')

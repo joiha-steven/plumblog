@@ -46,6 +46,9 @@ const PATHS = {
 
 export type IconName = keyof typeof PATHS;
 
+/** Themes and plugins name their group icons; one this set lacks is simply not drawn. */
+export const hasIcon = (name: string): name is IconName => Object.hasOwn(PATHS, name);
+
 const SVG = "http://www.w3.org/2000/svg";
 
 export function icon(name: IconName, cls = ""): SVGSVGElement {

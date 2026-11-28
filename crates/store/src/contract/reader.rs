@@ -1,7 +1,7 @@
 //! `ReaderStore`: what the public site reads. Published posts only, pinned first on the home
 //! listing alone, OFFSET paging behind a count, years and tags of published posts.
 
-use plumblog_model::{PostId, TagId, UserId};
+use plumblog_model::{PostId, SeriesId, TagId, UserId};
 
 use super::kit::{Check, Got, eq, ok, post, save, user};
 use crate::{
@@ -166,7 +166,7 @@ fn tag(slug: &str, name: &str) -> ReaderTag {
     }
 }
 
-/// The tag filter, tag rows with awkward names in id order, and the tag list.
+/// The tag filter and tag rows with awkward names in id order.
 pub async fn reader_tags_and_tag_filter<S: Store>(db: &S) -> Check {
     let u = user(db, "alice").await?;
     let comma = ok("ensure_tag comma", db.ensure_tag("comma", "a, b").await)?;
@@ -201,22 +201,22 @@ pub async fn reader_tags_and_tag_filter<S: Store>(db: &S) -> Check {
 
     eq!(
         "Tag comma: by date only, no draft, no page",
-        ids(db, ReaderFilter::Tag(comma), 0, 10).await?,
+        ids(db, ReaderFilter::Tag(comma, "vi"), 0, 10).await?,
         (3, vec![p2, p3, p1])
     )?;
     eq!(
         "Tag comma offset 1",
-        ids(db, ReaderFilter::Tag(comma), 1, 1).await?,
+        ids(db, ReaderFilter::Tag(comma, "vi"), 1, 1).await?,
         (3, vec![p3])
     )?;
     eq!(
         "Tag comma past the end",
-        ids(db, ReaderFilter::Tag(comma), 3, 10).await?,
+        ids(db, ReaderFilter::Tag(comma, "vi"), 3, 10).await?,
         (3, vec![])
     )?;
     eq!(
         "Tag with only a draft",
-        ids(db, ReaderFilter::Tag(draft_only), 0, 10).await?,
+        ids(db, ReaderFilter::Tag(draft_only, "vi"), 0, 10).await?,
         (0, vec![])
     )?;
 
@@ -246,19 +246,6 @@ pub async fn reader_tags_and_tag_filter<S: Store>(db: &S) -> Check {
             tag("comma", "a, b"),
             tag("quote", "say \"hi\" 'there' \\ ]")
         ])
-    )?;
-
-    let list = ok("reader_tags", db.reader_tags().await)?;
-    eq!(
-        "reader_tags: published posts only, by name",
-        list.iter()
-            .map(|t| (t.id, t.name.as_str()))
-            .collect::<Vec<_>>(),
-        vec![
-            (viet, VIET),
-            (comma, "a, b"),
-            (quote, "say \"hi\" 'there' \\ ]"),
-        ]
     )
 }
 
@@ -443,4 +430,147 @@ pub async fn reader_feed_and_sitemap<S: Store>(db: &S) -> Check {
     )?;
     let two = ok("reader_sitemap limit", db.reader_sitemap(2).await)?;
     eq!("sitemap limit", two.len(), 2)
+}
+
+/// The tag filter is per language: another language's posts are not listed, and it has its
+/// own page.
+pub async fn reader_tag_filter_per_language<S: Store>(db: &S) -> Check {
+    let author = user(db, "alice").await?;
+    let tag = ok("ensure_tag", db.ensure_tag("comma", "a, b").await)?;
+    let tagged = |lang: &str, slug: &str, when: i64| {
+        let mut p = at(author, lang, slug, when);
+        p.tag_ids = vec![tag];
+        p
+    };
+    let vi = save(db, tagged("vi", "v1", 100)).await?;
+    let en = save(db, tagged("en", "e1", 250)).await?;
+    eq!(
+        "tag in vi",
+        ids(db, ReaderFilter::Tag(tag, "vi"), 0, 10).await?,
+        (1, vec![vi])
+    )?;
+    eq!(
+        "tag in en: only the en post",
+        ids(db, ReaderFilter::Tag(tag, "en"), 0, 10).await?,
+        (1, vec![en])
+    )?;
+    eq!(
+        "tag in a language without posts",
+        ids(db, ReaderFilter::Tag(tag, "fr"), 0, 10).await?,
+        (0, vec![])
+    )
+}
+
+/// Series filter: one language, reading order, published posts of kind `post` only; the
+/// per-language tag and series page lists the sitemap and hreflang use.
+pub async fn reader_series_filter_and_pages<S: Store>(db: &S) -> Check {
+    let author = user(db, "alice").await?;
+    let mk = |slug: &str, title: &str| crate::NewSeries {
+        slug: slug.into(),
+        title: title.into(),
+        description: String::new(),
+    };
+    let s1 = ok("create_series s1", db.create_series(mk("s1", "Beta")).await)?;
+    let s2 = ok(
+        "create_series s2",
+        db.create_series(mk("s2", "Alpha")).await,
+    )?;
+    let s3 = ok(
+        "create_series s3",
+        db.create_series(mk("s3", "Empty")).await,
+    )?;
+    let tag = ok("ensure_tag", db.ensure_tag("t", "T").await)?;
+    let in_series = |lang: &str, slug: &str, when: i64, series, pos: Option<i64>| {
+        let mut p = at(author, lang, slug, when);
+        p.series_id = Some(series);
+        p.series_position = pos;
+        p.tag_ids = vec![tag];
+        p
+    };
+    // Reading order is the position, not the date; equal positions fall back to the date.
+    let pa = save(db, in_series("vi", "a", 300, s1, Some(2))).await?;
+    let pb = save(db, in_series("vi", "b", 100, s1, Some(1))).await?;
+    let pc = save(db, in_series("vi", "c", 200, s1, Some(2))).await?;
+    let pd = save(db, in_series("vi", "d", 400, s1, None)).await?;
+    let pe = save(db, in_series("en", "e", 100, s1, Some(1))).await?;
+    save(db, in_series("vi", "x", 100, s2, Some(1))).await?;
+    let mut draft = in_series("vi", "draft", 0, s1, Some(0));
+    draft.status = PostStatus::Draft;
+    draft.published_at = None;
+    save(db, draft).await?;
+    let mut pg = in_series("vi", "pg", 500, s1, Some(0));
+    pg.kind = PostKind::Page;
+    save(db, pg).await?;
+
+    eq!(
+        "Series s1 in vi: position, then date; no draft, no page, no en",
+        ids(db, ReaderFilter::Series(s1, "vi"), 0, 10).await?,
+        (4, vec![pd, pb, pc, pa])
+    )?;
+    eq!(
+        "Series s1 offset 1 limit 2",
+        ids(db, ReaderFilter::Series(s1, "vi"), 1, 2).await?,
+        (4, vec![pb, pc])
+    )?;
+    eq!(
+        "Series s1 in en",
+        ids(db, ReaderFilter::Series(s1, "en"), 0, 10).await?,
+        (1, vec![pe])
+    )?;
+    eq!(
+        "Series s3 has no posts",
+        ids(db, ReaderFilter::Series(s3, "vi"), 0, 10).await?,
+        (0, vec![])
+    )?;
+
+    series_pages_and_langs(db, s1, s2, tag).await?;
+    let post = ok("reader_post d", db.reader_post("vi", "d").await)?;
+    eq!(
+        "reader_post names its series",
+        post.and_then(|p| p.series).map(|x| (x.slug, x.title)),
+        Some(("s1".to_owned(), "Beta".to_owned()))
+    )
+}
+
+/// The sitemap's and hreflang's per-language page lists, over the posts the series test saved.
+async fn series_pages_and_langs<S: Store>(db: &S, s1: SeriesId, s2: SeriesId, tag: TagId) -> Check {
+    let langs = ["vi".to_owned(), "en".to_owned(), "fr".to_owned()];
+    let pages = |v: Vec<crate::ReaderTaxonPage>| {
+        v.into_iter()
+            .map(|p| format!("{}:{}:{}", p.slug, p.name, p.lang))
+            .collect::<Vec<_>>()
+    };
+    eq!(
+        "series pages: by title then language order, only with posts",
+        pages(ok("series pages", db.reader_series_pages(&langs).await)?),
+        ["s2:Alpha:vi", "s1:Beta:vi", "s1:Beta:en"]
+            .map(str::to_owned)
+            .to_vec()
+    )?;
+    eq!(
+        "tag pages per language",
+        pages(ok("tag pages", db.reader_tag_pages(&langs).await)?),
+        ["t:T:vi", "t:T:en"].map(str::to_owned).to_vec()
+    )?;
+    eq!(
+        "no languages, no pages",
+        db.reader_series_pages(&[]).await.map(|v| v.len()).ok(),
+        Some(0)
+    )?;
+    eq!(
+        "series langs, in the order given",
+        ok("series langs", db.reader_series_langs(s1, &langs).await)?,
+        vec!["vi".to_owned(), "en".to_owned()]
+    )?;
+    eq!(
+        "series langs of s2",
+        ok("series langs", db.reader_series_langs(s2, &langs).await)?,
+        vec!["vi".to_owned()]
+    )?;
+    eq!(
+        "tag langs",
+        ok("tag langs", db.reader_tag_langs(tag, &langs).await)?,
+        vec!["vi".to_owned(), "en".to_owned()]
+    )?;
+    Ok(())
 }

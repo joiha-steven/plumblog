@@ -95,6 +95,7 @@ describe("embedded theme", () => {
     "/reading-on-screens",
     "/vi/bai-viet-dau-tien",
     "/tag/tools",
+    "/vi/tag/life",
     "/feed.xml",
     "/sitemap.xml",
     "/archive/2025",
@@ -189,6 +190,7 @@ describe("embedded theme", () => {
     const reqs = [
       ["/search?q=plum"],
       ["/search?q=plum"],
+      ["/vi/search?q=plum"],
       ["/admin/"],
       ["/admin"],
       ["/api/v1/site"],

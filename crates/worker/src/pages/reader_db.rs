@@ -4,7 +4,8 @@
 use super::db::Db;
 use super::routes::is_lang;
 use super::source::{
-    Filter, Neighbours, ReaderSource, Settings, SitemapPost, Slice, StoredPost, Tag,
+    Filter, Neighbours, PostSeries, ReaderSource, SeriesInfo, Settings, SitemapPost, Slice,
+    StoredPost, Tag, TaxonPage,
 };
 use super::{core_text, warn};
 use crate::api::body::json_string;
@@ -13,7 +14,7 @@ use plumblog_markdown::Rendered;
 use plumblog_model::{PostId, Result, TagId};
 use plumblog_store::{
     ORIGIN_KEY, PostKind, PostSummary, ReaderFilter, ReaderLink, ReaderPost, ReaderStore,
-    ReaderTag, SettingsStore, TaxonomyStore,
+    ReaderTag, ReaderTaxonPage, SettingsStore, TaxonomyStore,
 };
 
 /// Site settings keys (JSON values). Every one has a default, so a fresh site renders.
@@ -135,6 +136,7 @@ fn from_summary(s: PostSummary, row_tags: Vec<ReaderTag>) -> StoredPost {
         // The store keeps one excerpt, written or automatic, so it is always the "stored"
         // one the theme cuts to `excerpt_words`.
         excerpt: None,
+        cover: None,
         body: Rendered {
             excerpt: s.excerpt,
             reading_minutes: u32::try_from(s.reading_minutes).unwrap_or(0),
@@ -142,6 +144,7 @@ fn from_summary(s: PostSummary, row_tags: Vec<ReaderTag>) -> StoredPost {
         },
         tags: tags(row_tags),
         translations: Vec::new(),
+        series: None,
     }
 }
 
@@ -169,8 +172,14 @@ fn from_full(r: ReaderPost) -> StoredPost {
         comments_enabled: p.comments_enabled,
         excerpt: None,
         body,
+        cover: r.cover.as_ref().map(super::cover::build),
         tags: tags(r.tags),
         translations: Vec::new(),
+        series: r.series.map(|s| PostSeries {
+            slug: s.slug,
+            title: s.title,
+            position: p.series_position,
+        }),
     }
 }
 
@@ -186,10 +195,22 @@ fn from_link(l: ReaderLink) -> StoredPost {
         is_page: false,
         comments_enabled: false,
         excerpt: None,
+        cover: None,
         body: Rendered::default(),
         tags: Vec::new(),
         translations: Vec::new(),
+        series: None,
     }
+}
+
+fn pages(rows: Vec<ReaderTaxonPage>) -> Vec<TaxonPage> {
+    rows.into_iter()
+        .map(|r| TaxonPage {
+            slug: r.slug,
+            name: r.name,
+            lang: r.lang,
+        })
+        .collect()
 }
 
 fn clamp(n: usize) -> u32 {
@@ -215,7 +236,8 @@ impl<S: SettingsStore + ReaderStore + TaxonomyStore> ReaderSource for Db<'_, S> 
     async fn posts(&self, filter: Filter<'_>, offset: usize, limit: usize) -> Result<Slice> {
         let f = match filter {
             Filter::Home(l) => ReaderFilter::Home(l),
-            Filter::Tag(t) => ReaderFilter::Tag(t.id),
+            Filter::Tag(t, l) => ReaderFilter::Tag(t.id, l),
+            Filter::Series(s, l) => ReaderFilter::Series(s.id, l),
             Filter::Year(y) => ReaderFilter::Year(y),
             Filter::Lang(l) => ReaderFilter::Lang(l),
         };
@@ -294,18 +316,33 @@ impl<S: SettingsStore + ReaderStore + TaxonomyStore> ReaderSource for Db<'_, S> 
     }
 
     // 1 query.
-    async fn tags(&self) -> Result<Vec<Tag>> {
-        Ok(self
-            .0
-            .reader_tags()
-            .await?
-            .into_iter()
-            .map(|t| Tag {
-                id: t.id,
-                slug: t.slug,
-                name: t.name,
-            })
-            .collect())
+    async fn series(&self, slug: &str) -> Result<Option<SeriesInfo>> {
+        Ok(self.0.find_series(slug).await?.map(|s| SeriesInfo {
+            id: s.id,
+            slug: s.slug,
+            title: s.title,
+            description: s.description,
+        }))
+    }
+
+    // 1 query.
+    async fn tag_pages(&self, langs: &[String]) -> Result<Vec<TaxonPage>> {
+        Ok(pages(self.0.reader_tag_pages(langs).await?))
+    }
+
+    // 1 query.
+    async fn series_pages(&self, langs: &[String]) -> Result<Vec<TaxonPage>> {
+        Ok(pages(self.0.reader_series_pages(langs).await?))
+    }
+
+    // 1 query.
+    async fn tag_langs(&self, tag: &Tag, langs: &[String]) -> Result<Vec<String>> {
+        self.0.reader_tag_langs(tag.id, langs).await
+    }
+
+    // 1 query.
+    async fn series_langs(&self, series: &SeriesInfo, langs: &[String]) -> Result<Vec<String>> {
+        self.0.reader_series_langs(series.id, langs).await
     }
 
     // 1 query.

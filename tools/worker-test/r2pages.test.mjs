@@ -5,12 +5,10 @@
 // emptying the Cache API stands in for "another data centre".
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, test } from "node:test";
 
-import { cacheFile, r2File, seedSample, startWorker } from "./harness.mjs";
+import { seedSample, startWorker } from "./harness.mjs";
+import { cacheKeys, contentVersion, emptyCache, pageKeys, r2Body, r2Row, renameR2, versionId } from "./r2.mjs";
 
 const MARK = "x-plumblog-entry";
 const CACHE = "x-plumblog-cache";
@@ -23,48 +21,6 @@ async function read(w, path, init) {
   return { res, body: await res.text() };
 }
 
-function withDb(file, fn) {
-  const db = new DatabaseSync(file);
-  try {
-    db.exec("PRAGMA busy_timeout = 5000");
-    return fn(db);
-  } finally {
-    db.close();
-  }
-}
-const r2 = (w, fn, fallback) => {
-  const f = r2File(w.state);
-  return f === null ? fallback : withDb(f, fn);
-};
-const pageKeys = (w) => r2(w, (db) => db.prepare("SELECT key FROM _mf_objects WHERE key LIKE 'pages/%' ORDER BY key").all().map((r) => r.key), []);
-const r2Row = (w, key) => r2(w, (db) => db.prepare("SELECT * FROM _mf_objects WHERE key = ?").get(key), undefined);
-/** The object's bytes, from the bucket's blob directory (the one dir next to miniflare's own). */
-function r2Body(w, row) {
-  const root = join(w.state, "v3", "r2");
-  const [bucket, ...more] = readdirSync(root).filter((d) => !d.startsWith("miniflare-"));
-  assert.equal(more.length, 0, `one bucket dir under ${root}`);
-  return readFileSync(join(root, bucket, "blobs", row.blob_id), "utf8");
-}
-const renameR2 = (w, from, to) => r2(w, (db) => db.prepare("UPDATE _mf_objects SET key = ? WHERE key = ?").run(to, from));
-
-/** Runs `fn(db)` on this Worker's Cache API database. */
-function withCache(w, fn) {
-  const f = cacheFile(w.state);
-  assert.ok(f, `no Cache API database under ${w.state}`);
-  return withDb(f, fn);
-}
-/** Empties the Cache API, so the next request misses it as a data centre that never saw the page. */
-const emptyCache = (w) => withCache(w, (db) => db.exec("DELETE FROM _mf_entries"));
-const cacheKeys = (w) => withCache(w, (db) => db.prepare("SELECT key FROM _mf_entries").all().map((r) => r.key));
-
-async function versionId(w) {
-  const res = await get(w, "/healthz");
-  await res.text();
-  const id = res.headers.get("x-plumblog-version");
-  assert.match(id ?? "", /^[0-9a-f-]{8,}$/i);
-  return id;
-}
-const contentVersion = (w) => Number(w.query("SELECT content_version FROM site WHERE id = 1")[0].content_version);
 const keyOf = async (w, path) => `pages/${await versionId(w)}/v${contentVersion(w)}${path}`;
 
 /** The R2 row once the put (after the response) lands. */

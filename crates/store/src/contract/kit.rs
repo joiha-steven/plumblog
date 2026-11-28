@@ -19,6 +19,12 @@ pub type Got<T> = std::result::Result<T, String>;
 /// Fixed time for rows whose time does not matter to the case.
 pub const T0: i64 = 1_000;
 
+/// The acting owner of user-admin writes whose actor does not matter to the case: unchecked.
+pub const ADMIN: crate::Admin = crate::Admin {
+    id: UserId(0),
+    proof: crate::Proof::Unchecked,
+};
+
 /// Unwraps a store call that must succeed.
 pub fn ok<T>(what: &str, r: Result<T>) -> Got<T> {
     r.map_err(|e| format!("{what}: expected Ok, got error {e}"))

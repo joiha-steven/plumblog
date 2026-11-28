@@ -1,15 +1,17 @@
 //! Scheduled jobs. One cron trigger, every 10 minutes (the free plan allows few triggers),
 //! dispatched here by the scheduled time: every run publishes due posts and sends due
-//! webhook deliveries; the run scheduled 03:10-03:19 UTC also prunes the system log and old
+//! webhook deliveries, then pre-renders reader pages into R2 and deletes retired ones
+//! (`pages::prerender`); the run scheduled 03:10-03:19 UTC also prunes the system log and old
 //! deliveries. Each job stands alone: one failing never skips the others.
 
 use plumblog_store::{RETENTION_JOB, retention_job};
 use plumblog_syslog::{Retention, Scope, request_id};
-use plumblog_webhook::{PRUNE_JOB, prune_job};
+use plumblog_webhook::{DELIVERY_JOB, PRUNE_JOB, prune_job};
 use worker::{Env, console_error, console_log, js_sys};
 
 use crate::d1::D1Store;
-use crate::webhooks;
+use crate::pages::PRERENDER_JOB;
+use crate::webhooks::{self, PUBLISH_JOB};
 
 /// A cron run has no `cf-ray`, so its request id is generated. It only links log lines to
 /// the admin entry, so `Math.random` is enough.
@@ -39,6 +41,9 @@ pub fn is_daily(scheduled_ms: f64) -> bool {
 /// Runs the jobs due at `scheduled_ms`. Failures go to the Worker log and, where storage
 /// works, to the system log with an error code; a cron handler has no one to return them to.
 pub async fn run(env: &Env, scheduled_ms: f64) {
+    // Test builds: count only this run's calls (`crate::subrequests`).
+    #[cfg(feature = "contract-tests")]
+    crate::subrequests::take();
     let scope = Scope::new(request_id(None, job_id), None);
     let prefix = scope.log_prefix();
     let store = match env.d1("DB") {
@@ -50,6 +55,8 @@ pub async fn run(env: &Env, scheduled_ms: f64) {
     };
     // Subrequests used so far (see webhooks::SUBREQUESTS); deliveries get what is left.
     let mut used = webhooks::publish_job(&store, &scope).await;
+    // Test builds: each job logs its own count (`crate::subrequests::lap`).
+    crate::subrequests::lap(PUBLISH_JOB, used);
     let daily = is_daily(scheduled_ms);
     if daily {
         let now = worker::Date::now().as_millis();
@@ -58,14 +65,16 @@ pub async fn run(env: &Env, scheduled_ms: f64) {
             Ok(deleted) => console_log!("{prefix} job.run {RETENTION_JOB} deleted={deleted}"),
             Err(e) => console_error!("{prefix} job.run {RETENTION_JOB} failed: {e}"),
         }
+        crate::subrequests::lap(RETENTION_JOB, webhooks::RETENTION_USED);
         let now = i64::try_from(now).unwrap_or(i64::MAX);
         match prune_job(&store, &scope, now, report).await {
             Ok(deleted) => console_log!("{prefix} job.run {PRUNE_JOB} deleted={deleted}"),
             Err(e) => console_error!("{prefix} job.run {PRUNE_JOB} failed: {e}"),
         }
+        crate::subrequests::lap(PRUNE_JOB, webhooks::PRUNE_USED);
         used += webhooks::DAILY_JOBS;
     }
-    webhooks::deliver_job(
+    let delivered = webhooks::deliver_job(
         env,
         &store,
         &scope,
@@ -74,6 +83,27 @@ pub async fn run(env: &Env, scheduled_ms: f64) {
         daily,
     )
     .await;
+    crate::subrequests::lap(DELIVERY_JOB, delivered);
+    used += delivered;
+    // Last: a CPU cut-off then loses only this work, which the next run redoes.
+    let pages = crate::pages::store_cron(
+        env,
+        &store,
+        &scope,
+        webhooks::SUBREQUESTS.saturating_sub(used),
+    )
+    .await;
+    crate::subrequests::lap(PRERENDER_JOB, pages);
+    // Test builds: the calls this run made next to the jobs' own count, which
+    // tools/worker-test/r2cron.test.mjs and subreq.test.mjs hold to webhooks::SUBREQUESTS.
+    #[cfg(feature = "contract-tests")]
+    console_log!(
+        "{prefix} job.run subrequests counted={} budgeted={}",
+        crate::subrequests::take(),
+        used + pages
+    );
+    #[cfg(not(feature = "contract-tests"))]
+    let _ = pages;
 }
 
 #[cfg(test)]

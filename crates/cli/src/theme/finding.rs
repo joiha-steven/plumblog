@@ -15,6 +15,7 @@ pub enum Level {
 pub enum Kind {
     ThemeLoad,
     ThemeTemplate,
+    ThemeTemplateDefault,
     ThemeDarkToken,
     ThemeContrast,
     ThemeCssSize,
@@ -24,6 +25,7 @@ pub enum Kind {
     ThemePageProblem,
     ThemeAssetMissing,
     ThemeTooLarge,
+    ThemePushed,
     FileSecretName,
     FileSecretContent,
     FileStray,
@@ -45,6 +47,7 @@ impl Kind {
         match self {
             Self::ThemeLoad => "theme.load",
             Self::ThemeTemplate => "theme.template",
+            Self::ThemeTemplateDefault => "theme.template_default",
             Self::ThemeDarkToken => "theme.dark_token",
             Self::ThemeContrast => "theme.contrast",
             Self::ThemeCssSize => "theme.css_size",
@@ -54,6 +57,7 @@ impl Kind {
             Self::ThemePageProblem => "theme.page_problem",
             Self::ThemeAssetMissing => "theme.asset_missing",
             Self::ThemeTooLarge => "theme.too_large",
+            Self::ThemePushed => "theme.push_document",
             Self::FileSecretName => "file.secret_name",
             Self::FileSecretContent => "file.secret_content",
             Self::FileStray => "file.stray",
@@ -80,6 +84,10 @@ impl Kind {
             Self::ThemeTemplate => (
                 key!("cli.finding.theme_template.what"),
                 key!("cli.finding.theme_template.fix"),
+            ),
+            Self::ThemeTemplateDefault => (
+                key!("cli.finding.theme_template_default.what"),
+                key!("cli.finding.theme_template_default.fix"),
             ),
             Self::ThemeDarkToken => (
                 key!("cli.finding.theme_dark_token.what"),
@@ -113,6 +121,10 @@ impl Kind {
                 key!("cli.finding.theme_asset_missing.what"),
                 key!("cli.finding.theme_asset_missing.fix"),
             ),
+            Self::ThemePushed => (
+                key!("cli.finding.theme_pushed.what"),
+                key!("cli.finding.theme_pushed.fix"),
+            ),
             Self::ThemeTooLarge => (
                 key!("cli.finding.theme_too_large.what"),
                 key!("cli.finding.theme_too_large.fix"),
@@ -129,6 +141,13 @@ impl Kind {
                 key!("cli.finding.file_asset_name.what"),
                 key!("cli.finding.file_asset_name.fix"),
             ),
+            other => other.file_keys(),
+        }
+    }
+
+    /// [`Kind::keys`] for the file, text and plugin kinds; the theme kinds are answered there.
+    fn file_keys(self) -> (Key, Key) {
+        match self {
             Self::FileSecretName => (
                 key!("cli.finding.file_secret_name.what"),
                 key!("cli.finding.file_secret_name.fix"),
@@ -168,6 +187,15 @@ impl Kind {
             Self::PluginCssSize => (
                 key!("cli.finding.plugin_css_size.what"),
                 key!("cli.finding.plugin_css_size.fix"),
+            ),
+            // Theme kinds are matched in `keys` before they can get here.
+            Self::ThemeLoad => (
+                key!("cli.finding.theme_load.what"),
+                key!("cli.finding.theme_load.fix"),
+            ),
+            _ => (
+                key!("cli.finding.theme_template.what"),
+                key!("cli.finding.theme_template.fix"),
             ),
         }
     }

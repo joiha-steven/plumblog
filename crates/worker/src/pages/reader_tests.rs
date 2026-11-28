@@ -5,8 +5,11 @@
 use super::db::Db;
 use super::tests_support::run;
 use super::{Outcome, render, seed};
+use plumblog_model::MediaId;
 use plumblog_store::memory::MemoryStore;
-use plumblog_store::{PostKind, PostStatus, PostStore, SavePost, SettingsStore};
+use plumblog_store::{
+    MediaStore, NewMedia, PostKind, PostStatus, PostStore, SavePost, SettingsStore,
+};
 
 fn get(db: &MemoryStore, path: &str) -> (u16, String) {
     match run(render(&Db(db), &Db(db), &Db(db), path, "")).unwrap() {
@@ -106,6 +109,10 @@ fn pages_past_the_end_are_404_decided_from_the_count() {
 
 /// A published `kind` at `/<slug>` with its own comment switch on.
 fn commentable(db: &MemoryStore, kind: PostKind, slug: &str) {
+    published(db, kind, slug, None);
+}
+
+fn published(db: &MemoryStore, kind: PostKind, slug: &str, cover: Option<MediaId>) {
     let author = run(plumblog_store::UserStore::list_users(db)).unwrap()[0].id;
     run(db.save_post(SavePost {
         id: None,
@@ -126,7 +133,7 @@ fn commentable(db: &MemoryStore, kind: PostKind, slug: &str) {
         reading_minutes: 1,
         pinned: false,
         comments_enabled: true,
-        cover_media_id: None,
+        cover_media_id: cover,
         series_id: None,
         series_position: None,
         tag_ids: Vec::new(),
@@ -242,6 +249,93 @@ fn an_empty_feed_is_dated_by_a_real_time_or_not_at_all() {
     );
     assert!(get(&db, "/rss.xml").1.contains("<lastBuildDate>"));
     assert!(!get(&db, "/sitemap.xml").1.contains("<lastmod>"));
+}
+
+const VARIANTS: &str = r#"[
+ {"key":"media/1/cover-480.avif","width":480,"height":240,"bytes":10,"mime":"image/avif"},
+ {"key":"media/1/cover-960.avif","width":960,"height":480,"bytes":20,"mime":"image/avif"},
+ {"key":"media/1/cover-480.webp","width":480,"height":240,"bytes":30,"mime":"image/webp"},
+ {"key":"media/1/cover-960.webp","width":960,"height":480,"bytes":40,"mime":"image/webp"},
+ {"key":"media/1/cover-1600.webp","width":1600,"height":800,"bytes":50,"mime":"image/webp"}]"#;
+
+fn media(db: &MemoryStore, alt: &str, variants: &str) -> MediaId {
+    run(db.create_media(NewMedia {
+        r2_key: "media/1/cover.png".to_owned(),
+        mime: "image/png".to_owned(),
+        bytes: 100,
+        width: 3000,
+        height: 1500,
+        alt: alt.to_owned(),
+        variants_json: variants.to_owned(),
+        uploaded_by: None,
+        created_at: 1,
+        sha256: None,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_cover_becomes_an_absolute_social_card() {
+    let db = seeded();
+    run(db.put_setting("origin", "\"https://blog.example\"", 1)).unwrap();
+    let id = media(&db, "A \"quoted\" view", VARIANTS);
+    published(&db, PostKind::Post, "with-cover", Some(id));
+    published(&db, PostKind::Page, "about-cover", Some(id));
+    published(&db, PostKind::Post, "no-cover", None);
+    // Largest WebP up to 1200 px (AVIF is not a card type for most networks).
+    let img = format!("https://blog.example/media/{}/cover-960.webp", id.0);
+    for slug in ["with-cover", "about-cover"] {
+        let html = get(&db, &format!("/{slug}")).1;
+        for tag in [
+            format!("<meta property=\"og:image\" content=\"{img}\">"),
+            "<meta property=\"og:image:width\" content=\"960\">".to_owned(),
+            "<meta property=\"og:image:height\" content=\"480\">".to_owned(),
+            "<meta property=\"og:image:alt\" content=\"A &quot;quoted&quot; view\">".to_owned(),
+            "<meta name=\"twitter:card\" content=\"summary_large_image\">".to_owned(),
+            format!("<meta name=\"twitter:image\" content=\"{img}\">"),
+            "<meta name=\"twitter:image:alt\" content=\"A &quot;quoted&quot; view\">".to_owned(),
+            format!("\"image\":[\"{img}\"]"),
+        ] {
+            assert!(html.contains(&tag), "{slug}: missing {tag}");
+        }
+    }
+    let plain = get(&db, "/no-cover").1;
+    for gone in ["og:image", "twitter:image", "\"image\":"] {
+        assert!(!plain.contains(gone), "{gone} without a cover");
+    }
+    assert!(plain.contains("<meta name=\"twitter:card\" content=\"summary\">"));
+}
+
+#[test]
+fn a_cover_without_variants_or_alt_uses_the_original_and_no_alt_tags() {
+    let db = seeded();
+    run(db.put_setting("origin", "\"https://blog.example\"", 1)).unwrap();
+    let id = media(&db, "", "[]");
+    published(&db, PostKind::Post, "plain-cover", Some(id));
+    let html = get(&db, "/plain-cover").1;
+    let img = format!("https://blog.example/media/{}/cover.png", id.0);
+    assert!(
+        html.contains(&format!("og:image\" content=\"{img}\"")),
+        "{html}"
+    );
+    assert!(html.contains("og:image:width\" content=\"3000\""));
+    assert!(html.contains("og:image:height\" content=\"1500\""));
+    assert!(!html.contains("og:image:alt") && !html.contains("twitter:image:alt"));
+}
+
+#[test]
+fn no_origin_means_no_image_tags() {
+    let db = seeded();
+    // The sample sets an origin; an empty one is the same as none.
+    run(db.put_setting("origin", "\"\"", 1)).unwrap();
+    let id = media(&db, "x", VARIANTS);
+    published(&db, PostKind::Post, "with-cover", Some(id));
+    let html = get(&db, "/with-cover").1;
+    assert!(
+        !html.contains("og:image") && !html.contains("twitter:image"),
+        "{html}"
+    );
+    assert!(html.contains("<meta name=\"twitter:card\" content=\"summary\">"));
 }
 
 /// A published post in `lang`, `at` ms after the epoch (the newest has the largest).

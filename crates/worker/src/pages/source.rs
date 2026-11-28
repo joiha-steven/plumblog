@@ -3,7 +3,7 @@
 //! posts to unit tests of rendering and to nothing else.
 
 use plumblog_markdown::Rendered;
-use plumblog_model::{PostId, Result, TagId};
+use plumblog_model::{PostId, Result, SeriesId, TagId};
 
 #[derive(Clone, Debug)]
 pub struct StoredPost {
@@ -19,10 +19,39 @@ pub struct StoredPost {
     /// The post's own comment switch; the site switch is read separately.
     pub comments_enabled: bool,
     pub excerpt: Option<String>,
+    /// The post page only; sized for a social card (see `pages/cover.rs`).
+    pub cover: Option<plumblog_render::Image>,
     pub body: Rendered,
     pub tags: Vec<Tag>,
     /// Other published language versions: `(lang, slug)`.
     pub translations: Vec<(String, String)>,
+    /// The series it belongs to; read for the post page only.
+    pub series: Option<PostSeries>,
+}
+
+/// A post's series as its page shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostSeries {
+    pub slug: String,
+    pub title: String,
+    pub position: Option<i64>,
+}
+
+/// A series page's subject.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeriesInfo {
+    pub id: SeriesId,
+    pub slug: String,
+    pub title: String,
+    pub description: String,
+}
+
+/// A tag or series page that exists in one language (sitemap).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaxonPage {
+    pub slug: String,
+    pub name: String,
+    pub lang: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,7 +83,10 @@ pub struct Settings {
 pub enum Filter<'a> {
     /// One language, pinned first, then by date: the home page.
     Home(&'a str),
-    Tag(&'a Tag),
+    /// One language's posts with the tag, newest first.
+    Tag(&'a Tag, &'a str),
+    /// One language's posts of the series in reading order.
+    Series(&'a SeriesInfo, &'a str),
     Year(i32),
     /// One language, newest first (feeds).
     Lang(&'a str),
@@ -102,8 +134,16 @@ pub trait ReaderSource {
     /// Newest `limit` published posts and pages, for the sitemap.
     async fn sitemap_posts(&self, limit: usize) -> Result<Vec<SitemapPost>>;
     async fn tag(&self, slug: &str) -> Result<Option<Tag>>;
-    /// Every tag with at least one published post (sitemap).
-    async fn tags(&self) -> Result<Vec<Tag>>;
+    async fn series(&self, slug: &str) -> Result<Option<SeriesInfo>>;
+    /// Every (tag, language) among `langs` with a published post: the tag pages that exist
+    /// (sitemap), by tag name. 1 query.
+    async fn tag_pages(&self, langs: &[String]) -> Result<Vec<TaxonPage>>;
+    /// As [`ReaderSource::tag_pages`] for series (`name` is the title). 1 query.
+    async fn series_pages(&self, langs: &[String]) -> Result<Vec<TaxonPage>>;
+    /// Which of `langs` have a published post with the tag, in order. 1 query.
+    async fn tag_langs(&self, tag: &Tag, langs: &[String]) -> Result<Vec<String>>;
+    /// Which of `langs` have a published post in the series, in order. 1 query.
+    async fn series_langs(&self, series: &SeriesInfo, langs: &[String]) -> Result<Vec<String>>;
     /// Years that have posts, newest first.
     async fn years(&self) -> Result<Vec<i32>>;
     /// Whether a published post or page is at `/<lang>/<slug>`. 1 query.
