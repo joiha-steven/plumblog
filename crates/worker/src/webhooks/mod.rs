@@ -40,8 +40,12 @@ pub const PER_PUBLISHED: u32 = 3;
 /// The publish job's own calls when it publishes: `publish_due`, the settings for the posts'
 /// URLs, and its `job.run` entry.
 pub const PUBLISH_FIXED: u32 = 3;
-/// The daily jobs: system log prune + entry, delivery prune + entry.
-pub const DAILY_JOBS: u32 = 4;
+/// The system log retention job: its prune query and its `job.run` entry.
+pub const RETENTION_USED: u32 = 2;
+/// The delivery prune job: its prune query and its `job.run` entry.
+pub const PRUNE_USED: u32 = 2;
+/// The daily jobs together.
+pub const DAILY_JOBS: u32 = RETENTION_USED + PRUNE_USED;
 /// Most posts one cron run publishes: (50 - 3 - 4) / 3 = 14, so publishing plus the daily
 /// jobs always fit, whatever deliveries are left. Further due posts go live 10 min later
 /// with their events; none is published without its `post.published` being queued.

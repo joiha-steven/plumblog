@@ -4,11 +4,11 @@
 // starts its own Worker and seeds its own state; the tests read and seed miniflare's local R2
 // files directly (r2.mjs).
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
 import { test } from "node:test";
 
 import { seedSample, startWorker } from "./harness.mjs";
-import { contentVersion, emptyCache, pageKeys, r2, r2Body, r2Row, versionId } from "./r2.mjs";
+import { DAILY, assertWithinBudget, cron, duePosts, jobRuns, receiver, subrequests } from "./subreq.mjs";
+import { contentVersion, emptyCache, pageKeys, r2, r2Body, r2Row, seed, versionId } from "./r2.mjs";
 
 const CACHE = "x-plumblog-cache";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -24,12 +24,6 @@ async function withWorker({ sample = false, vars = {} }, fn) {
   } finally {
     await w.stop();
   }
-}
-/** Fires the cron once (at `time` ms when given); wrangler answers after the handler finished. */
-async function cron(w, time) {
-  const at = time === undefined ? "" : `&time=${time}`;
-  const res = await fetch(`${w.url}/__scheduled?cron=${encodeURIComponent("*/10 * * * *")}${at}`);
-  assert.equal(res.status, 200, await res.text());
 }
 const doneKey = async (w) => `pages/${await versionId(w)}/.done-v${contentVersion(w)}`;
 /** Runs the cron until this version's work is marked done; returns how many runs it took. */
@@ -47,16 +41,6 @@ const snapshot = (w) =>
 const deleteKeys = (w, keys) =>
   r2(w, (db) => {
     for (const k of keys) db.prepare("DELETE FROM _mf_objects WHERE key = ?").run(k);
-  });
-/** Empty objects (no blob) uploaded at `uploaded` ms, as R2 would list them. */
-const seed = (w, keys, uploaded = Date.now()) =>
-  r2(w, (db) => {
-    const st = db.prepare(
-      "INSERT INTO _mf_objects (key, blob_id, version, size, etag, uploaded, checksums, http_metadata, custom_metadata) VALUES (?, NULL, ?, 0, ?, ?, '{}', '{}', '{}')",
-    );
-    db.exec("BEGIN");
-    for (const k of [keys].flat()) st.run(k, `seed-${k}`, `etag-${k}`, uploaded);
-    db.exec("COMMIT");
   });
 const bump = (w) => w.exec("UPDATE site SET content_version = content_version + 1 WHERE id = 1");
 /** The default language's newest published posts, as the feed lists them. */
@@ -77,27 +61,6 @@ async function storeHome(w) {
   await storedRow(w, `pages/${id}/v${contentVersion(w)}/`);
   await storedRow(w, `pages/${id}/.seen`);
 }
-/** Scheduled posts due a second ago, `n` of them. */
-function duePosts(w, n, name) {
-  const now = Date.now();
-  for (let i = 0; i < n; i++) {
-    w.exec(
-      "INSERT INTO posts (kind, translation_group, lang, slug, status, published_at, author_id, title, markdown, html, created_at, updated_at) " +
-        `SELECT 'post', 0, 'en', '${name}-${i}', 'scheduled', ${now - 1000}, id, 'Due', 'x', '<p>x</p>', ${now}, ${now} FROM users ORDER BY id LIMIT 1; ` +
-        `UPDATE posts SET translation_group = id WHERE slug = '${name}-${i}';`,
-    );
-  }
-}
-/** The n-th (1-based) `job.run subrequests` line of this Worker's log. */
-async function subrequests(w, n) {
-  for (let i = 0; i < 50; i++) {
-    const all = [...w.log().matchAll(/job\.run subrequests counted=(\d+) budgeted=(\d+)/g)];
-    if (all.length >= n) return { counted: Number(all[n - 1][1]), budgeted: Number(all[n - 1][2]) };
-    await sleep(100);
-  }
-  assert.fail(`no subrequest line ${n} in the log`);
-}
-
 test("after a content change the cron stores home, the 3 newest posts, the feed and the sitemap as a reader miss would, in 2 runs; a further run stores nothing", async () => {
   await withWorker({ sample: true }, async (w) => {
     bump(w);
@@ -303,26 +266,6 @@ test("a post rendered without its comments (not cacheable) is never stored, is m
   });
 });
 
-/** A webhook receiver that answers 200 to everything. */
-function receiver() {
-  const server = createServer((req, res) => {
-    req.resume();
-    req.on("end", () => res.writeHead(200).end("ok"));
-  });
-  return new Promise((ok) =>
-    server.listen(0, "127.0.0.1", () =>
-      ok({
-        url: `http://127.0.0.1:${server.address().port}/hook`,
-        close: () =>
-          new Promise((done) => {
-            server.closeAllConnections();
-            server.close(done);
-          }),
-      }),
-    ),
-  );
-}
-
 test("worst-case runs make no more subrequests than they budget, and budget at most 50", async () => {
   const recv = await receiver();
   try {
@@ -345,9 +288,8 @@ test("worst-case runs make no more subrequests than they budget, and budget at m
         w.exec(`INSERT INTO webhook_deliveries (webhook_id, msg_id, event, payload, next_at_ms, created_at_ms) VALUES (${webhookId}, 'msg_${i}', 'post.published', '{}', ${now}, ${now})`);
       }
       duePosts(w, 2, "budget-due");
-      const daily = Date.UTC(2026, 10, 28, 3, 12);
       const runs = [];
-      await cron(w, daily);
+      await cron(w, DAILY);
       runs.push(await subrequests(w, 1));
       await cron(w);
       runs.push(await subrequests(w, 2));
@@ -357,15 +299,13 @@ test("worst-case runs make no more subrequests than they budget, and budget at m
         assert.ok(r.budgeted <= 50, `run ${i + 1}: budgeted ${r.budgeted}`);
       }
       assert.ok(runs[0].counted > 30, `the first run is heavy: ${runs[0].counted}`);
+      assert.equal(assertWithinBudget(jobRuns(w, "pages.prerender"), "pages.prerender").length, 2);
     });
   } finally {
     await recv.close();
   }
 });
 
-/** The publish job's own counts, from each run's `job.run subrequests` line, in order. */
-const publishCounts = (w) =>
-  [...w.log().matchAll(/job\.run subrequests counted=\d+ budgeted=\d+ publish_counted=(\d+) publish_budgeted=(\d+)/g)].map((m) => ({ counted: Number(m[1]), budgeted: Number(m[2]) }));
 const published = (w, name) => Number(w.query(`SELECT count(*) AS n FROM posts WHERE slug LIKE '${name}-%' AND status = 'published'`)[0].n);
 
 test("more due posts than the cap: the cap (14) is published, the rest next run; calls per post are measured, not assumed", async () => {
@@ -384,7 +324,7 @@ test("more due posts than the cap: the cap (14) is published, the rest next run;
       await cron(w);
       const run2 = await subrequests(w, 2);
       assert.equal(published(w, "budget-many"), CAP + 2);
-      const pub = publishCounts(w);
+      const pub = assertWithinBudget(jobRuns(w, "posts.publish_due"), "posts.publish_due");
       console.log("runs:", JSON.stringify([run1, run2]), "publish job:", JSON.stringify(pub));
       for (const r of [run1, run2]) {
         assert.ok(r.counted <= r.budgeted, `counted ${r.counted} > budgeted ${r.budgeted}`);

@@ -26,7 +26,7 @@ use source::{Filter, ReaderSource, Settings, StoredPost};
 use std::cell::Cell;
 use worker::{Context, Env, Headers, Request, Response, Result, console_error};
 
-pub(crate) use prerender::cron as store_cron;
+pub(crate) use prerender::{PRERENDER_JOB, cron as store_cron};
 
 /// Where the default theme's `assets/` folder is served (Workers static assets).
 pub const THEME_ASSETS_URL: &str = "/theme/minimal";
