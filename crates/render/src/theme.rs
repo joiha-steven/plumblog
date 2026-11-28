@@ -320,6 +320,23 @@ impl Theme {
         )
     }
 
+    /// Checks one option value (JSON as stored) against this theme's declaration, or bundled
+    /// plugin `plugin`'s. `None`: no such plugin or key, so nothing to check against (such
+    /// values are kept and simply not read).
+    #[must_use]
+    pub fn check_option(
+        &self,
+        plugin: Option<&str>,
+        key: &str,
+        raw: &str,
+    ) -> Option<Result<(), String>> {
+        let schema = match plugin {
+            None => &self.shared.schema,
+            Some(name) => &self.shared.plugins.iter().find(|p| p.name == name)?.schema,
+        };
+        schema.check_one(key, raw)
+    }
+
     /// Names of the bundled plugins that loaded, for listing and enabling.
     #[must_use]
     pub fn plugin_names(&self) -> Vec<&str> {

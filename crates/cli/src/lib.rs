@@ -13,3 +13,4 @@ pub mod restore;
 pub mod setup;
 pub mod state;
 pub mod text;
+pub mod theme;

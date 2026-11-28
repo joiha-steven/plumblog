@@ -192,6 +192,7 @@ pub async fn option_put(
     let key = input.str("key").unwrap_or_default();
     name("key", key)?;
     let value = input.json("value").unwrap_or_default();
+    check_option(ctx, owner, n, key, &value).await?;
     ctx.store.put_option(owner, n, key, &value, ctx.now).await?;
     changed(
         ctx,
@@ -201,6 +202,38 @@ pub async fn option_put(
     )
     .await;
     Ok(Reply::empty())
+}
+
+/// A value its declaration refuses would only be replaced by the default at render time:
+/// refuse it here instead. Theme options are checked against the active theme (a pushed
+/// one included) or the embedded default when the name is the default's; plugin options
+/// against the bundled plugin. Undeclared keys and other themes have nothing to check
+/// against, so they are kept as before.
+async fn check_option(
+    ctx: &Ctx,
+    owner: OptionOwner,
+    name: &str,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    crate::theme_runtime::prepare(&ctx.env).await;
+    let themes = [
+        crate::theme_runtime::current(),
+        crate::theme_runtime::embedded(),
+    ];
+    let mut loaded = themes.iter().filter_map(|t| t.ok());
+    let verdict = match owner {
+        OptionOwner::Theme => loaded
+            .find(|t| t.name() == name)
+            .and_then(|t| t.check_option(None, key, value)),
+        OptionOwner::Plugin => loaded
+            .next()
+            .and_then(|t| t.check_option(Some(name), key, value)),
+    };
+    match verdict {
+        Some(Err(why)) => Err(invalid("value", &why)),
+        _ => Ok(()),
+    }
 }
 
 /// Resets every option of one theme or plugin to its declared default.

@@ -13,13 +13,12 @@ use crate::keys;
 use db::{Db, ExtSource};
 use plumblog_i18n::{Catalog, Key};
 use plumblog_model::VERSION;
-use plumblog_render::{Body, Link, PageInfo, Plugin, Post, Site, Theme, ThemeError};
+use plumblog_render::{Body, Link, PageInfo, Post, Site, Theme, ThemeError};
 use plumblog_store::{PostStore, SettingsStore, comment};
 use routes::Route;
 use search::SearchSource;
 use source::{Filter, ReaderSource, SampleSource, Settings, StoredPost};
 use std::cell::Cell;
-use std::sync::OnceLock;
 use worker::{Context, Env, Headers, Request, Response, Result, console_error};
 
 /// Where the default theme's `assets/` folder is served (Workers static assets).
@@ -44,25 +43,9 @@ pub enum Outcome {
     Redirect(String),
 }
 
-/// Theme and bundled plugins loaded once per isolate: parsing manifests, locales and
-/// templates costs more than rendering a page, so it must not happen per request. A plugin
-/// that fails to load is left out and logged; the site keeps working.
+/// The theme pages render with (pushed or embedded default; see `crate::theme_runtime`).
 fn theme() -> std::result::Result<&'static Theme, &'static ThemeError> {
-    static THEME: OnceLock<std::result::Result<Theme, ThemeError>> = OnceLock::new();
-    THEME
-        .get_or_init(|| {
-            let plugins = source::PLUGIN_FILES
-                .iter()
-                .filter_map(|(name, files)| {
-                    let url = format!("{PLUGIN_ASSETS_URL}/{name}");
-                    Plugin::load(name, files, &url)
-                        .map_err(|e| warn(&format!("plugin.broken name={name} detail={e}")))
-                        .ok()
-                })
-                .collect();
-            Theme::load(&source::THEME_FILES, None, plugins, THEME_ASSETS_URL)
-        })
-        .as_ref()
+    crate::theme_runtime::current()
 }
 
 /// The theme with this site's stored options and enabled plugins, and whether both were
@@ -145,14 +128,17 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
         Err(e) => return Ok(failure(&format!("content version: {e}"))),
     };
     // Same content version and engine build means the same bytes, so browsers may revalidate.
-    let etag = format!("\"{version}-{VERSION}\"");
+    let etag = format!(
+        "\"{version}{}-{VERSION}\"",
+        crate::theme_runtime::cache_tag()
+    );
     if req.headers().get("if-none-match")?.as_deref() == Some(etag.as_str()) {
         let h = Headers::new();
         h.set("etag", &etag)?;
         return Ok(Response::empty()?.with_status(304).with_headers(h));
     }
 
-    let key = cache::key(&origin, version, &path);
+    let key = cache::key(&origin, version, crate::theme_runtime::cache_tag(), &path);
     let lookup = cache::get(&key).await;
     if let cache::Lookup::Hit(resp) = lookup {
         return Ok(resp);

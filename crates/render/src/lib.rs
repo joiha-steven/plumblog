@@ -9,6 +9,7 @@ mod json;
 mod keys;
 pub mod options;
 mod plugin;
+pub mod pushed;
 mod seo;
 mod theme;
 
@@ -16,6 +17,7 @@ pub use data::{
     Alternate, Body, CommentItem, Comments, Image, Link, NavItem, PageInfo, Post, Site,
 };
 pub use plugin::Plugin;
+pub use pushed::{PushedTheme, THEME_API};
 pub use theme::{Report, Theme, ThemeError, ThemeFiles};
 
 /// Flattens a locale TOML file into `section.key` strings (core `locales/` use the same shape).

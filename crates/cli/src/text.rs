@@ -124,6 +124,13 @@ codes! {
     RestoreImportFailed => "restore.import_failed",
     RestoreImportUncertain => "restore.import_uncertain",
     RestoreCountMismatch => "restore.count_mismatch",
+    ThemeDirNotEmpty => "theme.dir_not_empty",
+    ThemeDirTracked => "theme.dir_tracked",
+    ThemeDirUnreadable => "theme.dir_unreadable",
+    ThemeNameInvalid => "theme.name_invalid",
+    ThemeCheckFailed => "theme.check_failed",
+    ThemeServeFailed => "theme.serve_failed",
+    PluginCheckFailed => "plugin.check_failed",
 }
 
 /// One language's `[cli]` text, English behind it.

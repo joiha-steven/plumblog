@@ -541,6 +541,128 @@ sig_global_not_base64 = "the signature's second part is unreadable"
 sig_global_wrong_length = "the signature's second part has the wrong length"
 sig_unknown_algorithm = "the signature uses an unknown method"
 
+[cli.theme]
+about = "Make and check themes (new, check, dev)"
+dir_value = "FOLDER"
+name_value = "NAME"
+port_value = "PORT"
+dir_unreadable = "Cannot read or write {dir}: {reason}."
+dir_not_empty = "{dir} already exists and is not empty. Pick a new folder, or empty this one first."
+dir_tracked = "{dir} is inside the plumblog source checkout, whose files are tracked. Make the theme in a folder of your own."
+name_invalid = "\"{name}\" is not a theme name. Use lowercase letters, digits and -, starting with a letter (pass --name if the folder name does not fit)."
+
+[cli.theme.new]
+about = "Start a theme: copy the default theme into a new folder"
+dir_help = "New folder for the theme (must not exist, or be empty)"
+name_help = "Theme name (default: the folder name)"
+done = "Theme {name} created in {dir} ({count} files). Next: `blog theme dev {dir}` to preview it, `blog theme check {dir}` before you use it."
+
+[cli.theme.check]
+about = "Check a theme folder the way the blog loads it: templates, colors, contrast, size, files that must not be public"
+dir_help = "The theme folder"
+
+[cli.theme.dev]
+about = "Preview a theme on this computer with sample posts; edits show on refresh"
+dir_help = "The theme folder"
+port_help = "Port to listen on (default 4321); only this computer can connect"
+listening = "Previewing {dir} at {url} (Ctrl-C to stop). Edit the theme and refresh the page."
+bind_failed = "Cannot listen on port {port}: {reason}. Try another with --port."
+serve_failed = "The preview stopped: {reason}."
+problem_title = "This theme has problems"
+problem_hint = "Fix the errors below and refresh. They are the same as `blog theme check` reports."
+
+[cli.plugin]
+about = "Check plugins (check)"
+dir_value = "FOLDER"
+
+[cli.plugin.check]
+about = "Check a plugin folder the way the blog loads it, and that it renders on the default theme"
+dir_help = "The plugin folder (its name is the plugin's name)"
+
+[cli.finding]
+error = "error"
+warning = "warning"
+fix = "Fix:"
+summary_ok = "No problems found in {dir}."
+summary_warnings = "No errors in {dir}; warnings: {warnings}."
+summary_errors = "Problems in {dir}: errors {errors}, warnings {warnings}."
+
+[cli.finding.theme_load]
+what = "The theme does not load: {detail}"
+fix = "Fix what the message names; `blog theme check` loads the theme exactly as the blog does."
+
+[cli.finding.theme_template]
+what = "Template error: {detail}"
+fix = "Fix the template at that line and run the check again."
+
+[cli.finding.theme_dark_token]
+what = "Color `{name}` has a {have} value but no {missing} value."
+fix = "Add `{name}` to [colors.{missing}] in theme.toml; both modes define the same colors."
+
+[cli.finding.theme_contrast]
+what = "Low contrast in {mode} mode: `{fg}` on `{bg}` is {ratio}:1, below {need}:1."
+fix = "Change `{fg}` or `{bg}` in [colors.{mode}] (or the option that overrides it) until the ratio is at least {need}:1."
+
+[cli.finding.theme_css_size]
+what = "The stylesheet is {size} KB compressed; the limit is {max} KB."
+fix = "Remove unused rules, or move styles most readers do not need into a style file chosen by an option."
+
+[cli.finding.theme_js_size]
+what = "The theme's scripts are {size} KB compressed; the limit is {max} KB."
+fix = "Trim the scripts, or load rare ones only on the pages that need them with asset()."
+
+[cli.finding.theme_hard_color]
+what = "Fixed color {text} in a stylesheet; styles use colors from theme.toml only."
+fix = "Define the color in [colors.light] and [colors.dark], and use var(--c-<name>) here."
+
+[cli.finding.theme_locale_key]
+what = "Text key `{key}` has no text in language {lang}, or in English."
+fix = "Add the key to locales/en.toml, and to the other language files the theme ships."
+
+[cli.finding.theme_page_problem]
+what = "A page was left incomplete: {detail}"
+fix = "Fix the part the message names."
+
+[cli.finding.file_secret_name]
+what = "This file looks like a secret ({why}), and every file in a theme or plugin is public."
+fix = "Delete it from the folder. If it held a real secret, treat the secret as leaked and replace it."
+
+[cli.finding.file_secret_content]
+what = "This looks like a {name}, and every file in a theme or plugin is public."
+fix = "Delete it from the file and revoke it where it was issued: treat it as leaked."
+
+[cli.finding.file_stray]
+what = "This file is outside the allowed layout ({layout})."
+fix = "Move it into one of those, or delete it."
+
+[cli.finding.file_symlink]
+what = "A symbolic link: it is not followed, and would not be part of the theme."
+fix = "Replace it with a real copy of the file."
+
+[cli.finding.file_admin]
+what = "This file targets the admin. No theme or plugin file ever runs in the admin."
+fix = "Delete it, and do not name files admin*."
+
+[cli.finding.file_too_many]
+what = "More files than a theme or plugin has; the rest were not read."
+fix = "Check that this is the right folder, and remove files that do not belong."
+
+[cli.finding.text_hard]
+what = "Fixed text {text} in a template. Text shown to readers belongs in locales/."
+fix = "Add the text to locales/en.toml (and the other languages) and call t(\"section.key\") here."
+
+[cli.finding.plugin_load]
+what = "The plugin does not load: {detail}"
+fix = "Fix what the message names; `blog plugin check` loads the plugin exactly as the blog does."
+
+[cli.finding.plugin_broken]
+what = "The plugin breaks a page on the default theme: {detail}"
+fix = "Fix the partial or option the message names. A plugin that fails is left out of the page and disabled."
+
+[cli.finding.plugin_css_size]
+what = "With this plugin enabled the stylesheet is {size} KB compressed; the limit is {max} KB."
+fix = "Trim the plugin's CSS."
+
 [cli.guide_token]
 # `blog guide token`. Button and field names (Create Token, Account Resources...) are the
 # Cloudflare dashboard's own English labels; keep them as they are.

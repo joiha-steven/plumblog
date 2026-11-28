@@ -528,6 +528,128 @@ sig_global_not_base64 = "phần thứ hai của chữ ký không đọc được
 sig_global_wrong_length = "phần thứ hai của chữ ký có độ dài sai"
 sig_unknown_algorithm = "chữ ký dùng cách chưa biết"
 
+[cli.theme]
+about = "Tạo và kiểm tra giao diện (new, check, dev)"
+dir_value = "THƯ MỤC"
+name_value = "TÊN"
+port_value = "CỔNG"
+dir_unreadable = "Không đọc hoặc ghi được {dir}: {reason}."
+dir_not_empty = "{dir} đã có và không trống. Chọn thư mục mới, hoặc dọn trống thư mục này trước."
+dir_tracked = "{dir} nằm trong mã nguồn plumblog, nơi mọi tệp đều được git theo dõi. Hãy tạo giao diện trong thư mục riêng của bạn."
+name_invalid = "\"{name}\" không phải tên giao diện. Dùng chữ thường, chữ số và dấu -, bắt đầu bằng chữ cái (thêm --name nếu tên thư mục không hợp lệ)."
+
+[cli.theme.new]
+about = "Bắt đầu một giao diện: chép giao diện mặc định vào thư mục mới"
+dir_help = "Thư mục mới cho giao diện (chưa có, hoặc đang trống)"
+name_help = "Tên giao diện (mặc định: tên thư mục)"
+done = "Đã tạo giao diện {name} trong {dir} ({count} tệp). Tiếp theo: `blog theme dev {dir}` để xem thử, `blog theme check {dir}` trước khi dùng."
+
+[cli.theme.check]
+about = "Kiểm tra thư mục giao diện như blog sẽ nạp nó: mẫu trang, màu, độ tương phản, dung lượng, tệp không được công khai"
+dir_help = "Thư mục giao diện"
+
+[cli.theme.dev]
+about = "Xem thử giao diện ngay trên máy với bài mẫu; sửa xong chỉ cần tải lại trang"
+dir_help = "Thư mục giao diện"
+port_help = "Cổng để lắng nghe (mặc định 4321); chỉ máy này kết nối được"
+listening = "Đang xem thử {dir} tại {url} (Ctrl-C để dừng). Sửa giao diện rồi tải lại trang."
+bind_failed = "Không lắng nghe được cổng {port}: {reason}. Thử cổng khác bằng --port."
+serve_failed = "Bản xem thử đã dừng: {reason}."
+problem_title = "Giao diện này có lỗi"
+problem_hint = "Sửa các lỗi bên dưới rồi tải lại trang. Đây cũng là những gì `blog theme check` báo."
+
+[cli.plugin]
+about = "Kiểm tra plugin (check)"
+dir_value = "THƯ MỤC"
+
+[cli.plugin.check]
+about = "Kiểm tra thư mục plugin như blog sẽ nạp nó, và xem nó có hiển thị được trên giao diện mặc định"
+dir_help = "Thư mục plugin (tên thư mục là tên plugin)"
+
+[cli.finding]
+error = "lỗi"
+warning = "cảnh báo"
+fix = "Cách sửa:"
+summary_ok = "Không thấy vấn đề nào trong {dir}."
+summary_warnings = "Không có lỗi trong {dir}; cảnh báo: {warnings}."
+summary_errors = "Vấn đề trong {dir}: lỗi {errors}, cảnh báo {warnings}."
+
+[cli.finding.theme_load]
+what = "Giao diện không nạp được: {detail}"
+fix = "Sửa chỗ thông báo nêu; `blog theme check` nạp giao diện đúng như blog làm."
+
+[cli.finding.theme_template]
+what = "Lỗi mẫu trang: {detail}"
+fix = "Sửa mẫu trang ở dòng đó rồi chạy kiểm tra lại."
+
+[cli.finding.theme_dark_token]
+what = "Màu `{name}` có giá trị {have} nhưng thiếu giá trị {missing}."
+fix = "Thêm `{name}` vào [colors.{missing}] trong theme.toml; hai chế độ phải có cùng các màu."
+
+[cli.finding.theme_contrast]
+what = "Độ tương phản thấp ở chế độ {mode}: `{fg}` trên `{bg}` chỉ {ratio}:1, dưới {need}:1."
+fix = "Đổi `{fg}` hoặc `{bg}` trong [colors.{mode}] (hoặc tuỳ chọn ghi đè nó) cho tới khi đạt ít nhất {need}:1."
+
+[cli.finding.theme_css_size]
+what = "Tệp CSS nặng {size} KB sau khi nén; giới hạn là {max} KB."
+fix = "Bỏ các quy tắc không dùng, hoặc chuyển phần ít người cần sang tệp kiểu do một tuỳ chọn chọn."
+
+[cli.finding.theme_js_size]
+what = "Mã JS của giao diện nặng {size} KB sau khi nén; giới hạn là {max} KB."
+fix = "Cắt bớt mã, hoặc chỉ nạp phần ít dùng ở trang cần bằng asset()."
+
+[cli.finding.theme_hard_color]
+what = "Màu cố định {text} trong CSS; CSS chỉ dùng màu khai báo trong theme.toml."
+fix = "Khai báo màu trong [colors.light] và [colors.dark], rồi dùng var(--c-<tên>) ở đây."
+
+[cli.finding.theme_locale_key]
+what = "Khoá chữ `{key}` không có nội dung ở ngôn ngữ {lang}, cũng không có bản tiếng Anh."
+fix = "Thêm khoá vào locales/en.toml và các tệp ngôn ngữ khác của giao diện."
+
+[cli.finding.theme_page_problem]
+what = "Một trang bị thiếu phần: {detail}"
+fix = "Sửa phần mà thông báo nêu."
+
+[cli.finding.file_secret_name]
+what = "Tệp này trông như bí mật ({why}), mà mọi tệp trong giao diện hay plugin đều công khai."
+fix = "Xoá nó khỏi thư mục. Nếu bên trong là bí mật thật, coi như đã lộ và đổi cái mới."
+
+[cli.finding.file_secret_content]
+what = "Chỗ này trông như {name}, mà mọi tệp trong giao diện hay plugin đều công khai."
+fix = "Xoá khỏi tệp và thu hồi ở nơi đã cấp: coi như đã lộ."
+
+[cli.finding.file_stray]
+what = "Tệp này nằm ngoài cấu trúc cho phép ({layout})."
+fix = "Chuyển vào một trong các mục đó, hoặc xoá."
+
+[cli.finding.file_symlink]
+what = "Liên kết tượng trưng: không được theo, và sẽ không thuộc về giao diện."
+fix = "Thay bằng bản sao thật của tệp."
+
+[cli.finding.file_admin]
+what = "Tệp này nhắm vào trang quản trị. Không tệp nào của giao diện hay plugin được chạy trong trang quản trị."
+fix = "Xoá nó, và đừng đặt tên tệp bắt đầu bằng admin."
+
+[cli.finding.file_too_many]
+what = "Nhiều tệp hơn mức một giao diện hay plugin có; phần còn lại chưa được đọc."
+fix = "Kiểm tra đúng thư mục chưa, và bỏ các tệp không thuộc về nó."
+
+[cli.finding.text_hard]
+what = "Chữ cố định {text} trong mẫu trang. Chữ hiện cho người đọc phải nằm trong locales/."
+fix = "Thêm chữ vào locales/en.toml (và các ngôn ngữ khác) rồi gọi t(\"section.key\") ở đây."
+
+[cli.finding.plugin_load]
+what = "Plugin không nạp được: {detail}"
+fix = "Sửa chỗ thông báo nêu; `blog plugin check` nạp plugin đúng như blog làm."
+
+[cli.finding.plugin_broken]
+what = "Plugin làm hỏng trang trên giao diện mặc định: {detail}"
+fix = "Sửa phần hoặc tuỳ chọn mà thông báo nêu. Plugin lỗi bị bỏ khỏi trang và bị tắt."
+
+[cli.finding.plugin_css_size]
+what = "Khi bật plugin này, CSS nặng {size} KB sau khi nén; giới hạn là {max} KB."
+fix = "Cắt bớt CSS của plugin."
+
 [cli.guide_token]
 title = "# API token Cloudflare"
 intro = "Cách tạo API token mà `blog` dùng (sinh từ bảng các lệnh gọi API trong code)."

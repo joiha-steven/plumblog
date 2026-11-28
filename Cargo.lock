@@ -564,6 +564,7 @@ dependencies = [
  "miniz_oxide",
  "plumblog-auth",
  "plumblog-i18n",
+ "plumblog-markdown",
  "plumblog-model",
  "plumblog-render",
  "plumblog-store",

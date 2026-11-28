@@ -3,7 +3,7 @@ use plumblog_cli::cloudflare::{Client, Credentials, TokenError, TokenKind, endpo
 use plumblog_cli::help;
 use plumblog_cli::release::{self, Version, fetch::Source};
 use plumblog_cli::text::{Code, Text, pick_lang};
-use plumblog_cli::{backup, deploy, migrations, restore, setup};
+use plumblog_cli::{backup, deploy, migrations, restore, setup, theme};
 use plumblog_i18n::{Key, key};
 use std::{fmt::Write, path::Path, process::ExitCode};
 
@@ -175,6 +175,36 @@ enum Command {
         #[arg(long, conflicts_with = "db")]
         allow_older: bool,
     },
+    Theme {
+        #[command(subcommand)]
+        action: ThemeAction,
+    },
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ThemeAction {
+    New {
+        dir: std::path::PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    Check {
+        dir: std::path::PathBuf,
+    },
+    Dev {
+        dir: std::path::PathBuf,
+        #[arg(long, default_value_t = 4321)]
+        port: u16,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginAction {
+    Check { dir: std::path::PathBuf },
 }
 
 /// clap takes value names only as `&'static str` without its `string` feature; a few bytes,
@@ -199,6 +229,56 @@ fn restore_help(c: clap::Command, text: &Text) -> clap::Command {
         .mut_arg("build", |a| a.help(t(key!("cli.restore.build_help"))))
         .mut_arg("allow_other_site", |a| {
             a.help(t(key!("cli.restore.allow_other_site_help")))
+        })
+}
+
+/// `blog theme`'s help texts.
+fn theme_help(c: clap::Command, text: &Text) -> clap::Command {
+    let t = |k: Key| text.t(k, &[]);
+
+    c.about(t(key!("cli.theme.about")))
+        .mut_subcommand("new", |c| {
+            c.about(t(key!("cli.theme.new.about")))
+                .mut_arg("dir", |a| {
+                    a.help(t(key!("cli.theme.new.dir_help")))
+                        .value_name(leak(t(key!("cli.theme.dir_value"))))
+                })
+                .mut_arg("name", |a| {
+                    a.help(t(key!("cli.theme.new.name_help")))
+                        .value_name(leak(t(key!("cli.theme.name_value"))))
+                })
+        })
+        .mut_subcommand("check", |c| {
+            c.about(t(key!("cli.theme.check.about")))
+                .mut_arg("dir", |a| {
+                    a.help(t(key!("cli.theme.check.dir_help")))
+                        .value_name(leak(t(key!("cli.theme.dir_value"))))
+                })
+        })
+        .mut_subcommand("dev", |c| {
+            c.about(t(key!("cli.theme.dev.about")))
+                .mut_arg("dir", |a| {
+                    a.help(t(key!("cli.theme.dev.dir_help")))
+                        .value_name(leak(t(key!("cli.theme.dir_value"))))
+                })
+                .mut_arg("port", |a| {
+                    a.help(t(key!("cli.theme.dev.port_help")))
+                        .value_name(leak(t(key!("cli.theme.port_value"))))
+                })
+        })
+}
+
+/// `blog plugin`'s help texts.
+fn plugin_help(c: clap::Command, text: &Text) -> clap::Command {
+    let t = |k: Key| text.t(k, &[]);
+
+    c.about(t(key!("cli.plugin.about")))
+        .mut_subcommand("check", |c| {
+            c.about(t(key!("cli.plugin.check.about")))
+                .mut_arg("dir", |a| {
+                    a.help(t(key!("cli.plugin.check.dir_help")))
+                        .value_name(leak(t(key!("cli.plugin.dir_value"))))
+                })
         })
 }
 
@@ -277,6 +357,8 @@ fn command(text: &Text) -> clap::Command {
                     a.help(t(key!("cli.update.allow_older_help")))
                 })
         })
+        .mut_subcommand("theme", |c| theme_help(c, text))
+        .mut_subcommand("plugin", |c| plugin_help(c, text))
         .mut_subcommand("rollback", |c| {
             c.about(t(key!("cli.rollback.about")))
                 .mut_arg("to", |a| {
@@ -559,6 +641,24 @@ enum Outcome {
     Fail(Code, String),
 }
 
+fn theme_command(text: &Text, command: Command) -> Result<String, (Code, String)> {
+    match command {
+        Command::Theme {
+            action: ThemeAction::New { dir, name },
+        } => theme::new(text, &dir, name.as_deref()),
+        Command::Theme {
+            action: ThemeAction::Check { dir },
+        } => theme::check_theme(text, &dir),
+        Command::Theme {
+            action: ThemeAction::Dev { dir, port },
+        } => theme::dev(text, &dir, port),
+        Command::Plugin {
+            action: PluginAction::Check { dir },
+        } => theme::check_plugin(text, &dir),
+        _ => Ok(String::new()),
+    }
+}
+
 fn run(text: &Text, args: &[String]) -> Outcome {
     let has = |flags: &[&str]| args.iter().skip(1).any(|a| flags.contains(&a.as_str()));
     let cmd = command(text);
@@ -654,6 +754,7 @@ fn run(text: &Text, args: &[String]) -> Outcome {
                 allow_older,
             }),
         ),
+        Some(c @ (Command::Theme { .. } | Command::Plugin { .. })) => theme_command(text, c),
         None => return Outcome::Help(help::render(&cmd, &[], text)),
     };
     match result {

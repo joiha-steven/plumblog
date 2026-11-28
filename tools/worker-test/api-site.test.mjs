@@ -442,15 +442,23 @@ describe("api v1 site", () => {
   test("theme and plugin options round-trip; plugins enable and disable", async () => {
     for (const kind of ["themes", "plugins"]) {
       const base = `/api/v1/${kind}/minimal/options`;
-      assert.equal((await api(w, "PUT", `${base}/accent`, { as: AS.ownerToken, body: { value: "#336699" } })).status, 204);
+      const accent = { light: "#336699", dark: "#99bbdd" };
+      assert.equal((await api(w, "PUT", `${base}/accent`, { as: AS.ownerToken, body: { value: accent } })).status, 204);
       assert.equal((await api(w, "PUT", `${base}/excerpt_words`, { as: AS.ownerSession, body: { value: 40 } })).status, 204);
       const got = await api(w, "GET", base, { as: AS.ownerToken });
-      assert.deepEqual(got.json.options, { accent: "#336699", excerpt_words: 40 });
+      assert.deepEqual(got.json.options, { accent, excerpt_words: 40 });
       assertError(await api(w, "PUT", `${base}/a.b`, { as: AS.ownerToken, body: { value: 1 } }), 400, "input.invalid", "key");
       assertError(await api(w, "GET", `/api/v1/${kind}/Mini/options`, { as: AS.ownerToken }), 400, "input.invalid", "name");
       assert.equal((await api(w, "DELETE", base, { as: AS.ownerToken })).status, 204);
       assert.deepEqual((await api(w, "GET", base, { as: AS.ownerToken })).json.options, {});
     }
+    // A value the active theme's declaration refuses is refused at write time, not stored
+    // to be replaced by the default at render time. Undeclared keys are kept, as before.
+    const before = w.query("SELECT * FROM extension_options ORDER BY owner_kind, owner_id, key");
+    for (const [key, value] of [["excerpt_words", 41], ["excerpt_words", 500], ["accent", "#336699"], ["style", "magazine"]]) {
+      assertError(await api(w, "PUT", `/api/v1/themes/minimal/options/${key}`, { as: AS.ownerToken, body: { value } }), 400, "input.invalid", "value");
+    }
+    assert.deepEqual(w.query("SELECT * FROM extension_options ORDER BY owner_kind, owner_id, key"), before, "nothing stored");
     // Options of one owner kind never leak into the other.
     await api(w, "PUT", "/api/v1/themes/minimal/options/only_theme", { as: AS.ownerToken, body: { value: true } });
     assert.deepEqual((await api(w, "GET", "/api/v1/plugins/minimal/options", { as: AS.ownerToken })).json.options, {});
