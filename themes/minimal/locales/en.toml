@@ -1,5 +1,9 @@
 # Text of the minimal theme, English. Templates call t("section.key", name=value);
 # {name} placeholders are filled from those arguments.
+[site]
+# The page description when the site and the page have none.
+description_fallback = "Posts from {site}"
+
 [nav]
 search = "Search"
 skip_to_content = "Skip to content"

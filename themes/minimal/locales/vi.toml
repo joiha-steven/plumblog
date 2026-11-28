@@ -1,4 +1,8 @@
 # Text of the minimal theme, Vietnamese.
+[site]
+# The page description when the site and the page have none.
+description_fallback = "Bài viết từ {site}"
+
 [nav]
 search = "Tìm kiếm"
 skip_to_content = "Bỏ qua, tới nội dung"

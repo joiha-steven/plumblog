@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>{% block title %}{{ site.title }}{% endblock %}</title>
-<meta name="description" content="{{ page.description }}">
+{#- Never empty: search engines and Lighthouse fail a page with no description. #}
+{%- set description = page.description or t("site.description_fallback", site=site.title) %}
+<meta name="description" content="{{ description }}">
 <link rel="canonical" href="{{ page.canonical }}">
 <link rel="icon" href="{{ site.icon_url }}">
 {%- for alt in page.seo.alternates %}
@@ -17,7 +19,7 @@
 <meta property="og:type" content="{{ page.seo.og_type }}">
 <meta property="og:site_name" content="{{ site.title }}">
 <meta property="og:title" content="{{ page.seo.title }}">
-<meta property="og:description" content="{{ page.description }}">
+<meta property="og:description" content="{{ description }}">
 <meta property="og:url" content="{{ page.canonical }}">
 {%- if page.seo.locale %}
 <meta property="og:locale" content="{{ page.seo.locale }}">

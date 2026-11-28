@@ -590,3 +590,47 @@ fn comments_section() {
     assert!(!closed.contains("<form class=\"comment-form\""));
     assert!(closed.contains("Comments are closed."));
 }
+
+#[test]
+fn empty_site_description_falls_back_in_meta() {
+    let files = theme_files();
+    let theme = load(&files, &BTreeMap::new());
+    let a = post("first", "First", 1_772_668_800, false);
+    let posts = [&a];
+    let mut bare = site();
+    bare.description = String::new();
+    let home = |lang: &str| {
+        theme
+            .render(
+                &bare,
+                &page(lang),
+                &Body::Home {
+                    posts: &posts,
+                    older_url: None,
+                    newer_url: None,
+                },
+            )
+            .unwrap()
+    };
+    // Lighthouse SEO fails an empty description; never print one.
+    let en = home("en");
+    assert!(!en.contains("content=\"\""), "no empty meta content");
+    assert!(en.contains("<meta name=\"description\" content=\"Posts from Plum Notes\">"));
+    assert!(en.contains("<meta property=\"og:description\" content=\"Posts from Plum Notes\">"));
+    assert!(home("vi").contains(
+        "<meta name=\"description\" content=\"B\u{e0}i vi\u{1ebf}t t\u{1eeb} Plum Notes\">"
+    ));
+    // A set description wins.
+    let set = theme
+        .render(
+            &site(),
+            &page("en"),
+            &Body::Home {
+                posts: &posts,
+                older_url: None,
+                newer_url: None,
+            },
+        )
+        .unwrap();
+    assert!(set.contains("<meta name=\"description\" content=\"A test blog.\">"));
+}
