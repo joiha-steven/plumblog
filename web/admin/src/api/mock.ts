@@ -25,6 +25,11 @@
  * absent, so the defaults show). Writes need the owner (`?role=writer` gets 403 `auth.forbidden`);
  * `?settings=invalid` makes writing `site_per_page` fail with 400 `input.invalid`, as a refused value would.
  *
+ * People and invitations (`/api/v1/users`, `/api/v1/invites`, Settings): in memory from fixtures/users.json
+ * (`?mock=empty`: only you, no invitations; `?role=writer`: 403). The last-owner rule is the server's.
+ * `?users=error` fails only the people list, `last_owner|gone|forbidden|posts` makes every change fail that way
+ * (`posts`: delete refused because the person still has posts); `?invites=error` fails only the invitations list.
+ *
  * Posts live in memory, from fixtures/posts.json, and reset on page load; the long post (id 1)
  * keeps its body in post-1.txt, so its `markdown` in the JSON is empty and is filled in here.
  * They answer as `/api/v1/posts` does: paged lists (opaque cursor), `post.not_found`, 409
@@ -39,9 +44,10 @@ import mediaFixtures from "../../fixtures/media.json";
 import posts from "../../fixtures/posts.json";
 import settingsFixture from "../../fixtures/settings.json";
 import tokenFixtures from "../../fixtures/tokens.json";
+import usersFixture from "../../fixtures/users.json";
 import longPost from "../../fixtures/post-1.txt";
-import { type Api, type JsonBody, type LogQuery, type Me, type MediaItem, type MediaPage, type Method, type Result, fail } from "./client";
-import { LOG_KINDS, LOG_LEVELS, type LogEntry, type LogPage, type Post, type PostCreateInput, type PostPage, type PostUpdateInput, type RenderWarning } from "./model.gen";
+import { type Api, type JsonBody, type LogQuery, type Me, type Media, type MediaItem, type MediaPage, type Method, type Result, fail } from "./client";
+import { LOG_KINDS, LOG_LEVELS, type Invite, type LogEntry, type LogPage, type Post, type PostCreateInput, type PostPage, type PostUpdateInput, type RenderWarning, type User } from "./model.gen";
 
 /** Cloudflare's public always-pass Turnstile key: the real widget works in dev. */
 const TEST_SITE_KEY = "1x00000000000000000000AA";
@@ -223,6 +229,88 @@ async function settingsCall<T>(params: URLSearchParams, method: Method, key: str
   return { ok: true, value: undefined as T };
 }
 
+const DAY = 86_400_000;
+
+/** The mock's people and invitations; each mock API starts from the fixture. */
+function peopleMock(params: URLSearchParams, signedIn: number) {
+  const empty = params.get("mock") === "empty";
+  let users: User[] = (usersFixture.users as User[]).filter((u) => !empty || u.id === signedIn).map((u) => structuredClone(u));
+  let invites: Invite[] = empty
+    ? []
+    : usersFixture.invites.map((i) => ({ id: i.id, role: i.role, created_by: i.created_by, created_at: Date.now() - i.created_ago_days * DAY, expires_at: Date.now() + i.expires_in_days * DAY }));
+  const flag = params.get("users");
+  const activeOwners = (): User[] => users.filter((u) => u.role === "owner" && u.disabled_at === null);
+
+  return async <T>(method: Method, path: string, body: Body): Promise<Result<T> | undefined> => {
+    const um = /^\/api\/v1\/users(?:\?(.*)|\/(\d+)(?:\/(role|disabled))?)?$/.exec(path);
+    const im = /^\/api\/v1\/invites(?:\/(\d+))?$/.exec(path);
+    if (!um && !im) return undefined;
+    const mode = params.get("mock");
+    if (mode === "loading") await new Promise(() => undefined);
+    await new Promise((r) => setTimeout(r, 200));
+    if (mode === "offline") return fail("network", 0);
+    if (mode === "error") return fail("internal", 500);
+    if (params.get("role") === "writer") return fail("auth.forbidden", 403);
+    const done = (value: unknown): Result<T> => ({ ok: true, value: value as T });
+    if (im) {
+      if (method === "GET" && im[1] === undefined) return params.get("invites") === "error" ? fail("internal", 500) : done({ invites: structuredClone(invites) });
+      if (method === "POST" && im[1] === undefined) {
+        const role = body?.["role"];
+        const at = body?.["expires_at"];
+        if ((role !== "owner" && role !== "writer") || (at !== undefined && (typeof at !== "number" || at <= Date.now() || at > Date.now() + 30 * DAY))) return fail("input.invalid", 400, { field: "expires_at" });
+        const made = { id: Math.max(0, ...invites.map((i) => i.id)) + 1, role, created_by: signedIn, created_at: Date.now(), expires_at: at ?? Date.now() + 7 * DAY };
+        invites.push(made);
+        return done({ ...made, code: "mock-7f3a-91c2-b2d8-44e0" });
+      }
+      if (method === "DELETE" && im[1] !== undefined) {
+        const at = invites.findIndex((i) => i.id === Number(im[1]));
+        if (at < 0 || flag === "gone") return fail("store.not_found", 404);
+        invites.splice(at, 1);
+        return done(undefined);
+      }
+      return fail("api.not_found", 404);
+    }
+    if (um && method === "GET" && um[2] === undefined) {
+      if (flag === "error") return fail("internal", 500);
+      const q = new URLSearchParams(um[1] ?? "");
+      const after = Number(q.get("cursor") ?? 0);
+      const limit = Number(q.get("limit") ?? PAGE);
+      const rest = [...users].sort((a, b) => a.id - b.id).filter((u) => u.id > after);
+      const page = rest.slice(0, limit);
+      const last = page[page.length - 1];
+      return done({ users: structuredClone(page), next_cursor: rest.length > limit && last ? String(last.id) : null });
+    }
+    const target = users.find((u) => u.id === Number(um?.[2]));
+    if (!um || um[2] === undefined || !target || flag === "gone") return fail("user.not_found", 404);
+    if (flag === "forbidden") return fail("auth.forbidden", 403);
+    // Takes the person out of the active owners: refused when they are the only one left.
+    const leaving = target.role === "owner" && target.disabled_at === null && activeOwners().length === 1;
+    if (method === "PUT" && um[3] === "role") {
+      const role = body?.["role"];
+      if (role !== "owner" && role !== "writer") return fail("input.invalid", 400, { field: "role" });
+      if (role !== "owner" && (flag === "last_owner" || leaving)) return fail("user.last_owner", 409);
+      if (target.role === "owner" && role !== "owner") invites = invites.filter((i) => i.created_by !== target.id);
+      target.role = role;
+      target.updated_at = Date.now();
+      return done(structuredClone(target));
+    }
+    if (method === "PUT" && um[3] === "disabled") {
+      const off = body?.["disabled"] === true;
+      if (off && (flag === "last_owner" || leaving)) return fail("user.last_owner", 409);
+      target.disabled_at = off ? Date.now() : null;
+      target.updated_at = Date.now();
+      return done(structuredClone(target));
+    }
+    if (method === "DELETE" && um[3] === undefined) {
+      if (flag === "last_owner" || leaving) return fail("user.last_owner", 409);
+      if (flag === "posts" || (posts as Post[]).some((p) => p.author_id === target.id)) return fail("store.conflict", 409);
+      users = users.filter((u) => u !== target);
+      return done(undefined);
+    }
+    return fail("api.not_found", 404);
+  };
+}
+
 /** An approximation: the server warns on TeX that does not render (`$\notacommand$`); the mock
  * only knows a `$$` that never closes, enough to show a warning. */
 const warningsOf = (markdown: string): RenderWarning[] =>
@@ -246,6 +334,7 @@ export function mockApi(params: URLSearchParams): Api {
   let conflictPending = params.get("conflict") === "1";
   /** The first publish fails once with a taken slug when `?slug=taken`. */
   let slugPending = params.get("slug") === "taken";
+  const people = peopleMock(params, me.user.id);
   const down = <T>(): Result<T> | undefined => {
     if (mode === "error") return fail("internal", 500);
     if (mode === "offline") return fail("network", 0);
@@ -402,6 +491,8 @@ export function mockApi(params: URLSearchParams): Api {
     async call<T>(method: Method, path: string, body?: Body): Promise<Result<T>> {
       const sm = /^\/api\/v1\/settings(?:\/([a-z0-9_-]+))?$/.exec(path);
       if (sm) return settingsCall<T>(params, method, sm[1], body);
+      const pm = await people<T>(method, path, body);
+      if (pm) return pm;
       const m = /^\/api\/v1\/posts\/(\d+)\/(trash|restore)$/.exec(path);
       if (method !== "POST" || !m) return auth<T>(params, method, path, body);
       await settle();

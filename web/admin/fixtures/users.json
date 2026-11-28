@@ -1,0 +1,115 @@
+{
+  "users": [
+    {
+      "id": 1,
+      "login": "lan",
+      "slug": "lan",
+      "display_name": "Lan Nguyen",
+      "bio": "",
+      "role": "owner",
+      "disabled_at": null,
+      "created_at": 1768176000000,
+      "updated_at": 1768176000000
+    },
+    {
+      "id": 2,
+      "login": "khoi",
+      "slug": "khoi",
+      "display_name": "Tr\u1ea7n Minh Kh\u00f4i",
+      "bio": "",
+      "role": "owner",
+      "disabled_at": null,
+      "created_at": 1770076800000,
+      "updated_at": 1770076800000
+    },
+    {
+      "id": 3,
+      "login": "thuy",
+      "slug": "thuy",
+      "display_name": "Ph\u1ea1m Thu Th\u1ee7y",
+      "bio": "",
+      "role": "writer",
+      "disabled_at": null,
+      "created_at": 1773792000000,
+      "updated_at": 1773792000000
+    },
+    {
+      "id": 4,
+      "login": "bao",
+      "slug": "bao",
+      "display_name": "L\u00ea Gia B\u1ea3o",
+      "bio": "",
+      "role": "writer",
+      "disabled_at": null,
+      "created_at": 1778284800000,
+      "updated_at": 1778284800000
+    },
+    {
+      "id": 5,
+      "login": "hoa",
+      "slug": "hoa",
+      "display_name": "\u0110\u1eb7ng Th\u1ecb Hoa",
+      "bio": "",
+      "role": "writer",
+      "disabled_at": 1790899200000,
+      "created_at": 1782000000000,
+      "updated_at": 1782000000000
+    },
+    {
+      "id": 6,
+      "login": "quynhanh",
+      "slug": "quynhanh",
+      "display_name": "Nguy\u1ec5n Qu\u1ef3nh Anh",
+      "bio": "",
+      "role": "writer",
+      "disabled_at": null,
+      "created_at": 1788048000000,
+      "updated_at": 1788048000000
+    },
+    {
+      "id": 7,
+      "login": "tuan",
+      "slug": "tuan",
+      "display_name": "V\u0169 Anh Tu\u1ea5n with a rather long display name that has to wrap or cut cleanly",
+      "bio": "",
+      "role": "writer",
+      "disabled_at": null,
+      "created_at": 1789344000000,
+      "updated_at": 1789344000000
+    },
+    {
+      "id": 8,
+      "login": "p",
+      "slug": "p",
+      "display_name": "\u00d4ng B\u00e0 Nh\u1ecf",
+      "bio": "",
+      "role": "writer",
+      "disabled_at": null,
+      "created_at": 1792886400000,
+      "updated_at": 1792886400000
+    }
+  ],
+  "invites": [
+    {
+      "id": 1,
+      "role": "writer",
+      "created_by": 1,
+      "created_ago_days": 2,
+      "expires_in_days": 5
+    },
+    {
+      "id": 2,
+      "role": "owner",
+      "created_by": 2,
+      "created_ago_days": 9,
+      "expires_in_days": -2
+    },
+    {
+      "id": 3,
+      "role": "writer",
+      "created_by": 1,
+      "created_ago_days": 1,
+      "expires_in_days": 29
+    }
+  ]
+}
