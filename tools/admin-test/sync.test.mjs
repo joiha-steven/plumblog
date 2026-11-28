@@ -50,6 +50,8 @@ const rows = new Map();
   globalThis.indexedDB = { open: () => request(() => db) };
 }
 
+/** Lets pending promise callbacks run; setImmediate is never among the mocked timers. */
+const turn = () => new Promise((r) => setImmediate(r));
 const DELAY = 5;
 const settle = async (ms = 40) => {
   for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, ms / 4));
@@ -386,15 +388,25 @@ test("a request with no answer settles as network within its bound, and the next
   }
 });
 
-test("an expired session waits for the editor's local save, at most its bound", async () => {
+test("an expired session waits for the editor's local save, at most its bound", async (t) => {
   let done = false;
   client.session.flush = () => new Promise((ok) => setTimeout(() => ok((done = true)), 20));
   await client.flushLocal(1000);
   assert.equal(done, true, "waited for the flush");
   client.session.flush = () => new Promise(() => undefined);
-  const t0 = Date.now();
-  await client.flushLocal(50);
-  assert.ok(Date.now() - t0 < 500, "a stuck flush never keeps the writer from signing in");
+  // The bound is a timer, so the clock is mocked: flushLocal must return when its 50 ms pass,
+  // not a moment before, whatever the machine's load (a wall-clock bound failed under load).
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let returned = false;
+  const out = client.flushLocal(50).then(() => (returned = true));
+  await turn();
+  t.mock.timers.tick(49);
+  await turn();
+  assert.equal(returned, false, "waits for a stuck flush until its bound");
+  t.mock.timers.tick(1);
+  await out;
+  assert.equal(returned, true, "a stuck flush never keeps the writer from signing in");
+  t.mock.timers.reset();
   client.session.flush = () => Promise.reject(new Error("boom"));
   const logErr = console.error;
   console.error = () => undefined;
@@ -590,7 +602,7 @@ test("what the server confirmed is its answer: a normalised text keeps the draft
   assert.equal(rows.get("1:post-3")?.body, "body  ", "the draft stays: the server holds other text");
 });
 
-test("a mount waits at most the bound for a hung create, then holds: nothing sent until it settles, then adopts it", async () => {
+test("a mount waits at most the bound for a hung create, then holds: nothing sent until it settles, then adopts it", async (t) => {
   reset();
   let release;
   const api = fakeApi({ create: (input) => new Promise((r) => (release = () => r({ ok: true, value: post(7, input.title, input.markdown, 1) }))) });
@@ -599,9 +611,17 @@ test("a mount waits at most the bound for a hung create, then holds: nothing sen
   await settle();
   a.alive = false; // redrawn while the create hangs
   const key = newKey();
-  const t0 = Date.now();
-  assert.equal(await settled(key, 1, 30), undefined, "the mount goes on after the bound");
-  assert.ok(Date.now() - t0 < 500);
+  // A mocked clock, as for flushLocal: the mount goes on exactly at its bound, never earlier.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let went = false;
+  const mount = settled(key, 1, 30).then((p) => ((went = true), p));
+  await turn();
+  t.mock.timers.tick(29);
+  await turn();
+  assert.equal(went, false, "the mount waits for the hung create until its bound");
+  t.mock.timers.tick(1);
+  assert.equal(await mount, undefined, "the mount goes on after the bound");
+  t.mock.timers.reset();
   const b = editor(api, { title: "T", body: "one" });
   await b.save("T", "two");
   await settle();

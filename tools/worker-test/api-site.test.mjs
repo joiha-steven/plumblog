@@ -103,14 +103,17 @@ const uploadPath = (q) => `/api/v1/media?${new URLSearchParams(q)}`;
 const upload = (w, as, [mime, bytes, width, height, name], extra = {}) =>
   api(w, "POST", uploadPath({ name, mime, width, height, ...extra }), { as, raw: bytes });
 
-const S = { owner: b64u(randomBytes(32)), writer: b64u(randomBytes(32)) };
-const TOK = { read: newSecret(), writer: newSecret(), owner: newSecret() };
+const S = { owner: b64u(randomBytes(32)), writer: b64u(randomBytes(32)), writer2: b64u(randomBytes(32)) };
+const TOK = { read: newSecret(), writer: newSecret(), owner: newSecret(), writerOwner: newSecret() };
 const AS = {
   ownerSession: { cookie: S.owner },
   writerSession: { cookie: S.writer },
   readToken: { bearer: TOK.read },
   writerToken: { bearer: TOK.writer },
   ownerToken: { bearer: TOK.owner },
+  // Wren, a second writer, and an owner-scope token of Will (a writer): it acts as writer.
+  writer2Session: { cookie: S.writer2 },
+  writerOwnerToken: { bearer: TOK.writerOwner },
 };
 
 let w;
@@ -118,14 +121,17 @@ before(async () => {
   const seed = [
     `INSERT INTO users (id, login, slug, display_name, role, password_hash, disabled_at, created_at, updated_at) VALUES
       (1, 'olga', 'olga', 'Olga', 'owner', NULL, NULL, ${T}, ${T}),
-      (2, 'will', 'will', 'Will', 'writer', NULL, NULL, ${T}, ${T});`,
+      (2, 'will', 'will', 'Will', 'writer', NULL, NULL, ${T}, ${T}),
+      (3, 'wren', 'wren', 'Wren', 'writer', NULL, NULL, ${T}, ${T});`,
     `INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES
       (${sq(sha256hex(S.owner))}, 1, ${T}, ${T + 29 * DAY}),
-      (${sq(sha256hex(S.writer))}, 2, ${T}, ${T + 29 * DAY});`,
+      (${sq(sha256hex(S.writer))}, 2, ${T}, ${T + 29 * DAY}),
+      (${sq(sha256hex(S.writer2))}, 3, ${T}, ${T + 29 * DAY});`,
     `INSERT INTO api_tokens (id, user_id, name, token_hash, scope, created_at, expires_at, revoked_at) VALUES
       (11, 1, 'reader', ${sq(sha256hex(TOK.read))}, 'read', ${T}, NULL, NULL),
       (12, 2, 'agent', ${sq(sha256hex(TOK.writer))}, 'writer', ${T}, NULL, NULL),
-      (13, 1, 'boss', ${sq(sha256hex(TOK.owner))}, 'owner', ${T}, NULL, NULL);`,
+      (13, 1, 'boss', ${sq(sha256hex(TOK.owner))}, 'owner', ${T}, NULL, NULL),
+      (14, 2, 'overreach', ${sq(sha256hex(TOK.writerOwner))}, 'owner', ${T}, NULL, NULL);`,
     `INSERT INTO settings (key, value_json, updated_at) VALUES
       ('setup_code_hash', '"deadbeef"', ${T}),
       ('setup_code_expires_at', '${T + DAY}', ${T}),
@@ -257,6 +263,66 @@ describe("api v1 site", () => {
     assertError(await api(w, "DELETE", `/api/v1/media/${id}`, {}), 401, "auth.unauthenticated");
     assert.ok(w.r2Size(r2Key(id)) > 0);
     assert.equal((await api(w, "GET", `/api/v1/media/${id}`, { as: AS.readToken })).json.alt, "");
+  });
+
+  // Issue #59: writers delete only their own uploads; the owner deletes any, orphans included.
+  test("media: delete is the uploader's own, or the owner's", async () => {
+    const mine = async (as) => {
+      const r = await upload(w, as, IMAGES[1]);
+      assert.equal(r.status, 201, r.text);
+      return r.json.id;
+    };
+    const exists = (id) => w.query(`SELECT COUNT(*) AS n FROM media WHERE id = ${id}`)[0].n === 1;
+    const del = (id, as) => api(w, "DELETE", `/api/v1/media/${id}`, { as });
+    const orphan = async () => {
+      const id = await mine(AS.writer2Session);
+      w.exec(`UPDATE media SET uploaded_by = NULL WHERE id = ${id}`);
+      return id;
+    };
+
+    const own = await mine(AS.writerToken);
+    assert.equal((await del(own, AS.writerSession)).status, 204);
+    assert.ok(!exists(own));
+
+    const wrens = await mine(AS.writer2Session);
+    assertError(await del(wrens, AS.writerSession), 403, "auth.forbidden");
+    assertError(await del(wrens, AS.writerToken), 403, "auth.forbidden");
+    assertError(await del(wrens, AS.writerOwnerToken), 403, "auth.forbidden");
+    assertError(await del(wrens, AS.readToken), 403, "auth.forbidden");
+    assert.ok(exists(wrens));
+    assert.ok(w.r2Size(r2Key(wrens)) > 0);
+
+    const olgas = await mine(AS.ownerSession);
+    assertError(await del(olgas, AS.writerSession), 403, "auth.forbidden");
+    assert.ok(exists(olgas));
+
+    const lost = await orphan();
+    assertError(await del(lost, AS.writerSession), 403, "auth.forbidden");
+    assertError(await del(lost, AS.writer2Session), 403, "auth.forbidden");
+    assert.ok(exists(lost));
+
+    assert.equal((await del(wrens, AS.ownerSession)).status, 204);
+    assert.ok(!exists(wrens));
+    assert.equal((await del(lost, AS.ownerToken)).status, 204);
+    assert.ok(!exists(lost));
+    assert.equal((await del(olgas, AS.ownerToken)).status, 204);
+    // A missing item stays 404 for anyone.
+    assertError(await del(own, AS.writerSession), 404, "store.not_found");
+  });
+
+  test("media: ownership is checked before use, so a refused delete hides the posts", async () => {
+    const mine = (await upload(w, AS.writerToken, IMAGES[0])).json.id;
+    const wrens = (await upload(w, AS.writer2Session, IMAGES[0])).json.id;
+    const post = await api(w, "POST", "/api/v1/posts", {
+      as: AS.writerToken,
+      body: { lang: "en", slug: "uses-two-media", title: "T", markdown: `![a](/media/${mine}/red.png) ![b](/media/${wrens}/red.png)` },
+    });
+    assert.equal(post.status, 201, post.text);
+    const r = await api(w, "DELETE", `/api/v1/media/${mine}`, { as: AS.writerSession });
+    assert.equal(r.status, 409, r.text);
+    assert.deepEqual(r.json, { error: "store.conflict", posts: [post.json.id] });
+    assertError(await api(w, "DELETE", `/api/v1/media/${wrens}`, { as: AS.writerToken }), 403, "auth.forbidden");
+    assert.ok(w.r2Size(r2Key(wrens)) > 0);
   });
 
   test("media: alt text, filters and keyset pages", async () => {
