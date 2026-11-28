@@ -1,9 +1,9 @@
 //! `save_post`: validation first, then every row the save touches.
 
-use plumblog_model::{Error, PostId, Result, RevisionId};
+use plumblog_model::{Error, PostId, Result, RevisionId, UserId};
 
 use super::{State, conflict, invalid, next_seq, post_not_found};
-use crate::{NewRevision, Post, PostStatus, Revision, SavePost, search};
+use crate::{NewRevision, Post, PostStatus, Revision, SavePost, Saved, search};
 
 /// The `Conflict` of a save from a version that is no longer stored.
 pub(super) fn stale_version(id: PostId, current: i64, expected: Option<i64>) -> Error {
@@ -43,6 +43,22 @@ pub(super) fn check_post_shape(input: &SavePost) -> Result<()> {
 }
 
 impl State {
+    /// The post an insert's `(author_id, client_id)` already made, if any.
+    fn replayed(&self, input: &SavePost) -> Option<PostId> {
+        let key = input.client_id.as_deref().filter(|_| input.id.is_none())?;
+        self.client_post(input.author_id, key)
+    }
+
+    /// Like the `(author_id, client_id)` index: the author is the post's current one.
+    pub(super) fn client_post(&self, author: UserId, client_id: &str) -> Option<PostId> {
+        self.client_ids
+            .iter()
+            .find(|(id, k)| {
+                k.as_str() == client_id && self.posts.get(id).is_some_and(|p| p.author_id == author)
+            })
+            .map(|(id, _)| *id)
+    }
+
     /// Every FK the `posts`, `post_tags`, `post_media` and `revisions` inserts would hit.
     fn check_post_refs(&self, input: &SavePost) -> Result<()> {
         if !self.user_exists(input.author_id) {
@@ -75,8 +91,11 @@ impl State {
         Ok(())
     }
 
-    pub(super) fn save_post(&mut self, input: SavePost) -> Result<PostId> {
+    pub(super) fn save_post(&mut self, input: SavePost) -> Result<Saved> {
         check_post_shape(&input)?;
+        if let Some(id) = self.replayed(&input) {
+            return Ok(Saved { id, wrote: false });
+        }
         let old = match input.id {
             Some(id) => {
                 let old = self.posts.get(&id).ok_or_else(|| post_not_found(id))?;
@@ -87,6 +106,10 @@ impl State {
                     )));
                 }
                 if input.expected_version != Some(old.version) {
+                    // The same save again (its answer was lost): nothing to write.
+                    if input.matches(old) {
+                        return Ok(Saved { id, wrote: false });
+                    }
                     return Err(stale_version(id, old.version, input.expected_version));
                 }
                 Some(old.clone())
@@ -163,10 +186,13 @@ impl State {
             input.now,
         )?;
         self.posts.insert(id, post);
+        if let Some(k) = input.client_id.filter(|_| old.is_none()) {
+            self.client_ids.insert(id, k);
+        }
         self.post_media.retain(|(p, _)| *p != id);
         self.post_media
             .extend(input.media_ids.into_iter().map(|m| (id, m)));
-        Ok(id)
+        Ok(Saved { id, wrote: true })
     }
 
     /// Rows that follow a saved post: search text, revision, redirects, version.

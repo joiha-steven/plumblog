@@ -107,7 +107,9 @@ pub async fn serve(req: &Request, env: &Env) -> Result<Response> {
     let lang = pick_lang(
         req.headers().get("cookie")?.as_deref(),
         req.headers().get("accept-language")?.as_deref(),
+        site.lang_set.then_some(site.lang.as_str()),
         &site.lang,
+        is_auth_page(&path),
     );
     // A missing file is a 404, never the shell: after a deploy an open tab may still import an
     // old chunk, and HTML served under a `.js` URL breaks the editor (nosniff) and would be
@@ -173,13 +175,26 @@ fn langs() -> impl Iterator<Item = &'static str> {
 }
 
 /// The cookie's language, else the first `Accept-Language` entry the admin speaks, else the
-/// site language, else English.
-fn pick_lang(cookie: Option<&str>, accept: Option<&str>, site_lang: &str) -> String {
+/// site language, else English. On the auth pages a stored site language (`set_lang`) goes
+/// before `Accept-Language`: nobody can use the switch before an account exists, and the
+/// owner chose the site's language at setup.
+fn pick_lang(
+    cookie: Option<&str>,
+    accept: Option<&str>,
+    set_lang: Option<&str>,
+    site_lang: &str,
+    auth_page: bool,
+) -> String {
     let speaks = |l: &str| langs().any(|x| x == l);
     let from_cookie = cookie.into_iter().flat_map(|c| c.split(';')).find_map(|p| {
         let (k, v) = p.trim().split_once('=')?;
         (k == LANG_COOKIE && speaks(v)).then(|| v.to_owned())
     });
+    let from_set = || {
+        set_lang
+            .filter(|l| auth_page && speaks(l))
+            .map(str::to_owned)
+    };
     let from_header = || {
         accept
             .into_iter()
@@ -195,6 +210,7 @@ fn pick_lang(cookie: Option<&str>, accept: Option<&str>, site_lang: &str) -> Str
             .find(|l| speaks(l))
     };
     from_cookie
+        .or_else(from_set)
         .or_else(from_header)
         .or_else(|| speaks(site_lang).then(|| site_lang.to_owned()))
         .unwrap_or_else(|| "en".to_owned())
@@ -371,15 +387,30 @@ mod tests {
     #[test]
     fn language_comes_from_cookie_then_header_then_site() {
         assert_eq!(
-            pick_lang(Some("a=1; pb_lang=vi"), Some("en-US"), "en"),
+            pick_lang(Some("a=1; pb_lang=vi"), Some("en-US"), None, "en", false),
             "vi"
         );
         assert_eq!(
-            pick_lang(Some("pb_lang=xx"), Some("fr, vi;q=0.8"), "en"),
+            pick_lang(Some("pb_lang=xx"), Some("fr, vi;q=0.8"), None, "en", false),
             "vi"
         );
-        assert_eq!(pick_lang(None, Some("fr-FR,de;q=0.5"), "vi"), "vi");
-        assert_eq!(pick_lang(None, None, "fr"), "en");
+        assert_eq!(
+            pick_lang(None, Some("fr-FR,de;q=0.5"), None, "vi", false),
+            "vi"
+        );
+        assert_eq!(pick_lang(None, None, None, "fr", false), "en");
+    }
+
+    #[test]
+    fn auth_pages_prefer_a_stored_site_language_to_the_browser() {
+        let pick = |cookie, accept, set, site, auth| pick_lang(cookie, accept, set, site, auth);
+        assert_eq!(pick(None, Some("en-US"), Some("vi"), "vi", true), "vi");
+        assert_eq!(pick(None, Some("vi"), None, "en", true), "vi");
+        assert_eq!(
+            pick(Some("pb_lang=en"), Some("vi"), Some("vi"), "vi", true),
+            "en"
+        );
+        assert_eq!(pick(None, Some("en-US"), Some("vi"), "vi", false), "en");
     }
 
     #[test]

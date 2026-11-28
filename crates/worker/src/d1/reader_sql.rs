@@ -194,6 +194,8 @@ mod plans {
             include_str!("../../../../migrations/0004_comment_html.sql"),
             include_str!("../../../../migrations/0005_token_read_scope.sql"),
             include_str!("../../../../migrations/0006_reader_indexes.sql"),
+            include_str!("../../../../migrations/0007_media_sha256.sql"),
+            include_str!("../../../../migrations/0008_post_client_id.sql"),
         ] {
             c.execute_batch(sql).unwrap();
         }
@@ -262,6 +264,41 @@ mod plans {
                 "{name}: full scan {l:?}:\n{all}"
             );
         }
+    }
+
+    /// `find_client_post` (d1/posts.rs) and the partial unique index behind the create replay.
+    #[test]
+    fn client_id_lookup_uses_its_index_and_is_unique_per_author() {
+        let c = db();
+        check(
+            &c,
+            "find_client_post",
+            "SELECT id FROM posts WHERE author_id = ? AND client_id = ?",
+            &["posts_author_client"],
+            false,
+        );
+        c.execute_batch(
+            "INSERT INTO users (id, login, slug, display_name, role, created_at, updated_at) \
+             VALUES (2, 'v', 'v', 'V', 'writer', 0, 0); \
+             INSERT INTO posts (kind, translation_group, lang, slug, status, author_id, title, \
+             markdown, html, created_at, updated_at, client_id) \
+             VALUES ('post', 5001, 'en', 'k1', 'draft', 1, 't', 'm', 'h', 0, 0, 'key'), \
+             ('post', 5002, 'fr', 'k2', 'draft', 2, 't', 'm', 'h', 0, 0, 'key');",
+        )
+        .unwrap();
+        let again = c.execute(
+            "INSERT INTO posts (kind, translation_group, lang, slug, status, author_id, title, \
+             markdown, html, created_at, updated_at, client_id) \
+             VALUES ('post', 5003, 'de', 'k3', 'draft', 1, 't', 'm', 'h', 0, 0, 'key')",
+            [],
+        );
+        assert!(
+            again
+                .unwrap_err()
+                .to_string()
+                .contains("UNIQUE constraint failed"),
+            "one author, one key"
+        );
     }
 
     #[test]
