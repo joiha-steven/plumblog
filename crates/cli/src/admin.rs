@@ -1,21 +1,18 @@
 //! `blog admin reset`: whoever holds the Cloudflare token gets owner access back (no email
 //! recovery). Why it works this way: docs/ARCHITECTURE.md, Users and auth.
 //!
-//! Every check reads only; the one write is a single D1 request whose statements are ordered
-//! so that any prefix of it leaves the account more locked, never more open (the REST query
-//! is not documented as atomic): credentials first, then sessions (a session can no longer
-//! be minted), then tokens, then the new code, then the log row.
+//! Every check reads only; the one write is a single D1 request ([`reset_statements`]).
 
 use crate::cloudflare::Client;
 use crate::d1::{self, Database};
-use crate::deploy::{self, Lock, at_ms, request_id};
+use crate::deploy::{self, Lock, request_id};
 use crate::migrations;
 use crate::setup::{self, Context, Failure, MARKER_BINDING, Run, code_hash, printable};
 use crate::text::Code;
 use plumblog_i18n::{Key, key};
 use plumblog_store::{
-    OWNER_RESET_EXPIRES_KEY, OWNER_RESET_HASH_KEY, OWNER_RESET_USER_KEY, SITE_ID_KEY,
-    setup_hash_json,
+    OWNER_RESET_AT_KEY, OWNER_RESET_EXPIRES_KEY, OWNER_RESET_HASH_KEY, OWNER_RESET_KEEP_TOKENS_KEY,
+    OWNER_RESET_USER_KEY, SITE_ID_KEY, setup_hash_json,
 };
 use plumblog_syslog::{Event, EventKind};
 use serde_json::Value;
@@ -61,6 +58,19 @@ fn check_ours(run: &Run, worker: &str, db: &Database) -> Result<(), Failure> {
         .and_then(|b| b.get("text").and_then(Value::as_str))
         .map(str::to_string);
     let marker_ok = marker.is_some() && marker == run.state.script_marker;
+    if marker.is_none() {
+        // An older setup, or a rollback to a version from before the marker: `blog setup`
+        // records one in state, and only `blog deploy` puts it on the Worker.
+        return Err(fail(
+            run,
+            Code::AdminResetUnmarked,
+            key!("cli.error.admin_reset_unmarked"),
+            &[
+                ("worker", worker.to_string()),
+                ("binding", MARKER_BINDING.to_string()),
+            ],
+        ));
+    }
     migrations::check_ours(db).map_err(|e| setup::migration_error(run, e))?;
     let live: Option<String> = d1::settings(db, &[SITE_ID_KEY])
         .map_err(|e| run.api(&e))?
@@ -197,6 +207,83 @@ fn plan(run: &mut Run, opts: &Options, login: &str, origin: &str, counted: [i64;
 const LOG_SQL: &str = "INSERT INTO system_log (at_ms, request_id, kind, actor_id, error_code, \
                        detail) VALUES (?, ?, ?, NULL, NULL, ?)";
 
+/// The values of the reset write, as D1 parameters (text).
+pub struct Reset<'a> {
+    pub user: &'a str,
+    pub now: &'a str,
+    pub hash_json: &'a str,
+    pub expires: &'a str,
+    pub keep_tokens: bool,
+    pub log: &'a [String; 4],
+}
+
+/// The `auth.owner_reset` log row: `at_ms, request_id, kind, detail` (never the code).
+#[must_use]
+pub fn reset_log(user: &str, keep_tokens: bool, now_ms: i64) -> [String; 4] {
+    let revoked = if keep_tokens {
+        "password,passkeys,sessions"
+    } else {
+        "password,passkeys,sessions,tokens"
+    };
+    let event = Event::new(
+        EventKind::OwnerReset,
+        request_id("admin-reset", now_ms),
+        u64::try_from(now_ms).unwrap_or(0),
+    )
+    .subject("owner reset")
+    .field("user", user)
+    .field("revoked", revoked)
+    .field("via", "cli");
+    [
+        event.at_ms().to_string(),
+        event.request_id().as_str().to_string(),
+        event.kind().as_str().to_string(),
+        event.detail(),
+    ]
+}
+
+/// The one D1 request of a reset, in order, as `(sql, params)`. Ordered so any prefix leaves
+/// the account more locked, never more open (the REST query is not documented atomic). A
+/// Worker request that authenticated before it creates no credential after it (store
+/// `Proof`); one that wrote between its statements is undone by the redeem, which removes
+/// every passkey, session and (per `owner_reset_keep_tokens`) token of the owner, using the
+/// reset time and choice stored here. Public so tools/worker-test replays this exact SQL
+/// (crates/cli/tests/admin writes it to a fixture).
+#[must_use]
+pub fn reset_statements(r: &Reset) -> Vec<(&'static str, Vec<String>)> {
+    let s = |v: &[&str]| v.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
+    // NULL never verifies: sign-in answers it like a wrong password, at the same cost
+    // (api/auth.rs `password_matches`), where an unparseable hash would be a 500.
+    let mut stmts = vec![
+        (
+            "UPDATE users SET password_hash = NULL, updated_at = ? WHERE id = ?",
+            s(&[r.now, r.user]),
+        ),
+        ("DELETE FROM passkeys WHERE user_id = ?", s(&[r.user])),
+        ("DELETE FROM sessions WHERE user_id = ?", s(&[r.user])),
+    ];
+    if !r.keep_tokens {
+        stmts.push((
+            "UPDATE api_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+            s(&[r.now, r.user]),
+        ));
+    }
+    // Hash first: a request cut short leaves a code nobody was shown, and the previous code
+    // stops working at once.
+    let keep = if r.keep_tokens { "true" } else { "false" };
+    for (k, v) in [
+        (OWNER_RESET_HASH_KEY, r.hash_json),
+        (OWNER_RESET_USER_KEY, r.user),
+        (OWNER_RESET_EXPIRES_KEY, r.expires),
+        (OWNER_RESET_AT_KEY, r.now),
+        (OWNER_RESET_KEEP_TOKENS_KEY, keep),
+    ] {
+        stmts.push((d1::PUT_OWNER_RESET, s(&[k, v, r.now])));
+    }
+    stmts.push((LOG_SQL, r.log.to_vec()));
+    stmts
+}
+
 /// `blog admin reset`.
 ///
 /// # Errors
@@ -241,57 +328,20 @@ pub fn run(
     let code = run.random(setup::new_setup_code())?;
     let hash = setup_hash_json(&code_hash(&code));
     let expires = (cx.now_ms + RESET_CODE_TTL_MS).to_string();
-    let revoked = if opts.keep_tokens {
-        "password,passkeys,sessions"
-    } else {
-        "password,passkeys,sessions,tokens"
-    };
-    let event = Event::new(
-        EventKind::OwnerReset,
-        request_id("admin-reset", cx.now_ms),
-        at_ms(cx),
-    )
-    .subject("owner reset")
-    .field("user", &id)
-    .field("revoked", revoked)
-    .field("via", "cli");
-    let log = [
-        event.at_ms().to_string(),
-        event.request_id().as_str().to_string(),
-        event.kind().as_str().to_string(),
-        event.detail(),
-    ];
-    let log: Vec<&str> = log.iter().map(String::as_str).collect();
-    // NULL never verifies: sign-in answers it like a wrong password, at the same cost
-    // (api/auth.rs `password_matches`), where an unparseable hash would be a 500.
-    let (n, u) = (now.as_str(), id.as_str());
-    let at_user = [n, u];
-    let user = [u];
-    let put_hash = [OWNER_RESET_HASH_KEY, hash.as_str(), n];
-    let put_user = [OWNER_RESET_USER_KEY, u, n];
-    let put_expires = [OWNER_RESET_EXPIRES_KEY, expires.as_str(), n];
-    let mut stmts: Vec<(&str, &[&str])> = vec![
-        (
-            "UPDATE users SET password_hash = NULL, updated_at = ? WHERE id = ?",
-            &at_user,
-        ),
-        ("DELETE FROM passkeys WHERE user_id = ?", &user),
-        ("DELETE FROM sessions WHERE user_id = ?", &user),
-    ];
-    if !opts.keep_tokens {
-        stmts.push((
-            "UPDATE api_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
-            &at_user,
-        ));
-    }
-    // Hash first: a request cut short leaves a code nobody was shown, and the previous code
-    // stops working at once.
-    stmts.extend([
-        (d1::PUT_OWNER_RESET, &put_hash[..]),
-        (d1::PUT_OWNER_RESET, &put_user[..]),
-        (d1::PUT_OWNER_RESET, &put_expires[..]),
-        (LOG_SQL, &log[..]),
-    ]);
+    let log = reset_log(&id, opts.keep_tokens, cx.now_ms);
+    let stmts = reset_statements(&Reset {
+        user: &id,
+        now: &now,
+        hash_json: &hash,
+        expires: &expires,
+        keep_tokens: opts.keep_tokens,
+        log: &log,
+    });
+    let stmts: Vec<(&str, Vec<&str>)> = stmts
+        .iter()
+        .map(|(sql, v)| (*sql, v.iter().map(String::as_str).collect()))
+        .collect();
+    let stmts: Vec<(&str, &[&str])> = stmts.iter().map(|(sql, v)| (*sql, &v[..])).collect();
     db.batch(&stmts).map_err(|e| run.api(&e))?;
 
     // Shown once; never written to the state file or a log.

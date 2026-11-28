@@ -15,6 +15,7 @@ use crate::{
 impl SessionStore for MemoryStore {
     async fn create_session(&self, session: NewSession) -> Result<i64> {
         self.write(|s| {
+            s.require_proof(session.user_id, &session.proof, session.created_at)?;
             if !s.user_exists(session.user_id) {
                 return Err(invalid(format!(
                     "user {} does not exist",
@@ -94,6 +95,7 @@ impl SessionStore for MemoryStore {
 impl PasskeyStore for MemoryStore {
     async fn add_passkey(&self, passkey: NewPasskey) -> Result<i64> {
         self.write(|s| {
+            s.require_proof(passkey.user_id, &passkey.proof, passkey.created_at)?;
             if !s.user_exists(passkey.user_id) {
                 return Err(invalid(format!(
                     "user {} does not exist",
@@ -194,6 +196,7 @@ impl PasskeyStore for MemoryStore {
 impl TokenStore for MemoryStore {
     async fn create_token(&self, token: NewToken) -> Result<i64> {
         self.write(|s| {
+            s.require_proof(token.user_id, &token.proof, token.created_at)?;
             if !s.user_exists(token.user_id) {
                 return Err(invalid(format!("user {} does not exist", token.user_id.0)));
             }

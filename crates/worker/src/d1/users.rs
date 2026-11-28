@@ -3,7 +3,7 @@ use plumblog_store::{NewSession, NewUser, ProfileUpdate, SiteStore, User, UserSt
 
 use super::{
     D1Store, Failure, Row, Stmt, bound, bump, bump_if, guard, int, invalid, opt_int, opt_text,
-    storage, text,
+    proof_gone, proof_guard, storage, text,
 };
 
 pub(super) const USER_COLS: &str =
@@ -248,12 +248,10 @@ impl UserStore for D1Store {
         } else {
             "EXISTS (SELECT 1 FROM users WHERE id = ? AND password_hash IS NULL)"
         };
-        let mut stmts = vec![guard(
-            self,
-            "change_password_guard",
-            condition,
-            &[bound(id.0)],
-        )?];
+        let mut stmts = vec![
+            proof_guard(self, id, &session.proof, session.created_at)?,
+            guard(self, "change_password_guard", condition, &[bound(id.0)])?,
+        ];
         let write = if let Some(p) = &profile {
             stmts.push(bump(self)?);
             self.stmt(
@@ -295,6 +293,14 @@ impl UserStore for D1Store {
         )?);
         let results = match self.batch_guarded("change_password", stmts).await {
             Ok(r) => r,
+            Err(Failure::Guard)
+                if !self
+                    .proof_holds(id, &session.proof, session.created_at)
+                    .await? =>
+            {
+                self.get_user(id).await?;
+                return Err(proof_gone());
+            }
             Err(Failure::Guard) if hash.is_none() => {
                 // Which half of the guard failed: a missing user, or one with a password.
                 self.get_user(id).await?;

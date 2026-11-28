@@ -9,8 +9,8 @@ use plumblog_auth::{Crypto, base64url, constant_time_eq, session};
 use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 use plumblog_store::{
     InviteStore, NewSession, NewUser, OWNER_RESET_HASH_KEY, OWNER_RESET_USER_KEY, ProfileUpdate,
-    SETUP_CODE_HASH_KEY, SITE_ID_KEY, SessionStore, SettingsStore, SetupStore, User, UserStore,
-    setup_hash_json,
+    Proof, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SessionStore, SettingsStore, SetupStore, User,
+    UserStore, setup_hash_json,
 };
 use plumblog_syslog::EventKind;
 
@@ -101,7 +101,8 @@ pub async fn me(ctx: &Ctx, p: &Principal) -> Result<Reply> {
     ))
 }
 
-async fn new_session(ctx: &Ctx, user: UserId) -> Result<(NewSession, String)> {
+/// A new session for `user`, written only while `proof` holds (see [`Proof`]).
+async fn new_session(ctx: &Ctx, user: UserId, proof: Proof) -> Result<(NewSession, String)> {
     let (token, hash) = session::new_token(&ctx.crypto).await?;
     let expires = session::expires_at(ctx.now);
     Ok((
@@ -110,6 +111,7 @@ async fn new_session(ctx: &Ctx, user: UserId) -> Result<(NewSession, String)> {
             user_id: user,
             created_at: ctx.now,
             expires_at: expires,
+            proof,
         },
         session::set_cookie(&token, expires, ctx.now),
     ))
@@ -121,11 +123,21 @@ pub(super) async fn sign_in(
     ctx: &Ctx,
     p: &Principal,
     user: &User,
+    proof: Proof,
     status: u16,
     how: &str,
 ) -> Result<Reply> {
-    let (new, cookie) = new_session(ctx, user.id).await?;
-    ctx.store.create_session(new).await?;
+    let (new, cookie) = new_session(ctx, user.id, proof).await?;
+    ctx.store.create_session(new).await.map_err(|e| {
+        // The password or passkey changed (an owner reset) while this sign-in ran.
+        if e.code == ErrorCode::Unauthenticated {
+            wrong_credentials(&format!(
+                "credential gone before the session was written: {e}"
+            ))
+        } else {
+            e
+        }
+    })?;
     if let Some(old) = p.session_hash()
         && let Err(e) = ctx.store.delete_session(old).await
     {
@@ -138,6 +150,14 @@ pub(super) async fn sign_in(
     ctx.syslog(ctx.event(EventKind::SignIn, Some(user.id)).subject(how))
         .await;
     Ok(user_reply(status, user).with_cookie(cookie))
+}
+
+/// The password hash that just verified (or was just set), as the proof of a new session.
+fn password_proof(user: &User) -> Result<Proof> {
+    user.password_hash
+        .clone()
+        .map(Proof::Password)
+        .ok_or_else(|| wrong_credentials("account has no password"))
 }
 
 /// Same work whether or not the account exists or has a password, so neither the answer nor
@@ -232,12 +252,14 @@ pub async fn setup(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
     )
     .await;
     let user = ctx.store.get_user(id).await?;
-    sign_in(ctx, p, &user, 201, "setup").await
+    let proof = password_proof(&user)?;
+    sign_in(ctx, p, &user, proof, 201, "setup").await
 }
 
 /// `POST /api/auth/reset`: an owner's new password (and maybe login), with the one-time code
-/// `blog admin reset` printed. Limited like setup codes. The code is taken (single use) before
-/// the write; a write that then fails leaves no code, and the owner runs the reset again.
+/// `blog admin reset` printed. Limited like setup codes. One store write checks the code,
+/// spends it and replaces every credential of the owner; a login another user holds refuses
+/// the whole write, so the code still works.
 pub async fn redeem_reset(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
     let f = Fields::parse(body, &["code", "login", "password", "turnstile_token"])?;
     let stretched = password::parse_stretched(f.req("password")?)?;
@@ -249,35 +271,61 @@ pub async fn redeem_reset(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply
     let stored = ctx.store.get_setting(OWNER_RESET_HASH_KEY).await?;
     let matches =
         stored.is_some_and(|s| constant_time_eq(s.as_bytes(), setup_hash_json(&hash).as_bytes()));
-    let taken = if matches {
-        // A login another user holds would fail the write after the code is spent: refuse
-        // it first (the take below stays the check that counts).
-        if let Some(other) = ctx.store.find_user_by_login(login).await?
-            && ctx
-                .store
-                .get_setting(OWNER_RESET_USER_KEY)
-                .await?
-                .as_deref()
-                != Some(other.id.0.to_string().as_str())
+    // The owner the code names, read to build the write; the write checks it again.
+    let bound = if matches {
+        match ctx
+            .store
+            .get_setting(OWNER_RESET_USER_KEY)
+            .await?
+            .and_then(|v| v.parse::<i64>().ok())
         {
-            return Err(Error::new(ErrorCode::Conflict, "login is taken").at("login"));
+            Some(id) => match ctx.store.get_user(UserId(id)).await {
+                Ok(u) => Some(u),
+                Err(e) if e.code == ErrorCode::UserNotFound => None,
+                Err(e) => return Err(e),
+            },
+            None => None,
         }
-        ctx.store.take_owner_reset(&hash, ctx.now).await?
     } else {
         None
     };
-    let Some(id) = taken else {
-        code_failed(ctx, &attempt, "reset code").await?;
-        return Err(Error::new(
-            ErrorCode::SetupInvalid,
-            "reset code does not match, expired or was used",
-        ));
+    let redeemed = match bound {
+        Some(user) => {
+            let profile = (login != user.login).then(|| ProfileUpdate {
+                login: login.to_owned(),
+                slug: user.slug.clone(),
+                display_name: user.display_name.clone(),
+                bio: user.bio.clone(),
+            });
+            let new_hash = hash_password(&ctx.crypto, &stretched).await?;
+            let (session, cookie) =
+                new_session(ctx, user.id, Proof::ResetCode(hash.clone())).await?;
+            match ctx
+                .store
+                .redeem_owner_reset(user.id, new_hash, profile, session, ctx.now)
+                .await
+            {
+                Ok(_) => Some((user, cookie)),
+                Err(e) if e.code == ErrorCode::SetupInvalid => None,
+                // The slug is unchanged: the login is the one another user holds.
+                Err(e) if e.code == ErrorCode::Conflict => return Err(e.at("login")),
+                Err(e) => return Err(e),
+            }
+        }
+        None => None,
     };
-    // The code was right: this attempt was not a guess.
-    limit::succeeded(ctx, &keys).await?;
-    let user = ctx.store.get_user(id).await?;
-    if user.role != Role::Owner || user.disabled_at.is_some() {
-        // Demoted or disabled since the reset: the code is spent and gives nothing.
+    let Some((user, cookie)) = redeemed else {
+        // Wrong, expired or raced, or its owner is gone, demoted or disabled: spend it (an
+        // expired code is deleted too) and say which in the log.
+        let Some(id) = ctx.store.take_owner_reset(&hash, ctx.now).await? else {
+            code_failed(ctx, &attempt, "reset code").await?;
+            return Err(Error::new(
+                ErrorCode::SetupInvalid,
+                "reset code does not match, expired or was used",
+            ));
+        };
+        // The code was right: this attempt was not a guess.
+        limit::succeeded(ctx, &keys).await?;
         return Err(Error::new(
             ErrorCode::SetupInvalid,
             format!(
@@ -285,19 +333,8 @@ pub async fn redeem_reset(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply
                 id.0
             ),
         ));
-    }
-    let profile = (login != user.login).then(|| ProfileUpdate {
-        login: login.to_owned(),
-        slug: user.slug.clone(),
-        display_name: user.display_name.clone(),
-        bio: user.bio.clone(),
-    });
-    let new_hash = Some(hash_password(&ctx.crypto, &stretched).await?);
-    let (session, cookie) = new_session(ctx, user.id).await?;
-    // The password write that ends every session of the user and creates this one.
-    ctx.store
-        .change_password(user.id, new_hash, profile, session, ctx.now)
-        .await?;
+    };
+    limit::succeeded(ctx, &keys).await?;
     if let Some(old) = p.session_hash()
         && let Err(e) = ctx.store.delete_session(old).await
     {
@@ -338,7 +375,8 @@ pub async fn accept_invite(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Repl
     )
     .await;
     let user = ctx.store.get_user(id).await?;
-    sign_in(ctx, p, &user, 201, "invite").await
+    let proof = password_proof(&user)?;
+    sign_in(ctx, p, &user, proof, 201, "invite").await
 }
 
 /// `POST /api/auth/login`.
@@ -369,7 +407,8 @@ pub async fn login(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
         }
     };
     limit::succeeded(ctx, &keys).await?;
-    sign_in(ctx, p, &user, 200, "password").await
+    let proof = password_proof(&user)?;
+    sign_in(ctx, p, &user, proof, 200, "password").await
 }
 
 /// `POST /api/auth/logout`: ends this session. Harmless without one.
@@ -411,6 +450,7 @@ pub(super) async fn check_current(ctx: &Ctx, user: &User, f: &Fields) -> Result<
 /// the user and rotates this one, in one store write.
 async fn write_password(
     ctx: &Ctx,
+    p: &Principal,
     user: &User,
     f: &Fields,
     profile: Option<ProfileUpdate>,
@@ -418,7 +458,7 @@ async fn write_password(
 ) -> Result<String> {
     let new = password::parse_stretched(f.req("new_password")?)?;
     let hash = Some(hash_password(&ctx.crypto, &new).await?);
-    let (session, cookie) = new_session(ctx, user.id).await?;
+    let (session, cookie) = new_session(ctx, user.id, p.session_proof()?).await?;
     ctx.store
         .change_password(user.id, hash, profile, session, ctx.now)
         .await?;
@@ -440,7 +480,7 @@ pub async fn change_password(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Re
     // Shape errors before the (rate-limited) password check.
     password::parse_stretched(f.req("new_password")?)?;
     check_current(ctx, user, &f).await?;
-    let cookie = write_password(ctx, user, &f, None, "password").await?;
+    let cookie = write_password(ctx, p, user, &f, None, "password").await?;
     Ok(Reply::empty().with_cookie(cookie))
 }
 
@@ -494,7 +534,7 @@ pub async fn update_me(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
             ));
         }
         passkey::verify(ctx, &f, "", Some(user.id), "passkey re-auth").await?;
-        let (session, cookie) = new_session(ctx, user.id).await?;
+        let (session, cookie) = new_session(ctx, user.id, p.session_proof()?).await?;
         // Conflict if a password was set meanwhile (its stretch salt holds the old login).
         ctx.store
             .change_password(user.id, None, Some(profile), session, ctx.now)
@@ -514,6 +554,6 @@ pub async fn update_me(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
     }
     password::parse_stretched(f.req("new_password")?)?;
     check_current(ctx, user, &f).await?;
-    let cookie = write_password(ctx, user, &f, Some(profile), "login").await?;
+    let cookie = write_password(ctx, p, user, &f, Some(profile), "login").await?;
     Ok(user_reply(200, &ctx.store.get_user(user.id).await?).with_cookie(cookie))
 }

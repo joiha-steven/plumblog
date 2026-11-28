@@ -182,6 +182,7 @@ pub async fn user_delete_effects<S: Store>(db: &S) -> Check {
             user_id: v,
             created_at: T0,
             expires_at: T0 + 1000,
+            proof: crate::Proof::Unchecked,
         })
         .await,
     )?;
@@ -301,6 +302,7 @@ fn passkey(user: UserId, cred: &str) -> NewPasskey {
         sign_count: 0,
         name: "laptop".into(),
         created_at: T0,
+        proof: crate::Proof::Unchecked,
     }
 }
 
@@ -312,6 +314,7 @@ fn token(user: UserId, hash: &str, expires_at: Option<i64>) -> NewToken {
         scope: TokenScope::Writer,
         created_at: T0,
         expires_at,
+        proof: crate::Proof::Unchecked,
     }
 }
 
@@ -321,6 +324,7 @@ fn session(user: UserId, hash: &str, expires_at: i64) -> NewSession {
         user_id: user,
         created_at: T0,
         expires_at,
+        proof: crate::Proof::Unchecked,
     }
 }
 

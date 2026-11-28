@@ -1,0 +1,149 @@
+{
+  "keep_tokens": [
+    {
+      "params": [
+        "$now",
+        "$user"
+      ],
+      "sql": "UPDATE users SET password_hash = NULL, updated_at = ? WHERE id = ?"
+    },
+    {
+      "params": [
+        "$user"
+      ],
+      "sql": "DELETE FROM passkeys WHERE user_id = ?"
+    },
+    {
+      "params": [
+        "$user"
+      ],
+      "sql": "DELETE FROM sessions WHERE user_id = ?"
+    },
+    {
+      "params": [
+        "owner_reset_hash",
+        "$hash_json",
+        "$now"
+      ],
+      "sql": "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at"
+    },
+    {
+      "params": [
+        "owner_reset_user",
+        "$user",
+        "$now"
+      ],
+      "sql": "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at"
+    },
+    {
+      "params": [
+        "owner_reset_expires_at",
+        "$expires",
+        "$now"
+      ],
+      "sql": "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at"
+    },
+    {
+      "params": [
+        "owner_reset_at",
+        "$now",
+        "$now"
+      ],
+      "sql": "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at"
+    },
+    {
+      "params": [
+        "owner_reset_keep_tokens",
+        "true",
+        "$now"
+      ],
+      "sql": "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at"
+    },
+    {
+      "params": [
+        "$now",
+        "cli-admin-reset-$now",
+        "auth.owner_reset",
+        "owner reset\nuser\t$user\nrevoked\tpassword,passkeys,sessions\nvia\tcli"
+      ],
+      "sql": "INSERT INTO system_log (at_ms, request_id, kind, actor_id, error_code, detail) VALUES (?, ?, ?, NULL, NULL, ?)"
+    }
+  ],
+  "revoke_tokens": [
+    {
+      "params": [
+        "$now",
+        "$user"
+      ],
+      "sql": "UPDATE users SET password_hash = NULL, updated_at = ? WHERE id = ?"
+    },
+    {
+      "params": [
+        "$user"
+      ],
+      "sql": "DELETE FROM passkeys WHERE user_id = ?"
+    },
+    {
+      "params": [
+        "$user"
+      ],
+      "sql": "DELETE FROM sessions WHERE user_id = ?"
+    },
+    {
+      "params": [
+        "$now",
+        "$user"
+      ],
+      "sql": "UPDATE api_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL"
+    },
+    {
+      "params": [
+        "owner_reset_hash",
+        "$hash_json",
+        "$now"
+      ],
+      "sql": "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at"
+    },
+    {
+      "params": [
+        "owner_reset_user",
+        "$user",
+        "$now"
+      ],
+      "sql": "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at"
+    },
+    {
+      "params": [
+        "owner_reset_expires_at",
+        "$expires",
+        "$now"
+      ],
+      "sql": "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at"
+    },
+    {
+      "params": [
+        "owner_reset_at",
+        "$now",
+        "$now"
+      ],
+      "sql": "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at"
+    },
+    {
+      "params": [
+        "owner_reset_keep_tokens",
+        "false",
+        "$now"
+      ],
+      "sql": "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at"
+    },
+    {
+      "params": [
+        "$now",
+        "cli-admin-reset-$now",
+        "auth.owner_reset",
+        "owner reset\nuser\t$user\nrevoked\tpassword,passkeys,sessions,tokens\nvia\tcli"
+      ],
+      "sql": "INSERT INTO system_log (at_ms, request_id, kind, actor_id, error_code, detail) VALUES (?, ?, ?, NULL, NULL, ?)"
+    }
+  ]
+}

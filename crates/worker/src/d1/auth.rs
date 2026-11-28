@@ -77,8 +77,14 @@ impl SessionStore for D1Store {
                 int(session.expires_at)?,
             ],
         )?;
-        let r = self.exec(s).await?;
-        Self::last_row_id("create_session", &r)
+        self.insert_proven(
+            "create_session",
+            session.user_id,
+            &session.proof,
+            session.created_at,
+            s,
+        )
+        .await
     }
 
     // 1 query (every authenticated request).
@@ -152,8 +158,14 @@ impl PasskeyStore for D1Store {
                 int(passkey.created_at)?,
             ],
         )?;
-        let r = self.exec(s).await?;
-        Self::last_row_id("add_passkey", &r)
+        self.insert_proven(
+            "add_passkey",
+            passkey.user_id,
+            &passkey.proof,
+            passkey.created_at,
+            s,
+        )
+        .await
     }
 
     // 1 query.
@@ -284,8 +296,14 @@ impl TokenStore for D1Store {
                 opt_int(token.expires_at)?,
             ],
         )?;
-        let r = self.exec(s).await?;
-        Self::last_row_id("create_token", &r)
+        self.insert_proven(
+            "create_token",
+            token.user_id,
+            &token.proof,
+            token.created_at,
+            s,
+        )
+        .await
     }
 
     // 1 query (every API call).

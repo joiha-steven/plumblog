@@ -4,9 +4,12 @@
 import assert from "node:assert/strict";
 import { createHash, pbkdf2, pbkdf2Sync, randomBytes } from "node:crypto";
 import { after, before, describe, test } from "node:test";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { startWorker } from "./harness.mjs";
+import { d1Batch, startWorker } from "./harness.mjs";
 
 const ITER = 600000;
 const COOKIE = "__Host-plumblog_session";
@@ -40,19 +43,15 @@ const assertError = (r, status, code) => {
   assert.equal(r.json.error, code, r.text);
 };
 
-/** What `blog admin reset` writes, in its order (crates/cli/src/admin.rs `run`). */
-function resetSql(user, code, expiresAt) {
-  const now = Date.now();
-  return `UPDATE users SET password_hash = NULL, updated_at = ${now} WHERE id = ${user};
-    DELETE FROM passkeys WHERE user_id = ${user};
-    DELETE FROM sessions WHERE user_id = ${user};
-    UPDATE api_tokens SET revoked_at = ${now} WHERE user_id = ${user} AND revoked_at IS NULL;
-    INSERT INTO settings (key, value_json, updated_at) VALUES ('owner_reset_hash', ${sq(JSON.stringify(sha256hex(code)))}, ${now})
-      ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at;
-    INSERT INTO settings (key, value_json, updated_at) VALUES ('owner_reset_user', '${user}', ${now})
-      ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at;
-    INSERT INTO settings (key, value_json, updated_at) VALUES ('owner_reset_expires_at', '${expiresAt}', ${now})
-      ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at;`;
+/** What `blog admin reset` writes, in its order: the SQL crates/cli/src/admin.rs generates (its test keeps the fixture fresh). */
+const RESET = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures/admin-reset.json"), "utf8"));
+function reset(user, code, expiresAt, { keepTokens = false, codeOnly = false } = {}) {
+  const values = { $user: String(user), $now: String(Date.now()), $hash_json: JSON.stringify(sha256hex(code)), $expires: String(expiresAt) };
+  const fill = (p) => p.replace(/\$(user|now|hash_json|expires)/g, (k) => values[k]);
+  const stmts = RESET[keepTokens ? "keep_tokens" : "revoke_tokens"]
+    .filter((s) => !codeOnly || s.sql.startsWith("INSERT INTO settings"))
+    .map((s) => ({ sql: s.sql, params: s.params.map(fill) }));
+  d1Batch(w.state, stmts);
 }
 
 const OLD_SESSION = b64u(randomBytes(32));
@@ -84,18 +83,18 @@ describe("owner reset", () => {
   });
 
   test("after the reset: old password, old session refused; wrong and expired codes refused and counted", async () => {
-    w.exec(resetSql(1, "expired-code", T - 1));
+    reset(1, "expired-code", T - 1);
     assertError(await api(w, "POST", "/api/auth/reset", { body: { code: "expired-code", login: "Bob", password: await stretch("Bob", "x pass") }, ip: "203.0.113.2" }), 403, "setup.invalid");
     assert.deepEqual(resetKeys(), [], "an expired code is deleted when tried");
 
-    w.exec(resetSql(1, "good-code-1", Date.now() + HOUR));
+    reset(1, "good-code-1", Date.now() + HOUR);
     assertError(await api(w, "POST", "/api/auth/login", { body: { login: "Bob", password: await stretch("Bob", "old bob pass") }, ip: "203.0.113.3" }), 401, "auth.invalid_credentials");
     assertError(await api(w, "GET", "/api/auth/me", { cookie: OLD_SESSION }), 401, "auth.unauthenticated");
 
     const before = failures();
     assertError(await api(w, "POST", "/api/auth/reset", { body: { code: "wrong-code", login: "Bob", password: await stretch("Bob", "x pass") }, ip: "203.0.113.4" }), 403, "setup.invalid");
     assert.equal(failures(), before + 1, "a wrong code is counted by the limiter");
-    assert.deepEqual(resetKeys(), ["owner_reset_expires_at", "owner_reset_hash", "owner_reset_user"], "a wrong code keeps the right one");
+    assert.deepEqual(resetKeys(), ["owner_reset_at", "owner_reset_expires_at", "owner_reset_hash", "owner_reset_keep_tokens", "owner_reset_user"], "a wrong code keeps the right one");
   });
 
   test("reset keys never leave the Worker", async () => {
@@ -110,7 +109,7 @@ describe("owner reset", () => {
     const r = await api(w, "POST", "/api/auth/reset", { body: { code: "good-code-1", login: "wendy", password: await stretch("wendy", "stolen pass") }, ip: "203.0.113.5" });
     assertError(r, 409, "store.conflict");
     assert.equal(r.json.field, "login");
-    assert.equal(resetKeys().length, 3, "the code is still there");
+    assert.equal(resetKeys().length, 5, "the code is still there");
     const wendy = await api(w, "POST", "/api/auth/login", { body: { login: "wendy", password: await stretch("wendy", "wendy pass") }, ip: "203.0.113.5" });
     assert.equal(wendy.status, 200, "the writer's password is untouched");
   });
@@ -136,20 +135,54 @@ describe("owner reset", () => {
     assertError(await api(w, "POST", "/api/auth/reset", { body: { code: "good-code-1", login: "Bobby", password: await stretch("Bobby", "again pass") }, ip: "203.0.113.8" }), 403, "setup.invalid");
 
     // Settings over the API, as the owner: none of the reset keys, and none writable.
-    w.exec(resetSql(1, "good-code-2", Date.now() + HOUR));
+    reset(1, "good-code-2", Date.now() + HOUR);
     const fresh = tokenOf((await api(w, "POST", "/api/auth/reset", { body: { code: "good-code-2", login: "Bobby", password: await stretch("Bobby", "new bob pass") }, ip: "203.0.113.10" })).setCookie);
-    w.exec(resetSql(1, "good-code-3", Date.now() + HOUR));
+    reset(1, "good-code-3", Date.now() + HOUR);
     const s = await api(w, "GET", "/api/v1/settings", { cookie: fresh });
     assert.equal(s.status, 401, "the reset ended that session too");
     const again = await api(w, "POST", "/api/auth/reset", { body: { code: "good-code-3", login: "Bobby", password: await stretch("Bobby", "new bob pass") }, ip: "203.0.113.11" });
     const owner = tokenOf(again.setCookie);
-    w.exec(resetSql(1, "good-code-4", Date.now() + HOUR).split("\n").slice(4).join("\n"));
+    reset(1, "good-code-4", Date.now() + HOUR, { codeOnly: true });
     const list = await api(w, "GET", "/api/v1/settings", { cookie: owner });
     assert.equal(list.status, 200, list.text);
     assert.ok(!list.text.includes("owner_reset"), list.text);
-    for (const k of ["owner_reset_hash", "owner_reset_user", "owner_reset_expires_at"]) {
+    for (const k of ["owner_reset_hash", "owner_reset_user", "owner_reset_expires_at", "owner_reset_at", "owner_reset_keep_tokens"]) {
       assertError(await api(w, "PUT", `/api/v1/settings/${k}`, { cookie: owner, body: { value: "x" } }), 400, "input.invalid");
     }
-    assert.equal(resetKeys().length, 3, "untouched by the refused writes");
+    assert.equal(resetKeys().length, 5, "untouched by the refused writes");
+  });
+
+  test("the redeem removes what a request in flight across the reset left: passkeys, tokens and owner invites since", async () => {
+    reset(1, "flight-code", Date.now() + HOUR, { keepTokens: true });
+    const at = Number(w.query("SELECT value_json AS v FROM settings WHERE key = 'owner_reset_at'")[0].v);
+    // Written after the reset by requests that authenticated before it (what the Worker now refuses).
+    w.exec(`INSERT INTO passkeys (user_id, credential_id, public_key, created_at) VALUES (1, 'late-cred', 'k', ${at + 1});
+      INSERT INTO api_tokens (user_id, name, token_hash, scope, created_at) VALUES (1, 'kept', 'kept-hash', 'owner', ${at - 1}), (1, 'late', 'late-hash', 'owner', ${at + 1});
+      INSERT INTO invites (code_hash, role, created_by, created_at, expires_at) VALUES ('late-invite', 'owner', 1, ${at + 1}, ${at + DAY});`);
+    const r = await api(w, "POST", "/api/auth/reset", { body: { code: "flight-code", login: "Bobby", password: await stretch("Bobby", "new bob pass") }, ip: "203.0.113.20" });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(w.query("SELECT count(*) AS n FROM passkeys WHERE user_id = 1")[0].n, 0);
+    const tokens = w.query("SELECT token_hash, revoked_at IS NOT NULL AS revoked FROM api_tokens WHERE token_hash IN ('kept-hash', 'late-hash') ORDER BY token_hash");
+    assert.deepEqual(tokens, [{ token_hash: "kept-hash", revoked: 0 }, { token_hash: "late-hash", revoked: 1 }], "--keep-tokens keeps only tokens from before the reset");
+    assert.equal(w.query("SELECT count(*) AS n FROM invites WHERE code_hash = 'late-invite'")[0].n, 0);
+    assert.deepEqual(resetKeys(), []);
+  });
+
+  test("a code whose owner was demoted or disabled since the reset gives nothing, changes nothing, and is spent", async () => {
+    w.exec(`INSERT INTO users (id, login, slug, display_name, role, created_at, updated_at) VALUES (3, 'root', 'root', 'Root', 'owner', ${T}, ${T})`);
+    for (const [what, change, undo] of [
+      ["demoted", "UPDATE users SET role = 'writer' WHERE id = 1", "UPDATE users SET role = 'owner' WHERE id = 1"],
+      ["disabled", `UPDATE users SET disabled_at = ${T} WHERE id = 1`, "UPDATE users SET disabled_at = NULL WHERE id = 1"],
+    ]) {
+      reset(1, `${what}-code`, Date.now() + HOUR);
+      w.exec(change);
+      const r = await api(w, "POST", "/api/auth/reset", { body: { code: `${what}-code`, login: "Bobby", password: await stretch("Bobby", "taken over") }, ip: "203.0.113.21" });
+      assertError(r, 403, "setup.invalid");
+      assert.equal(r.setCookie, null, what);
+      assert.equal(w.query("SELECT password_hash FROM users WHERE id = 1")[0].password_hash, null, `${what}: password untouched`);
+      assert.equal(w.query("SELECT count(*) AS n FROM sessions WHERE user_id = 1")[0].n, 0, `${what}: no session`);
+      assert.deepEqual(resetKeys(), [], `${what}: the code is spent`);
+      w.exec(undo);
+    }
   });
 });

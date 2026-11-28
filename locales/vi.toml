@@ -454,6 +454,7 @@ backup_media_unwritable = "Không ghi được {path}: {reason}. Hãy sửa rồ
 backup_incomplete = "Bản sao lưu chưa đầy đủ: {failed} tệp bị lỗi và {missing} tệp bị thiếu (đã chép {objects} tệp). Các dòng phía trên nói rõ tệp nào; chạy lại blog backup để thử lại."
 backup_missing = "Bản sao lưu chưa đầy đủ: {missing} tệp mà cơ sở dữ liệu ghi nhận không có trong R2 ({list}), {failed} tệp bị lỗi, đã chép {objects} tệp. Nếu tệp nào cũng thiếu thì nhiều khả năng quyền R2 của token, bucket hoặc đường dẫn tệp bị sai, chứ không phải tệp đã mất. Hãy kiểm tra lại rồi chạy lại blog backup."
 admin_reset_foreign = "Chưa có gì thay đổi. Worker {worker} hoặc cơ sở dữ liệu của nó không mang dấu của thư mục này (biến {binding} và mã trang mà blog setup đã ghi), nên có thể đó là trang của người khác. Hãy chạy `blog setup` trong thư mục này một lần (lệnh không đổi gì đã có, chỉ ghi lại các dấu), rồi thử lại."
+admin_reset_unmarked = "Chưa có gì thay đổi. Worker {worker} chưa có biến {binding} (được dựng bằng bản blog cũ, hoặc đã quay về một bản trước khi có biến này), nên thư mục này chưa chứng minh được trang là của nó. Hãy chạy `blog setup` trong thư mục này (lệnh ghi lại dấu), rồi `blog deploy` (chỉ lần deploy mới đưa dấu lên Worker), rồi thử lại."
 admin_reset_unconfirmed = "Chưa có gì thay đổi. Nếu đúng ý bạn, chạy lại đúng lệnh đó kèm --yes."
 admin_reset_ambiguous = "Chưa có gì thay đổi. Trang có nhiều chủ ({list}): chọn người cần đặt lại bằng --login."
 admin_reset_not_owner = "Chưa có gì thay đổi. {login} không phải chủ đang hoạt động của trang này. Các chủ: {list}."

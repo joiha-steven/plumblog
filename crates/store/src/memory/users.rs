@@ -5,7 +5,12 @@ use crate::{NewSession, NewUser, ProfileUpdate, Session, SiteStore, User, UserSt
 
 impl State {
     /// `users.login` is `NOCASE` (ASCII only) and `users.slug` is unique.
-    fn check_user_unique(&self, login: &str, slug: &str, except: Option<UserId>) -> Result<()> {
+    pub(super) fn check_user_unique(
+        &self,
+        login: &str,
+        slug: &str,
+        except: Option<UserId>,
+    ) -> Result<()> {
         for u in self.users.values().filter(|u| Some(u.id) != except) {
             if u.login.eq_ignore_ascii_case(login) {
                 return Err(conflict(format!("login {login:?} is taken")));
@@ -33,7 +38,7 @@ impl State {
         self.users.get(&id).is_some_and(|u| u.disabled_at.is_none())
     }
 
-    fn user_mut(&mut self, id: UserId) -> Result<&mut User> {
+    pub(super) fn user_mut(&mut self, id: UserId) -> Result<&mut User> {
         self.users.get_mut(&id).ok_or_else(|| user_not_found(id))
     }
 
@@ -143,6 +148,8 @@ impl UserStore for MemoryStore {
         now: i64,
     ) -> Result<i64> {
         self.write(|s| {
+            s.user_mut(id)?;
+            s.require_proof(id, &session.proof, session.created_at)?;
             let has_password = s.user_mut(id)?.password_hash.is_some();
             if hash.is_none() && has_password {
                 return Err(conflict(

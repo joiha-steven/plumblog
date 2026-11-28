@@ -12,7 +12,7 @@ use plumblog_auth::webauthn::{self, Expected, client_data, cose};
 use plumblog_auth::{Crypto, base64url};
 use plumblog_model::{Error, ErrorCode, Result, UserId};
 use plumblog_store::{
-    ChallengePurpose, ChallengeStore, NewPasskey, Passkey, PasskeyStore, User, UserStore,
+    ChallengePurpose, ChallengeStore, NewPasskey, Passkey, PasskeyStore, Proof, User, UserStore,
 };
 use plumblog_syslog::EventKind;
 
@@ -273,6 +273,8 @@ pub async fn register_verify(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Re
             sign_count: i64::from(cred.sign_count),
             name: name.to_owned(),
             created_at: ctx.now,
+            // A request that passed re-auth before `blog admin reset` adds nothing after it.
+            proof: p.session_proof()?,
         })
         .await?;
     ctx.syslog(
@@ -348,7 +350,7 @@ async fn check_assertion(
     want_user: Option<UserId>,
     site: &site::Site,
     challenge_taken: bool,
-) -> std::result::Result<User, std::result::Result<Refused, Error>> {
+) -> std::result::Result<(User, i64), std::result::Result<Refused, Error>> {
     let ours = |e: Error| {
         if e.code == ErrorCode::PasskeyInvalid {
             Ok(refused(want_user, "malformed or unverifiable", e.detail))
@@ -413,7 +415,7 @@ async fn check_assertion(
         .touch_passkey(key.id, i64::from(count), ctx.now)
         .await
     {
-        Ok(true) => Ok(user),
+        Ok(true) => Ok((user, key.id)),
         Ok(false) => Err(Ok(refused(
             owner,
             "sign counter did not increase (cloned authenticator?)",
@@ -445,7 +447,7 @@ pub async fn verify(
     prefix: &str,
     want_user: Option<UserId>,
     how: &str,
-) -> Result<User> {
+) -> Result<(User, i64)> {
     let credential_id = f.req(&format!("{prefix}credential_id"))?;
     if credential_id.is_empty() || credential_id.len() > MAX_CREDENTIAL_ID_TEXT {
         return Err(Error::new(
@@ -483,9 +485,9 @@ pub async fn verify(
     )
     .await
     {
-        Ok(user) => {
+        Ok(found) => {
             limit::succeeded(ctx, &keys).await?;
-            Ok(user)
+            Ok(found)
         }
         Err(Err(e)) => Err(e),
         Err(Ok(r)) => {
@@ -506,8 +508,8 @@ pub async fn login_verify(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply
     let mut allowed = ASSERTION_FIELDS.to_vec();
     allowed.push("turnstile_token");
     let f = Fields::parse(body, &allowed)?;
-    let user = verify(ctx, &f, "", None, "passkey").await?;
-    auth::sign_in(ctx, p, &user, 200, "passkey").await
+    let (user, key) = verify(ctx, &f, "", None, "passkey").await?;
+    auth::sign_in(ctx, p, &user, Proof::Passkey(key), 200, "passkey").await
 }
 
 /// The user's passkeys as a JSON array (no credential ids or keys).

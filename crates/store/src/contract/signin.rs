@@ -610,10 +610,13 @@ pub async fn owner_reset_is_single_use<S: Store>(db: &S) -> Check {
         ok("take", db.take_owner_reset("c", T0).await)?,
         None,
     )?;
-    ok("put old", db.put_owner_reset("old", b, T0 + 50, T0).await)?;
+    ok(
+        "put old",
+        db.put_owner_reset("old", b, T0 + 50, false, T0).await,
+    )?;
     ok(
         "put replaces",
-        db.put_owner_reset("c", a, T0 + 100, T0).await,
+        db.put_owner_reset("c", a, T0 + 100, false, T0).await,
     )?;
     eq!(
         "reset keys as JSON",
@@ -656,7 +659,7 @@ pub async fn owner_reset_is_single_use<S: Store>(db: &S) -> Check {
     )?;
     ok(
         "put expiring",
-        db.put_owner_reset("e", b, T0 + 100, T0).await,
+        db.put_owner_reset("e", b, T0 + 100, false, T0).await,
     )?;
     eq!(
         "code at exactly its expiry",
@@ -672,7 +675,7 @@ pub async fn owner_reset_is_single_use<S: Store>(db: &S) -> Check {
     version_is(db, "owner reset", 1).await?;
     ok(
         "put garbled",
-        db.put_owner_reset("g", b, T0 + 100, T0).await,
+        db.put_owner_reset("g", b, T0 + 100, false, T0).await,
     )?;
     ok(
         "garble the expiry",
@@ -705,6 +708,7 @@ pub async fn session_renewal<S: Store>(db: &S) -> Check {
         user_id: u,
         created_at: T0,
         expires_at,
+        proof: crate::Proof::Unchecked,
     };
     ok("live", db.create_session(new("live", T0 + 100)).await)?;
     ok("dead", db.create_session(new("dead", T0 + 10)).await)?;

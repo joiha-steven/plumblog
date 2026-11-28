@@ -339,3 +339,91 @@ fn the_folder_lock_is_held() {
     ok(&reset(&fake, &dir, &yes()));
     assert!(!lock.exists(), "the lock goes when the run ends");
 }
+
+#[test]
+fn a_worker_without_the_marker_binding_needs_setup_then_deploy() {
+    let (fake, dir) = set_up();
+    // An older setup, or a rollback to a version from before the marker: no binding at all.
+    {
+        let mut st = fake.state();
+        for v in &mut st.versions {
+            if let Some(b) = v.metadata["bindings"].as_array_mut() {
+                b.retain(|b| b["name"] != "PLUMBLOG_SITE_ID");
+            }
+        }
+    }
+    let before = snapshot(&fake);
+    let r = reset(&fake, &dir, &yes());
+    assert_eq!(code(&r), Code::AdminResetUnmarked);
+    let msg = &r.result.as_ref().unwrap_err().message;
+    assert!(
+        msg.contains("blog setup") && msg.contains("blog deploy"),
+        "{msg}"
+    );
+    assert_eq!(snapshot(&fake), before);
+}
+
+/// tools/worker-test replays the reset's exact SQL from this file. `$user`, `$now`,
+/// `$hash_json` and `$expires` stand for the values; `BLESS=1` rewrites it.
+#[test]
+fn the_worker_test_fixture_is_the_reset_sql() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/worker-test/fixtures/admin-reset.json");
+    let batch = |keep_tokens: bool| {
+        let log = admin::reset_log("$user", keep_tokens, 0);
+        let log = [
+            "$now".to_string(),
+            log[1].replace("-0", "-$now"),
+            log[2].clone(),
+            log[3].clone(),
+        ];
+        let stmts = admin::reset_statements(&admin::Reset {
+            user: "$user",
+            now: "$now",
+            hash_json: "$hash_json",
+            expires: "$expires",
+            keep_tokens,
+            log: &log,
+        });
+        Value::Array(
+            stmts
+                .into_iter()
+                .map(|(sql, params)| serde_json::json!({"sql": sql, "params": params}))
+                .collect(),
+        )
+    };
+    let want = serde_json::to_string_pretty(
+        &serde_json::json!({"revoke_tokens": batch(false), "keep_tokens": batch(true)}),
+    )
+    .unwrap()
+        + "\n";
+    if std::env::var_os("BLESS").is_some() {
+        std::fs::write(&path, &want).unwrap();
+    }
+    let got = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        got == want,
+        "{} is stale: run `BLESS=1 cargo test -p plumblog-cli --test cloudflare admin::` after changing the reset SQL",
+        path.display()
+    );
+}
+
+#[test]
+fn the_code_carries_the_reset_time_and_the_token_choice() {
+    let (fake, dir) = set_up();
+    ok(&reset(&fake, &dir, &yes()));
+    assert_eq!(setting(&fake, "owner_reset_at"), Some(NOW.to_string()));
+    assert_eq!(
+        setting(&fake, "owner_reset_keep_tokens").as_deref(),
+        Some("false")
+    );
+    let keep = Options {
+        keep_tokens: true,
+        ..yes()
+    };
+    ok(&reset(&fake, &dir, &keep));
+    assert_eq!(
+        setting(&fake, "owner_reset_keep_tokens").as_deref(),
+        Some("true")
+    );
+}

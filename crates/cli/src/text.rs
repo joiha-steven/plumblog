@@ -115,6 +115,7 @@ codes! {
     BackupMediaUnwritable => "backup.media_unwritable",
     BackupIncomplete => "backup.incomplete",
     AdminResetForeign => "admin.reset_foreign",
+    AdminResetUnmarked => "admin.reset_unmarked",
     AdminResetUnconfirmed => "admin.reset_unconfirmed",
     AdminResetAmbiguous => "admin.reset_ambiguous",
     AdminResetNotOwner => "admin.reset_not_owner",

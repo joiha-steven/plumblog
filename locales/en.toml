@@ -468,6 +468,7 @@ backup_media_unwritable = "Cannot write {path}: {reason}. Fix this and run blog 
 backup_incomplete = "The backup is not complete: {failed} media files failed and {missing} are missing ({objects} copied). The lines above say which; run blog backup again to retry."
 backup_missing = "The backup is not complete: {missing} media files the database lists are not in R2 ({list}), {failed} failed, {objects} copied. If every file is missing, the token's R2 permission, the bucket or the object path is likely wrong, not the files gone. Check that, then run blog backup again."
 admin_reset_foreign = "Nothing was changed. The Worker {worker} or its database does not carry this folder's marks (the {binding} binding and the site id blog setup recorded), so it may be another site. Run `blog setup` in this folder once (it changes nothing that exists and records the marks), then try again."
+admin_reset_unmarked = "Nothing was changed. The Worker {worker} has no {binding} binding yet (set up by an older blog, or rolled back to a version from before it), so this folder cannot prove the site is its own. Run `blog setup` in this folder (it records the mark), then `blog deploy` (only a deploy puts it on the Worker), then try again."
 admin_reset_unconfirmed = "Nothing was changed. If that is what you want, run the same command again with --yes."
 admin_reset_ambiguous = "Nothing was changed. The site has several owners ({list}): name the one to reset with --login."
 admin_reset_not_owner = "Nothing was changed. {login} is not an active owner of this site. Owners: {list}."
