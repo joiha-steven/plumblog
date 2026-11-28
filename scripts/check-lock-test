@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Tests scripts/check-lock without touching the real lock path. Run by scripts/check.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+fail() { echo "check-lock-test: FAIL: $1" >&2; exit 1; }
+
+tmp=$(mktemp -d)
+bg=""
+cleanup() { [ -z "$bg" ] || kill "$bg" 2> /dev/null || true; rm -rf "$tmp"; }
+trap cleanup EXIT
+
+# Run the lock in a child shell: prints "got" once acquired, then holds for $HOLD seconds.
+run_lock() {
+  env -u CI -u PLUMBLOG_CHECK_LOCK_HELD PLUMBLOG_CHECK_LOCK="$tmp/lock" \
+    PLUMBLOG_CHECK_LOCK_POLL=1 PLUMBLOG_CHECK_LOCK_GRACE=1 "$@" \
+    bash -c 'source scripts/check-lock; trap "check_lock_release" EXIT
+      check_lock_acquire; echo got; sleep "${HOLD:-0}"'
+}
+
+# 1. Stale lock (dead pid) is taken over.
+mkdir "$tmp/lock"
+sleep 0 & dead=$!; wait "$dead" || true
+echo "$dead" > "$tmp/lock/pid"
+out=$(run_lock 2> "$tmp/err") || fail "stale: run failed"
+[ "$out" = "got" ] || fail "stale: lock not acquired"
+grep -q "stale lock" "$tmp/err" || fail "stale: no takeover line"
+[ ! -e "$tmp/lock" ] || fail "stale: lock not released"
+
+# 1b. Missing pid file is taken over after the grace.
+mkdir "$tmp/lock"
+out=$(run_lock 2> "$tmp/err") || fail "nopid: run failed"
+[ "$out" = "got" ] || fail "nopid: lock not acquired"
+grep -q "no pid" "$tmp/err" || fail "nopid: no takeover line"
+
+# 2. Live holder: second run waits, says so once, proceeds after release.
+HOLD=3 run_lock > "$tmp/out1" 2> /dev/null &
+bg=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$tmp/out1" ] && break; sleep 0.3; done
+[ -s "$tmp/out1" ] || fail "holder did not start"
+out=$(run_lock 2> "$tmp/err") || fail "wait: run failed"
+[ "$out" = "got" ] || fail "wait: second run never got the lock"
+[ "$(grep -c "waiting for another scripts/check (pid " "$tmp/err")" = 1 ] || fail "wait: expected one waiting line"
+wait "$bg" || true
+bg=""
+[ ! -e "$tmp/lock" ] || fail "wait: lock not released"
+
+# 3. CI set: no lock taken, even with a live holder.
+mkdir "$tmp/lock"; echo "$$" > "$tmp/lock/pid"
+out=$(CI=1 PLUMBLOG_CHECK_LOCK="$tmp/lock" bash -c 'source scripts/check-lock; check_lock_acquire; echo ok') \
+  || fail "ci: run failed"
+[ "$out" = "ok" ] || fail "ci: did not skip the lock"
+[ "$(cat "$tmp/lock/pid")" = "$$" ] || fail "ci: touched the lock"
+
+# 4. Nested run (lock marked held) does not wait.
+out=$(env -u CI PLUMBLOG_CHECK_LOCK_HELD=1 PLUMBLOG_CHECK_LOCK="$tmp/lock" \
+  bash -c 'source scripts/check-lock; check_lock_acquire; echo ok') || fail "nested: run failed"
+[ "$out" = "ok" ] || fail "nested: did not skip"
+
+echo "check-lock-test: ok"
