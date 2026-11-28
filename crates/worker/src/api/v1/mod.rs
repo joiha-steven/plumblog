@@ -78,21 +78,27 @@ pub fn check_access(p: &Principal, m: &Method, path: &str) -> Result<()> {
 ///
 /// # Errors
 ///
-/// `Unauthenticated`, `Forbidden`, or `NotFound` for an unknown item.
+/// `Unauthenticated`, `Forbidden`, or `NotFound` for an unknown item or a path id that is not
+/// one.
 pub async fn check_before_body(ctx: &Ctx, p: &Principal, m: &Method, path: &str) -> Result<()> {
     check_access(p, m, path)?;
-    let Some((route, values)) = method(m).and_then(|m| api::find(m, path).ok()) else {
-        return Ok(());
-    };
-    if route.id == RouteId::MediaVariant
-        && let Some(id) = values
-            .iter()
-            .find(|(k, _)| *k == "id")
-            .and_then(|(_, v)| v.parse().ok())
-    {
+    if let Some(id) = owned_before_body(m, path)? {
         media::owned(ctx, p, plumblog_model::MediaId(id)).await?;
     }
     Ok(())
+}
+
+/// The media item a raw body would be added to (a new size), whose ownership is checked
+/// before the body is read; `NotFound` when its path id is not one, so that body is not read.
+fn owned_before_body(m: &Method, path: &str) -> Result<Option<i64>> {
+    match method(m).and_then(|m| api::find(m, path).ok()) {
+        Some((route, values)) if route.id == RouteId::MediaVariant => values
+            .iter()
+            .find(|(k, _)| *k == "id")
+            .map(|(k, v)| input::path_id(k, v))
+            .transpose(),
+        _ => Ok(None),
+    }
 }
 
 /// A content write in the system log: who, how (session or token), what.
@@ -300,8 +306,27 @@ fn me(p: &Principal) -> Result<Reply> {
 
 #[cfg(test)]
 mod tests {
-    use super::reference;
+    use super::{owned_before_body, reference};
+    use plumblog_model::ErrorCode;
     use plumblog_model::api::ROUTES;
+    use worker::Method;
+
+    /// A new size's item is known before its body is read; a path id that is not one is 404
+    /// then too, never a body read first.
+    #[test]
+    fn owned_before_the_body() {
+        let at = |m: Method, p: &str| owned_before_body(&m, p);
+        assert_eq!(
+            at(Method::Post, "/api/v1/media/7/variants").unwrap(),
+            Some(7)
+        );
+        for bad in ["abc", "0", "-1", "07"] {
+            let e = at(Method::Post, &format!("/api/v1/media/{bad}/variants")).unwrap_err();
+            assert_eq!(e.code, ErrorCode::NotFound, "{bad}");
+        }
+        assert_eq!(at(Method::Post, "/api/v1/media").unwrap(), None);
+        assert_eq!(at(Method::Delete, "/api/v1/media/7").unwrap(), None);
+    }
 
     /// The served reference lists every route of the table, and only those.
     #[test]
