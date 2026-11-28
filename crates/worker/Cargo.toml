@@ -37,5 +37,13 @@ roxmltree.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
 
+# worker-build's wasm-opt step, as scripts/build-bundle and scripts/check run it. Explicit args
+# replace its default (`-O --debuginfo`; it appends the --enable-* feature flags itself), so
+# those two stay and the new ones are added. Measured 2026-11-28: gzip 1,065,608 -> 1,055,588 bytes (raw 2,646,798 -> 2,663,809),
+# render time unchanged within noise (60 interleaved warm misses per page, wrangler dev; docs/ARCHITECTURE.md,
+# Wasm budget). Turning one-caller inlining off is what saves most; --converge adds a little.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O", "--debuginfo", "--converge", "--one-caller-inline-max-function-size=0"]
+
 [lints]
 workspace = true
