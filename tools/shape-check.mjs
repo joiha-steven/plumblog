@@ -34,6 +34,9 @@ function checkValue(shapes, codeLists, descriptor, value, path) {
   }
   if (d === "string") return typeof value === "string" ? [] : [`${path}: expected string, got ${describe(value)}`];
   if (d === "integer") return Number.isInteger(value) ? [] : [`${path}: expected integer, got ${describe(value)}`];
+  if (d === "number") return Number.isFinite(value) ? [] : [`${path}: expected number, got ${describe(value)}`];
+  // Any JSON value but null (a nullable one says `json|null`).
+  if (d === "json") return value === null || value === undefined ? [`${path}: expected a value, got ${describe(value)}`] : [];
   if (d === "boolean") return typeof value === "boolean" ? [] : [`${path}: expected boolean, got ${describe(value)}`];
   if (d.startsWith("code:")) {
     const list = codeLists[d.slice(5)];

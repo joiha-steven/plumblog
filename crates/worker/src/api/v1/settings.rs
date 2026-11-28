@@ -242,6 +242,121 @@ async fn check_option(
     }
 }
 
+/// `GET /api/v1/themes`: the embedded default and the theme `PLUMBLOG_THEME` binds, if any.
+/// Only these two can render, so only they are installed; a pushed theme that did not load
+/// is listed unavailable, with the default active.
+pub async fn themes(ctx: &Ctx) -> Result<Reply> {
+    use crate::theme_runtime as rt;
+    rt::prepare(&ctx.env).await;
+    let entry = |name: &str, version: Option<&str>, active: bool, source: &str, available: bool| {
+        object(&[
+            ("name", Out::Str(name.to_owned())),
+            (
+                "version",
+                version.map_or(Out::Null, |v| Out::Str(v.to_owned())),
+            ),
+            ("active", Out::Bool(active)),
+            ("source", Out::Str(source.to_owned())),
+            ("available", Out::Bool(available)),
+        ])
+    };
+    let mut items = Vec::new();
+    let pushed = rt::pushed();
+    if let Some(t) = pushed {
+        items.push(entry(t.name(), t.version(), true, "pushed", true));
+    } else {
+        let bound = rt::bound(&ctx.env);
+        if !bound.is_empty() {
+            items.push(entry(&bound, None, false, "pushed", false));
+        }
+    }
+    let embedded = rt::embedded().map_err(|e| {
+        Error::new(
+            ErrorCode::Internal,
+            format!("the embedded theme did not load: {}", e.detail),
+        )
+    })?;
+    // A pushed theme may reuse the default's name; it is the one that renders.
+    if pushed.is_none_or(|t| t.name() != embedded.name()) {
+        items.push(entry(
+            embedded.name(),
+            embedded.version(),
+            pushed.is_none(),
+            "embedded",
+            true,
+        ));
+    }
+    Ok(Reply::json(
+        200,
+        object(&[("themes", Out::Raw(format!("[{}]", items.join(","))))]),
+    ))
+}
+
+/// `GET /api/v1/{themes,plugins}/<name>/declarations`: the option declarations the admin
+/// builds a settings tab from, from the theme loaded once per isolate (no parsing here).
+/// Plugins come from the theme that renders, as option checks do. A bound pushed theme that
+/// did not load is 409 `theme.unavailable` (its declarations are unknown); a theme or plugin
+/// that is not installed is 404.
+pub async fn declarations(
+    ctx: &Ctx,
+    p: &Principal,
+    owner: OptionOwner,
+    input: &Input,
+) -> Result<Reply> {
+    use crate::theme_runtime as rt;
+    // The route table gates this too; checked again here like the option values beside it, so a
+    // change to the table alone never opens plugin declarations (a plugin's secrets live there).
+    match owner {
+        OptionOwner::Theme => p.require_read()?,
+        OptionOwner::Plugin => p.require(manage(owner))?,
+    };
+    let n = owner_name(input)?;
+    // Tags are case-insensitive (BCP 47) and often written with `_` (vi_VN).
+    let lang = input
+        .str("lang")
+        .unwrap_or("en")
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    let lang = lang.as_str();
+    let not_loaded = |e: &plumblog_render::ThemeError| {
+        Error::new(
+            ErrorCode::Internal,
+            format!("the theme did not load: {}", e.detail),
+        )
+    };
+    rt::prepare(&ctx.env).await;
+    let found = match owner {
+        OptionOwner::Theme => {
+            if rt::unavailable(&ctx.env, n) {
+                return Err(Error::new(
+                    ErrorCode::ThemeUnavailable,
+                    format!("theme {n} is the pushed theme but did not load; push it again"),
+                ));
+            }
+            // A theme that failed to load is a server fault, not a theme that is not installed.
+            let embedded = rt::embedded().map_err(not_loaded)?;
+            [rt::pushed(), Some(embedded)]
+                .into_iter()
+                .flatten()
+                .find(|t| t.name() == n)
+                .and_then(|t| t.declarations(None, lang))
+        }
+        OptionOwner::Plugin => rt::current()
+            .map_err(not_loaded)?
+            .declarations(Some(n), lang),
+    };
+    let what = owner.as_str();
+    match found {
+        Some(Ok(json)) => Ok(Reply::json(200, json)),
+        Some(Err(detail)) => Err(Error::new(ErrorCode::Internal, detail)),
+        None => Err(Error::new(
+            ErrorCode::NotFound,
+            format!("no installed {what} named {n}"),
+        )
+        .at("name")),
+    }
+}
+
 /// Resets every option of one theme or plugin to its declared default.
 pub async fn options_delete(
     ctx: &Ctx,
@@ -336,6 +451,12 @@ mod tests {
             assert!(writable_key(key).is_err(), "{key}");
         }
         assert!(writable_key("origin").is_ok());
+        // The model spells the render crate's field types by hand for the admin's shapes.
+        let types: Vec<&str> = plumblog_render::options::FieldType::ALL
+            .iter()
+            .map(|t| t.name())
+            .collect();
+        assert_eq!(types, plumblog_model::shape::OPTION_TYPES);
         // The model's list spells the store's keys by hand; keep them bound together.
         for key in [
             plumblog_store::ORIGIN_KEY,
