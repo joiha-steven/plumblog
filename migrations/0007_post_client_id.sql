@@ -1,4 +1,4 @@
--- plumblog schema v8: a client request id on posts, so a create retried after a lost answer
+-- plumblog schema v7: a client request id on posts, so a create retried after a lost answer
 -- returns the post the first request made instead of a second one (issue #86,
 -- `SavePost::client_id`). Per author: the UNIQUE index is on (author_id, client_id). A
 -- partial index: posts without an id (every post from before, every API create without one)

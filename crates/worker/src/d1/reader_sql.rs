@@ -194,7 +194,7 @@ mod plans {
             include_str!("../../../../migrations/0004_comment_html.sql"),
             include_str!("../../../../migrations/0005_token_read_scope.sql"),
             include_str!("../../../../migrations/0006_reader_indexes.sql"),
-            include_str!("../../../../migrations/0008_post_client_id.sql"),
+            include_str!("../../../../migrations/0007_post_client_id.sql"),
         ] {
             c.execute_batch(sql).unwrap();
         }

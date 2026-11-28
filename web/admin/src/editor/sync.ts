@@ -22,7 +22,10 @@
  * or none within `createMs`; the API client sets creates no bound) is sent again with it, a few
  * times with growing waits, and so is the next one after a reload. A reload while the create
  * is out still asks first (beforeunload). Only without localStorage (the id then lives in this
- * page) can a reload after a lost answer make a second server draft (slug `-2`).
+ * page) can a reload after a lost answer make a second server draft (slug `-2`). That post may
+ * have been edited elsewhere meanwhile (version above 1): then the writer picks, never an
+ * overwrite. The stored id is left behind when a new draft is dropped without a create
+ * (drafts.ts and index.ts drop drafts; only an unused UUID remains).
  */
 
 import type { Api, ApiError, Result } from "../api/client";
@@ -84,6 +87,8 @@ const MAX_SLUG = 100;
 const SLUG_TRIES = 5;
 /** Sends of a create with no answer after the first, waiting `retry`, 2x, 4x... in between. */
 const CREATE_RETRIES = 4;
+/** Unanswered update texts kept for telling our own 409 from another writer's. */
+const LOST_MAX = 20;
 
 /** The new post's `client_id` by draft key, for this page; localStorage keeps it over a reload. */
 const createIds = new Map<string, string>();
@@ -150,8 +155,17 @@ export const slugify = (title: string, n = 1): string => {
 const creates = new Map<string, Promise<Post | undefined>>();
 
 /** Moves a new post's draft to the created post's key, based on its version. Resolves to its rev. */
-const moveTo = (key: string, user: number, p: Post): Promise<number> =>
-  moveDraft(key, draftKey(user, p.id, ""), { base: p.updated_at, version: p.version });
+const moveTo = (key: string, user: number, p: Post, based: Based = basedOn(p)): Promise<number> =>
+  moveDraft(key, draftKey(user, p.id, ""), { base: based.base, version: based.version });
+
+/** The server copy a draft's text is based on (`Draft.base`, `Draft.version`). */
+interface Based {
+  base: number;
+  version: number;
+}
+const basedOn = (p: Post): Based => ({ base: p.updated_at, version: p.version });
+/** The post as its create made it: what a draft edited since that create is based on. */
+const asCreated = (p: Post): Based => ({ base: p.created_at, version: 1 });
 
 /**
  * For a mount of a new post's editor: the post an earlier mount's create made of this draft
@@ -215,8 +229,8 @@ export function startSync(o: SyncHost, delay = 3000, slow = 20_000, createMs = 2
   let failing = false;
   /** The server copy turned out not to be a draft: this editor never sends again. */
   let stopped = false;
-  /** The text of an update that got no answer: it may have landed, so a 409 may be our own. */
-  let lost: [string, string] | undefined;
+  /** Texts of updates that got no answer since the last one answered: any may have landed, so a 409 may be our own. */
+  const lost: [string, string][] = [];
 
   /**
    * Every server copy this editor learns of passes here. One that is not a draft stops the
@@ -301,18 +315,19 @@ export function startSync(o: SyncHost, delay = 3000, slow = 20_000, createMs = 2
    * for): the draft, then the URL, now name it. An editor no longer on the page leaves the move
    * to the next mount (`settled` or its own `adopt`), so two never move one draft.
    */
-  const adopt = (p: Post) =>
+  /** `based`: what this text is based on, when not `p` itself (a replay edited elsewhere). */
+  const adopt = (p: Post, based: Based = basedOn(p)) =>
     serial(st, async () => {
       if (!o.alive() || st.key.includes(":post-")) return;
       id = p.id;
       last = p;
       o.made(p);
-      const rev = await moveTo(st.key, o.user, p);
+      const rev = await moveTo(st.key, o.user, p, based);
       st.key = draftKey(o.user, p.id, "");
       // Moved already (nothing here): read it. Another tab's rev is kept apart: the next save here then asks.
       if (!rev) st.rev = (await loadDraft(st.key))?.rev ?? 0;
       else if (rev !== st.rev) console.warn(`admin editor: draft moved at rev ${rev}, this tab had ${st.rev}`);
-      Object.assign(st, { base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
+      Object.assign(st, { base: based.base, version: based.version, server: [p.title, p.markdown] });
       history.replaceState(history.state, "", editHref(p.id));
     });
 
@@ -338,8 +353,7 @@ export function startSync(o: SyncHost, delay = 3000, slow = 20_000, createMs = 2
     }
     const p = r.value;
     const draft = learn(p);
-    const ours = lost;
-    lost = undefined;
+    const ours = lost.splice(0);
     if (same(o.text(), [p.title, p.markdown])) {
       Object.assign(st, { hold: false, base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
       o.say(draft ? t("admin.editor.saved") : t("admin.editor.saved_here"));
@@ -347,7 +361,7 @@ export function startSync(o: SyncHost, delay = 3000, slow = 20_000, createMs = 2
     }
     // The server copy is exactly an update of ours whose answer was lost, typed on since: no
     // one else's text to keep, so the newer text goes out on that version.
-    if (draft && same([p.title, p.markdown], ours)) {
+    if (draft && ours.some((b) => same([p.title, p.markdown], b))) {
       console.warn(`admin editor: post ${p.id} version ${p.version} is this editor's unanswered save; sending the newer text`);
       Object.assign(st, { hold: false, base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
       again = true;
@@ -421,17 +435,35 @@ export function startSync(o: SyncHost, delay = 3000, slow = 20_000, createMs = 2
         lagging = false;
       }
       if (r.ok || refusesContent(r.error.status)) forgetCreateId(key);
+      // An earlier attempt's post (same id) that was edited since (another device, while this
+      // one had no answer): its text is not ours to overwrite, so the writer picks.
+      const elsewhere = r.ok && r.value.version > 1 && !same(text, [r.value.title, r.value.markdown]);
       if (r.ok) {
         id = r.value.id;
-        await adopt(r.value);
-        // An earlier attempt's post (same id) with its older text: this text goes as an update.
-        if (!same(text, [r.value.title, r.value.markdown])) again = true;
+        await adopt(r.value, elsewhere ? asCreated(r.value) : basedOn(r.value));
+        // Its older text, not edited since: this text goes as an update.
+        if (!elsewhere && !same(text, [r.value.title, r.value.markdown])) again = true;
       } else creates.delete(key);
       done(r.ok ? r.value : undefined);
+      if (r.ok && elsewhere && !stopped) {
+        const p = r.value;
+        console.warn(`admin editor: post ${p.id} was made by an earlier attempt and is at version ${p.version}; asking`);
+        last = p;
+        if (!learn(p)) return;
+        st.hold = true;
+        if (o.alive()) {
+          o.say(t("admin.editor.not_saved"));
+          o.choose(p);
+        }
+        return;
+      }
     } else {
       r = await o.api.updatePost(id, { expected_version: st.version ?? 0, title, markdown });
-      if (!r.ok && r.error.code === "network") lost = [title, markdown];
-      else if (r.ok) lost = undefined;
+      // Bounded: past a few, the oldest could not be what the server holds without a newer one.
+      if (!r.ok && r.error.code === "network") {
+        lost.push([title, markdown]);
+        if (lost.length > LOST_MAX) lost.shift();
+      } else if (r.ok) lost.length = 0;
     }
     // Stopped while the request was out (trashed, or not a draft any more): its answer changes nothing here.
     if (stopped) {

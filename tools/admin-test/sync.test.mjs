@@ -874,3 +874,50 @@ test("a create refused for its content (400, 409) drops its id: the next post ge
   });
   assert.equal(localStorage.getItem(`plumblog-create:${key}`), null);
 });
+
+test("a replayed create edited elsewhere since (version 2, other text) asks; nothing is sent over it", async () => {
+  reset();
+  const s = mockServer();
+  s.lose = 5; // the create landed; every answer was lost, then this device went quiet
+  const e = editor(s.api);
+  await quiet(async () => {
+    await e.save("Trip", "mine");
+    await settle(80);
+  });
+  assert.equal(s.posts.size, 1);
+  const [pid] = [...s.posts.keys()];
+  s.posts.set(pid, post(pid, "Trip", "edited on the phone", 2));
+  await quiet(async () => {
+    await e.save("Trip", "mine, more");
+    await settle(80);
+  });
+  assert.equal(s.calls.at(-1)[0], "create", "no PATCH after the replay");
+  assert.equal(s.calls.filter((c) => c[0] === "update").length, 0);
+  assert.equal(e.chosen.length, 1, "the writer picks");
+  assert.equal(e.chosen[0].markdown, "edited on the phone");
+  assert.equal(s.posts.get(pid).markdown, "edited on the phone", "nothing overwritten");
+  assert.equal(e.st.hold, true);
+  assert.equal(rows.get(`1:post-${pid}`)?.version, 1, "the draft stays based on the created version, so a reload asks too");
+  e.sync.changed();
+  await settle();
+  assert.equal(s.calls.filter((c) => c[0] === "update").length, 0, "held: a later change sends nothing");
+});
+
+test("two lost updates in a row: a 409 against either of them asks nothing", async () => {
+  reset("/admin/posts/3");
+  const s = mockServer();
+  s.posts.set(3, post(3, "T", "base", 4));
+  const e = editor(s.api, { key: "1:post-3", post: post(3, "T", "base", 4), title: "T", body: "base" });
+  s.lose = 2; // "one" lands (version 5); "one two" is a 409 nobody hears
+  await quiet(async () => {
+    await e.save("T", "one");
+    await settle();
+    await e.save("T", "one two");
+    await settle();
+    await e.save("T", "one two three");
+    await settle();
+  });
+  assert.equal(e.chosen.length, 0, "no choice banner");
+  assert.equal(s.posts.get(3).markdown, "one two three");
+  assert.equal(e.said.at(-1), "admin.editor.saved");
+});

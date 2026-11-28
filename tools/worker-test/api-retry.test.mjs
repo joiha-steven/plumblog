@@ -51,6 +51,10 @@ test("a create repeated with its client_id returns the first post and makes noth
   assert.equal(edited.status, 201, edited.text);
   assert.equal(edited.json.id, first.json.id);
   assert.equal(edited.json.title, first.json.title, "the stored post, not the new body");
+  // A reused id is logged as such, so a client that mints too few ids shows in the log.
+  const warned = /client_id repeated with another title; answering post \d+/;
+  for (const end = Date.now() + 5000; !warned.test(w.log()) && Date.now() < end; ) await new Promise((r) => setTimeout(r, 50));
+  assert.match(w.log(), warned);
   assert.equal(count(`SELECT COUNT(*) AS n FROM posts WHERE slug LIKE 'retry%'`), 1);
   assert.equal(creates(), logged, "a replay logs no second create");
 

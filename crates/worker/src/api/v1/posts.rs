@@ -435,7 +435,7 @@ pub async fn create(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
             return Err(invalid("client_id", "1-64 of A-Z, a-z, 0-9, - and _"));
         }
         if let Some(id) = ctx.store.find_client_post(user.id, k).await? {
-            return replay(ctx, id).await;
+            return replay(ctx, id, input.str("title")).await;
         }
     }
     let c = common(input)?;
@@ -516,7 +516,7 @@ pub async fn create(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
     // Not inserted by this request: it lost a race to a create with the same client id, and
     // the store returned the winner.
     if !saved.wrote {
-        return replay(ctx, saved.id).await;
+        return replay(ctx, saved.id, input.str("title")).await;
     }
     let post = ctx.store.get_post(saved.id).await?;
     log(ctx, p, "post.create", &post).await;
@@ -524,15 +524,26 @@ pub async fn create(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
 }
 
 /// The answer to a repeated `client_id`: the post as the first create's 201 would show it
-/// now, its warnings from its stored Markdown.
-async fn replay(ctx: &Ctx, id: PostId) -> Result<Reply> {
+/// now, its warnings from its stored Markdown. `title`: the request's, to spot a client that
+/// reused an id for another post (it gets the old post back, never a new one).
+async fn replay(ctx: &Ctx, id: PostId, title: Option<&str>) -> Result<Reply> {
     let post = ctx.store.get_post(id).await?;
-    worker::console_log!(
-        "[{}] POST post: client_id repeated, answering post {} (version {})",
-        ctx.request_id.as_str(),
-        id.0,
-        post.version
-    );
+    if title.is_some_and(|t| t != post.title) {
+        worker::console_warn!(
+            "[{}] POST post: client_id repeated with another title; answering post {} \
+             (version {}) as stored. A client reusing an id for a new post gets this one back",
+            ctx.request_id.as_str(),
+            id.0,
+            post.version
+        );
+    } else {
+        worker::console_log!(
+            "[{}] POST post: client_id repeated, answering post {} (version {})",
+            ctx.request_id.as_str(),
+            id.0,
+            post.version
+        );
+    }
     let r = render(&post.markdown);
     Ok(Reply::json(201, post_json(&post, &warning_codes(&r))))
 }

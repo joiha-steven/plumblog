@@ -6,8 +6,7 @@ Create, edit, publish and delete posts and media through the HTTP API, and how t
 blog guide api
 ```
 
-`blog guide api` is the full route reference (fields, access, answers); this guide does not
-repeat it. Other guides use the conventions below.
+`blog guide api` is the full route reference (fields, access, answers); this guide does not repeat it. Other guides use the conventions below.
 
 ## Token and requests
 
@@ -28,6 +27,7 @@ The answer shows the token once; keep it in an environment variable, never in a 
   (default), `scheduled` (needs a future `published_at`) or `published` (`published_at`
   defaults to now; a past time is allowed). `kind`: `post` (default) or `page`. Add a new
   `client_id` (a UUID) per post to retry a create with no answer: it returns the same post.
+  Never reuse a `client_id` for another post: a repeated one returns the existing post whatever the body.
 - Slug: `a-z`, `0-9` and inner `-`, 1-100 characters. Never use `page`, `tag`, `archive`,
   `search`, `theme`, `admin` or `api`: the API saves them but readers can never open them.
   One `(lang, slug)` per site (409 on `slug`).
