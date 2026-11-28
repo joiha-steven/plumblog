@@ -142,6 +142,25 @@ pub fn has_authorization(req: &Request) -> bool {
 /// `Unauthenticated` for an `Authorization` header that is not a valid, live API token;
 /// storage and crypto errors pass through.
 pub async fn resolve(ctx: &Ctx, req: &Request) -> Result<(Principal, Option<String>)> {
+    resolve_with(ctx, req, true).await
+}
+
+/// [`resolve`] without any write and without a cookie: a session near its end is not
+/// renewed, a dead one not cleared. For public answers that must cost no D1 write and set
+/// no cookie (`/media/...`); the next `/api/` or admin request renews the session.
+///
+/// # Errors
+///
+/// As [`resolve`].
+pub async fn resolve_read_only(ctx: &Ctx, req: &Request) -> Result<Principal> {
+    resolve_with(ctx, req, false).await.map(|(p, _)| p)
+}
+
+async fn resolve_with(
+    ctx: &Ctx,
+    req: &Request,
+    renew: bool,
+) -> Result<(Principal, Option<String>)> {
     let header = |name: &str| req.headers().get(name).ok().flatten();
     if has_authorization(req) {
         let value = header("authorization").unwrap_or_default();
@@ -162,7 +181,7 @@ pub async fn resolve(ctx: &Ctx, req: &Request) -> Result<(Principal, Option<Stri
         );
         return Ok((anonymous, Some(session::clear_cookie())));
     };
-    from_token(ctx, &token).await
+    from_token(ctx, &token, renew).await
 }
 
 /// The token principal for an `Authorization` value: one indexed read for the token (which
@@ -197,7 +216,11 @@ async fn from_api_token(ctx: &Ctx, value: &str) -> Result<Principal> {
     })
 }
 
-async fn from_token(ctx: &Ctx, token: &SessionToken) -> Result<(Principal, Option<String>)> {
+async fn from_token(
+    ctx: &Ctx,
+    token: &SessionToken,
+    renew: bool,
+) -> Result<(Principal, Option<String>)> {
     let hash = session::hash_token(&ctx.crypto, token).await?;
     let Some(found) = ctx.store.find_session(&hash, ctx.now).await? else {
         let p = Principal::Anonymous {
@@ -219,7 +242,7 @@ async fn from_token(ctx: &Ctx, token: &SessionToken) -> Result<(Principal, Optio
         return Ok((p, Some(session::clear_cookie())));
     };
     let mut cookie = None;
-    if session::needs_renewal(found.expires_at, ctx.now) {
+    if renew && session::needs_renewal(found.expires_at, ctx.now) {
         let expires = session::expires_at(ctx.now);
         match ctx.store.renew_session(&hash, expires, ctx.now).await {
             Ok(true) => cookie = Some(session::set_cookie(token, expires, ctx.now)),

@@ -67,6 +67,11 @@ pub trait MediaStore {
     async fn find_media_by_sha256(&self, uploader: UserId, sha256: &str) -> Result<Option<Media>>;
     /// `NotFound`.
     async fn get_media(&self, id: MediaId) -> Result<Media>;
+    /// The item when a reader can see it: a `published` post or page uses it in its body
+    /// (`SavePost::media_ids`) or as cover. `None` for unknown or unused media and for media
+    /// used only by drafts, scheduled or trashed posts, alike, so a caller cannot tell them
+    /// apart. "Published" is the reader's own test (status alone). One read.
+    async fn public_media(&self, id: MediaId) -> Result<Option<Media>>;
     async fn list_media(&self, query: MediaQuery) -> Result<Vec<Media>>;
     /// `NotFound`. Bumps the content version (alt text shows on reader pages).
     async fn set_media_alt(&self, id: MediaId, alt: &str) -> Result<()>;

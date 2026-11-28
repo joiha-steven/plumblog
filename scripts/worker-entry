@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Puts the JS entry (crates/worker/js/entry.mjs) next to worker-build's index.js and makes it
+# the main module: `blog deploy` reads `main` from package.json, wrangler dev is pointed at
+# entry.mjs directly. Why the entry exists: docs/ARCHITECTURE.md, Page cache.
+#   scripts/worker-entry <worker-build-out-dir>
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+fail() { echo "worker-entry: FAIL: $1" >&2; exit 1; }
+mark=false
+if [ "${1:-}" = "--mark-loaded" ]; then mark=true; shift; fi
+[ $# -eq 1 ] || fail "usage: scripts/worker-entry [--mark-loaded] <out-dir>"
+dir=$1
+[ -f "$dir/index.js" ] && [ -f "$dir/package.json" ] || fail "$dir is not a worker-build output (no index.js or package.json)"
+
+cp crates/worker/js/entry.mjs "$dir/entry.mjs"
+# Plain text edit: the file is worker-build's fixed shape and there is no jq/node requirement here.
+if ! grep -q '"main": "entry.mjs"' "$dir/package.json"; then
+  grep -q '"main": "index.js"' "$dir/package.json" || fail "$dir/package.json has no \"main\": \"index.js\" to replace"
+  sed 's/"main": "index.js"/"main": "entry.mjs"/' "$dir/package.json" > "$dir/package.json.tmp"
+  mv "$dir/package.json.tmp" "$dir/package.json"
+fi
+# Test builds only: index.js records that it was evaluated, so tests can tell whether a
+# request loaded wasm (crates/worker/js/entry.mjs). Never in a deployed bundle.
+if $mark && ! grep -q '__plumblogWasmLoaded' "$dir/index.js"; then
+  printf '\nglobalThis.__plumblogWasmLoaded = true;\n' >> "$dir/index.js"
+fi

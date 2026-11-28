@@ -305,8 +305,11 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   /* ---------- saving ---------- */
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let quietTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The post is in the trash (opened so, or trashed elsewhere): nothing is sent until Restore. */
+  let trashed = post?.status === "trashed";
   // A live post's edits stay here until Update: say they are not on the site.
-  const here = () => pub.status === "draft" ? t("admin.editor.saved_here") : t("admin.editor.pub.unpublished_changes");
+  // A trashed post shows only its Trashed state: "saved here" would suggest it is still in use.
+  const here = () => trashed ? "" : pub.status === "draft" ? t("admin.editor.saved_here") : t("admin.editor.pub.unpublished_changes");
   const setSaved = (text: string, quiet = false) => {
     for (const el of [saved, saved2]) {
       el.textContent = text;
@@ -502,8 +505,6 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   };
   /* ---------- publishing (publish.ts, loaded on first use) ---------- */
   let working = false;
-  /** The post is in the trash (opened so, or trashed elsewhere): nothing is sent until Restore. */
-  let trashed = post?.status === "trashed";
   /** Nothing to publish yet, or a choice between two texts is waiting. */
   const pubState = () => {
     pubBtn.disabled = working || trashed || st.hold || st.paused || (!titleIn.value.trim() && view.state.doc.length === 0);
