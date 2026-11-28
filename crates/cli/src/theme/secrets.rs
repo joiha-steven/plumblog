@@ -16,9 +16,46 @@ pub fn bad_name(path: &str) -> Option<&'static str> {
     if name.starts_with("id_rsa") || name.starts_with("id_ed25519") {
         return Some("id_rsa");
     }
-    ["secret", "token", "credential"]
+    if token_name(&name) {
+        return Some("token");
+    }
+    ["secret", "credential"]
         .into_iter()
         .find(|w| name.contains(w))
+}
+
+/// A file named like a stored token (`token`, `cf-token`, `api_token.json`, `x.token`).
+/// "token" alone is too common in design files (`tokens.css`, `design-tokens.json`) to refuse
+/// on a substring, and a stylesheet, script, page, font or image is never a credential file.
+fn token_name(name: &str) -> bool {
+    let ext = name.rsplit_once('.').map_or("", |(_, e)| e);
+    let asset = matches!(
+        ext,
+        "css"
+            | "js"
+            | "mjs"
+            | "html"
+            | "htm"
+            | "woff"
+            | "woff2"
+            | "ttf"
+            | "otf"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "avif"
+            | "svg"
+            | "ico"
+    );
+    !asset
+        && (name == "token"
+            || name.starts_with("token.")
+            || ext == "token"
+            || name.ends_with("-token")
+            || name.contains("_token")
+            || name.contains("-token."))
 }
 
 /// `(line, kind)` of the first match per kind in `text`: kinds are `private key`,
@@ -103,7 +140,13 @@ mod tests {
             "k.KEY",
             "id_rsa.pub",
             "my-secret.css",
-            "assets/Token.js",
+            "token",
+            "a/Token.txt",
+            "deploy.token",
+            "api_token.json",
+            "my_token",
+            "github-token.txt",
+            "cf-token",
         ] {
             assert!(bad_name(bad).is_some(), "{bad}");
         }
@@ -112,6 +155,11 @@ mod tests {
             "assets/app.js",
             "templates/post.html",
             "envelope.png",
+            "tokens.css",
+            "assets/design-tokens.json",
+            "assets/token.js",
+            "assets/icons/token.svg",
+            "styles/color_tokens.css",
         ] {
             assert!(bad_name(ok).is_none(), "{ok}");
         }

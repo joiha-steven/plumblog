@@ -1,6 +1,10 @@
 //! A theme pushed as a static asset: `/_theme/<name>/theme.json`, every text file of the
 //! theme in one JSON document, so the Worker loads it with a single fetch. `blog theme push`
 //! writes it with these types; the Worker reads it with [`PushedTheme::parse`].
+//!
+//! Files under the theme's `assets/` are not in the document: each is its own static asset at
+//! `/_theme/<name>/assets/<path below assets/>`, listed in `assets` with its SHA-256 so a
+//! later deploy can fetch the theme back from the site and check every byte.
 
 use crate::theme::ThemeFiles;
 use serde::{Deserialize, Serialize};
@@ -21,9 +25,57 @@ pub struct PushedTheme {
     pub hash: String,
     /// Relative path (`/`-separated) to UTF-8 text.
     pub files: BTreeMap<String, String>,
+    /// Path below `assets/` to the SHA-256 hex of its bytes. Absent in documents written
+    /// before it existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub assets: BTreeMap<String, String>,
+}
+
+/// Prefix of the theme folder whose files ship as separate static assets.
+pub const ASSETS_DIR: &str = "assets/";
+
+/// Static asset path of `theme.json` for theme `name`.
+#[must_use]
+pub fn document_path(name: &str) -> String {
+    format!("/_theme/{name}/theme.json")
+}
+
+/// Static asset path of a file below the theme's `assets/` (`path` without that prefix).
+#[must_use]
+pub fn asset_path(name: &str, path: &str) -> String {
+    format!("/_theme/{name}/assets/{path}")
+}
+
+/// Theme names are URL path segments: lowercase letters, digits, `_` and `-`, starting with a
+/// letter, at most 64 bytes (the Worker's `theme_runtime` rule).
+#[must_use]
+pub fn valid_name(n: &str) -> bool {
+    n.len() <= 64
+        && n.starts_with(|c: char| c.is_ascii_lowercase())
+        && n.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
 impl PushedTheme {
+    /// What `hash` is the SHA-256 of (this crate has no hasher; the CLI and the Worker do):
+    /// a version line, then per text file `f <path len> <path> <text len>\n<text>\n` and per
+    /// asset `a <path len> <path> <sha256>\n`, each list in path order. Lengths make the
+    /// encoding unambiguous; `name` and `version` are not part of it, so the hash names the
+    /// content only.
+    #[must_use]
+    pub fn hash_input(&self) -> Vec<u8> {
+        let mut out = b"plumblog-theme 1\n".to_vec();
+        for (p, t) in &self.files {
+            out.extend_from_slice(format!("f {} {p} {}\n", p.len(), t.len()).as_bytes());
+            out.extend_from_slice(t.as_bytes());
+            out.push(b'\n');
+        }
+        for (p, h) in &self.assets {
+            out.extend_from_slice(format!("a {} {p} {h}\n", p.len()).as_bytes());
+        }
+        out
+    }
+
     /// Parses `theme.json` for the theme the Worker was told to use.
     ///
     /// # Errors
@@ -43,21 +95,30 @@ impl PushedTheme {
                 t.name
             ));
         }
-        if t.hash.len() != 64
-            || !t
-                .hash
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
+        if !is_hex64(&t.hash) {
             return Err("theme.json: hash is not 64 lowercase hex digits".to_owned());
         }
-        if let Some(p) = t.files.keys().find(|p| !safe_path(p)) {
+        if let Some(p) = t
+            .files
+            .keys()
+            .chain(t.assets.keys())
+            .find(|p| !safe_path(p))
+        {
             return Err(format!(
                 "theme.json: file path {p:?} is not a plain relative path"
             ));
         }
+        if let Some(p) = t.assets.iter().find(|(_, h)| !is_hex64(h)).map(|(p, _)| p) {
+            return Err(format!("theme.json: asset {p:?} has no SHA-256"));
+        }
         Ok(t)
     }
+}
+
+fn is_hex64(h: &str) -> bool {
+    h.len() == 64
+        && h.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// `a/b.css`: no empty, `.` or `..` segment, no backslash or leading `/`.
@@ -113,5 +174,53 @@ mod tests {
             PushedTheme::parse(&extra, "paper").is_ok(),
             "unknown fields"
         );
+        let asset = |path: &str, sha: &str| {
+            let mut v: serde_json::Value =
+                serde_json::from_str(&doc(THEME_API, "paper", HASH, "a")).unwrap();
+            v["assets"] = serde_json::json!({ path: sha });
+            v.to_string()
+        };
+        assert!(PushedTheme::parse(&asset("fonts/a.woff2", HASH), "paper").is_ok());
+        assert!(
+            PushedTheme::parse(&asset("../a.woff2", HASH), "paper")
+                .unwrap_err()
+                .contains("path")
+        );
+        assert!(
+            PushedTheme::parse(&asset("a.woff2", "x"), "paper")
+                .unwrap_err()
+                .contains("SHA-256")
+        );
+    }
+
+    #[test]
+    fn hash_input_tells_every_split_apart() {
+        let t = |files: &[(&str, &str)], assets: &[(&str, &str)]| {
+            PushedTheme {
+                api: THEME_API,
+                name: "paper".into(),
+                version: "1".into(),
+                hash: HASH.into(),
+                files: files
+                    .iter()
+                    .map(|(a, b)| ((*a).into(), (*b).into()))
+                    .collect(),
+                assets: assets
+                    .iter()
+                    .map(|(a, b)| ((*a).into(), (*b).into()))
+                    .collect(),
+            }
+            .hash_input()
+        };
+        let base = t(&[("a", "xy")], &[]);
+        assert_ne!(base, t(&[("a", "x"), ("y", "")], &[]));
+        assert_ne!(base, t(&[("a", "xy")], &[("f", HASH)]));
+        assert_ne!(t(&[], &[("f", HASH)]), t(&[], &[("g", HASH)]));
+        // Name and version are labels, not content.
+        let mut renamed = PushedTheme::parse(&doc(THEME_API, "paper", HASH, "a"), "paper").unwrap();
+        let before = renamed.hash_input();
+        renamed.name = "other".into();
+        renamed.version = "9".into();
+        assert_eq!(before, renamed.hash_input());
     }
 }

@@ -79,6 +79,23 @@ pub struct DeployRecord {
     /// before going back to this version. `None` in records older than this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_migrations: Option<Vec<String>>,
+    /// `theme_push` (`blog theme push`), `theme_default` (`blog theme push --default`);
+    /// `None` for `blog deploy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The pushed theme this version serves; `None`: the embedded default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<ThemeRecord>,
+}
+
+/// A pushed theme as a deploy record names it. Its files are kept in
+/// `.blog/themes/<hash>/` (see `theme::store`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemeRecord {
+    pub name: String,
+    pub version: String,
+    /// `PushedTheme::hash`.
+    pub hash: String,
 }
 
 /// One `blog rollback`: code (`kind = "version"`) or database (`kind = "database"`), or one

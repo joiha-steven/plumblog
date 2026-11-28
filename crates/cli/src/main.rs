@@ -137,6 +137,8 @@ enum Command {
         build: bool,
         #[arg(long)]
         allow_older: bool,
+        #[arg(long)]
+        theme_default: bool,
     },
     Backup {
         #[arg(long)]
@@ -200,6 +202,23 @@ enum ThemeAction {
         #[arg(long, default_value_t = 4321)]
         port: u16,
     },
+    Push {
+        #[arg(required_unless_present = "default", conflicts_with = "default")]
+        dir: Option<std::path::PathBuf>,
+        #[arg(long)]
+        default: bool,
+        #[arg(long, conflicts_with = "build")]
+        bundle: Option<std::path::PathBuf>,
+        #[arg(long)]
+        build: bool,
+    },
+    Rollback {
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        allow_older: bool,
+    },
+    List,
 }
 
 #[derive(Subcommand)]
@@ -266,6 +285,32 @@ fn theme_help(c: clap::Command, text: &Text) -> clap::Command {
                         .value_name(leak(t(key!("cli.theme.port_value"))))
                 })
         })
+        .mut_subcommand("push", |c| {
+            c.about(t(key!("cli.theme.push.about")))
+                .mut_arg("dir", |a| {
+                    a.help(t(key!("cli.theme.push.dir_help")))
+                        .value_name(leak(t(key!("cli.theme.dir_value"))))
+                })
+                .mut_arg("default", |a| {
+                    a.help(t(key!("cli.theme.push.default_help")))
+                })
+                .mut_arg("bundle", |a| {
+                    a.help(t(key!("cli.deploy.bundle_help")))
+                        .value_name(leak(t(key!("cli.deploy.bundle_value"))))
+                })
+                .mut_arg("build", |a| a.help(t(key!("cli.deploy.build_help"))))
+        })
+        .mut_subcommand("rollback", |c| {
+            c.about(t(key!("cli.theme.rollback.about")))
+                .mut_arg("to", |a| {
+                    a.help(t(key!("cli.theme.rollback.to_help")))
+                        .value_name(leak(t(key!("cli.rollback.to_value"))))
+                })
+                .mut_arg("allow_older", |a| {
+                    a.help(t(key!("cli.rollback.allow_older_help")))
+                })
+        })
+        .mut_subcommand("list", |c| c.about(t(key!("cli.theme.list.about"))))
 }
 
 /// `blog plugin`'s help texts.
@@ -335,6 +380,9 @@ fn command(text: &Text) -> clap::Command {
                 .mut_arg("build", |a| a.help(t(key!("cli.deploy.build_help"))))
                 .mut_arg("allow_older", |a| {
                     a.help(t(key!("cli.deploy.allow_older_help")))
+                })
+                .mut_arg("theme_default", |a| {
+                    a.help(t(key!("cli.deploy.theme_default_help")))
                 })
         })
         .mut_subcommand("backup", |c| {
@@ -490,11 +538,17 @@ fn now_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
-/// `blog deploy` and `blog rollback`: progress to stdout as each step finishes.
-fn deploy_or_rollback(
-    text: &Text,
-    action: Result<deploy::Options, deploy::RollbackOptions>,
-) -> Result<String, (Code, String)> {
+/// The commands that make or switch Worker versions.
+enum Versions {
+    Deploy(deploy::Options),
+    Rollback(deploy::RollbackOptions),
+    ThemePush(theme::push::PushOptions),
+    ThemeRollback(theme::push::RollbackOptions),
+}
+
+/// `blog deploy`, `blog rollback`, `blog theme push | rollback`: progress to stdout as each
+/// step finishes.
+fn deploy_or_rollback(text: &Text, action: Versions) -> Result<String, (Code, String)> {
     let creds = Credentials::load(Path::new(".")).map_err(|e| (e.code(), e.message(text)))?;
     let mut client = Client::from_env(creds.token).map_err(|e| (e.code(), e.message(text)))?;
     let migrations = migrations::bundled();
@@ -514,14 +568,27 @@ fn deploy_or_rollback(
     };
     let mut out = std::io::stdout().lock();
     let account = creds.account_id.as_deref();
+    let baked = |opts: &mut deploy::Options| -> Result<(), (Code, String)> {
+        if opts.bundle.is_none() && !opts.build {
+            opts.release = release::baked(text).map_err(|f| (f.code, f.message))?;
+        }
+        Ok(())
+    };
     match action {
-        Ok(mut opts) => {
-            if opts.bundle.is_none() && !opts.build {
-                opts.release = release::baked(text).map_err(|f| (f.code, f.message))?;
-            }
+        Versions::Deploy(mut opts) => {
+            baked(&mut opts)?;
             deploy::run(&mut client, account, &opts, &cx, &rt, &mut out)
         }
-        Err(opts) => deploy::rollback(&mut client, account, &opts, &cx, &rt, &mut out),
+        Versions::Rollback(opts) => {
+            deploy::rollback(&mut client, account, &opts, &cx, &rt, &mut out)
+        }
+        Versions::ThemePush(mut opts) => {
+            baked(&mut opts.source)?;
+            theme::push::push(&mut client, account, &opts, &cx, &rt, &mut out)
+        }
+        Versions::ThemeRollback(opts) => {
+            theme::push::rollback(&mut client, account, &opts, &cx, &rt, &mut out)
+        }
     }
     .map_err(|f| (f.code, f.message))?;
     Ok(String::new())
@@ -641,6 +708,35 @@ enum Outcome {
     Fail(Code, String),
 }
 
+fn deploy_command(text: &Text, command: Command) -> Result<String, (Code, String)> {
+    let Command::Deploy {
+        export,
+        bundle,
+        build,
+        allow_older,
+        theme_default,
+    } = command
+    else {
+        return Ok(String::new());
+    };
+    let theme = if theme_default {
+        deploy::ThemeCarry::Drop
+    } else {
+        deploy::ThemeCarry::Keep
+    };
+    deploy_or_rollback(
+        text,
+        Versions::Deploy(deploy::Options {
+            export,
+            bundle,
+            build,
+            allow_older,
+            release: None,
+            theme,
+        }),
+    )
+}
+
 fn theme_command(text: &Text, command: Command) -> Result<String, (Code, String)> {
     match command {
         Command::Theme {
@@ -652,6 +748,34 @@ fn theme_command(text: &Text, command: Command) -> Result<String, (Code, String)
         Command::Theme {
             action: ThemeAction::Dev { dir, port },
         } => theme::dev(text, &dir, port),
+        Command::Theme {
+            action:
+                ThemeAction::Push {
+                    dir,
+                    default: _,
+                    bundle,
+                    build,
+                },
+        } => deploy_or_rollback(
+            text,
+            Versions::ThemePush(theme::push::PushOptions {
+                dir,
+                source: deploy::Options {
+                    bundle,
+                    build,
+                    ..deploy::Options::default()
+                },
+            }),
+        ),
+        Command::Theme {
+            action: ThemeAction::Rollback { to, allow_older },
+        } => deploy_or_rollback(
+            text,
+            Versions::ThemeRollback(theme::push::RollbackOptions { to, allow_older }),
+        ),
+        Command::Theme {
+            action: ThemeAction::List,
+        } => theme::push::list(text, Path::new(".")),
         Command::Plugin {
             action: PluginAction::Check { dir },
         } => theme::check_plugin(text, &dir),
@@ -700,21 +824,7 @@ fn run(text: &Text, args: &[String]) -> Outcome {
                 clear_failed_migration,
             },
         ),
-        Some(Command::Deploy {
-            export,
-            bundle,
-            build,
-            allow_older,
-        }) => deploy_or_rollback(
-            text,
-            Ok(deploy::Options {
-                export,
-                bundle,
-                build,
-                allow_older,
-                release: None,
-            }),
-        ),
+        Some(c @ Command::Deploy { .. }) => deploy_command(text, c),
         Some(Command::Backup { no_media, out }) => backup(text, &backup::Options { no_media, out }),
         Some(Command::Restore {
             file,
@@ -746,7 +856,7 @@ fn run(text: &Text, args: &[String]) -> Outcome {
             allow_older,
         }) => deploy_or_rollback(
             text,
-            Err(deploy::RollbackOptions {
+            Versions::Rollback(deploy::RollbackOptions {
                 to,
                 db,
                 yes,

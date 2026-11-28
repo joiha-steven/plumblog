@@ -1,4 +1,4 @@
-//! `blog theme new | check | dev` and `blog plugin check` (docs/ARCHITECTURE.md, Themes).
+//! `blog theme new | check | dev | push | rollback | list` and `blog plugin check` (docs/ARCHITECTURE.md, Themes).
 //! Validation is the render crate's own loader, so a folder that passes loads in the Worker.
 
 pub mod check;
@@ -8,8 +8,10 @@ mod embed;
 pub mod files;
 pub mod finding;
 mod hardtext;
+pub mod push;
 pub mod sample;
 mod secrets;
+pub mod store;
 
 use crate::text::{Code, Text};
 use files::DirFiles;

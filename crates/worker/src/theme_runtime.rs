@@ -228,6 +228,7 @@ mod tests {
                 .iter()
                 .map(|(p, t)| ((*p).to_owned(), (*t).to_owned()))
                 .collect(),
+            assets: std::collections::BTreeMap::new(),
         };
         let toml = t.files["theme.toml"].replacen("name = \"minimal\"", "name = \"paper\"", 1);
         t.files.insert("theme.toml".into(), toml);

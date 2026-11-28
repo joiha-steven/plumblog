@@ -131,6 +131,11 @@ codes! {
     ThemeCheckFailed => "theme.check_failed",
     ThemeServeFailed => "theme.serve_failed",
     PluginCheckFailed => "plugin.check_failed",
+    ThemeInvalid => "theme.invalid",
+    ThemePushPending => "theme.push_pending_migrations",
+    ThemeUnrecoverable => "deploy.theme_unrecoverable",
+    ThemeRollbackNoRecord => "theme.rollback_no_record",
+    ThemeRollbackUnknown => "theme.rollback_unknown",
 }
 
 /// One language's `[cli]` text, English behind it.

@@ -13,3 +13,4 @@ node_modules/
 .wrangler/
 .DS_Store
 .blog-deploy.lock
+.blog/

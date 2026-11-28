@@ -139,14 +139,15 @@ files=()
 while IFS= read -r -d '' f; do [ -f "$f" ] && files+=("$f"); done < "$list_file"
 
 step "site secrets and state stay out of git"
-# The API token (.env), resource names (site.local.toml) and database backups are per site;
+# The API token (.env), resource names (site.local.toml), database backups and pushed theme
+# copies (.blog/) are per site;
 # committed, they would leak or make every pull conflict (docs/ARCHITECTURE.md, Site-specific state).
 # .env.example (names only, no values) is the one allowed .env file, as in .gitignore.
 tracked=$(git -c core.quotePath=false ls-files -- ':(glob)**/.env' ':(glob)**/.env.*' \
-  ':(exclude,glob)**/.env.example' ':(glob)**/site.local.toml' ':(glob)**/backups/**') \
+  ':(exclude,glob)**/.env.example' ':(glob)**/site.local.toml' ':(glob)**/backups/**' ':(glob)**/.blog/**') \
   || fail "git ls-files failed"
 if [ -n "$tracked" ]; then echo "$tracked" | sed 's/^/  /'; fail "tracked site files; git rm --cached them"; fi
-for p in .env .env.local site.local.toml backups/x.sql; do
+for p in .env .env.local site.local.toml backups/x.sql .blog/themes/x/theme.json; do
   git check-ignore -q --no-index "$p" || fail "$p is not ignored by .gitignore"
 done
 

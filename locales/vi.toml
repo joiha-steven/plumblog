@@ -192,6 +192,11 @@ seen_status = "{path} trả lời HTTP {status}"
 seen_version = "/healthz trả lời bằng phiên bản {got}, không phải {want}"
 log_failed = "Lưu ý: không ghi được lần đưa lên này vào nhật ký hệ thống của trang: {error}"
 done = "Đã đưa phiên bản {version} lên {origin}."
+theme_default_help = "Chuyển về giao diện mặc định: không mang giao diện đã đẩy lên sang phiên bản mới"
+theme_dropped = "Bỏ giao diện đã đẩy lên {name} (--theme-default): phiên bản mới dùng giao diện mặc định."
+theme_local = "Giữ giao diện đã đẩy lên {name} ({hash}) từ bản sao trong thư mục này."
+theme_local_unusable = "Không dùng được bản sao của giao diện {name} trong thư mục này ({reason}); lấy lại từ trang."
+theme_fetched = "Giữ giao diện đã đẩy lên {name} ({hash}), lấy lại từ trang và đã kiểm tra."
 
 [cli.release]
 downloading = "Đang tải gói phát hành: {url}"
@@ -465,6 +470,11 @@ update_downgrade = "Bản phát hành {target} cũ hơn blog này ({current}), n
 update_version_invalid = "\"{value}\" không phải số phiên bản. Hãy viết dạng vX.Y.Z, ví dụ v0.2.0."
 update_no_build = "Bản phát hành {tag} không có blog cho máy này ({target}). Chưa có gì thay đổi. Xem {page}."
 update_replace_failed = "Không thay được {path}: {reason}. Blog hiện tại vẫn chạy và không bị đổi. Hãy chuyển blog sang thư mục bạn có quyền ghi, hoặc chạy blog update với quyền sửa file đó."
+theme_unrecoverable = "Trang đang dùng giao diện đã đẩy lên {name}, nhưng blog không lấy lại được các tệp của nó ({reason}). Mỗi lần đưa lên đều tải lại toàn bộ tệp tĩnh, nên lần này sẽ âm thầm làm mất giao diện. Hãy đẩy lại thư mục giao diện (`blog theme push <thư-mục>`), hoặc đưa lên với --theme-default nếu bạn muốn chuyển về giao diện mặc định."
+theme_invalid = "Không đẩy giao diện lên được: {path}: {reason}."
+theme_push_pending = "Gói này có các bản cập nhật cơ sở dữ liệu mà trang chưa chạy ({list}). Đẩy giao diện không bao giờ cập nhật cơ sở dữ liệu: hãy chạy `blog deploy` trước, rồi đẩy giao diện."
+theme_rollback_unknown = "Phiên bản {version} không do một lần đẩy giao diện được ghi trong thư mục này tạo ra. Các phiên bản gần đây có giao diện: {list}. Xem `blog theme list`."
+theme_rollback_no_record = "Trong {path} không có lần đẩy giao diện nào, nên không có giao diện nào để quay lại. `blog rollback` quay về phiên bản trước lần đưa lên gần nhất."
 
 [cli.reason]
 # Lý do một file phát hành hay chữ ký bị từ chối: phần {reason} của release.archive_invalid,
@@ -529,7 +539,7 @@ sig_global_wrong_length = "phần thứ hai của chữ ký có độ dài sai"
 sig_unknown_algorithm = "chữ ký dùng cách chưa biết"
 
 [cli.theme]
-about = "Tạo và kiểm tra giao diện (new, check, dev)"
+about = "Tạo, kiểm tra và đưa giao diện lên (new, dev, check, push, rollback, list)"
 dir_value = "THƯ MỤC"
 name_value = "TÊN"
 port_value = "CỔNG"
@@ -557,6 +567,26 @@ bind_failed = "Không lắng nghe được cổng {port}: {reason}. Thử cổng
 serve_failed = "Bản xem thử đã dừng: {reason}."
 problem_title = "Giao diện này có lỗi"
 problem_hint = "Sửa các lỗi bên dưới rồi tải lại trang. Đây cũng là những gì `blog theme check` báo."
+
+[cli.theme.push]
+about = "Đưa giao diện lên trang: kiểm tra, rồi đưa lên một phiên bản mới mang giao diện đó (tự quay lại nếu kiểm tra trang không đạt)"
+dir_help = "Thư mục giao diện (được kiểm tra trước; có lỗi là dừng)"
+default_help = "Quay về giao diện mặc định"
+pushing = "Đang đẩy giao diện {name} {version} ({hash})."
+default = "Đang chuyển về giao diện mặc định."
+
+[cli.theme.rollback]
+about = "Quay về phiên bản trước lần đẩy giao diện gần nhất, hoặc về một phiên bản do lần đẩy giao diện trước đó tạo ra"
+to_help = "Một phiên bản do lần đẩy giao diện trước đó tạo ra (xem `blog theme list`)"
+active = "Trang giờ dùng giao diện {name} {version} ({hash})."
+default = "Trang giờ dùng giao diện mặc định."
+
+[cli.theme.list]
+about = "Liệt kê các phiên bản gần đây và giao diện của chúng, mới nhất trước"
+push = "{at}  {version}  {outcome}  đẩy giao diện: {theme}"
+deploy = "{at}  {version}  {outcome}  đưa lên: {theme}"
+default = "giao diện mặc định"
+empty = "Thư mục này chưa ghi lần đưa lên nào."
 
 [cli.plugin]
 about = "Kiểm tra plugin (check)"
