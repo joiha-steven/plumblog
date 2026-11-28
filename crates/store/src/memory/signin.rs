@@ -219,6 +219,17 @@ impl super::State {
         }
     }
 
+    /// `Unauthenticated` unless `by.proof` holds, then `Forbidden` unless `by.id` is an
+    /// active owner (see [`crate::Admin`]). Under the store lock, so it holds for the write.
+    pub(super) fn require_admin(&self, by: &crate::Admin, now: i64) -> Result<()> {
+        self.require_proof(by.id, &by.proof, now)?;
+        #[cfg(any(test, feature = "contract"))]
+        if by.proof == Proof::Unchecked {
+            return Ok(());
+        }
+        by.refusal(self.users.get(&by.id)).map_or(Ok(()), Err)
+    }
+
     /// `Unauthenticated` unless `proof` holds (checked before anything else, as D1 does).
     pub(super) fn require_proof(&self, user: UserId, proof: &Proof, now: i64) -> Result<()> {
         if self.proof_holds(user, proof, now) {

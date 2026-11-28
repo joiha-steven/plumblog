@@ -43,6 +43,7 @@ export const KIND_GROUPS = [
       "auth.token_created",
       "auth.token_revoked",
       "user.created",
+      "user.changed",
     ],
   },
   { id: "content", kinds: ["content.changed", "comment.created", "comment.moderated"] },
