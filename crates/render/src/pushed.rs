@@ -2,7 +2,8 @@
 //! theme in one JSON document, so the Worker loads it with a single fetch. `blog theme push`
 //! writes it with these types; the Worker reads it with [`PushedTheme::parse`].
 //!
-//! Files under the theme's `assets/` are not in the document: each is its own static asset at
+//! Files under the theme's `assets/` are not in the document, except the few the loader reads
+//! as text ([`document_assets`]): each is its own static asset at
 //! `/_theme/<name>/assets/<path below assets/>`, listed in `assets` with its SHA-256 so a
 //! later deploy can fetch the theme back from the site and check every byte.
 
@@ -40,6 +41,22 @@ pub const MAX_DOCUMENT: usize = 256 * 1024;
 
 /// Prefix of the theme folder whose files ship as separate static assets.
 pub const ASSETS_DIR: &str = "assets/";
+
+/// Files below `assets/` that the loader reads as text, so a push carries them in the
+/// document as well as serving them as assets: the `fonts.faces` stylesheet. `manifest` is
+/// `theme.toml.json`. Choice stylesheets (`choices[].css`) are read too but deliberately not
+/// listed: they must sit outside `assets/`, and `blog theme check` fails when one does not.
+/// The loader test in `crates/cli/tests/theme.rs` covers the rest.
+#[must_use]
+pub fn document_assets(manifest: &str) -> Vec<String> {
+    let faces = serde_json::from_str::<serde_json::Value>(manifest)
+        .ok()
+        .and_then(|m| m.pointer("/fonts/faces")?.as_str().map(str::to_owned));
+    faces
+        .filter(|p| p.starts_with(ASSETS_DIR))
+        .into_iter()
+        .collect()
+}
 
 /// Static asset path of `theme.json` for theme `name`.
 #[must_use]

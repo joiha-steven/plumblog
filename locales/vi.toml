@@ -827,6 +827,10 @@ fix = "Xoá nó, và đừng đặt tên tệp bắt đầu bằng admin."
 what = "Nhiều tệp hơn mức một giao diện hay plugin có; phần còn lại chưa được đọc."
 fix = "Kiểm tra đúng thư mục chưa, và bỏ các tệp không thuộc về nó."
 
+[cli.finding.theme_pushed]
+what = "Các tệp mà lệnh đẩy giao diện gửi đi không nạp được trên trang: {detail}. Trang sẽ hiện giao diện mặc định."
+fix = "Sửa điều thông báo nêu. Tệp cần để nạp giao diện phải là tệp mà lệnh đẩy gửi đi: tệp văn bản ngoài assets/, và tệp được nêu trong `fonts.faces`."
+
 [cli.finding.theme_too_large]
 what = "Các tệp văn bản của giao diện tạo ra theme.json nặng {size} KB; giới hạn là {max} KB, vượt quá thì trang sẽ hiện giao diện mặc định."
 fix = "Bớt chữ lớn trong mẫu, tệp kiểu và tệp ngôn ngữ (ảnh và phông chữ để trong assets/, không tính vào giới hạn), hoặc rút gọn chúng."
@@ -836,7 +840,7 @@ what = "Lớn hơn {max} byte, mức tối đa cho một tệp của giao diện
 fix = "Làm tệp nhỏ lại, hoặc bỏ nó khỏi thư mục."
 
 [cli.finding.file_not_text]
-what = "Không phải văn bản UTF-8. Ngoài assets/, giao diện chỉ chứa tệp văn bản."
+what = "Không phải văn bản UTF-8. Các tệp ngoài assets/ và tệp CSS khai báo phông chữ của giao diện phải là văn bản."
 fix = "Lưu lại dưới dạng UTF-8, hoặc chuyển vào assets/ nếu nó không phải văn bản."
 
 [cli.finding.file_asset_name]

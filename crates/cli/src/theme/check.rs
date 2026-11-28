@@ -425,6 +425,8 @@ pub fn check_theme(files: &DirFiles) -> Vec<Finding> {
             return out;
         }
     };
+    // What a push carries must load on its own: the Worker never sees the folder.
+    out.extend(push_document_finding(files, &default));
     if let Some(m) = &manifest {
         out.extend(contrast_findings(src, m));
     }
@@ -443,6 +445,24 @@ pub fn check_theme(files: &DirFiles) -> Vec<Finding> {
         }
     }
     out
+}
+
+/// The files as a push carries them ([`DirFiles::document`]), loaded the way the Worker loads
+/// them. Skipped when the folder itself does not load (that is reported first).
+fn push_document_finding(files: &DirFiles, default: &Embedded) -> Option<Finding> {
+    struct Doc<'a>(BTreeMap<&'a str, &'a str>);
+    impl ThemeFiles for Doc<'_> {
+        fn read(&self, path: &str) -> Option<&str> {
+            self.0.get(path).copied()
+        }
+        fn paths(&self) -> Vec<&str> {
+            self.0.keys().copied().collect()
+        }
+    }
+    let doc = Doc(files.document());
+    Theme::load(&doc, Some(default), Vec::new(), ASSETS_URL)
+        .err()
+        .map(|e| Finding::new(Level::Error, Kind::ThemePushed, "", None).arg("detail", e.detail))
 }
 
 /// Asset names are URL path segments as they are: a push serves them at the same path, and

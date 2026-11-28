@@ -174,8 +174,19 @@ fn push_uploads_the_theme_and_binds_it() {
             && !doc.files.contains_key("theme.toml")
             && doc.files.contains_key("templates/base.html")
     );
-    assert!(!doc.files.keys().any(|p| p.starts_with("assets/")));
+    // Below assets/ the document carries only the file the loader reads (`fonts.faces`).
+    let carried: Vec<_> = doc
+        .files
+        .keys()
+        .filter(|p| p.starts_with("assets/"))
+        .collect();
+    assert_eq!(carried, ["assets/fonts/faces.css"]);
     assert!(doc.assets.contains_key("minimal.js"));
+    // What the version serves loads the way the Worker loads it (issue #110).
+    let default = plumblog_cli::theme::files::Embedded::default_theme();
+    if let Err(e) = plumblog_render::Theme::load(&doc, Some(&default), Vec::new(), "/_theme") {
+        panic!("the served theme.json does not load: {}", e.detail);
+    }
     let rec = load(&dir).deploys.last().unwrap().clone();
     assert_eq!(rec.outcome, "deployed");
     assert_eq!(rec.kind.as_deref(), Some("theme_push"));

@@ -842,6 +842,10 @@ fix = "Delete it, and do not name files admin*."
 what = "More files than a theme or plugin has; the rest were not read."
 fix = "Check that this is the right folder, and remove files that do not belong."
 
+[cli.finding.theme_pushed]
+what = "The files a push carries do not load on the site: {detail}. The site would show the default theme."
+fix = "Fix what the message names. A file the theme needs to load must be one a push carries: text files outside assets/, plus the file named by `fonts.faces`."
+
 [cli.finding.theme_too_large]
 what = "The theme's text files make a theme.json of {size} KB; the limit is {max} KB, and the site would show the default theme."
 fix = "Move large text out of templates, styles and locales (images and fonts belong in assets/, which do not count), or trim it."
@@ -851,7 +855,7 @@ what = "Larger than {max} bytes, the most a theme file may be."
 fix = "Make it smaller, or remove it from the folder."
 
 [cli.finding.file_not_text]
-what = "Not UTF-8 text. Outside assets/, a theme holds only text files."
+what = "Not UTF-8 text. A theme's files outside assets/, and the fonts stylesheet, must be text."
 fix = "Save it as UTF-8, or move it into assets/ if it is not text."
 
 [cli.finding.file_asset_name]
