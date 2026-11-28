@@ -179,6 +179,15 @@ pub struct SavePost {
     pub now: i64,
 }
 
+/// What a save did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Saved {
+    pub id: PostId,
+    /// False when nothing was written: a repeated client id (this request did not insert the
+    /// post) or a stale update the row already matches.
+    pub wrote: bool,
+}
+
 /// Longest client request id.
 pub const MAX_CLIENT_ID: usize = 64;
 
@@ -337,7 +346,11 @@ pub trait PostStore {
     /// if the new status is published, deletes the redirect from the new path (a draft or
     /// scheduled save keeps it, so the old URL works until the post is live); bumps the
     /// content version if the old or new status is published.
-    async fn save_post(&self, post: SavePost) -> Result<PostId>;
+    async fn save_post_outcome(&self, post: SavePost) -> Result<Saved>;
+    /// [`PostStore::save_post_outcome`] for callers that need only the id.
+    async fn save_post(&self, post: SavePost) -> Result<PostId> {
+        self.save_post_outcome(post).await.map(|s| s.id)
+    }
     /// `PostNotFound`.
     async fn get_post(&self, id: PostId) -> Result<Post>;
     /// The post `author` created with `client_id` (see [`SavePost::client_id`]), any status.

@@ -5,7 +5,7 @@ use plumblog_model::{
 };
 use plumblog_store::{
     Post, PostCounts, PostCursor, PostKind, PostOrder, PostQuery, PostStatus, PostStore,
-    PostSummary, Revision, SavePost, search,
+    PostSummary, Revision, SavePost, Saved, search,
 };
 use worker::wasm_bindgen::JsValue;
 
@@ -218,7 +218,7 @@ async fn explain_miss(store: &D1Store, id: PostId, wrong_state: &str) -> Error {
 }
 
 impl PostStore for D1Store {
-    async fn save_post(&self, post: SavePost) -> Result<PostId> {
+    async fn save_post_outcome(&self, post: SavePost) -> Result<Saved> {
         self.save_post_impl(post).await
     }
 

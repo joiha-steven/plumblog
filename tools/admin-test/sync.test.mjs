@@ -639,7 +639,8 @@ test("a create that settles within the bound: the mount gets the post and its dr
  * `hang` leaves that many unanswered for good, also after acting.
  */
 function mockServer() {
-  const s = { posts: new Map(), keys: new Map(), calls: [], lose: 0, hang: 0, next: 20 };
+  // `refuse`: answers by create number (1-based) given before the server acts, like auth.
+  const s = { posts: new Map(), keys: new Map(), calls: [], lose: 0, hang: 0, next: 20, refuse: new Map() };
   const answer = (value) => {
     if (s.hang > 0) {
       s.hang--;
@@ -654,6 +655,8 @@ function mockServer() {
   s.api = {
     async createPost(input) {
       s.calls.push(["create", input]);
+      const refused = s.refuse.get(s.calls.filter((c) => c[0] === "create").length);
+      if (refused) return refused;
       let p = s.posts.get(s.keys.get(input.client_id));
       if (!p) {
         p = post(s.next++, input.title, input.markdown, 1);
@@ -814,4 +817,40 @@ test("a 409 from another writer's text still asks, even after a lost answer", as
   await settle();
   assert.equal(e.chosen.length, 1, "the writer picks");
   assert.equal(s.posts.get(3).markdown, "someone else", "nothing overwritten");
+});
+
+test("a create refused for its session (401, 403, 429) keeps its id: after sign-in, still one post", async () => {
+  for (const [status, code] of [[401, "auth.unauthenticated"], [403, "auth.forbidden"], [429, "auth.rate_limited"]]) {
+    reset();
+    const s = mockServer();
+    s.lose = 1; // the first send made the post; its answer was lost
+    s.refuse.set(2, { ok: false, error: { code, status } });
+    const e = editor(s.api);
+    const key = e.st.key;
+    await quiet(async () => {
+      await e.save("Signed out", "text");
+      await settle(60);
+    });
+    assert.deepEqual(s.calls.map((c) => c[0]), ["create", "create"], String(status));
+    const id = s.calls[0][1].client_id;
+    assert.equal(localStorage.getItem(`plumblog-create:${key}`), id, `${status}: the id is kept`);
+    await e.save("Signed out", "text, more");
+    await settle(80);
+    assert.equal(s.calls.filter((c) => c[0] === "create").at(-1)[1].client_id, id, `${status}: the same id`);
+    assert.equal(s.posts.size, 1, `${status}: one post`);
+    assert.equal([...s.posts.values()][0].markdown, "text, more");
+  }
+});
+
+test("a create refused for its content (400, 409) drops its id: the next post gets a new one", async () => {
+  reset();
+  const s = mockServer();
+  s.refuse.set(1, { ok: false, error: { code: "input.invalid", status: 400, field: "title" } });
+  const e = editor(s.api);
+  const key = e.st.key;
+  await quiet(async () => {
+    await e.save("Bad", "text");
+    await settle();
+  });
+  assert.equal(localStorage.getItem(`plumblog-create:${key}`), null);
 });

@@ -83,10 +83,12 @@ test("client_id is checked: 1-64 of A-Z a-z 0-9 - _", async () => {
 test("two creates with one client_id at once make one post", async () => {
   for (const [a, b] of [["race", "race"], ["left", "right"]]) {
     const key = randomUUID();
+    const logged = creates();
     const both = await Promise.all([a, b].map((slug) => api("POST", "/api/v1/posts", newPost(slug, { client_id: key }))));
     assert.deepEqual(both.map((r) => r.status), [201, 201], both.map((r) => r.text).join(" | "));
     assert.equal(both[0].json.id, both[1].json.id);
     assert.equal(count(`SELECT COUNT(*) AS n FROM posts WHERE client_id = '${key}'`), 1);
+    assert.equal(creates(), logged + 1, "only the insert that won logs post.create");
   }
 });
 

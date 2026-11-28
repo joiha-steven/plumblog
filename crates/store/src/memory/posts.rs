@@ -6,6 +6,7 @@ use super::post_save::post_path;
 use super::{MemoryStore, invalid, not_found, post_not_found};
 use crate::{
     Post, PostCounts, PostKind, PostQuery, PostStatus, PostStore, PostSummary, Revision, SavePost,
+    Saved,
 };
 
 #[expect(
@@ -13,7 +14,7 @@ use crate::{
     reason = "in-memory stand-in for async D1 storage"
 )]
 impl PostStore for MemoryStore {
-    async fn save_post(&self, post: SavePost) -> Result<PostId> {
+    async fn save_post_outcome(&self, post: SavePost) -> Result<Saved> {
         self.write(|s| s.save_post(post))
     }
 

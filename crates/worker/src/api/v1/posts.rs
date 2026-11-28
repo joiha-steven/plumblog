@@ -8,7 +8,7 @@ use plumblog_model::{
 };
 use plumblog_store::{
     NewRevision, Post, PostCursor, PostKind, PostOrder, PostQuery, PostStatus, PostStore,
-    PostSummary, SavePost, SettingsStore, valid_client_id,
+    PostSummary, SavePost, Saved, SettingsStore, valid_client_id,
 };
 use plumblog_syslog::EventKind;
 
@@ -389,9 +389,9 @@ fn render(markdown: &str) -> plumblog_markdown::Rendered {
 
 /// Saves and maps a refused save: `Conflict` names `slug` or `lang` (the pair another post
 /// holds), and a bad reference (tag, series, cover, body media) stays `InvalidInput`.
-async fn save(ctx: &Ctx, post: SavePost) -> Result<PostId> {
+async fn save(ctx: &Ctx, post: SavePost) -> Result<Saved> {
     let (lang_v, slug_v, id) = (post.lang.clone(), post.slug.clone(), post.id);
-    match ctx.store.save_post(post).await {
+    match ctx.store.save_post_outcome(post).await {
         Err(e) if e.code == ErrorCode::Conflict => {
             let other = ctx.store.find_post(&lang_v, &slug_v).await.ok().flatten();
             let field = match other {
@@ -474,7 +474,7 @@ pub async fn create(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
         input.str("slug").unwrap_or_default(),
     )
     .await?;
-    let id = save(
+    let saved = save(
         ctx,
         SavePost {
             id: None,
@@ -513,12 +513,12 @@ pub async fn create(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
         },
     )
     .await?;
-    let post = ctx.store.get_post(id).await?;
-    // Not this request's insert (it sets created_at = now): it lost a race to a create with
-    // the same client id and the store returned the winner. Same second: logged twice, at worst.
-    if client_id.is_some() && post.created_at != ctx.now {
-        return replay(ctx, id).await;
+    // Not inserted by this request: it lost a race to a create with the same client id, and
+    // the store returned the winner.
+    if !saved.wrote {
+        return replay(ctx, saved.id).await;
     }
+    let post = ctx.store.get_post(saved.id).await?;
     log(ctx, p, "post.create", &post).await;
     Ok(Reply::json(201, post_json(&post, &warning_codes(&r))))
 }
@@ -687,15 +687,14 @@ pub async fn update(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
         now: ctx.now,
     };
     match save(ctx, save_post).await {
-        // Stale but equal: this same update landed before and its answer was lost; the store
-        // wrote nothing, so there is no change to log.
-        Ok(_) if old.version != expected => {
+        // Stale but equal: this same update landed before and its answer was lost (or another
+        // save of the same content won meanwhile); the store wrote nothing, so nothing to log.
+        Ok(s) if !s.wrote => {
             worker::console_log!(
-                "[{}] PATCH post {}: version {expected} is stale, but the stored post {} \
-                 already holds this update",
+                "[{}] PATCH post {}: version {expected} is stale, but the stored post already \
+                 holds this update",
                 ctx.request_id.as_str(),
-                id.0,
-                old.version
+                id.0
             );
             let post = ctx.store.get_post(id).await?;
             return Ok(Reply::json(200, post_json(&post, &warnings)));

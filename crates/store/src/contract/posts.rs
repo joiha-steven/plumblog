@@ -8,7 +8,7 @@ use super::kit::{
 };
 use crate::{
     CommentStatus, NewComment, NewRevision, PostKind, PostOrder, PostQuery, PostStatus,
-    PostSummary, SavePost, Store,
+    PostSummary, SavePost, Saved, Store,
 };
 
 pub async fn post_insert_and_update<S: Store>(db: &S) -> Check {
@@ -898,7 +898,12 @@ async fn post_count<S: Store>(db: &S) -> super::kit::Got<usize> {
 pub async fn post_client_id_replays<S: Store>(db: &S) -> Check {
     let a = user(db, "alice").await?;
     let b = user(db, "bob").await?;
-    let first = save(db, keyed(a, "hello", "k-1")).await?;
+    let saved = ok(
+        "first keyed create",
+        db.save_post_outcome(keyed(a, "hello", "k-1")).await,
+    )?;
+    that("the first create writes", saved.wrote)?;
+    let first = saved.id;
     let made = ok("get_post", db.get_post(first).await)?;
     eq!(
         "find_client_post",
@@ -909,15 +914,28 @@ pub async fn post_client_id_replays<S: Store>(db: &S) -> Check {
     // The same body (same slug): a replay, not a taken slug.
     eq!(
         "same body again",
-        save(db, keyed(a, "hello", "k-1")).await?,
-        first
+        ok(
+            "replay",
+            db.save_post_outcome(keyed(a, "hello", "k-1")).await
+        )?,
+        Saved {
+            id: first,
+            wrote: false
+        },
     )?;
     // A different body, typed while the first answer was lost: still that post, unchanged.
     let mut later = keyed(a, "hello-2", "k-1");
     later.title = "Later".into();
     later.status = PostStatus::Published;
     later.published_at = Some(T0);
-    eq!("other body, same key", save(db, later).await?, first)?;
+    eq!(
+        "other body, same key",
+        ok("replay", db.save_post_outcome(later).await)?,
+        Saved {
+            id: first,
+            wrote: false
+        },
+    )?;
     eq!("one post", post_count(db).await?, 1)?;
     eq!(
         "replay leaves the post",
@@ -960,12 +978,17 @@ pub async fn post_client_id_concurrent<S: Store>(db: &S) -> Check {
     // Same body (both race for the slug too) and different bodies (only the key collides).
     for (x, y, key) in [("same", "same", "race-1"), ("left", "right", "race-2")] {
         let (r1, r2) = both(
-            db.save_post(keyed(a, x, key)),
-            db.save_post(keyed(a, y, key)),
+            db.save_post_outcome(keyed(a, x, key)),
+            db.save_post_outcome(keyed(a, y, key)),
         )
         .await;
-        let (r1, r2) = (ok("first racer", r1)?, ok("second racer", r2)?);
-        eq!(&format!("{key}: one id for both"), r1, r2)?;
+        let (s1, s2) = (ok("first racer", r1)?, ok("second racer", r2)?);
+        eq!(&format!("{key}: one id for both"), s1.id, s2.id)?;
+        that(
+            &format!("{key}: exactly one wrote ({s1:?}, {s2:?})"),
+            s1.wrote != s2.wrote,
+        )?;
+        let r1 = s1.id;
         eq!(
             &format!("{key}: find_client_post"),
             ok("find_client_post", db.find_client_post(a, key).await)?,
@@ -990,7 +1013,10 @@ pub async fn post_stale_equal_save<S: Store>(db: &S) -> Check {
         author_id: Some(u),
         created_at: T0,
     });
-    save(db, edit.clone()).await?;
+    that(
+        "a current update writes",
+        ok("update", db.save_post_outcome(edit.clone()).await)?.wrote,
+    )?;
     let stored = ok("get_post", db.get_post(id).await)?;
     eq!("edited to version 2", stored.version, 2)?;
     let v = version(db).await?;
@@ -998,7 +1024,11 @@ pub async fn post_stale_equal_save<S: Store>(db: &S) -> Check {
     let mut retry = edit.clone();
     retry.tag_ids = vec![t1, t2, t1];
     retry.now = T0 + 5;
-    eq!("stale equal save", save(db, retry).await?, id)?;
+    eq!(
+        "stale equal save",
+        ok("stale equal save", db.save_post_outcome(retry).await)?,
+        Saved { id, wrote: false },
+    )?;
     eq!(
         "nothing written",
         ok("get_post", db.get_post(id).await)?,

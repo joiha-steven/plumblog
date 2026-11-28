@@ -3,7 +3,7 @@
 use plumblog_model::{Error, PostId, Result, RevisionId, UserId};
 
 use super::{State, conflict, invalid, next_seq, post_not_found};
-use crate::{NewRevision, Post, PostStatus, Revision, SavePost, search};
+use crate::{NewRevision, Post, PostStatus, Revision, SavePost, Saved, search};
 
 /// The `Conflict` of a save from a version that is no longer stored.
 pub(super) fn stale_version(id: PostId, current: i64, expected: Option<i64>) -> Error {
@@ -91,10 +91,10 @@ impl State {
         Ok(())
     }
 
-    pub(super) fn save_post(&mut self, input: SavePost) -> Result<PostId> {
+    pub(super) fn save_post(&mut self, input: SavePost) -> Result<Saved> {
         check_post_shape(&input)?;
         if let Some(id) = self.replayed(&input) {
-            return Ok(id);
+            return Ok(Saved { id, wrote: false });
         }
         let old = match input.id {
             Some(id) => {
@@ -108,7 +108,7 @@ impl State {
                 if input.expected_version != Some(old.version) {
                     // The same save again (its answer was lost): nothing to write.
                     if input.matches(old) {
-                        return Ok(id);
+                        return Ok(Saved { id, wrote: false });
                     }
                     return Err(stale_version(id, old.version, input.expected_version));
                 }
@@ -192,7 +192,7 @@ impl State {
         self.post_media.retain(|(p, _)| *p != id);
         self.post_media
             .extend(input.media_ids.into_iter().map(|m| (id, m)));
-        Ok(id)
+        Ok(Saved { id, wrote: true })
     }
 
     /// Rows that follow a saved post: search text, revision, redirects, version.

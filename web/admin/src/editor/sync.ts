@@ -110,6 +110,13 @@ export function createId(key: string): string {
   return id;
 }
 
+/**
+ * Whether a create's failure says the server refused this body, so no attempt with its id made
+ * a post. No answer, a server error, or a refusal of the session (401, 403, 429: checked before
+ * the id is looked up, so an earlier attempt may still have made the post) keep the id.
+ */
+const refusesContent = (status: number): boolean => status >= 400 && status < 500 && ![401, 403, 429].includes(status);
+
 /** A create answered (a post, or a refusal that made none): the next post gets a new id. */
 function forgetCreateId(key: string): void {
   createIds.delete(key);
@@ -413,9 +420,7 @@ export function startSync(o: SyncHost, delay = 3000, slow = 20_000, createMs = 2
         clearTimeout(late);
         lagging = false;
       }
-      // Only a post or a refusal (4xx) is sure: after no answer or a server error the post may
-      // exist, so the id stays for the next try (here or after a reload).
-      if (r.ok || (r.error.status >= 400 && r.error.status < 500)) forgetCreateId(key);
+      if (r.ok || refusesContent(r.error.status)) forgetCreateId(key);
       if (r.ok) {
         id = r.value.id;
         await adopt(r.value);
