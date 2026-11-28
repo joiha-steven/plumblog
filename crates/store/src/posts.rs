@@ -241,6 +241,7 @@ pub struct PostQuery {
     pub pinned: Option<bool>,
     pub order: PostOrder,
     pub after: Option<PostCursor>,
+    /// Capped at [`crate::MAX_PAGE`] + 1: a page plus the probe row for "is there more".
     pub limit: u32,
 }
 
