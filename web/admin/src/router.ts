@@ -15,12 +15,21 @@ export const HREF = {
   new: "/admin/posts/new",
 } as const satisfies Record<Exclude<Screen, "missing" | "edit" | AuthScreen>, string>;
 
+/** The screens that live under Settings: the top-nav item stays current on each. */
+const SETTINGS_SCREENS: readonly Screen[] = ["settings"];
+export const inSettings = (s: Screen): boolean => SETTINGS_SCREENS.includes(s);
+
+/** Sections drawn by the settings screen itself, at /admin/settings/<id> ("general" is /admin/settings). */
+export const SETTINGS_SECTIONS: readonly string[] = [];
+
 export const editHref = (id: number): string => `/admin/posts/${id}`;
 
 export interface Route {
   screen: Screen;
   /** The post id on `edit`. */
   id?: number;
+  /** The settings section on `settings`; absent is General. */
+  section?: string;
 }
 
 export function current(): Route {
@@ -32,6 +41,8 @@ export function current(): Route {
   if (auth) return { screen: auth[1] as AuthScreen };
   const edit = /^\/admin\/posts\/(\d{1,15})$/.exec(path);
   if (edit) return { screen: "edit", id: Number(edit[1]) };
+  const sec = /^\/admin\/settings\/([a-z]+)$/.exec(path);
+  if (sec?.[1] && SETTINGS_SECTIONS.includes(sec[1])) return { screen: "settings", section: sec[1] };
   const hit = Object.entries(HREF).find(([, href]) => href === path);
   return { screen: hit ? (hit[0] as Screen) : "missing" };
 }
