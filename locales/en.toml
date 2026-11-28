@@ -246,6 +246,14 @@ recorded = "Recorded as the last backup (setting last_backup, and site.local.tom
 complete = "Backup complete: the database and all media."
 database_only = "Backup finished: the database only. The media are not copied; run blog backup without --no-media to copy them."
 with_missing = "Backup finished, but {missing} media files the database lists are not in R2 (see above), so it is not complete."
+left_out = "Warning: {rows} rows were left out of the copy ({tables}). They were added while it ran, and the row they belong to was deleted before it could be read, so the site no longer has them either."
+reason_file_exists = "a file with that name exists already"
+reason_no_r2_key = "the row has no r2_key"
+reason_no_bytes = "the row has no size (bytes)"
+reason_variants_unreadable = "variants_json is not valid JSON ({detail})"
+reason_variants_not_list = "variants_json is not a list"
+reason_variant_no_key = "a variant has no key"
+reason_variant_no_bytes = "a variant has no size (bytes)"
 
 [cli.restore]
 about = "Replace the whole database with a .sql backup (from blog backup or blog deploy), even one older than 7 days"
@@ -276,7 +284,11 @@ reason_no_settings = "it does not create the settings table"
 reason_row_before_table = "it inserts rows into d1_migrations or settings before creating the table"
 reason_row_unreadable = "a row of d1_migrations or settings cannot be read"
 reason_no_counts = "it does not end with the row counts blog writes, so it is cut short or was not made by blog backup or blog deploy"
-counts_ok = "Checked: all {tables} tables hold the {rows} rows the file has."
+counts_ok = "Checked: all {tables} tables hold at least the {rows} rows the file has."
+sequence_warning = "Warning: the database did not accept raising its id counters ({detail}). The restore stands, but new posts, media or log entries may get ids that were used before the restore, which links or webhooks may still name."
+reason_upload_not_https = "the upload link Cloudflare gave is not https"
+reason_upload_no_reply = "the upload link did not answer"
+reason_upload_status = "the upload link answered HTTP {status}"
 
 [cli.help]
 # Our own help screen; clap's English help is turned off.
@@ -405,7 +417,7 @@ restore_backup_newer = "{path} was made by newer code: it has migrations this bl
 restore_upload_failed = "Uploading the file to Cloudflare failed: {reason}. The database was not changed; run the restore again."
 restore_upload_mismatch = "The file arrived at Cloudflare damaged (checksum {got}, expected {want}). The database was not changed; run the restore again."
 restore_import_failed = "Cloudflare could not import the file: {detail}. D1 undoes a failed import, so the database should be as it was; check the site. If it is not, undo with `{undo}`."
-restore_count_mismatch = "The import finished, but the database does not hold the rows the file has (table, rows in the file -> rows now: {tables}). Undo the restore with `{undo}`, then check the file."
+restore_count_mismatch = "The import finished, but the database holds fewer rows than the file has (table, rows in the file -> rows now: {tables}). Migrations and the cache version were still brought up to date. Undo the restore with `{undo}`, then check the file."
 restore_import_uncertain = "The import was sent, but blog could not see it finish: {detail}. It may have been applied. Do not run the restore again blindly: check the site, and if it is wrong, undo with `{undo}`."
 smoke_rolled_back = "The new version {version} failed the smoke check: {seen}. It was rolled back by itself: version {previous} serves the site again. Database migrations stay applied; they work with the previous version. The deploy is recorded in {path}."
 smoke_rollback_failed = "The new version {version} failed the smoke check: {seen}. Going back to version {previous} also failed: {error} The new version may still be serving the site. Run `blog rollback --to {previous}`."

@@ -237,6 +237,14 @@ recorded = "Đã ghi là lần sao lưu gần nhất (mục last_backup và site
 complete = "Sao lưu xong: cơ sở dữ liệu và toàn bộ ảnh, tệp."
 database_only = "Sao lưu xong phần cơ sở dữ liệu. Ảnh và tệp chưa được chép; chạy blog backup không có --no-media để chép."
 with_missing = "Sao lưu xong, nhưng {missing} tệp mà cơ sở dữ liệu ghi nhận không có trong R2 (xem phía trên), nên bản sao lưu chưa đầy đủ."
+left_out = "Lưu ý: có {rows} dòng không được chép ({tables}). Các dòng này được thêm vào trong lúc chép, còn dòng gốc của chúng đã bị xoá trước khi kịp đọc, nên trang cũng không còn giữ chúng nữa."
+reason_file_exists = "đã có một tệp trùng tên"
+reason_no_r2_key = "dòng này không có r2_key"
+reason_no_bytes = "dòng này không ghi kích thước (bytes)"
+reason_variants_unreadable = "variants_json không phải JSON hợp lệ ({detail})"
+reason_variants_not_list = "variants_json không phải là một danh sách"
+reason_variant_no_key = "có một biến thể không có key"
+reason_variant_no_bytes = "có một biến thể không ghi kích thước (bytes)"
 
 [cli.restore]
 about = "Thay toàn bộ cơ sở dữ liệu bằng một bản sao lưu .sql (do blog backup hay blog deploy tạo), kể cả bản cũ hơn 7 ngày"
@@ -268,6 +276,10 @@ reason_row_before_table = "tệp ghi dòng vào d1_migrations hoặc settings tr
 reason_row_unreadable = "có một dòng của d1_migrations hoặc settings không đọc được"
 reason_no_counts = "tệp không kết thúc bằng số dòng mà blog ghi, nên tệp bị cắt dở hoặc không do blog backup hay blog deploy tạo ra"
 counts_ok = "Đã kiểm: cả {tables} bảng có đủ {rows} dòng như trong tệp."
+sequence_warning = "Lưu ý: cơ sở dữ liệu không nhận việc nâng bộ đếm id ({detail}). Bản khôi phục vẫn giữ nguyên, nhưng bài, tệp hay dòng nhật ký mới có thể nhận lại id đã dùng trước khi khôi phục, mà liên kết hoặc webhook có thể vẫn đang trỏ tới."
+reason_upload_not_https = "đường dẫn tải lên mà Cloudflare đưa không dùng https"
+reason_upload_no_reply = "đường dẫn tải lên không trả lời"
+reason_upload_status = "đường dẫn tải lên trả về HTTP {status}"
 
 [cli.help]
 usage = "Cách dùng: {usage}"
@@ -392,7 +404,7 @@ restore_backup_newer = "{path} do mã mới hơn tạo: nó có migration mà bl
 restore_upload_failed = "Tải tệp lên Cloudflare không được: {reason}. Cơ sở dữ liệu chưa bị thay đổi; hãy chạy lại lệnh khôi phục."
 restore_upload_mismatch = "Tệp tới Cloudflare bị hỏng (mã kiểm tra {got}, đúng ra phải là {want}). Cơ sở dữ liệu chưa bị thay đổi; hãy chạy lại lệnh khôi phục."
 restore_import_failed = "Cloudflare không nạp được tệp: {detail}. Khi nạp lỗi, D1 tự đưa cơ sở dữ liệu về như cũ; hãy kiểm tra lại trang. Nếu trang không như cũ, huỷ bằng `{undo}`."
-restore_count_mismatch = "Đã nạp xong nhưng cơ sở dữ liệu không có đủ các dòng trong tệp (bảng, số dòng trong tệp -> số dòng hiện có: {tables}). Hãy huỷ lần khôi phục bằng `{undo}` rồi kiểm tra lại tệp."
+restore_count_mismatch = "Đã nạp xong nhưng cơ sở dữ liệu có ít dòng hơn trong tệp (bảng, số dòng trong tệp -> số dòng hiện có: {tables}). Các bản cập nhật cơ sở dữ liệu và phiên bản bộ nhớ đệm vẫn đã được đưa lên mới nhất. Hãy huỷ lần khôi phục bằng `{undo}` rồi kiểm tra lại tệp."
 restore_import_uncertain = "Đã gửi lệnh nạp nhưng blog không thấy được lúc nó xong: {detail}. Có thể tệp đã được nạp. Đừng chạy lại lệnh khôi phục khi chưa kiểm tra: xem trang trước, nếu sai thì huỷ bằng `{undo}`."
 smoke_rolled_back = "Phiên bản mới {version} không qua được kiểm tra: {seen}. Đã tự quay lại: phiên bản {previous} lại chạy trang. Các bản cập nhật cơ sở dữ liệu vẫn giữ nguyên; chúng chạy được với phiên bản trước. Lần đưa lên này được ghi trong {path}."
 smoke_rollback_failed = "Phiên bản mới {version} không qua được kiểm tra: {seen}. Quay lại phiên bản {previous} cũng bị lỗi: {error} Có thể phiên bản mới vẫn đang chạy trang. Hãy chạy `blog rollback --to {previous}`."

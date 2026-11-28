@@ -191,6 +191,10 @@ pub struct State {
     pub uploads: HashMap<String, (String, String, Option<String>)>,
     /// Replaces the `ETag` an upload answers with (bytes damaged on the way).
     pub upload_etag: Option<String>,
+    /// The next upload answers this status, keeping nothing.
+    pub upload_status: Option<u16>,
+    /// Refuse any write to `sqlite_sequence`, in queries and imports (D1 may).
+    pub refuse_sequence_writes: bool,
     /// The next import fails with this error, applying nothing.
     pub import_error: Option<String>,
     /// Polls an import answers `active` before its result.
@@ -221,6 +225,10 @@ impl Fake {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let mut state = state;
         state.base.clone_from(&base);
+        // D1 enforces foreign keys on every query and import; a test's own database too.
+        for conn in state.sqlite.values() {
+            conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        }
         let state = Arc::new(Mutex::new(state));
         let shared = Arc::clone(&state);
         // Never joined: the thread ends with the test process.
@@ -578,7 +586,9 @@ fn route_d1(
             let id = format!("db-{}", st.d1.len() + 1);
             let db = json!({"uuid": id, "name": name});
             st.d1.push(db.clone());
-            st.sqlite.insert(id, Connection::open_in_memory().unwrap());
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+            st.sqlite.insert(id, conn);
             ok(&db)
         }
         (
@@ -618,6 +628,13 @@ fn route_d1(
             let Some(conn) = st.sqlite.get(*id) else {
                 return err(404, 7404, "database not found");
             };
+            if st.refuse_sequence_writes && writes_sequence(&req.body) {
+                return err(
+                    400,
+                    7500,
+                    "not authorized to use sqlite_sequence: SQLITE_AUTH",
+                );
+            }
             let reply = d1_query(conn, &body);
             if let Some(i) = st
                 .after_query
@@ -652,6 +669,9 @@ fn upload(st: &mut State, req: &Recorded, path: &str) -> (u16, String, String) {
     if req.header("authorization").is_some() {
         return (400, "credentials not allowed".into(), String::new());
     }
+    if let Some(status) = st.upload_status.take() {
+        return (status, "unavailable".into(), String::new());
+    }
     let name = path.trim_start_matches("/__upload/");
     let Some(entry) = st.uploads.get_mut(name) else {
         return (404, "no such upload".into(), String::new());
@@ -670,6 +690,9 @@ fn apply_import(st: &mut State, id: &str, sql: &str) -> Value {
     let conn = &st.sqlite[id];
     let applied = match st.import_error.take() {
         Some(e) => Err(e),
+        None if st.refuse_sequence_writes && writes_sequence(sql) => {
+            Err("not authorized to use sqlite_sequence: SQLITE_AUTH".into())
+        }
         None => import_sql(conn, sql),
     };
     match applied {
@@ -690,6 +713,17 @@ fn apply_import(st: &mut State, id: &str, sql: &str) -> Value {
                    "error": e, "errors": [e], "messages": ["Import failed"]})
         }
     }
+}
+
+fn writes_sequence(sql: &str) -> bool {
+    let up = sql.to_ascii_uppercase();
+    [
+        "INTO SQLITE_SEQUENCE",
+        "UPDATE SQLITE_SEQUENCE",
+        "DELETE FROM SQLITE_SEQUENCE",
+    ]
+    .iter()
+    .any(|w| up.contains(w))
 }
 
 /// What the fake's import does with an uploaded file: all of it in one transaction, or

@@ -475,3 +475,31 @@ fn a_site_that_is_not_set_up_is_refused_before_any_call() {
     assert_eq!(code(&r), Code::NotSetUp);
     assert!(fake.requests().is_empty());
 }
+
+#[test]
+fn an_unreadable_media_row_is_told_in_the_owners_language() {
+    let (fake, dir) = set_up();
+    fake.exec(
+        "db-1",
+        "INSERT INTO media (id, r2_key, mime, bytes, width, height, variants_json, created_at) \
+         VALUES (1, 'a.png', 'image/png', 1, 10, 10, '{}', 1)",
+    );
+    let mut c = client(&fake, GOOD);
+    let migs = migrations::bundled();
+    let vi = Text::new("vi");
+    let cx = Context {
+        dir: &dir.0,
+        migrations: &migs,
+        now_ms: NOW,
+        text: &vi,
+    };
+    let mut buf = Vec::new();
+    let r = backup::run(&mut c, None, &Options::default(), &cx, &mut buf);
+    let out = String::from_utf8(buf).unwrap();
+    assert!(r.is_err(), "{out}");
+    let reason = vi.t(
+        plumblog_i18n::key!("cli.backup.reason_variants_not_list"),
+        &[],
+    );
+    assert!(out.contains(&reason), "{out}");
+}

@@ -555,19 +555,85 @@ fn inserts_are_split_under_the_statement_limit() {
     }
 }
 
+/// Every statement of a dump whose values hold no `;\n`.
+fn assert_statements_fit(text: &str) {
+    for st in text.split(";\n") {
+        assert!(st.len() + 1 < MAX_STATEMENT, "{} bytes", st.len() + 1);
+    }
+}
+
 #[test]
-fn a_row_too_large_for_d1_import_stops_with_no_file() {
+fn a_long_post_and_its_search_row_are_split_under_the_statement_limit() {
+    let (fake, dir) = set_up();
+    seed(&fake);
+    // 400 KB of markdown and html, well past one statement: quotes, Vietnamese, an emoji
+    // and the search word only at the very end.
+    let body = |unit: &str, n: usize| unit.repeat(n) + "cu\u{1ed1}ib\u{e0}i";
+    let markdown = body(
+        "Ph\u{1edf} 'b\u{f2}' \u{1f35c} n\u{1b0}\u{1edb}c d\u{f9}ng. ",
+        6_000,
+    );
+    let html = body("<p>Ph\u{1edf} &quot;b\u{f2}&quot; it's</p>\n", 7_000);
+    let bytes: Vec<u8> = (0..300_000u32)
+        .map(|i| u8::try_from(i * 7 % 256).unwrap())
+        .collect();
+    let nul_text = "\u{1ea0}\0b'\u{1f642}".repeat(25_000);
+    {
+        let st = fake.state();
+        let conn = &st.sqlite[DB];
+        conn.execute(
+            "UPDATE posts SET markdown = ?, html = ? WHERE id = 1",
+            rusqlite::params![markdown, html],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE posts_fts SET body = ? WHERE rowid = 1",
+            rusqlite::params![markdown],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE bin (id INTEGER PRIMARY KEY, b BLOB, t TEXT, n INTEGER);\
+             CREATE TABLE wr (a TEXT, b INTEGER, v, PRIMARY KEY (a, b)) WITHOUT ROWID;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bin VALUES (1, ?, ?, 5), (2, X'', '', NULL)",
+            rusqlite::params![bytes, nul_text],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wr VALUES ('k''1', 2, ?)",
+            rusqlite::params![markdown],
+        )
+        .unwrap();
+    }
+    let (before, after, text) = round_trip(&fake, &dir);
+    assert_eq!(before, after);
+    assert!(text.len() > 1_800_000, "{} bytes", text.len());
+    assert_statements_fit(&text);
+    for t in ["posts", "posts_fts", "bin", "wr"] {
+        assert!(
+            text.contains(&format!("UPDATE \"{t}\" SET ")),
+            "{t} is appended piece by piece"
+        );
+    }
+    let restored = import_into_empty(&text);
+    assert_eq!(fts_hits(&restored, "cuoibai"), [1]);
+}
+
+#[test]
+fn a_key_too_large_for_d1_import_stops_with_no_file() {
     let (fake, dir) = set_up();
     fake.exec(
         DB,
-        "CREATE TABLE wide (id INTEGER PRIMARY KEY, t TEXT);\
-         INSERT INTO wide VALUES (1, 'ok'), (7, printf('%.120000c', 'w')), (8, 'never read');",
+        "CREATE TABLE wide (k TEXT PRIMARY KEY, t TEXT) WITHOUT ROWID;\
+         INSERT INTO wide VALUES ('a', 'ok'), (printf('%.120000c', 'w'), 'x'), ('z', 'never');",
     );
     let (e, out) = backup_db(&fake, &dir).unwrap_err();
     assert_eq!(e.code, Code::DumpRowTooLarge, "{out}");
     assert_eq!(e.code.as_str(), "backup.row_too_large");
     assert!(
-        e.message.contains("wide") && e.message.contains("Row 7 "),
+        e.message.contains("wide") && e.message.contains("Row 'www"),
         "{}",
         e.message
     );
@@ -578,6 +644,107 @@ fn a_row_too_large_for_d1_import_stops_with_no_file() {
         })
         .unwrap_or_default();
     assert!(files.is_empty(), "{files:?}");
+}
+
+#[test]
+fn a_file_in_the_way_is_told_in_the_owners_language() {
+    let (fake, dir) = set_up();
+    std::fs::create_dir_all(dir.0.join("backups")).unwrap();
+    std::fs::write(dir.0.join(FILE), "mine").unwrap();
+    let mut c = client(&fake, GOOD);
+    let migs = migrations::bundled();
+    let vi = Text::new("vi");
+    let cx = Context {
+        dir: &dir.0,
+        migrations: &migs,
+        now_ms: NOW,
+        text: &vi,
+    };
+    let opts = Options {
+        no_media: true,
+        out: None,
+    };
+    let e = backup::run(&mut c, None, &opts, &cx, &mut Vec::new()).unwrap_err();
+    assert_eq!(e.code, Code::BackupUnwritable);
+    let reason = vi.t(plumblog_i18n::key!("cli.backup.reason_file_exists"), &[]);
+    assert!(e.message.contains(&reason), "{}", e.message);
+    assert_eq!(std::fs::read_to_string(dir.0.join(FILE)).unwrap(), "mine");
+}
+
+/// Runs `sql` in the live database right after the first page of `table` is read.
+fn after_first_page(fake: &Fake, table: &str, sql: &str) {
+    fake.state()
+        .after_query
+        .push((format!("FROM \\\"{table}\\\"  ORDER BY"), sql.to_string()));
+}
+
+#[test]
+fn a_row_added_while_the_dump_runs_brings_its_parents_along() {
+    let (fake, dir) = set_up();
+    seed(&fake);
+    // Users and posts are read before post_tags and comments: a new writer, their post, its
+    // tag and a comment thread arrive after both were read.
+    after_first_page(
+        &fake,
+        "posts",
+        "INSERT INTO users (id, login, slug, display_name, role, created_at, updated_at) \
+           VALUES (3, 'new', 'new', 'New', 'writer', 50, 50);\
+         INSERT INTO posts (id, kind, translation_group, lang, slug, status, published_at, \
+           author_id, title, markdown, html, created_at, updated_at) VALUES \
+           (10, 'post', 10, 'vi', 'moi', 'published', 50, 3, 'M\u{1edb}i', 'x', '<p>x</p>', 50, 50);\
+         INSERT INTO post_tags (post_id, tag_id) VALUES (10, 1);\
+         INSERT INTO comments (id, post_id, parent_id, author_name, body, status, created_at) \
+           VALUES (10, 10, NULL, 'A', 'a', 'approved', 51), (11, 10, 10, 'B', 'b', 'approved', 52);",
+    );
+    let (before, _, text) = round_trip(&fake, &dir);
+    // The live database now has the new rows; the dump must hold them all, or none.
+    let after = snapshot(&import_into_empty(&text));
+    let live = live(&fake);
+    for t in ["users", "posts", "post_tags", "comments"] {
+        assert_eq!(live[t], after[t], "{t}");
+    }
+    assert!(before["posts"].len() < after["posts"].len());
+    assert!(text.contains(&format!("{}\"posts\" 4\n", plumblog_cli::dump::ROWS)));
+}
+
+#[test]
+fn a_row_whose_parent_is_deleted_meanwhile_is_left_out_with_a_warning() {
+    let (fake, dir) = set_up();
+    seed(&fake);
+    after_first_page(
+        &fake,
+        "posts",
+        "INSERT INTO posts (id, kind, translation_group, lang, slug, status, published_at, \
+           author_id, title, markdown, html, created_at, updated_at) VALUES \
+           (10, 'post', 10, 'vi', 'moi', 'published', 50, 1, 'M\u{1edb}i', 'x', '<p>x</p>', 50, 50);\
+         INSERT INTO post_tags (post_id, tag_id) VALUES (10, 1);",
+    );
+    // post_tags is read with (10, 1); then the post goes, its tag row with it.
+    after_first_page(&fake, "post_tags", "DELETE FROM posts WHERE id = 10;");
+    let mut c = client(&fake, GOOD);
+    let migs = migrations::bundled();
+    let text = en();
+    let cx = Context {
+        dir: &dir.0,
+        migrations: &migs,
+        now_ms: NOW,
+        text: &text,
+    };
+    let mut buf = Vec::new();
+    let opts = Options {
+        no_media: true,
+        out: None,
+    };
+    backup::run(&mut c, None, &opts, &cx, &mut buf).unwrap();
+    let out = String::from_utf8(buf).unwrap();
+    let file = std::fs::read_to_string(dir.0.join(FILE)).unwrap();
+    let restored = import_into_empty(&file);
+    assert_eq!(
+        snapshot(&restored)["post_tags"],
+        live(&fake)["post_tags"],
+        "the orphan is not in the dump"
+    );
+    assert!(out.contains("post_tags 1"), "{out}");
 }
 
 fn restore_file(fake: &Fake, dir: &TempDir) -> Result<String, (RunFailure, String)> {
@@ -640,4 +807,46 @@ fn a_row_lost_in_the_import_stops_with_the_undo_command() {
     // Printed before the import too.
     assert!(out.contains(&undo), "{out}");
     assert_eq!(rec.outcome.as_deref(), Some("count_mismatch"));
+}
+
+#[test]
+fn a_refused_id_counter_write_only_warns() {
+    let (fake, dir) = set_up();
+    seed(&fake);
+    fake.exec(DB, "INSERT INTO tags (slug, name) VALUES ('c', 'C')");
+    let text = dumped(&fake, &dir);
+    // Kept as data, so the import itself never writes sqlite_sequence.
+    assert!(text.contains("-- sequence \"tags\" 3\n"), "{text}");
+    fake.exec(
+        DB,
+        "INSERT INTO tags (slug, name) VALUES ('d', 'D'); DELETE FROM tags WHERE id > 3; \
+         DELETE FROM post_tags; DELETE FROM comments;",
+    );
+    fake.state().refuse_sequence_writes = true;
+    let out = restore_file(&fake, &dir)
+        .unwrap_or_else(|(e, out)| panic!("{:?}: {}\n{out}", e.code, e.message));
+    assert!(
+        out.contains("did not accept raising its id counters"),
+        "{out}"
+    );
+    assert!(out.contains("SQLITE_AUTH"), "{out}");
+    // The data is the backup's.
+    let mut after = live(&fake);
+    let mut want = snapshot(&import_into_empty(&text));
+    for snap in [&mut after, &mut want] {
+        snap.remove("system_log");
+        snap.remove("site");
+        snap.get_mut("settings")
+            .unwrap()
+            .retain(|r| !r.contains("last_backup"));
+    }
+    assert_eq!(after, want);
+    let log = fake.sql(DB, "SELECT detail FROM system_log");
+    assert!(
+        log.iter().any(|row| row["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("ids may be reused")),
+        "{log:?}"
+    );
 }

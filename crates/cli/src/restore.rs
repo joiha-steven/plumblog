@@ -280,6 +280,8 @@ pub struct Dump {
     pub migrations: Vec<String>,
     /// `(table, rows)` the dump wrote, from its last lines.
     pub counts: Vec<(String, u64)>,
+    /// AUTOINCREMENT marks at dump time (`-- sequence` lines).
+    pub sequences: Vec<(String, i64)>,
 }
 
 /// Column names of a `CREATE TABLE ... (...)`, from the `(` at `i`.
@@ -391,6 +393,7 @@ pub fn parse(text: &str) -> Result<Dump, Reason> {
         return Err(Reason::NoSettingsTable);
     }
     dump.counts = crate::dump::counts(text).ok_or(Reason::NoRowCounts)?;
+    dump.sequences = crate::dump::sequence_marks(text);
     Ok(dump)
 }
 
@@ -414,6 +417,11 @@ pub fn date_from_name(name: &str) -> Option<String> {
 }
 
 /// A quoted SQL name.
+/// How far the content version moves past the highest value read before the import: the
+/// live site keeps bumping it during the upload and the import, and none of those values may
+/// come back for pages cached under them.
+const VERSION_MARGIN: i64 = 1000;
+
 fn ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
@@ -421,8 +429,11 @@ fn ident(name: &str) -> String {
 /// Statements that drop every object the owner's database has (never SQLite's `sqlite_*` or
 /// D1's `_cf_*`): triggers, views, indexes, virtual tables (which take their shadow tables
 /// with them, hence `IF EXISTS` after), then tables. Foreign keys are checked only at the end
-/// of the import, after the dump has put the rows back.
-fn drop_sql(db: &Database) -> Result<String, ApiError> {
+/// of the import, after the dump has put the rows back. Also returns the live AUTOINCREMENT
+/// high-water marks (dropping a table drops its `sqlite_sequence` row).
+type Marks = Vec<(String, i64)>;
+
+fn drop_sql(db: &Database) -> Result<(String, Marks), ApiError> {
     let rows = db.rows(
         "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\' \
          AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' AND type IN ('table', 'view', 'trigger', \
@@ -456,7 +467,7 @@ fn drop_sql(db: &Database) -> Result<String, ApiError> {
             let _ = writeln!(out, "DROP {verb} IF EXISTS {};", ident(&get(r, "name")));
         }
     }
-    Ok(out)
+    Ok((out, crate::dump::sequences(db)?))
 }
 
 // --- The run ---
@@ -506,13 +517,36 @@ fn reply_words(run: &Run, r: &Value, hide: &str) -> String {
     printable(&run.client.scrub(&text, &[]))
 }
 
+/// Why the upload failed; each is a sentence in `locales/` (`cli.restore.reason_upload_*`).
+enum UploadFailure {
+    NotHttps,
+    NoReply,
+    Status(u16),
+    /// The HTTP client's own message (never holding the URL): raw detail, not prose.
+    Other(String),
+}
+
+impl UploadFailure {
+    fn render(&self, run: &Run) -> String {
+        match self {
+            Self::NotHttps => run.t(key!("cli.restore.reason_upload_not_https"), &[]),
+            Self::NoReply => run.t(key!("cli.restore.reason_upload_no_reply"), &[]),
+            Self::Status(s) => run.t(
+                key!("cli.restore.reason_upload_status"),
+                &[("status", s.to_string())],
+            ),
+            Self::Other(s) => s.clone(),
+        }
+    }
+}
+
 /// `PUT`s the bytes to the presigned URL: no token or other credentials, HTTPS only (plain
 /// HTTP only to a loopback test server), no redirects. Returns the reply's `ETag` without
 /// quotes. The URL is a bearer link, so errors never include it.
-fn upload(url: &str, body: &[u8], local: bool) -> Result<Option<String>, String> {
+fn upload(url: &str, body: &[u8], local: bool) -> Result<Option<String>, UploadFailure> {
     let loopback = base_override_ok(url.split(['?', '#']).next().unwrap_or(""));
     if !(url.starts_with("https://") || local && loopback) {
-        return Err("the upload link is not https".into());
+        return Err(UploadFailure::NotHttps);
     }
     let resp = plain_agent(local, UPLOAD_TIMEOUT, 0)
         .put(url)
@@ -520,14 +554,14 @@ fn upload(url: &str, body: &[u8], local: bool) -> Result<Option<String>, String>
         .map_err(|e| {
             let s = e.to_string();
             if s.contains(url) {
-                "no reply".to_string()
+                UploadFailure::NoReply
             } else {
-                s
+                UploadFailure::Other(s)
             }
         })?;
     let status = resp.status().as_u16();
     if status != 200 {
-        return Err(format!("HTTP {status}"));
+        return Err(UploadFailure::Status(status));
     }
     Ok(resp
         .headers()
@@ -596,7 +630,8 @@ fn import(
             key!("cli.restore.uploading"),
             &[("bytes", sql.len().to_string())],
         );
-        let got = upload(url, sql, run.client.is_local()).map_err(|reason| {
+        let got = upload(url, sql, run.client.is_local()).map_err(|failure| {
+            let reason = failure.render(run);
             stopped(
                 "upload_failed",
                 fail(
@@ -688,8 +723,9 @@ fn poll(
     }
 }
 
-/// Right after the import: every table holds as many rows as the dump wrote. Anything else
-/// (a statement D1 skipped, a cut upload) stops before migrations, with the undo command.
+/// Right after the import: every table holds at least the rows the dump wrote. Fewer (a
+/// statement D1 skipped, a cut upload) is a mismatch, reported with the undo command; more
+/// is the live site writing meanwhile (comments, sessions, the rate limiter, the log).
 fn check_counts(
     run: &mut Run,
     db: &Database,
@@ -711,7 +747,7 @@ fn check_counts(
             .enumerate()
             .filter_map(|(i, (t, want))| {
                 let got = row.get(&format!("c{i}")).and_then(Value::as_u64);
-                (got != Some(*want)).then(|| {
+                got.is_none_or(|g| g < *want).then(|| {
                     format!(
                         "{t} {want} -> {}",
                         got.map_or_else(|| "?".into(), |g| g.to_string())
@@ -744,13 +780,9 @@ fn check_counts(
     Ok(())
 }
 
-/// After the import: the bundle's migrations the backup lacks, then the cache version.
-fn after_import(
-    run: &mut Run,
-    db: &Database,
-    reply: &Value,
-    version_before: Option<i64>,
-) -> Result<(), Stopped> {
+/// After the import: the bundle's migrations the backup lacks, then the cache version, set
+/// above `floor`.
+fn after_import(run: &mut Run, db: &Database, reply: &Value, floor: i64) -> Result<(), Stopped> {
     let result = reply.get("result").cloned().unwrap_or_default();
     run.line(
         key!("cli.restore.imported"),
@@ -781,8 +813,7 @@ fn after_import(
         run.line(key!("cli.rollback.failed_cleared"), &[("name", f.name)]);
     }
     setup::apply_migrations(run, db, false).map_err(as_failed)?;
-    d1::bump_content_version_above(db, version_before.unwrap_or(0))
-        .map_err(|e| stopped("restored", run.api(&e)))
+    d1::bump_content_version_above(db, floor).map_err(|e| stopped("restored", run.api(&e)))
 }
 
 /// Step 2, read only: the database is ours, the backup is this site's (or `--allow-other-site`)
@@ -907,6 +938,80 @@ fn read_file(cx: &Context, opts: &Options, shown: &str) -> Result<(Vec<u8>, Dump
     Ok((bytes, dump))
 }
 
+/// Steps 5-7: the import, the row counts, migrations and the content version.
+fn replace(
+    run: &mut Run,
+    db: &Database,
+    site: &Site,
+    clock: &dyn Clock,
+    (bytes, dump): (&[u8], &Dump),
+    version_before: Option<i64>,
+    undo: &str,
+) -> Result<(), Stopped> {
+    let (drops, sequences) = drop_sql(db).map_err(|e| stopped("failed", run.api(&e)))?;
+    // Read again just before the import: the site kept running since step 2.
+    let now = d1::content_version(db).map_err(|e| stopped("failed", run.api(&e)))?;
+    let floor = version_before
+        .max(now)
+        .unwrap_or(0)
+        .saturating_add(VERSION_MARGIN);
+    let mut sql = drops.into_bytes();
+    sql.extend_from_slice(bytes);
+    let reply = import(run, site, clock, &sql, undo)?;
+    // Migrations and the version run even when rows are missing, so the database matches
+    // the code and no stale page is served until the owner undoes the restore.
+    let counted = check_counts(run, db, &dump.counts, undo);
+    raise_sequences(run, db, &sequences, &dump.sequences);
+    let after = after_import(run, db, &reply, floor);
+    match (counted, after) {
+        (Ok(()), after) => after,
+        (Err(c), Ok(())) => Err(c),
+        (Err(c), Err(a)) => {
+            let f = &a.failure;
+            let _ = writeln!(run.out, "{}", run.cx.text.error_line(f.code, &f.message));
+            Err(c)
+        }
+    }
+}
+
+/// Raises every AUTOINCREMENT mark to the higher of its live value before the import and the
+/// dump's, so ids handed out since the backup are never reused. Outside the import, because
+/// D1 may refuse writes to `sqlite_sequence`: a refusal only warns (printed and logged), the
+/// restored data stands.
+fn raise_sequences(run: &mut Run, db: &Database, live: &[(String, i64)], dumped: &[(String, i64)]) {
+    let mut marks: std::collections::BTreeMap<&str, i64> = std::collections::BTreeMap::new();
+    for (t, seq) in live.iter().chain(dumped) {
+        let m = marks.entry(t.as_str()).or_insert(*seq);
+        *m = (*m).max(*seq);
+    }
+    if marks.is_empty() {
+        return;
+    }
+    let sql: Vec<String> = marks
+        .iter()
+        .flat_map(|(t, seq)| crate::dump::raise_sequence(t, *seq))
+        .collect();
+    let stmts: Vec<(&str, &[&str])> = sql.iter().map(|s| (s.as_str(), &[][..])).collect();
+    let Err(e) = db.batch(&stmts) else {
+        return;
+    };
+    let detail = printable(&e.message(run.cx.text));
+    let warning = run.t(
+        key!("cli.restore.sequence_warning"),
+        &[("detail", detail.clone())],
+    );
+    let _ = writeln!(run.out, "{warning}");
+    let event = Event::new(
+        EventKind::Migration,
+        request_id("restore", run.cx.now_ms),
+        at_ms(run.cx),
+    )
+    .subject(&format!(
+        "restore: AUTOINCREMENT marks not raised, ids may be reused: {detail}"
+    ));
+    log_events(run, db, &[event]);
+}
+
 /// `blog restore`. Progress goes to `out` as each step finishes.
 ///
 /// # Errors
@@ -988,15 +1093,15 @@ pub fn run(
     run.line(key!("cli.restore.cancels"), &[]);
 
     // 5-7. Import, migrations, cache version.
-    let result = drop_sql(&db)
-        .map_err(|e| stopped("failed", run.api(&e)))
-        .and_then(|drops| {
-            let mut sql = drops.into_bytes();
-            sql.extend_from_slice(&bytes);
-            import(&mut run, &site, clock, &sql, &undo)
-        })
-        .and_then(|reply| check_counts(&mut run, &db, &dump.counts, &undo).map(|()| reply))
-        .and_then(|reply| after_import(&mut run, &db, &reply, version_before));
+    let result = replace(
+        &mut run,
+        &db,
+        &site,
+        clock,
+        (&bytes, &dump),
+        version_before,
+        &undo,
+    );
     rec.outcome = Some(match &result {
         Ok(()) => "restored".into(),
         Err(s) => s.outcome.into(),

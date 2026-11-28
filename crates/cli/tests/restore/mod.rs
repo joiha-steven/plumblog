@@ -57,14 +57,17 @@ fn opts(bundle: &Path, yes: bool) -> Options {
 }
 
 fn restore_with(fake: &Fake, dir: &TempDir, o: &Options) -> Ran {
+    restore_in(fake, dir, o, &en())
+}
+
+fn restore_in(fake: &Fake, dir: &TempDir, o: &Options, text: &Text) -> Ran {
     let mut c = client(fake, GOOD);
     let migs = migrations::bundled();
-    let text = en();
     let cx = Context {
         dir: &dir.0,
         migrations: &migs,
         now_ms: NOW,
-        text: &text,
+        text,
     };
     let mut buf = Vec::new();
     let result = restore::run(&mut c, None, o, &cx, &FakeClock::default(), &mut buf);
@@ -454,7 +457,7 @@ fn a_full_restore_replaces_every_row_and_table() {
     assert!(
         put_req
             .body
-            .ends_with(&std::fs::read_to_string(dir.0.join(FILE)).unwrap())
+            .contains(&std::fs::read_to_string(dir.0.join(FILE)).unwrap())
     );
     // No token and no upload URL in what the owner sees.
     assert!(
@@ -545,4 +548,105 @@ fn an_import_that_never_finishes_may_have_been_applied() {
     assert_eq!(rec.outcome.as_deref(), Some("import_uncertain"));
     let undo = format!("blog rollback --db {} --yes", rec.previous.unwrap());
     assert!(message(&r).contains(&undo), "{}", message(&r));
+}
+
+#[test]
+fn the_content_version_moves_past_a_bump_made_after_the_checks() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    save_backup(&fake, &dir);
+    // The site bumps the version while the owner reads the plan: after step 2 read it.
+    fake.state().after_query.push((
+        "type IN ('table', 'view', 'trigger'".into(),
+        "UPDATE site SET content_version = 500 WHERE id = 1".into(),
+    ));
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    ok(&r);
+    // Past 500 by the margin, so bumps during the upload and import cannot catch up.
+    assert!(content_version(&fake) > 1500, "{}", content_version(&fake));
+}
+
+#[test]
+fn rows_the_live_site_adds_after_the_import_are_not_a_mismatch() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    save_backup(&fake, &dir);
+    fake.state().after_import = Some(
+        "INSERT INTO settings (key, value_json, updated_at) VALUES ('written_meanwhile', '1', 1)"
+            .into(),
+    );
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    ok(&r);
+    assert_eq!(
+        load(&dir).rollbacks.last().unwrap().outcome.as_deref(),
+        Some("restored")
+    );
+}
+
+#[test]
+fn missing_rows_still_get_the_migrations_and_the_version_bump() {
+    let mut old = migrations::bundled();
+    let last = old.pop().unwrap();
+    let (fake, dir, bundle) = set_up(&old);
+    put(&fake, "lost_in_import", "x");
+    save_backup(&fake, &dir);
+    write_migrations(&bundle, &migrations::bundled());
+    fake.exec(DB, &last.sql);
+    fake.exec(
+        DB,
+        &format!("INSERT INTO d1_migrations (name) VALUES ('{}')", last.name),
+    );
+    fake.exec(DB, "UPDATE site SET content_version = 40 WHERE id = 1");
+    fake.state().after_import = Some("DELETE FROM settings WHERE key = 'lost_in_import'".into());
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::RestoreCountMismatch, "{}", r.out);
+    assert!(message(&r).contains("settings "), "{}", message(&r));
+    assert_eq!(
+        load(&dir).rollbacks.last().unwrap().outcome.as_deref(),
+        Some("count_mismatch")
+    );
+    // The database still matches the code, and no page cached before is served.
+    let names: Vec<String> = fake
+        .sql(DB, "SELECT name FROM d1_migrations ORDER BY id")
+        .iter()
+        .map(|r| r["name"].as_str().unwrap().to_string())
+        .collect();
+    let all: Vec<String> = migrations::bundled().into_iter().map(|m| m.name).collect();
+    assert_eq!(names, all);
+    assert!(content_version(&fake) > 40, "{}", content_version(&fake));
+}
+
+#[test]
+fn ids_handed_out_after_the_backup_are_not_reused() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    fake.exec(
+        DB,
+        "INSERT INTO tags (id, slug, name) VALUES (1, 'a', 'A'), (2, 'b', 'B')",
+    );
+    save_backup(&fake, &dir);
+    // Made and deleted after the backup: a webhook or a link may still name ids 3 and 4.
+    fake.exec(
+        DB,
+        "INSERT INTO tags (slug, name) VALUES ('c', 'C'), ('d', 'D'); DELETE FROM tags WHERE id > 2",
+    );
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    ok(&r);
+    fake.exec(DB, "INSERT INTO tags (slug, name) VALUES ('e', 'E')");
+    let id = fake.sql(DB, "SELECT id FROM tags WHERE slug = 'e'")[0]["id"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(id, 5);
+}
+
+#[test]
+fn a_failed_upload_is_told_in_the_owners_language() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    save_backup(&fake, &dir);
+    fake.state().upload_status = Some(503);
+    let vi = Text::new("vi");
+    let r = restore_in(&fake, &dir, &opts(&bundle, true), &vi);
+    assert_eq!(code(&r), Code::RestoreUploadFailed, "{}", r.out);
+    let reason = vi.t(
+        plumblog_i18n::key!("cli.restore.reason_upload_status"),
+        &[("status", "503".into())],
+    );
+    assert!(message(&r).contains(&reason), "{}", message(&r));
 }

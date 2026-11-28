@@ -16,8 +16,8 @@ never backed up. Run commands in the site's folder; see `blog guide setup` for t
   one instant: its first lines name the bookmark taken just before, its last lines the rows
   per table. `blog deploy` writes one when migrations are pending, or always with `--export`.
 - **`blog backup`**: a dump without deploying, plus every media file (originals and resized
-  variants) from R2 to `backups/media/<r2 key>`. A row too large for one D1 statement
-  (100,000 bytes as SQL) stops it with `backup.row_too_large` and no file.
+  variants) from R2 to `backups/media/<r2 key>`. Long rows go in pieces under D1's limit of
+  100,000 bytes per statement; a row added during the copy brings the rows it points to.
 
 ```sh
 blog backup
@@ -35,8 +35,7 @@ cannot fix it, and the backup counts as not complete. The token needs R2 permiss
 Each run records itself as the site's `last_backup` setting (`at`, `database`, `media`
 counts or null, `complete`) and in `site.local.toml`; only `blog backup` writes it.
 
-Copy `backups/` somewhere off this machine: it holds password hashes and drafts, so keep it
-private.
+Copy `backups/` off this machine and keep it private: it holds password hashes and drafts.
 
 ## Restore
 
@@ -51,8 +50,9 @@ Both overwrite the whole database and cancel running queries; ask the owner firs
 the undo command they print. Without `--yes`, `blog restore` only checks the file and prints
 its plan. It refuses a file that is not a blog backup, another site's (`--allow-other-site`),
 one from newer code (`restore.backup_newer`: update `blog` first) or a cut one (no row
-counts). It saves a bookmark, imports, checks every table's row count
-(`restore.count_mismatch` names the undo command to run), then reruns missing migrations.
+counts). It saves a bookmark, imports (ids used since the backup are never handed out again),
+reruns missing migrations and moves the cache version past every value used before. A table
+holding fewer rows than the file is `restore.count_mismatch`: tell the owner its undo command.
 
 ## Not covered yet
 

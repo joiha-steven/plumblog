@@ -118,29 +118,59 @@ fn plain_md5(etag: &str) -> Option<&str> {
     (etag.len() == 32 && etag.bytes().all(|b| b.is_ascii_hexdigit())).then_some(etag)
 }
 
+/// Why a media row's keys cannot be read; each is a sentence in `locales/` (`cli.backup.reason_*`).
+enum RowReason {
+    NoKey,
+    NoBytes,
+    /// The JSON parser's message: raw detail, not prose.
+    VariantsUnreadable(String),
+    VariantsNotList,
+    VariantNoKey,
+    VariantNoBytes,
+}
+
+impl RowReason {
+    fn render(&self, text: &crate::text::Text) -> String {
+        match self {
+            Self::NoKey => text.t(key!("cli.backup.reason_no_r2_key"), &[]),
+            Self::NoBytes => text.t(key!("cli.backup.reason_no_bytes"), &[]),
+            Self::VariantsUnreadable(e) => text.t(
+                key!("cli.backup.reason_variants_unreadable"),
+                &[("detail", e.clone())],
+            ),
+            Self::VariantsNotList => text.t(key!("cli.backup.reason_variants_not_list"), &[]),
+            Self::VariantNoKey => text.t(key!("cli.backup.reason_variant_no_key"), &[]),
+            Self::VariantNoBytes => text.t(key!("cli.backup.reason_variant_no_bytes"), &[]),
+        }
+    }
+}
+
 /// The keys one media row names: the original, then its variants.
-fn row_keys(row: &serde_json::Map<String, Value>) -> Result<Vec<(String, u64)>, String> {
+fn row_keys(row: &serde_json::Map<String, Value>) -> Result<Vec<(String, u64)>, RowReason> {
     let key = row
         .get("r2_key")
         .and_then(Value::as_str)
-        .ok_or("no r2_key")?;
-    let bytes = row.get("bytes").and_then(Value::as_u64).ok_or("no bytes")?;
+        .ok_or(RowReason::NoKey)?;
+    let bytes = row
+        .get("bytes")
+        .and_then(Value::as_u64)
+        .ok_or(RowReason::NoBytes)?;
     let mut keys = vec![(key.to_string(), bytes)];
     let variants: Value = serde_json::from_str(
         row.get("variants_json")
             .and_then(Value::as_str)
             .unwrap_or("[]"),
     )
-    .map_err(|e| format!("variants_json: {e}"))?;
-    for v in variants.as_array().ok_or("variants_json is not a list")? {
+    .map_err(|e| RowReason::VariantsUnreadable(e.to_string()))?;
+    for v in variants.as_array().ok_or(RowReason::VariantsNotList)? {
         let key = v
             .get("key")
             .and_then(Value::as_str)
-            .ok_or("a variant has no key")?;
+            .ok_or(RowReason::VariantNoKey)?;
         let bytes = v
             .get("bytes")
             .and_then(Value::as_u64)
-            .ok_or("a variant has no bytes")?;
+            .ok_or(RowReason::VariantNoBytes)?;
         keys.push((key.to_string(), bytes));
     }
     Ok(keys)
@@ -349,6 +379,7 @@ impl Media<'_, '_> {
                     Err(reason) => {
                         self.tally.failed += 1;
                         let id = row.get("id").map_or_else(String::new, ToString::to_string);
+                        let reason = reason.render(self.run.cx.text);
                         problem(
                             self.run,
                             Code::BackupRowInvalid,
