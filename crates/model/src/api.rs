@@ -221,17 +221,21 @@ pub enum RouteId {
     MediaOriginal,
     CommentList,
     UserList,
+    LogList,
     RedirectList,
     RedirectPut,
     RedirectDelete,
     SettingList,
     SettingPut,
     SettingDelete,
+    ThemeList,
+    ThemeDeclarations,
     ThemeOptions,
     ThemeOptionPut,
     ThemeOptionsDelete,
     PluginList,
     PluginPut,
+    PluginDeclarations,
     PluginOptions,
     PluginOptionPut,
     PluginOptionsDelete,
@@ -410,8 +414,21 @@ const MEDIA_UPLOAD: &[Field] = &[
 ];
 /// An id-ordered listing: `cursor` is the last id of the previous page.
 const BY_ID: &[Field] = &[query("cursor", Type::Str), query("limit", Type::Int)];
+const LOG: &[Field] = &[
+    query("kind", Type::Str),
+    query("level", Type::Str),
+    query("code", Type::Str),
+    query("actor", Type::Int),
+    query("from", Type::Int),
+    query("to", Type::Int),
+    query("q", Type::Str),
+    query("cursor", Type::Str),
+    query("limit", Type::Int),
+];
 const VALUE: &[Field] = &[path_name("key"), req("value", Type::Json)];
 const OWNER: &[Field] = &[path_name("name")];
+/// `lang`: the language of labels and help (`vi`, `vi-VN`); English when absent or unknown.
+const DECLARATIONS: &[Field] = &[path_name("name"), query("lang", Type::Str)];
 const OWNER_VALUE: &[Field] = &[
     path_name("name"),
     path_name("key"),
@@ -726,6 +743,17 @@ pub const ROUTES: &[Route] = &[
         200,
         "user_page",
     ),
+    // Newest first. `level` is a minimum (`warning` or `error`; `info` is no filter); `q`
+    // matches a request id exactly or text of the entry's subject and fields.
+    route(
+        RouteId::LogList,
+        Method::Get,
+        "/api/v1/log",
+        Access::Require(Permission::ViewSystemLog),
+        LOG,
+        200,
+        "log_page",
+    ),
     route(
         RouteId::RedirectList,
         Method::Get,
@@ -787,6 +815,25 @@ pub const ROUTES: &[Route] = &[
         )
     },
     route(
+        RouteId::ThemeList,
+        Method::Get,
+        "/api/v1/themes",
+        Access::Read,
+        &[],
+        200,
+        "theme_list",
+    ),
+    // Read like theme option values: what a theme declares shows on reader pages anyway.
+    route(
+        RouteId::ThemeDeclarations,
+        Method::Get,
+        "/api/v1/themes/{name}/declarations",
+        Access::Read,
+        DECLARATIONS,
+        200,
+        "option_declarations",
+    ),
+    route(
         RouteId::ThemeOptions,
         Method::Get,
         "/api/v1/themes/{name}/options",
@@ -831,6 +878,17 @@ pub const ROUTES: &[Route] = &[
         204,
         "none",
     ),
+    // Gated like the plugin's option values, which only the same callers may read or write:
+    // the declarations are the form for them.
+    route(
+        RouteId::PluginDeclarations,
+        Method::Get,
+        "/api/v1/plugins/{name}/declarations",
+        PLUGINS,
+        DECLARATIONS,
+        200,
+        "option_declarations",
+    ),
     // Plugin options may hold a plugin's secrets: read like they are written.
     route(
         RouteId::PluginOptions,
@@ -874,6 +932,7 @@ pub const fn tool_name(id: RouteId) -> Option<&'static str> {
         RouteId::Me => Some("me"),
         RouteId::CommentList => Some("comment_list"),
         RouteId::UserList => Some("user_list"),
+        RouteId::LogList => Some("log_list"),
         RouteId::PostList => Some("post_list"),
         RouteId::PostGet => Some("post_get"),
         RouteId::PostCreate => Some("post_create"),
@@ -901,11 +960,14 @@ pub const fn tool_name(id: RouteId) -> Option<&'static str> {
         RouteId::SettingList => Some("setting_list"),
         RouteId::SettingPut => Some("setting_put"),
         RouteId::SettingDelete => Some("setting_delete"),
+        RouteId::ThemeList => Some("theme_list"),
+        RouteId::ThemeDeclarations => Some("theme_declarations"),
         RouteId::ThemeOptions => Some("theme_options"),
         RouteId::ThemeOptionPut => Some("theme_option_put"),
         RouteId::ThemeOptionsDelete => Some("theme_options_delete"),
         RouteId::PluginList => Some("plugin_list"),
         RouteId::PluginPut => Some("plugin_put"),
+        RouteId::PluginDeclarations => Some("plugin_declarations"),
         RouteId::PluginOptions => Some("plugin_options"),
         RouteId::PluginOptionPut => Some("plugin_option_put"),
         RouteId::PluginOptionsDelete => Some("plugin_options_delete"),

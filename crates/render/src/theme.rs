@@ -74,6 +74,8 @@ pub(crate) const LOCALE_SUFFIX: &str = ".toml.json";
 pub(crate) struct Manifest {
     name: String,
     #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
     fonts: Fonts,
     #[serde(default)]
     js: Js,
@@ -113,6 +115,7 @@ struct Colors {
 /// render, so per-request work is [`Theme::with_options`] (cheap) and the template render.
 struct Shared {
     name: String,
+    version: Option<String>,
     env: Environment<'static>,
     schema: Schema,
     slots: Vec<String>,
@@ -133,7 +136,10 @@ struct Shared {
 /// `t` function).
 struct PluginInfo {
     name: String,
+    version: String,
     schema: Schema,
+    /// Shared with the partials' `t()`, for the option labels the admin shows.
+    catalogs: Arc<Catalogs>,
     slots: Vec<String>,
     css: String,
     js: Vec<String>,
@@ -208,6 +214,16 @@ impl Catalogs {
     fn get(&self, lang: &str) -> &Catalog {
         self.by_lang.get(lang).unwrap_or(&self.english)
     }
+
+    /// The catalog for `lang` and the language it is: `lang` itself, else its primary
+    /// subtag (`vi-VN` -> `vi`), else English.
+    fn resolve<'a>(&'a self, lang: &'a str) -> (&'a str, &'a Catalog) {
+        let primary = lang.split('-').next().unwrap_or_default();
+        [lang, primary]
+            .into_iter()
+            .find_map(|l| self.by_lang.get_key_value(l))
+            .map_or((FALLBACK_LANG, &self.english), |(l, c)| (l.as_str(), c))
+    }
 }
 
 const FALLBACK_LANG: &str = "en";
@@ -252,7 +268,7 @@ impl Theme {
         let schema = Schema::check(
             "theme.toml",
             manifest.options,
-            &manifest.groups,
+            manifest.groups,
             &english,
             Owner::Theme(&tokens),
         )
@@ -285,6 +301,7 @@ impl Theme {
         let shared = Arc::new(Shared {
             name: manifest.name,
             env,
+            version: manifest.version,
             schema,
             slots: manifest.slots,
             colors: manifest.colors,
@@ -356,6 +373,41 @@ impl Theme {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.shared.name
+    }
+
+    /// `version` from `theme.toml`, when it says one.
+    #[must_use]
+    pub fn version(&self) -> Option<&str> {
+        self.shared.version.as_deref()
+    }
+
+    /// The option declarations of this theme, or of bundled plugin `plugin`, as the JSON the
+    /// admin builds its forms from, with labels and help in `lang` (see
+    /// `Catalogs::resolve`). Built from the schema loaded once per isolate: no parsing.
+    /// `None`: no such plugin.
+    #[must_use]
+    pub fn declarations(&self, plugin: Option<&str>, lang: &str) -> Option<Result<String, String>> {
+        let (name, version, schema, catalogs) = match plugin {
+            None => (
+                self.shared.name.as_str(),
+                self.shared.version.as_deref(),
+                &self.shared.schema,
+                &self.shared.catalogs,
+            ),
+            Some(n) => {
+                let p = self.shared.plugins.iter().find(|p| p.name == n)?;
+                (
+                    p.name.as_str(),
+                    Some(p.version.as_str()),
+                    &p.schema,
+                    &p.catalogs,
+                )
+            }
+        };
+        let (lang, catalog) = catalogs.resolve(lang);
+        let missing = MissingKeys::default();
+        let text = |key: &str| catalog.t_template(key, &[], &missing);
+        Some(schema.declarations(name, version, lang, &text))
     }
 
     /// The inlined stylesheet, for the size budget.
@@ -946,14 +998,17 @@ fn partial_env(
         for (slot, src) in &p.partials {
             partials.add_template_owned(p.template_name(slot), src.clone())?;
         }
+        let catalogs = Arc::new(p.catalogs);
         infos.push(PluginInfo {
             slots: p.partials.iter().map(|(s, _)| s.clone()).collect(),
             name: p.name.clone(),
+            version: p.version,
             schema: p.schema,
+            catalogs: Arc::clone(&catalogs),
             css: p.css,
             js: p.js,
         });
-        plugin_catalogs.insert(p.name, p.catalogs);
+        plugin_catalogs.insert(p.name, catalogs);
     }
 
     partials.add_function(

@@ -15,6 +15,7 @@ scripts/admin-build                              # real client -> target/admin (
 wb=$(scripts/worker-build); export PLUMBLOG_ADMIN_PRELOAD=$PWD/target/admin.preload
 (cd crates/worker && "$wb" --release --no-opt --out-dir ../../target/worker-dev \
   -- --features contract-tests --target-dir $PWD/../../target/contract-tests)
+scripts/worker-entry target/worker-dev           # wrangler.dev.toml's main is entry.mjs
 scripts/assemble-assets target/worker-dev/assets target/admin   # real admin, not admin-dev
 tools/node_modules/.bin/wrangler d1 migrations apply DB --local --config tools/wrangler.dev.toml --persist-to target/worker-dev/state
 nohup tools/node_modules/.bin/wrangler dev --config tools/wrangler.dev.toml \
@@ -23,7 +24,7 @@ timeout 90 bash -c 'until curl -s localhost:8790/healthz >/dev/null; do sleep 2;
 ```
 
 Forgetting `PLUMBLOG_ADMIN_PRELOAD` silently drops the shell's modulepreload links (score 99).
-After any Rust or admin change, rebuild all four steps and restart wrangler.
+After any Rust or admin change, rebuild all steps and restart wrangler.
 
 ## 2. Owner, session cookie, about 26 posts
 
