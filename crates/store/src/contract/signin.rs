@@ -4,8 +4,8 @@ use plumblog_model::{ErrorCode, Role};
 
 use super::kit::{Check, T0, eq, fails, new_user, ok, user, version_is};
 use crate::{
-    ChallengePurpose, MAX_FAILURE_KEYS, Recorded, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY,
-    Store,
+    ChallengePurpose, MAX_FAILURE_KEYS, OWNER_RESET_EXPIRES_KEY, OWNER_RESET_HASH_KEY,
+    OWNER_RESET_USER_KEY, Recorded, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, Store,
 };
 
 const WINDOW: i64 = 900_000;
@@ -592,6 +592,103 @@ pub async fn setup_creates_first_owner_once<S: Store>(db: &S) -> Check {
     version_is(db, "setup", 1).await
 }
 
+async fn reset_keys<S: Store>(db: &S) -> super::kit::Got<[Option<String>; 3]> {
+    Ok([
+        ok("get hash", db.get_setting(OWNER_RESET_HASH_KEY).await)?,
+        ok("get user", db.get_setting(OWNER_RESET_USER_KEY).await)?,
+        ok("get expiry", db.get_setting(OWNER_RESET_EXPIRES_KEY).await)?,
+    ])
+}
+
+/// The owner reset code: single use, bound to its user, refused once expired, replaced by a
+/// newer one, and a wrong code changes nothing.
+pub async fn owner_reset_is_single_use<S: Store>(db: &S) -> Check {
+    let a = user(db, "a").await?;
+    let b = user(db, "b").await?;
+    eq!(
+        "no code",
+        ok("take", db.take_owner_reset("c", T0).await)?,
+        None,
+    )?;
+    ok(
+        "put old",
+        db.put_owner_reset("old", b, T0 + 50, false, T0).await,
+    )?;
+    ok(
+        "put replaces",
+        db.put_owner_reset("c", a, T0 + 100, false, T0).await,
+    )?;
+    eq!(
+        "reset keys as JSON",
+        reset_keys(db).await?,
+        [
+            Some("\"c\"".to_owned()),
+            Some(a.0.to_string()),
+            Some((T0 + 100).to_string()),
+        ],
+    )?;
+    eq!(
+        "replaced code",
+        ok("take old", db.take_owner_reset("old", T0).await)?,
+        None,
+    )?;
+    eq!(
+        "wrong code",
+        ok("take wrong", db.take_owner_reset("d", T0).await)?,
+        None,
+    )?;
+    eq!(
+        "a wrong code keeps the right one",
+        reset_keys(db).await?[0].clone(),
+        Some("\"c\"".to_owned()),
+    )?;
+    eq!(
+        "right code gives its own user",
+        ok("take", db.take_owner_reset("c", T0 + 99).await)?,
+        Some(a),
+    )?;
+    eq!(
+        "taking consumes it",
+        reset_keys(db).await?,
+        [None, None, None]
+    )?;
+    eq!(
+        "same code again",
+        ok("take again", db.take_owner_reset("c", T0 + 99).await)?,
+        None,
+    )?;
+    ok(
+        "put expiring",
+        db.put_owner_reset("e", b, T0 + 100, false, T0).await,
+    )?;
+    eq!(
+        "code at exactly its expiry",
+        ok("take expired", db.take_owner_reset("e", T0 + 100).await)?,
+        None,
+    )?;
+    eq!(
+        "an expired code is deleted too",
+        reset_keys(db).await?,
+        [None, None, None],
+    )?;
+    // Readers never see the reset keys.
+    version_is(db, "owner reset", 1).await?;
+    ok(
+        "put garbled",
+        db.put_owner_reset("g", b, T0 + 100, false, T0).await,
+    )?;
+    ok(
+        "garble the expiry",
+        db.put_setting(OWNER_RESET_EXPIRES_KEY, "\"9999999999999\"", T0)
+            .await,
+    )?;
+    eq!(
+        "expiry that is not a JSON integer",
+        ok("take garbled", db.take_owner_reset("g", T0).await)?,
+        None,
+    )
+}
+
 /// The first stored site id wins; later calls get it back and write nothing visible.
 pub async fn site_id_is_set_once<S: Store>(db: &S) -> Check {
     let first = ok("ensure_site_id", db.ensure_site_id("\"one\"", T0).await)?;
@@ -611,6 +708,7 @@ pub async fn session_renewal<S: Store>(db: &S) -> Check {
         user_id: u,
         created_at: T0,
         expires_at,
+        proof: crate::Proof::Unchecked,
     };
     ok("live", db.create_session(new("live", T0 + 100)).await)?;
     ok("dead", db.create_session(new("dead", T0 + 10)).await)?;

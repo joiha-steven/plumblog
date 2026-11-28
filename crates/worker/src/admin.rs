@@ -53,7 +53,10 @@ const TURNSTILE_ORIGIN: &str = "https://challenges.cloudflare.com";
 /// an ordinary page, and keep it as the offline shell.
 fn is_auth_page(path: &str) -> bool {
     let p = path.strip_suffix('/').unwrap_or(path);
-    matches!(p, "/admin/signin" | "/admin/setup" | "/admin/invite")
+    matches!(
+        p,
+        "/admin/signin" | "/admin/setup" | "/admin/invite" | "/admin/reset"
+    )
 }
 
 /// 16 bytes from the platform's cryptographic RNG, hex. A nonce must not be guessable, so
@@ -393,7 +396,12 @@ mod tests {
         assert!(open.contains("script-src 'self' https://challenges.cloudflare.com;"));
         assert!(open.contains("frame-src https://challenges.cloudflare.com;"));
         assert!(open.contains("frame-ancestors 'none'"));
-        for p in ["/admin/signin", "/admin/setup", "/admin/invite"] {
+        for p in [
+            "/admin/signin",
+            "/admin/setup",
+            "/admin/invite",
+            "/admin/reset",
+        ] {
             assert!(is_auth_page(p), "{p}");
         }
         assert!(is_auth_page("/admin/signin/"));

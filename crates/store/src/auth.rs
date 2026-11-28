@@ -14,12 +14,33 @@ pub struct Session {
     pub expires_at: i64,
 }
 
+/// What the request that creates a credential authenticated with. The write happens only
+/// if it still holds for the credential's user at that moment, in the same atomic write: a
+/// request that checked its credential before `blog admin reset` (or a password change) and
+/// writes after it creates nothing. Otherwise `Unauthenticated`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Proof {
+    /// The session cookie's hash: that session of the user still exists.
+    Session(String),
+    /// The password hash that verified: still the user's `password_hash`.
+    Password(String),
+    /// The passkey (row id) that signed in: still the user's.
+    Passkey(i64),
+    /// An owner reset code's hash: still stored, bound to the user, unexpired at the
+    /// credential's `created_at`.
+    ResetCode(String),
+    /// No check: seeding test data only, absent from the Worker's build.
+    #[cfg(any(test, feature = "contract"))]
+    Unchecked,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewSession {
     pub token_hash: String,
     pub user_id: UserId,
     pub created_at: i64,
     pub expires_at: i64,
+    pub proof: Proof,
 }
 
 /// A row of `passkeys`.
@@ -43,6 +64,7 @@ pub struct NewPasskey {
     pub sign_count: i64,
     pub name: String,
     pub created_at: i64,
+    pub proof: Proof,
 }
 
 /// A row of `api_tokens`.
@@ -68,6 +90,7 @@ pub struct NewToken {
     pub scope: TokenScope,
     pub created_at: i64,
     pub expires_at: Option<i64>,
+    pub proof: Proof,
 }
 
 /// A row of `invites`.
@@ -91,12 +114,15 @@ pub struct NewInvite {
     pub created_by: UserId,
     pub created_at: i64,
     pub expires_at: i64,
+    /// What the creator's request authenticated with (checked for `created_by`).
+    pub proof: Proof,
 }
 
 // Workers are single-threaded, so futures need not be `Send` (see plumblog_auth::Crypto).
 #[allow(async_fn_in_trait)]
 pub trait SessionStore {
-    /// `Conflict` on a duplicate hash; `InvalidInput` if the user does not exist.
+    /// `Unauthenticated` if `session.proof` no longer holds ([`Proof`]); `Conflict` on a
+    /// duplicate hash; `InvalidInput` if the user does not exist.
     async fn create_session(&self, session: NewSession) -> Result<i64>;
     /// `None` if absent, expired (`expires_at <= now`) or its user is disabled.
     async fn find_session(&self, token_hash: &str, now: i64) -> Result<Option<Session>>;
@@ -113,7 +139,8 @@ pub trait SessionStore {
 
 #[allow(async_fn_in_trait)]
 pub trait PasskeyStore {
-    /// `Conflict` on a duplicate credential id; `InvalidInput` if the user does not exist.
+    /// `Unauthenticated` if `passkey.proof` no longer holds ([`Proof`]); `Conflict` on a
+    /// duplicate credential id; `InvalidInput` if the user does not exist.
     async fn add_passkey(&self, passkey: NewPasskey) -> Result<i64>;
     async fn find_passkey(&self, credential_id: &str) -> Result<Option<Passkey>>;
     /// Ordered by id.
@@ -134,7 +161,8 @@ pub trait PasskeyStore {
 
 #[allow(async_fn_in_trait)]
 pub trait TokenStore {
-    /// `Conflict` on a duplicate hash; `InvalidInput` if the user does not exist.
+    /// `Unauthenticated` if `token.proof` no longer holds ([`Proof`]); `Conflict` on a
+    /// duplicate hash; `InvalidInput` if the user does not exist.
     async fn create_token(&self, token: NewToken) -> Result<i64>;
     /// `None` if absent, revoked, expired (`expires_at <= now`) or its user is disabled.
     /// Disabling does not revoke: re-enabling the user makes their unrevoked, unexpired
@@ -148,6 +176,7 @@ pub trait TokenStore {
 
 #[allow(async_fn_in_trait)]
 pub trait InviteStore {
+    /// `Unauthenticated` if `invite.proof` no longer holds for `created_by` ([`Proof`]);
     /// `Conflict` on a duplicate hash; `InvalidInput` if the creator does not exist.
     async fn create_invite(&self, invite: NewInvite) -> Result<i64>;
     /// Newest first (`created_at` DESC, id DESC), used ones included.

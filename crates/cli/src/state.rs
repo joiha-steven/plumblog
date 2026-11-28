@@ -171,6 +171,10 @@ pub struct SiteState {
     /// by `blog` for this site, so setup never adopts someone else's Worker of the same name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_marker: Option<String>,
+    /// The database's `site_id` setting (decoded), recorded by `blog setup`: `blog admin reset`
+    /// changes nothing unless the database still carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_id: Option<String>,
     /// The custom domain has served a version once: from then on it is the smoke target.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub domain_smoke_passed: bool,

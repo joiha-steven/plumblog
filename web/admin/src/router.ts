@@ -3,8 +3,8 @@
 export type Screen = "posts" | "pages" | "media" | "settings" | "account" | "new" | "edit" | "missing" | AuthScreen;
 
 /** The signed-out pages: a full page load each (their CSP differs), never client-side routing. */
-export type AuthScreen = "signin" | "setup" | "invite";
-export const isAuth = (s: Screen): s is AuthScreen => s === "signin" || s === "setup" || s === "invite";
+export type AuthScreen = "signin" | "setup" | "invite" | "reset";
+export const isAuth = (s: Screen): s is AuthScreen => s === "signin" || s === "setup" || s === "invite" || s === "reset";
 
 export const HREF = {
   posts: "/admin/",
@@ -28,7 +28,7 @@ export function current(): Route {
   // else is not a page, so a sign-in page never renders under the signed-in CSP.
   const path = location.pathname.replace(/\/$/, "") || "/";
   if (path === "/admin") return { screen: "posts" };
-  const auth = /^\/admin\/(signin|setup|invite)$/.exec(path);
+  const auth = /^\/admin\/(signin|setup|invite|reset)$/.exec(path);
   if (auth) return { screen: auth[1] as AuthScreen };
   const edit = /^\/admin\/posts\/(\d{1,15})$/.exec(path);
   if (edit) return { screen: "edit", id: Number(edit[1]) };

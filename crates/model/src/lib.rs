@@ -89,6 +89,9 @@ stable_codes! {
         // The site's pushed theme failed to load, so its option declarations are unknown:
         // writes to its options wait until it loads again (push it again).
         ThemeUnavailable => "theme.unavailable",
+        // The right owner reset code, used after it expired: not a guess, so not counted;
+        // the owner runs `blog admin reset` again.
+        ResetExpired => "auth.reset_expired",
     }
 }
 
@@ -342,6 +345,7 @@ mod tests {
                 (ErrorCode::CommentCheckFailed, "comments.check_failed"),
                 (ErrorCode::CommentRateLimited, "comments.rate_limited"),
                 (ErrorCode::ThemeUnavailable, "theme.unavailable"),
+                (ErrorCode::ResetExpired, "auth.reset_expired"),
             ]
         );
     }

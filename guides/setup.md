@@ -53,7 +53,8 @@ older one is refused unless you add `--allow-older`. A `release.*` or `update.*`
 hash or signature means a download was not the official file: follow the message, never work
 around it. Never edit tracked files for one site: a pull must not conflict.
 
-## Not built yet
+## Lost owner access
 
-`blog admin reset` (owner access recovery with the Cloudflare token) does not exist: an owner
-who loses every password and passkey cannot get back in.
+`blog admin reset [--login <owner>] --yes` ends that owner's sessions, passkeys, password, API tokens (`--keep-tokens` keeps them) and unused invites, and prints a 1-hour code for `<origin>/admin/reset`.
+No `--yes`: plan only. Both list the other active owners: disable any you do not know. After: re-add passkeys, rotate webhook secrets and any other secret the admin shows, review users and invites.
+`admin.reset_unmarked`: `blog setup`, `blog deploy`, retry; `admin.reset_foreign`: `blog setup`, retry; `auth.reset_expired` on the page: run it again.

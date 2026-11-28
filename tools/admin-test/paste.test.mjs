@@ -65,12 +65,71 @@ test("only structured HTML is converted", () => {
   assert.equal(isRich(DOCS), true);
 });
 
-test("a large paste converts fast", () => {
-  const big = `<p>Line <b>bold</b> and <i>it</i> with a <a href="https://x.test">link</a>.</p>`.repeat(5000);
-  const t = performance.now();
-  const out = md(big);
+// Wall time on a shared machine is a poor clock (a 2 s bound failed at load 32), so a time check
+// compares the converter with a reference workload measured in the same run (the method of
+// crates/auth/tests/perf.rs). The reference is FNV-1a over the input's characters, `passes`
+// times: plain JS that shares nothing with the converter and cannot regress. `passes` is a
+// fixed number per input, tuned so the reference takes about as long as the converter does
+// normally; that way one K catches a slowdown on every shape. Only `htmlToMarkdown` on a
+// parsed tree is timed; happy-dom's parse is not our code. Rounds alternate a block of
+// reference runs with a block of converter runs, so both see the same machine state, and each
+// side keeps its best time, which drops scheduler noise. Blocks, not single alternating runs:
+// the converter's garbage slowed a reference run right after it by 2x, hiding a 10x slowdown.
+// Work that grows with the input is caught by the read counts (`counting`), not by time.
+const ROUNDS = 6;
+const RUNS = 5;
+const fnv = (s, passes) => {
+  let h = 0x811c9dc5;
+  for (let p = 0; p < passes; p++) for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  return h;
+};
+/** Best-of-RUNS time of the converter and of the reference, interleaved: [work, reference] in ms. */
+function race(body, html, passes) {
+  let work = Infinity;
+  let ref = Infinity;
+  let sink = 0;
+  for (let round = 0; round < ROUNDS; round++) {
+    for (let i = 0; i < RUNS; i++) {
+      const t = performance.now();
+      sink += fnv(html, passes) & 1;
+      ref = Math.min(ref, performance.now() - t);
+    }
+    for (let i = 0; i < RUNS; i++) {
+      const t = performance.now();
+      sink += htmlToMarkdown(body).length;
+      work = Math.min(work, performance.now() - t);
+    }
+  }
+  assert.ok(sink > 0);
+  return [work, ref];
+}
+// The converter may cost at most K times the reference. Measured ratios (7 cases): 0.7-1.1
+// idle, 0.9-3.0 with one busy loop per core, up to 2.1 with two per core (load 32). A 10x
+// slower converter measured 8.5-9.6. K = 6 sits 2x above the loaded worst and fails a 10x
+// slowdown; a slow or loaded machine slows the reference alike, so it does not trip it.
+const K = 6;
+const within = (name, body, html, passes) => {
+  const [work, ref] = race(body, html, passes);
+  const ratio = work / ref;
+  console.log(`ratio ${name}: converter ${work.toFixed(1)} ms, reference ${ref.toFixed(1)} ms, x${ratio.toFixed(2)} (limit ${K})`);
+  assert.ok(ratio < K, `${name}: converter ${work.toFixed(1)} ms vs reference ${ref.toFixed(1)} ms: over ${K}x`);
+};
+// Reference passes per nesting shape, at 20,000 levels.
+const PASSES = { spans: 50, "spans around a block": 55, divs: 70, bold: 100, lists: 100, quotes: 30 };
+
+test("a large paste converts in work linear in its size, at a bounded cost per byte", () => {
+  const para = `<p>Line <b>bold</b> and <i>it</i> with a <a href="https://x.test">link</a>.</p>`;
+  const big = para.repeat(5000);
+  const body = parsed(big);
+  const out = htmlToMarkdown(body);
   assert.ok(out.length > 100_000);
-  assert.ok(performance.now() - t < 2000, "5,000 paragraphs under 2 s in happy-dom");
+  // 4x the input: linear work reads 4x, quadratic 16x.
+  const [, readsSmall] = counting(() => htmlToMarkdown(parsed(para.repeat(1250))));
+  const [, readsLarge] = counting(() => htmlToMarkdown(body));
+  assert.ok(readsSmall > 1_250, `the count sees the walk (${readsSmall} reads)`);
+  const ratio = readsLarge / readsSmall;
+  assert.ok(ratio < 4.5, `${readsSmall} -> ${readsLarge} reads (x${ratio.toFixed(2)})`);
+  within("5,000 paragraphs", body, big, 110);
 });
 
 // ---- Hostile and awkward input ----
@@ -148,8 +207,8 @@ test("picture descriptions are one line with brackets and backslashes escaped", 
 // linearity is checked on a count instead: every read the converter makes of the tree, with
 // the reads that cost in proportion to what they return (`childNodes`, `children`,
 // `textContent`) weighted by its length. Re-walking a subtree, the usual way such code turns
-// quadratic, shows in the count exactly, whatever the machine. A wall-time bound far above
-// normal (about 80 ms on CI) backstops work the count cannot see, such as string building.
+// quadratic, shows in the count exactly, whatever the machine. A ratio to a
+// reference workload (`within`) backstops work the count cannot see, such as string building.
 const nest = (tag, n, inner = "x") => `<${tag}>`.repeat(n) + inner + `</${tag}>`.repeat(n);
 const SHAPES = {
   spans: (n) => nest("span", n),
@@ -200,16 +259,14 @@ test("deep and wide nesting converts with work linear in its size, and never thr
     const small = parsed(make(5_000));
     const large = parsed(make(20_000));
     const [outSmall, readsSmall] = counting(() => htmlToMarkdown(small));
-    const t = performance.now();
     const [outLarge, readsLarge] = counting(() => htmlToMarkdown(large));
-    const ms = performance.now() - t;
     assert.match(outSmall, /x/, name);
     assert.match(outLarge, /x/, name);
     assert.ok(readsSmall > 5_000, `${name}: the count sees the walk (${readsSmall} reads)`);
     // 4x the input: linear work reads 4x (plus a constant), quadratic 16x.
     const ratio = readsLarge / readsSmall;
     assert.ok(ratio < 4.5, `${name}: ${readsSmall} -> ${readsLarge} reads (x${ratio.toFixed(2)})`);
-    assert.ok(ms < 3_000, `${name}: ${ms.toFixed(0)} ms`);
+    within(name, large, make(20_000), PASSES[name]);
   }
 });
 
