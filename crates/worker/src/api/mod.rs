@@ -8,6 +8,7 @@ mod auth;
 pub(crate) mod body;
 mod fields;
 pub(crate) mod limit;
+mod mcp;
 mod passkey;
 mod principal;
 pub(crate) mod site;
@@ -24,6 +25,7 @@ use worker::{Env, Method, Request, Response};
 
 use crate::d1::D1Store;
 use crate::webcrypto::WebCrypto;
+pub use mcp::PATH as MCP_PATH;
 pub use principal::Principal;
 
 pub const PREFIX: &str = "/api/";
@@ -162,12 +164,13 @@ fn request_id(req: &Request, crypto: Option<&WebCrypto>) -> RequestId {
 }
 
 fn respond(reply: Reply) -> worker::Result<Response> {
+    let has_body = reply.body.is_some();
     let mut res = match reply.body {
         Some(b) => Response::ok(b)?.with_status(reply.status),
         None => Response::empty()?.with_status(reply.status),
     };
     let h = res.headers_mut();
-    if reply.status != 204 {
+    if has_body {
         h.set("content-type", "application/json; charset=utf-8")?;
     }
     // Answers depend on the cookie; never let a cache keep one.
@@ -251,12 +254,36 @@ async fn read_body(req: &mut Request, max: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Handles one `/api/` request. Never returns a non-JSON error for a failure of ours.
+/// One error line in the Worker log, with the request id: `error` for our failures (5xx),
+/// `warn` for the client's.
+fn log_error(rid: &RequestId, method: &str, what: &str, e: &Error) {
+    let s = status(e.code);
+    let line = format!("[{}] {method} {what} -> {s} {e}", rid.as_str());
+    if s >= 500 {
+        worker::console_error!("{line}");
+    } else {
+        worker::console_warn!("{line}");
+    }
+}
+
+/// Handles one `/api/` or `/mcp` request. Never returns a non-JSON error for a failure of ours.
 pub async fn handle(mut req: Request, env: &Env) -> worker::Result<Response> {
     let crypto = WebCrypto::new();
     let rid = request_id(&req, crypto.as_ref().ok());
     let method = req.method();
     let path = req.path();
+    let is_mcp = path == mcp::PATH;
+    if is_mcp && method != Method::Post {
+        // Stateless and JSON only: no SSE stream to GET, no session to DELETE. There is no
+        // "method not allowed" code; `/api/v1` answers a wrong method `api.not_found` too.
+        let e = Error::new(ErrorCode::RouteNotFound, "mcp: POST only");
+        log_error(&rid, method.as_ref(), &path, &e);
+        let mut reply = mcp::error_reply(&e);
+        reply.status = 405;
+        let mut res = respond(reply)?;
+        res.headers_mut().set("allow", "POST")?;
+        return Ok(res);
+    }
     // The gate's cookie (renewal, or clearing a dead session) goes out on errors too.
     let mut gate_cookie = None;
     let result = async {
@@ -279,6 +306,9 @@ pub async fn handle(mut req: Request, env: &Env) -> worker::Result<Response> {
             ip: req.headers().get("cf-connecting-ip").ok().flatten(),
             request_origin,
         };
+        if is_mcp {
+            return mcp::handle(&ctx, &mut req).await;
+        }
         // A token request carries its credential explicitly, and with no CORS a cross-site
         // page cannot send an `Authorization` header; it also never uses the cookie.
         if !matches!(method, Method::Get | Method::Head) && !principal::has_authorization(&req) {
@@ -318,14 +348,12 @@ pub async fn handle(mut req: Request, env: &Env) -> worker::Result<Response> {
     let mut reply = match result {
         Ok(r) => r,
         Err(e) => {
-            let s = status(e.code);
-            let line = format!("[{}] {} {path} -> {s} {}", rid.as_str(), method.as_ref(), e);
-            if s >= 500 {
-                worker::console_error!("{line}");
+            log_error(&rid, method.as_ref(), &path, &e);
+            if is_mcp {
+                mcp::error_reply(&e)
             } else {
-                worker::console_warn!("{line}");
+                error_reply(&e)
             }
-            error_reply(&e)
         }
     };
     // A handler that changed the session (sign-in, sign-out, rotation) decides the cookie.

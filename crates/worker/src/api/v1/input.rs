@@ -208,7 +208,8 @@ impl Input {
     }
 }
 
-fn write_json(out: &mut String, v: &Value) {
+/// Compact JSON text of a strictly parsed value (also how MCP rebuilds a tool's body).
+pub fn write_json(out: &mut String, v: &Value) {
     match v {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),

@@ -1,9 +1,13 @@
 //! Embeds the default theme's text files, bundled plugins and the sample posts, so the Worker renders pages
-//! with no storage at all. Fonts and JS are served as static assets, not embedded (they would
+//! with no storage at all; and the guides, served over MCP. Fonts and JS are served as static assets, not embedded (they would
 //! only grow the wasm).
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
+
+// Shared with the `blog` CLI's build script: MCP resources are the same guides as `blog guide`.
+#[path = "../guides_embed.rs"]
+mod guides_embed;
 
 fn main() {
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -103,6 +107,12 @@ fn main() {
     fs::write(
         PathBuf::from(env::var("OUT_DIR").unwrap()).join("embedded.rs"),
         out,
+    )
+    .unwrap();
+
+    fs::write(
+        PathBuf::from(env::var("OUT_DIR").unwrap()).join("guides.rs"),
+        guides_embed::source(&root.join("guides")),
     )
     .unwrap();
 }
