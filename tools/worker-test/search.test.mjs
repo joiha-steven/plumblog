@@ -76,3 +76,53 @@ test("results link to pages that exist, newest first", async () => {
   assert.equal(links[0], "/why-small-tools");
   for (const href of links) assert.equal((await fetch(`${worker.url}${href}`)).status, 200, href);
 });
+
+// Search is per language, like the homes: the sample site lists en and vi, and its one vi
+// post ("Bai viet dau tien": "cong cu" = tools) is only found under /vi/search.
+const searchAt = async (path, q) => {
+  const res = await fetch(`${worker.url}${path}?q=${encodeURIComponent(q)}`, { redirect: "manual" });
+  return { res, html: await res.text() };
+};
+
+test("a Vietnamese phrase is found at /vi/search and not at /search", async () => {
+  for (const q of ["c\u00f4ng c\u1ee5", "cong cu"]) {
+    const vi = await searchAt("/vi/search", q);
+    assert.equal(vi.res.status, 200, q);
+    assert.deepEqual(hits(vi.html), ["/vi/bai-viet-dau-tien"], q);
+    assert.deepEqual(hits((await search(q)).html), [], `${q} at /search`);
+  }
+  // And the other way round: an English word does not appear in the Vietnamese results.
+  assert.deepEqual(hits((await searchAt("/vi/search", "tools")).html), []);
+  assert.ok(hits((await search("tools")).html).includes("/why-small-tools"));
+});
+
+test("the Vietnamese search page keeps the search limits and follows the page language", async () => {
+  const { res, html } = await searchAt("/vi/search", "cong cu");
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.equal(res.headers.get("x-plumblog-cache"), "bypass");
+  assert.equal(res.headers.get("etag"), null);
+  assert.match(html, /<html lang="vi"/);
+  assert.match(html, /<meta name="robots" content="noindex">/);
+  assert.match(html, /action="\/vi\/search"/);
+  assert.doesNotMatch(html, /action="\/search"/);
+  // Any Vietnamese page submits to /vi/search, any English page to /search.
+  assert.match(await (await fetch(`${worker.url}/vi/bai-viet-dau-tien`)).text(), /action="\/vi\/search"/);
+  assert.match(await (await fetch(`${worker.url}/vi/`)).text(), /action="\/vi\/search"/);
+  assert.match(await (await fetch(`${worker.url}/first-post`)).text(), /action="\/search"/);
+  // A query without words is the form again.
+  assert.deepEqual(hits((await searchAt("/vi/search", "**")).html), []);
+});
+
+test("one URL per language's search: the default's is /search, unlisted languages are 404", async () => {
+  const en = await searchAt("/en/search", "da lat");
+  assert.equal(en.res.status, 301);
+  assert.equal(en.res.headers.get("location"), `${worker.url}/search?q=da+lat`);
+  const bare = await fetch(`${worker.url}/en/search`, { redirect: "manual" });
+  assert.equal(bare.status, 301);
+  assert.equal(bare.headers.get("location"), `${worker.url}/search`);
+  const slash = await fetch(`${worker.url}/vi/search/?q=x`, { redirect: "manual" });
+  assert.equal(slash.status, 301);
+  assert.equal(slash.headers.get("location"), `${worker.url}/vi/search`);
+  assert.equal((await searchAt("/xx/search", "tools")).res.status, 404);
+  assert.equal((await searchAt("/api/search", "tools")).res.status, 404);
+});

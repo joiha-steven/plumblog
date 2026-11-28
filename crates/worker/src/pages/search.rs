@@ -39,30 +39,43 @@ pub fn clean(raw: &str) -> &str {
 
 impl<S: super::source::ReaderSource> Pages<'_, S> {
     /// Empty or word-less queries show the form (or "nothing found") without a store query.
-    pub(super) async fn search(&self, from: &impl SearchSource, raw: &str) -> PageResult {
+    pub(super) async fn search(
+        &self,
+        from: &impl SearchSource,
+        raw: &str,
+        lang: &str,
+    ) -> PageResult {
         let query = clean(raw);
         let mut found = if search::query_words(query).is_empty() {
             Vec::new()
         } else {
             let limit = u32::try_from(RESULT_LIMIT + 1).unwrap_or(u32::MAX);
-            from.search(&self.info.lang, query, limit).await?
+            from.search(lang, query, limit).await?
         };
         let more = found.len() > RESULT_LIMIT;
         found.truncate(RESULT_LIMIT);
-        let posts: Vec<Post> = found.iter().map(to_render).collect();
+        let posts: Vec<Post> = found
+            .iter()
+            .map(|s| to_render(s, &self.settings.lang))
+            .collect();
         let refs: Vec<&Post> = posts.iter().collect();
-        self.show(&Body::Search {
-            query,
-            posts: &refs,
-            more,
-        })
+        self.render_in(
+            lang,
+            &Body::Search {
+                query,
+                posts: &refs,
+                more,
+            },
+            &[],
+        )
+        .map(Some)
     }
 }
 
 /// A search hit as a list entry. Tags are left out: their names would cost a second query.
-fn to_render(s: &PostSummary) -> Post {
+fn to_render(s: &PostSummary, default_lang: &str) -> Post {
     Post {
-        url: routes::post(&s.slug),
+        url: routes::post_in(&s.lang, default_lang, &s.slug),
         title: s.title.clone(),
         lang: s.lang.clone(),
         // The store keeps milliseconds; pages use seconds.
