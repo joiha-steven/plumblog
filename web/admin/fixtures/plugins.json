@@ -1,0 +1,391 @@
+{
+  "plugins": [
+    {
+      "name": "newsletter",
+      "enabled": true,
+      "disabled_reason": null,
+      "updated_at": 1795000000
+    },
+    {
+      "name": "reading-progress",
+      "enabled": false,
+      "disabled_reason": "its partial failed to render three times in a row",
+      "updated_at": 1795100000
+    }
+  ],
+  "declarations": {
+    "newsletter": {
+      "en": {
+        "name": "newsletter",
+        "version": "1.0.0",
+        "lang": "en",
+        "groups": [
+          {
+            "key": "form",
+            "label": "Sign-up box",
+            "label_key": "options.group_form",
+            "icon": null
+          },
+          {
+            "key": "look",
+            "label": "Look",
+            "label_key": "options.group_look",
+            "icon": null
+          }
+        ],
+        "options": [
+          {
+            "key": "heading",
+            "label": "Heading",
+            "help": "Shown above the sign-up box.",
+            "type": "short_text",
+            "label_key": "options.heading",
+            "help_key": "options.heading_help",
+            "group": "form",
+            "icon": null,
+            "token": null,
+            "min": null,
+            "max": null,
+            "step": null,
+            "default": "Get new posts by email",
+            "choices": [],
+            "max_len": 60,
+            "max_items": null
+          },
+          {
+            "key": "note",
+            "label": "Small print",
+            "help": "A sentence under the button, for example what you promise.",
+            "type": "long_text",
+            "label_key": "options.note",
+            "help_key": "options.note_help",
+            "group": "form",
+            "icon": null,
+            "token": null,
+            "min": null,
+            "max": null,
+            "step": null,
+            "default": "One email a week. Leave any time.",
+            "choices": [],
+            "max_len": 300,
+            "max_items": null
+          },
+          {
+            "key": "cover",
+            "label": "Picture",
+            "help": null,
+            "type": "image",
+            "label_key": "options.cover",
+            "help_key": null,
+            "group": "look",
+            "icon": null,
+            "token": null,
+            "min": null,
+            "max": null,
+            "step": null,
+            "default": "",
+            "choices": [],
+            "max_len": null,
+            "max_items": null
+          },
+          {
+            "key": "networks",
+            "label": "Also find me on",
+            "help": "One name per line.",
+            "type": "list",
+            "label_key": "options.networks",
+            "help_key": "options.networks_help",
+            "group": "look",
+            "icon": null,
+            "token": null,
+            "min": null,
+            "max": null,
+            "step": null,
+            "default": [
+              "Mastodon",
+              "RSS"
+            ],
+            "choices": [],
+            "max_len": 40,
+            "max_items": 6
+          },
+          {
+            "key": "position",
+            "label": "Where it appears",
+            "help": null,
+            "type": "choice",
+            "label_key": "options.position",
+            "help_key": null,
+            "group": "look",
+            "icon": null,
+            "token": null,
+            "min": null,
+            "max": null,
+            "step": null,
+            "default": "after_post",
+            "choices": [
+              {
+                "label": "After each post",
+                "value": "after_post",
+                "label_key": "options.position_after_post"
+              },
+              {
+                "label": "In the footer",
+                "value": "footer",
+                "label_key": "options.position_footer"
+              },
+              {
+                "label": "Before each post",
+                "value": "before_post",
+                "label_key": "options.position_before_post"
+              },
+              {
+                "label": "At the top of every page",
+                "value": "body_start",
+                "label_key": "options.position_body_start"
+              }
+            ],
+            "max_len": null,
+            "max_items": null
+          }
+        ]
+      },
+      "vi": {
+        "name": "newsletter",
+        "version": "1.0.0",
+        "lang": "vi",
+        "groups": [
+          {
+            "key": "form",
+            "label": "Khung đăng ký",
+            "label_key": "options.group_form",
+            "icon": null
+          },
+          {
+            "key": "look",
+            "label": "Diện mạo",
+            "label_key": "options.group_look",
+            "icon": null
+          }
+        ],
+        "options": [
+          {
+            "key": "heading",
+            "label": "Tiêu đề",
+            "help": "Hiện phía trên khung đăng ký.",
+            "type": "short_text",
+            "label_key": "options.heading",
+            "help_key": "options.heading_help",
+            "group": "form",
+            "icon": null,
+            "token": null,
+            "min": null,
+            "max": null,
+            "step": null,
+            "default": "Nhận bài mới qua email",
+            "choices": [],
+            "max_len": 60,
+            "max_items": null
+          },
+          {
+            "key": "note",
+            "label": "Dòng chữ nhỏ",
+            "help": "Một câu dưới nút, ví dụ lời hứa của bạn.",
+            "type": "long_text",
+            "label_key": "options.note",
+            "help_key": "options.note_help",
+            "group": "form",
+            "icon": null,
+            "token": null,
+            "min": null,
+            "max": null,
+            "step": null,
+            "default": "Mỗi tuần một thư. Hủy lúc nào cũng được.",
+            "choices": [],
+            "max_len": 300,
+            "max_items": null
+          },
+          {
+            "key": "cover",
+            "label": "Ảnh",
+            "help": null,
+            "type": "image",
+            "label_key": "options.cover",
+            "help_key": null,
+            "group": "look",
+            "icon": null,
+            "token": null,
+            "min": null,
+            "max": null,
+            "step": null,
+            "default": "",
+            "choices": [],
+            "max_len": null,
+            "max_items": null
+          },
+          {
+            "key": "networks",
+            "label": "Cũng tìm thấy tôi ở",
+            "help": "Mỗi dòng một tên.",
+            "type": "list",
+            "label_key": "options.networks",
+            "help_key": "options.networks_help",
+            "group": "look",
+            "icon": null,
+            "token": null,
+            "min": null,
+            "max": null,
+            "step": null,
+            "default": [
+              "Mastodon",
+              "RSS"
+            ],
+            "choices": [],
+            "max_len": 40,
+            "max_items": 6
+          },
+          {
+            "key": "position",
+            "label": "Vị trí hiện",
+            "help": null,
+            "type": "choice",
+            "label_key": "options.position",
+            "help_key": null,
+            "group": "look",
+            "icon": null,
+            "token": null,
+            "min": null,
+            "max": null,
+            "step": null,
+            "default": "after_post",
+            "choices": [
+              {
+                "label": "Sau mỗi bài",
+                "value": "after_post",
+                "label_key": "options.position_after_post"
+              },
+              {
+                "label": "Ở chân trang",
+                "value": "footer",
+                "label_key": "options.position_footer"
+              },
+              {
+                "label": "Trước mỗi bài",
+                "value": "before_post",
+                "label_key": "options.position_before_post"
+              },
+              {
+                "label": "Đầu mọi trang",
+                "value": "body_start",
+                "label_key": "options.position_body_start"
+              }
+            ],
+            "max_len": null,
+            "max_items": null
+          }
+        ]
+      }
+    },
+    "reading-progress": {
+      "en": {
+        "name": "reading-progress",
+        "version": "0.3.1",
+        "lang": "en",
+        "groups": [],
+        "options": [
+          {
+            "key": "thin",
+            "label": "Thin bar",
+            "help": null,
+            "type": "toggle",
+            "label_key": "options.thin",
+            "help_key": null,
+            "group": null,
+            "icon": null,
+            "token": null,
+            "min": null,
+            "max": null,
+            "step": null,
+            "default": false,
+            "choices": [],
+            "max_len": null,
+            "max_items": null
+          },
+          {
+            "key": "height",
+            "label": "Bar height (px)",
+            "help": "From 2 to 8.",
+            "type": "number",
+            "label_key": "options.height",
+            "help_key": "options.height_help",
+            "group": null,
+            "icon": null,
+            "token": null,
+            "min": 2,
+            "max": 8,
+            "step": 1,
+            "default": 3,
+            "choices": [],
+            "max_len": null,
+            "max_items": null
+          }
+        ]
+      },
+      "vi": {
+        "name": "reading-progress",
+        "version": "0.3.1",
+        "lang": "vi",
+        "groups": [],
+        "options": [
+          {
+            "key": "thin",
+            "label": "Thanh mảnh",
+            "help": null,
+            "type": "toggle",
+            "label_key": "options.thin",
+            "help_key": null,
+            "group": null,
+            "icon": null,
+            "token": null,
+            "min": null,
+            "max": null,
+            "step": null,
+            "default": false,
+            "choices": [],
+            "max_len": null,
+            "max_items": null
+          },
+          {
+            "key": "height",
+            "label": "Độ cao thanh (px)",
+            "help": "Từ 2 đến 8.",
+            "type": "number",
+            "label_key": "options.height",
+            "help_key": "options.height_help",
+            "group": null,
+            "icon": null,
+            "token": null,
+            "min": 2,
+            "max": 8,
+            "step": 1,
+            "default": 3,
+            "choices": [],
+            "max_len": null,
+            "max_items": null
+          }
+        ]
+      }
+    }
+  },
+  "stored": {
+    "newsletter": {
+      "heading": "Nhận thư mới của Lan",
+      "networks": [
+        "Mastodon",
+        "RSS",
+        "Bluesky"
+      ]
+    },
+    "reading-progress": {}
+  }
+}

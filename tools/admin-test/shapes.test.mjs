@@ -138,3 +138,53 @@ test("mock: ?conflict=1 makes the first update conflict only", async () => {
   assert.ok(!first.ok && first.error.field === "expected_version" && first.error.version === fixtures[1].version + 1);
   ok(await a.updatePost(2, { expected_version: first.error.version, title: "X" }));
 });
+
+// --- Appearance and Plugins fixtures ---
+
+test("fixtures: theme and plugin declarations match SHAPES.option_declarations and cover every field type", async () => {
+  const theme = JSON.parse(readFileSync(new URL("web/admin/fixtures/theme-declarations.json", root), "utf8"));
+  const plugins = JSON.parse(readFileSync(new URL("web/admin/fixtures/plugins.json", root), "utf8"));
+  assert.deepEqual(check("theme_list", { themes: theme.themes }), []);
+  const all = [theme.declarations, ...Object.values(plugins.declarations)].flatMap((d) => [d.en, d.vi]);
+  for (const d of all) assert.deepEqual(check("option_declarations", d), [], d.name);
+  const types = new Set(all.flatMap((d) => d.options.map((o) => o.type)));
+  assert.deepEqual([...types].sort(), [...gen.OPTION_TYPES].sort(), "every field type appears in the fixtures");
+  // Same keys in both languages, so a screen never differs by language.
+  for (const d of [theme.declarations, ...Object.values(plugins.declarations)]) {
+    assert.deepEqual(d.en.options.map((o) => o.key), d.vi.options.map((o) => o.key));
+  }
+  assert.deepEqual(Object.keys(plugins.declarations).sort(), plugins.plugins.map((p) => p.name).sort());
+});
+
+test("mock: themes, declarations in the asked language, options and plugin switches", async () => {
+  const a = (q = "") => api(q);
+  const list = ok(await a().call("GET", "/api/v1/themes"));
+  assert.deepEqual(check("theme_list", list), []);
+  const vi = ok(await a().call("GET", "/api/v1/themes/minimal/declarations?lang=vi"));
+  assert.deepEqual(check("option_declarations", vi), []);
+  assert.equal(vi.lang, "vi");
+  const en = ok(await a().call("GET", "/api/v1/themes/minimal/declarations?lang=en"));
+  assert.equal(en.lang, "en");
+  const mock = a();
+  assert.equal(ok(await mock.call("GET", "/api/v1/themes/minimal/options")).options.excerpt_words, 40);
+  ok(await mock.call("PUT", "/api/v1/themes/minimal/options/excerpt_words", { value: 10 }));
+  assert.equal(ok(await mock.call("GET", "/api/v1/themes/minimal/options")).options.excerpt_words, 10);
+  ok(await mock.call("DELETE", "/api/v1/themes/minimal/options"));
+  assert.deepEqual(ok(await mock.call("GET", "/api/v1/themes/minimal/options")).options, {});
+  const plugins = ok(await mock.call("GET", "/api/v1/plugins")).plugins;
+  assert.equal(plugins.length, 2);
+  ok(await mock.call("PUT", "/api/v1/plugins/reading-progress", { enabled: true }));
+  const now = ok(await mock.call("GET", "/api/v1/plugins")).plugins.find((p) => p.name === "reading-progress");
+  assert.deepEqual([now.enabled, now.disabled_reason], [true, null]);
+  assert.deepEqual(check("option_declarations", ok(await mock.call("GET", "/api/v1/plugins/newsletter/declarations?lang=en"))), []);
+  // The forced states.
+  const bad = await a("options=unavailable").call("GET", "/api/v1/themes/minimal/declarations?lang=en");
+  assert.ok(!bad.ok && bad.error.code === "theme.unavailable" && bad.error.status === 409);
+  assert.ok(ok(await a("options=unavailable").call("GET", "/api/v1/themes")).themes.some((t) => !t.available));
+  assert.deepEqual(ok(await a("mock=empty").call("GET", "/api/v1/plugins")).plugins, []);
+  assert.deepEqual(ok(await a("options=bare").call("GET", "/api/v1/themes/minimal/declarations?lang=en")).options, []);
+  const refused = await a("options=invalid").call("PUT", "/api/v1/themes/minimal/options/excerpt_words", { value: 10 });
+  assert.ok(!refused.ok && refused.error.code === "input.invalid");
+  const writer = await a("role=writer").call("PUT", "/api/v1/plugins/newsletter", { enabled: false });
+  assert.ok(!writer.ok && writer.error.code === "auth.forbidden");
+});

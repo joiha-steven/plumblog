@@ -362,6 +362,82 @@ const STATES = [
       await page.waitForSelector("#set-site_per_page-err:not([hidden])");
     },
   ],
+  // Appearance and Plugins (generated from declarations; the mock's flags force each state).
+  ["appearance", "/admin/settings/appearance", "#app-excerpt_words"],
+  ["appearance-bare", "/admin/settings/appearance?options=bare", "main .empty"],
+  ["appearance-unavailable", "/admin/settings/appearance?options=unavailable", "main [role=alert]"],
+  [
+    "appearance-saved",
+    "/admin/settings/appearance",
+    "#app-excerpt_words",
+    async (page) => {
+      await page.fill("#app-excerpt_words", "60");
+      await page.click("button[type=submit]");
+      await page.waitForFunction(() => document.querySelector("[role=status]")?.textContent?.trim());
+      await page.waitForTimeout(900);
+    },
+  ],
+  [
+    "appearance-field-error",
+    "/admin/settings/appearance?options=invalid",
+    "#app-excerpt_words",
+    async (page) => {
+      await page.fill("#app-excerpt_words", "60");
+      await page.click("button[type=submit]");
+      await page.waitForSelector("#app-excerpt_words-err:not([hidden])");
+    },
+  ],
+  [
+    "appearance-invalid",
+    "/admin/settings/appearance",
+    "#app-excerpt_words",
+    async (page) => {
+      await page.fill("#app-excerpt_words", "500");
+      await page.click("button[type=submit]");
+      await page.waitForSelector("#app-excerpt_words-err:not([hidden])");
+    },
+  ],
+  [
+    "appearance-reset-all",
+    "/admin/settings/appearance",
+    "#app-excerpt_words",
+    async (page) => {
+      await page.getByRole("button", { name: "Reset all to defaults" }).or(page.getByRole("button", { name: "\u0110\u1eb7t l\u1ea1i t\u1ea5t c\u1ea3 v\u1ec1 m\u1eb7c \u0111\u1ecbnh" })).click();
+      await page.waitForSelector("form .btn-row[role=group]:not([hidden])");
+    },
+  ],
+  [
+    "appearance-offline",
+    "/admin/settings/appearance",
+    "#app-excerpt_words",
+    async (page) => {
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, "onLine", { get: () => false });
+        dispatchEvent(new Event("offline"));
+      });
+      await page.waitForSelector(".banner");
+    },
+  ],
+  ["plugins", "/admin/settings/plugins", "#plg-newsletter-heading"],
+  ["plugins-empty", "/admin/settings/plugins?mock=empty", "main .empty"],
+  [
+    "plugin-tab",
+    "/admin/settings/plugins",
+    "#plg-newsletter-heading",
+    async (page) => {
+      await page.click(".seg button:nth-child(2)");
+      await page.waitForSelector("#plg-reading-progress-height");
+    },
+  ],
+  [
+    "plugin-switch-error",
+    "/admin/settings/plugins?options=plugin-error",
+    "#plg-newsletter-heading",
+    async (page) => {
+      await page.click("section.sec label.opt >> nth=1");
+      await page.waitForSelector("section.sec .err:not([hidden])");
+    },
+  ],
   ["syslog", "/admin/settings/log", ".log-btn"],
   [
     "syslog-detail",
@@ -757,7 +833,7 @@ try {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const english = ["syslog", "syslog-detail", "syslog-filtered", "syslog-writer", "posts", "posts-strip", "pages", "media", "media-details", "media-in-use", "media-upload-progress", "media-upload-drop", "media-upload-exists", "media-upload-error", "no-permission", "settings", "settings-saved", "settings-field-error", "settings-offline", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow", "account-tokens", "account-tokens-secret", "account-tokens-writer"];
+        const english = ["syslog", "syslog-detail", "syslog-filtered", "syslog-writer", "posts", "posts-strip", "pages", "media", "media-details", "media-in-use", "media-upload-progress", "media-upload-drop", "media-upload-exists", "media-upload-error", "no-permission", "settings", "settings-saved", "settings-field-error", "settings-offline", "appearance", "appearance-saved", "appearance-field-error", "appearance-offline", "appearance-unavailable", "plugins", "plugins-empty", "plugin-tab", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow", "account-tokens", "account-tokens-secret", "account-tokens-writer"];
         const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
         const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);

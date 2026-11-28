@@ -1,0 +1,260 @@
+{
+  "themes": [
+    {
+      "name": "minimal",
+      "version": "0.2.0",
+      "active": true,
+      "source": "embedded",
+      "available": true
+    }
+  ],
+  "declarations": {
+    "en": {
+      "name": "minimal",
+      "version": "0.2.0",
+      "lang": "en",
+      "groups": [
+        {
+          "key": "look",
+          "label": "Look",
+          "label_key": "options.group_look",
+          "icon": "palette"
+        },
+        {
+          "key": "reading",
+          "label": "Reading",
+          "label_key": "options.group_reading",
+          "icon": "book-open"
+        }
+      ],
+      "options": [
+        {
+          "key": "style",
+          "label": "Style",
+          "help": "How the whole site looks. Every style keeps the same reading comfort.",
+          "type": "choice",
+          "label_key": "options.style",
+          "help_key": "options.style_help",
+          "group": "look",
+          "icon": null,
+          "token": null,
+          "min": null,
+          "max": null,
+          "step": null,
+          "default": "writer",
+          "choices": [
+            {
+              "label": "Writer",
+              "value": "writer",
+              "label_key": "options.style_writer"
+            }
+          ],
+          "max_len": null,
+          "max_items": null
+        },
+        {
+          "key": "accent",
+          "label": "Accent color",
+          "help": "Used for links, the focus ring and text selection.",
+          "type": "color",
+          "label_key": "options.accent",
+          "help_key": "options.accent_help",
+          "group": "look",
+          "icon": null,
+          "token": "accent",
+          "min": null,
+          "max": null,
+          "step": null,
+          "default": {
+            "light": "#8a2d6f",
+            "dark": "#e2a3d2"
+          },
+          "choices": [],
+          "max_len": null,
+          "max_items": null
+        },
+        {
+          "key": "list_images",
+          "label": "Show images in the post list",
+          "help": null,
+          "type": "toggle",
+          "label_key": "options.list_images",
+          "help_key": null,
+          "group": "look",
+          "icon": null,
+          "token": null,
+          "min": null,
+          "max": null,
+          "step": null,
+          "default": false,
+          "choices": [],
+          "max_len": null,
+          "max_items": null
+        },
+        {
+          "key": "excerpt_words",
+          "label": "Excerpt length (words)",
+          "help": "Used when a post has no excerpt of its own. 0 hides excerpts.",
+          "type": "number",
+          "label_key": "options.excerpt_words",
+          "help_key": "options.excerpt_words_help",
+          "group": "reading",
+          "icon": null,
+          "token": null,
+          "min": 0,
+          "max": 120,
+          "step": 5,
+          "default": 55,
+          "choices": [],
+          "max_len": null,
+          "max_items": null
+        },
+        {
+          "key": "sidenotes",
+          "label": "Notes beside the text",
+          "help": "Off: notes stay at the end of the post.",
+          "type": "toggle",
+          "label_key": "options.sidenotes",
+          "help_key": "options.sidenotes_help",
+          "group": "reading",
+          "icon": null,
+          "token": null,
+          "min": null,
+          "max": null,
+          "step": null,
+          "default": true,
+          "choices": [],
+          "max_len": null,
+          "max_items": null
+        }
+      ]
+    },
+    "vi": {
+      "name": "minimal",
+      "version": "0.2.0",
+      "lang": "vi",
+      "groups": [
+        {
+          "key": "look",
+          "label": "Giao diện",
+          "label_key": "options.group_look",
+          "icon": "palette"
+        },
+        {
+          "key": "reading",
+          "label": "Đọc",
+          "label_key": "options.group_reading",
+          "icon": "book-open"
+        }
+      ],
+      "options": [
+        {
+          "key": "style",
+          "label": "Kiểu",
+          "help": "Diện mạo của cả site. Kiểu nào cũng giữ cùng độ dễ đọc.",
+          "type": "choice",
+          "label_key": "options.style",
+          "help_key": "options.style_help",
+          "group": "look",
+          "icon": null,
+          "token": null,
+          "min": null,
+          "max": null,
+          "step": null,
+          "default": "writer",
+          "choices": [
+            {
+              "label": "Writer",
+              "value": "writer",
+              "label_key": "options.style_writer"
+            }
+          ],
+          "max_len": null,
+          "max_items": null
+        },
+        {
+          "key": "accent",
+          "label": "Màu nhấn",
+          "help": "Dùng cho liên kết, viền khi chọn bằng bàn phím và vùng bôi chọn chữ.",
+          "type": "color",
+          "label_key": "options.accent",
+          "help_key": "options.accent_help",
+          "group": "look",
+          "icon": null,
+          "token": "accent",
+          "min": null,
+          "max": null,
+          "step": null,
+          "default": {
+            "light": "#8a2d6f",
+            "dark": "#e2a3d2"
+          },
+          "choices": [],
+          "max_len": null,
+          "max_items": null
+        },
+        {
+          "key": "list_images",
+          "label": "Hiện ảnh trong danh sách bài",
+          "help": null,
+          "type": "toggle",
+          "label_key": "options.list_images",
+          "help_key": null,
+          "group": "look",
+          "icon": null,
+          "token": null,
+          "min": null,
+          "max": null,
+          "step": null,
+          "default": false,
+          "choices": [],
+          "max_len": null,
+          "max_items": null
+        },
+        {
+          "key": "excerpt_words",
+          "label": "Độ dài đoạn trích (chữ)",
+          "help": "Dùng khi bài chưa có đoạn trích riêng. 0 là ẩn đoạn trích.",
+          "type": "number",
+          "label_key": "options.excerpt_words",
+          "help_key": "options.excerpt_words_help",
+          "group": "reading",
+          "icon": null,
+          "token": null,
+          "min": 0,
+          "max": 120,
+          "step": 5,
+          "default": 55,
+          "choices": [],
+          "max_len": null,
+          "max_items": null
+        },
+        {
+          "key": "sidenotes",
+          "label": "Chú thích bên lề",
+          "help": "Tắt: chú thích nằm cuối bài.",
+          "type": "toggle",
+          "label_key": "options.sidenotes",
+          "help_key": "options.sidenotes_help",
+          "group": "reading",
+          "icon": null,
+          "token": null,
+          "min": null,
+          "max": null,
+          "step": null,
+          "default": true,
+          "choices": [],
+          "max_len": null,
+          "max_items": null
+        }
+      ]
+    }
+  },
+  "stored": {
+    "excerpt_words": 40,
+    "accent": {
+      "light": "#3b5bdb",
+      "dark": "#91a7ff"
+    }
+  }
+}

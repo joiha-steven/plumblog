@@ -21,6 +21,8 @@ interface Entry {
 /** The section list. Entries drawn by other screens (they only link there) belong here too. */
 const ENTRIES: readonly Entry[] = [
   { key: "general", href: HREF.settings, label: () => t("admin.settings.general"), permission: "settings.manage" },
+  { key: "appearance", href: "/admin/settings/appearance", label: () => t("admin.settings.appearance"), permission: "theme.manage" },
+  { key: "plugins", href: "/admin/settings/plugins", label: () => t("admin.settings.plugins"), permission: "plugin.manage" },
   { key: "log", href: HREF.syslog, label: () => t("admin.syslog.title"), permission: "syslog.view" },
 ];
 
@@ -49,6 +51,22 @@ export function mountSettings(box: HTMLElement, api: Api, o: SettingsOptions): v
   const content = h("div", { class: "settings-main" });
   box.replaceChildren(h("div", { class: "settings" }, nav, content));
   if (active === "general") general(content, api, o.offline);
+  if (active === "appearance" || active === "plugins") options(content, api, o.offline, active);
+}
+
+/** Appearance and Plugins draw forms from declarations: a chunk of their own, loaded when asked for. */
+function options(content: HTMLElement, api: Api, offline: () => boolean, which: "appearance" | "plugins"): void {
+  const load = (): void => {
+    content.replaceChildren(loadingRows(3));
+    import("./options/index").then(
+      (m) => (which === "appearance" ? m.mountAppearance(content, api, offline) : m.mountPlugins(content, api, offline)),
+      (e: unknown) => {
+        console.error("admin: options failed to load", e);
+        content.replaceChildren(failed({ code: "network", status: 0 }, load));
+      },
+    );
+  };
+  load();
 }
 
 // --- General ---

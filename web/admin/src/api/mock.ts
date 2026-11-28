@@ -24,6 +24,11 @@
  * Settings (`/api/v1/settings`): a map kept in memory from fixtures/settings.json (`?mock=empty`: every key
  * absent, so the defaults show). Writes need the owner (`?role=writer` gets 403 `auth.forbidden`);
  * `?settings=invalid` makes writing `site_per_page` fail with 400 `input.invalid`, as a refused value would.
+ * Appearance and Plugins (`/api/v1/themes`, `/api/v1/plugins`, fixtures/theme-declarations.json and plugins.json): option
+ * values and plugin states are kept in memory; declarations answer in `?lang=` (English and Vietnamese fixtures).
+ * `?mock=empty` leaves no plugins and every option at its default. `?options=` forces `invalid` (writing `excerpt_words`
+ * or a plugin's `heading` fails with 400 `input.invalid`), `unavailable` (the bound theme did not load: the list says so, its
+ * declarations answer 409 `theme.unavailable`), `bare` (a theme with no options) or `plugin-error` (switching a plugin fails).
  *
  * Posts live in memory, from fixtures/posts.json, and reset on page load; the long post (id 1)
  * keeps its body in post-1.txt, so its `markdown` in the JSON is empty and is filled in here.
@@ -223,6 +228,85 @@ async function settingsCall<T>(params: URLSearchParams, method: Method, key: str
   return { ok: true, value: undefined as T };
 }
 
+/** The mock's option values (`themes/<name>`, `plugins/<name>`) and plugin switches; reset by a page load. */
+interface OptionState {
+  values: Record<string, Record<string, unknown>>;
+  plugins: { name: string; enabled: boolean; disabled_reason: string | null; updated_at: number }[];
+}
+const optionStates = new WeakMap<URLSearchParams, OptionState>();
+
+/** `/api/v1/themes[...]` and `/api/v1/plugins[...]`; undefined for any other path. */
+async function optionsCall<T>(params: URLSearchParams, method: Method, path: string, body: Body): Promise<Result<T> | undefined> {
+  const url = /^\/api\/v1\/(themes|plugins)(?:\/([a-z0-9_-]+)(?:\/(declarations|options)(?:\/([a-z0-9_]+))?)?)?(?:\?lang=([\w-]+))?$/.exec(path);
+  if (!url) return undefined;
+  const [, kind, name, what, key, lang] = url;
+  const mode = params.get("mock");
+  if (mode === "loading") await new Promise(() => undefined);
+  await new Promise((r) => setTimeout(r, 250));
+  if (mode === "error") return fail("internal", 500);
+  if (mode === "offline") return fail("network", 0);
+  // Loaded on first use so the dev shell does not carry them (the shell has a size budget).
+  const [themeFixtures, pluginFixtures] = await Promise.all([import("../../fixtures/theme-declarations.json"), import("../../fixtures/plugins.json")]).then(([a, b]) => [a.default, b.default] as const);
+  const flag = params.get("options");
+  const done = (value: unknown): Result<T> => ({ ok: true, value: structuredClone(value) as T });
+  const writer = params.get("role") === "writer";
+  const l = lang?.startsWith("vi") ? "vi" : "en";
+  let state = optionStates.get(params);
+  if (!state) {
+    state = {
+      values: {
+        "themes/minimal": mode === "empty" ? {} : structuredClone(themeFixtures.stored),
+        ...Object.fromEntries(Object.entries(pluginFixtures.stored).map(([n, v]) => [`plugins/${n}`, mode === "empty" ? {} : structuredClone(v)])),
+      },
+      plugins: mode === "empty" ? [] : structuredClone(pluginFixtures.plugins),
+    };
+    optionStates.set(params, state);
+  }
+  const { values: optionValues, plugins } = state;
+  if (kind === "themes" && name === undefined) {
+    const themes = structuredClone(themeFixtures.themes) as { name: string; version: string | null; active: boolean; source: string; available: boolean }[];
+    if (flag === "unavailable") themes.push({ name: "journal", version: null, active: false, source: "pushed", available: false });
+    return done({ themes });
+  }
+  if (kind === "plugins" && name === undefined) return writer ? fail("auth.forbidden", 403) : done({ plugins });
+  if (kind === "plugins" && what === undefined && method === "PUT") {
+    if (writer) return fail("auth.forbidden", 403);
+    const p = plugins.find((x) => x.name === name);
+    if (!p) return fail("store.not_found", 404);
+    if (flag === "plugin-error") return fail("internal", 500);
+    p.enabled = body?.["enabled"] === true;
+    p.disabled_reason = null;
+    return { ok: true, value: undefined as T };
+  }
+  const owner = `${kind}/${name}`;
+  const known = kind === "themes" ? name === "minimal" || name === "journal" : plugins.some((x) => x.name === name);
+  if (!known) return fail("store.not_found", 404, { field: "name" });
+  if (what === "declarations") {
+    if (kind === "plugins" && writer) return fail("auth.forbidden", 403);
+    if (kind === "themes") {
+      if (name === "journal" || flag === "unavailable") return fail("theme.unavailable", 409);
+      const d = structuredClone(themeFixtures.declarations[l]);
+      return done(flag === "bare" ? { ...d, groups: [], options: [] } : d);
+    }
+    const all = pluginFixtures.declarations as Record<string, Record<string, unknown>>;
+    return done(all[name ?? ""]?.[l]);
+  }
+  const values = (optionValues[owner] ??= {});
+  if (what === "options" && method === "GET" && key === undefined) return done({ options: values });
+  if (writer) return fail("auth.forbidden", 403);
+  if (what === "options" && method === "PUT" && key !== undefined) {
+    if (body?.["value"] === undefined) return fail("input.invalid", 400, { field: "value" });
+    if (flag === "invalid" && (key === "excerpt_words" || key === "heading")) return fail("input.invalid", 400, { field: "value" });
+    values[key] = body["value"];
+    return { ok: true, value: undefined as T };
+  }
+  if (what === "options" && method === "DELETE" && key === undefined) {
+    optionValues[owner] = {};
+    return { ok: true, value: undefined as T };
+  }
+  return fail("api.not_found", 404);
+}
+
 /** An approximation: the server warns on TeX that does not render (`$\notacommand$`); the mock
  * only knows a `$$` that never closes, enough to show a warning. */
 const warningsOf = (markdown: string): RenderWarning[] =>
@@ -402,6 +486,8 @@ export function mockApi(params: URLSearchParams): Api {
     async call<T>(method: Method, path: string, body?: Body): Promise<Result<T>> {
       const sm = /^\/api\/v1\/settings(?:\/([a-z0-9_-]+))?$/.exec(path);
       if (sm) return settingsCall<T>(params, method, sm[1], body);
+      const om = await optionsCall<T>(params, method, path, body);
+      if (om) return om;
       const m = /^\/api\/v1\/posts\/(\d+)\/(trash|restore)$/.exec(path);
       if (method !== "POST" || !m) return auth<T>(params, method, path, body);
       await settle();
