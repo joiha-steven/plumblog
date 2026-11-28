@@ -296,6 +296,12 @@ describe("/media on the public site", () => {
     const other = await get(files.body.src, AS.anonymous, { headers: { "if-none-match": '"nope"' } });
     assert.equal(other.status, 200);
     assert.ok(other.bytes.equals(files.body.bytes));
+    // If-None-Match is decided before Range (RFC 9110 13.2.2).
+    const past = `bytes=${files.body.bytes.length}-`;
+    const held = await get(files.body.src, AS.anonymous, { headers: { "if-none-match": etag, range: past } });
+    assert.equal(held.status, 304);
+    const stale = await get(files.body.src, AS.anonymous, { headers: { "if-none-match": '"nope"', range: past } });
+    assert.equal(stale.status, 416);
   });
 
   test("a wrong file name, a non-numeric or non-canonical id, extra segments: 404", async () => {

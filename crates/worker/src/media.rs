@@ -324,6 +324,15 @@ async fn answer(
     }
     let want = parse_range(header("range").as_deref(), size);
     if want == Want::Unsatisfiable {
+        // RFC 9110 13.2.2: If-None-Match is decided before Range, so a client holding the
+        // current copy gets 304 even with a range past the end (rare; one extra R2 head).
+        if let Some(tag) = etag_in.as_deref() {
+            let obj = bucket.head(target.key.clone()).await.map_err(broken)?;
+            let obj = present(&target, obj)?;
+            if tag == obj.etag() {
+                return not_modified(&target, &obj, cache);
+            }
+        }
         let mut res = empty(416).map_err(broken)?;
         res.headers_mut()
             .set("content-range", &format!("bytes */{size}"))
@@ -445,6 +454,7 @@ mod tests {
             variants_json: variants.into(),
             uploaded_by: None,
             created_at: 0,
+            sha256: None,
         }
     }
 
