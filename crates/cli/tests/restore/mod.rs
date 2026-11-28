@@ -948,3 +948,173 @@ fn the_worker_test_fixture_is_the_credential_reset_sql() {
         path.display()
     );
 }
+
+fn backup_with(fake: &Fake, dir: &TempDir, out: &str) -> Ran {
+    let mut c = client(fake, GOOD);
+    let migs = migrations::bundled();
+    let text = en();
+    let cx = Context {
+        dir: &dir.0,
+        migrations: &migs,
+        now_ms: NOW,
+        text: &text,
+    };
+    let o = plumblog_cli::backup::Options {
+        no_media: true,
+        out: Some(PathBuf::from(out)),
+    };
+    let mut buf = Vec::new();
+    let result = plumblog_cli::backup::run(&mut c, None, &o, &cx, &mut buf);
+    Ran {
+        result,
+        out: String::from_utf8(buf).unwrap(),
+    }
+}
+
+const REMINDER: &str = "did not finish resetting credentials";
+
+#[test]
+fn a_restore_killed_after_the_import_began_is_remembered_until_the_reset() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    add_credentials(&fake);
+    save_backup(&fake, &dir);
+    // The state file as it is while the import runs: what a Ctrl-C or a crash leaves.
+    let path = state::path(&dir.0);
+    let seen = Arc::new(Mutex::new(String::new()));
+    let keep = Arc::clone(&seen);
+    let p = path.clone();
+    fake.on_request("/import", move || {
+        *keep.lock().unwrap() = std::fs::read_to_string(&p).unwrap();
+    });
+    ok(&restore_with(&fake, &dir, &opts(&bundle, true)));
+    let killed = seen.lock().unwrap().clone();
+    std::fs::write(&path, &killed).unwrap();
+    assert_eq!(
+        load(&dir).rollbacks.last().unwrap().outcome.as_deref(),
+        Some("importing")
+    );
+    // The backup's credentials are live again (the import ran, step 8 never did).
+    add_credentials_again(&fake);
+
+    let b = backup_with(&fake, &dir, "b1");
+    ok(&b);
+    assert!(b.out.contains(REMINDER), "{}", b.out);
+    assert!(
+        b.out.contains("blog restore --reset-credentials --yes"),
+        "{}",
+        b.out
+    );
+    let d = deploy_or_rollback(&fake, &dir, &bundle, None);
+    assert!(d.out.contains(REMINDER), "{}", d.out);
+    let plan = restore_with(&fake, &dir, &opts(&bundle, false));
+    assert_eq!(code(&plan), Code::RestoreUnconfirmed);
+    assert!(plan.out.contains(REMINDER), "{}", plan.out);
+
+    let r = reset_with(&fake, &dir);
+    ok(&r);
+    assert_credentials_reset(&fake);
+    assert_eq!(
+        load(&dir).rollbacks.last().unwrap().outcome.as_deref(),
+        Some("restored")
+    );
+    let b = backup_with(&fake, &dir, "b2");
+    ok(&b);
+    assert!(!b.out.contains(REMINDER), "{}", b.out);
+}
+
+/// The live database after a killed restore: the backup's rows came back, unreset.
+fn add_credentials_again(fake: &Fake) {
+    fake.exec(
+        DB,
+        "INSERT OR IGNORE INTO sessions (token_hash, user_id, created_at, expires_at) \
+           VALUES ('sh1', 1, 1, 9999999999999); \
+         UPDATE api_tokens SET revoked_at = NULL WHERE id = 1;",
+    );
+}
+
+#[test]
+fn a_restored_database_without_an_owner_says_to_run_setup() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    save_backup(&fake, &dir);
+    assert_eq!(count(&fake, "users"), 0);
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    ok(&r);
+    assert!(r.out.contains("has no users"), "{}", r.out);
+    assert!(r.out.contains("`blog setup`"), "{}", r.out);
+    assert!(!r.out.contains("sign in again"), "{}", r.out);
+    assert!(r.out.contains("check webhooks"), "{}", r.out);
+    // With an owner: sign in, and `blog admin reset` if that fails.
+    add_credentials(&fake);
+    save_backup(&fake, &dir);
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    ok(&r);
+    assert!(r.out.contains("sign in again"), "{}", r.out);
+    assert!(r.out.contains("`blog admin reset`"), "{}", r.out);
+    assert!(!r.out.contains("no active owner"), "{}", r.out);
+    assert!(!r.out.contains("has no users"), "{}", r.out);
+}
+
+#[test]
+fn a_restored_database_with_writers_but_no_owner_says_to_recover_by_hand() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    fake.exec(
+        DB,
+        "INSERT INTO users (id, login, slug, display_name, role, password_hash, created_at, \
+           updated_at) VALUES (1, 'w', 'w', 'W', 'writer', 'h', 1, 1), \
+           (2, 'o', 'o', 'O', 'owner', 'h', 1, 1); \
+         UPDATE users SET disabled_at = 5 WHERE id = 2;",
+    );
+    save_backup(&fake, &dir);
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    ok(&r);
+    assert!(r.out.contains("sign in again"), "{}", r.out);
+    assert!(r.out.contains("no active owner"), "{}", r.out);
+    assert!(r.out.contains("by hand in the D1 database"), "{}", r.out);
+    assert!(!r.out.contains("`blog setup`"), "{}", r.out);
+}
+
+#[test]
+fn a_row_count_mismatch_still_resets_and_a_failed_reset_is_only_printed() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    add_credentials(&fake);
+    put(&fake, "lost_in_import", "x");
+    save_backup(&fake, &dir);
+    fake.state().after_import = Some("DELETE FROM settings WHERE key = 'lost_in_import'".into());
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::RestoreCountMismatch, "{}", r.out);
+    assert_credentials_reset(&fake);
+
+    add_credentials_again(&fake);
+    fake.state().after_import = Some("DELETE FROM settings WHERE key = 'lost_in_import'".into());
+    fake.fail_body("UPDATE api_tokens SET revoked_at", Failure::Status(400));
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::RestoreCountMismatch, "{}", r.out);
+    assert!(r.out.contains("restore.credentials_not_reset"), "{}", r.out);
+    assert!(
+        r.out.contains("blog restore --reset-credentials --yes"),
+        "{}",
+        r.out
+    );
+}
+
+#[test]
+fn a_failed_migration_still_resets_and_a_failed_reset_is_only_printed() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    add_credentials(&fake);
+    save_backup(&fake, &dir);
+    let mut migs = migrations::bundled();
+    migs.push(Migration {
+        name: "9999_broken.sql".into(),
+        sql: "CREATE TABLE posts (x);".into(),
+    });
+    write_migrations(&bundle, &migs);
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::MigrationFailed, "{}", r.out);
+    assert_credentials_reset(&fake);
+
+    add_credentials_again(&fake);
+    fake.fail_body("UPDATE api_tokens SET revoked_at", Failure::Status(400));
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::MigrationFailed, "{}", r.out);
+    assert!(r.out.contains("restore.credentials_not_reset"), "{}", r.out);
+}

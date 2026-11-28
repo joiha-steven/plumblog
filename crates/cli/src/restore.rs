@@ -19,7 +19,7 @@ use crate::deploy::{
 };
 use crate::migrations;
 use crate::setup::{self, Context, Failure, Run, printable};
-use crate::state::{RollbackRecord, push_capped};
+use crate::state::{RollbackRecord, SiteState, push_capped};
 use crate::text::Code;
 use plumblog_i18n::{Key, key};
 use plumblog_store::{OWNER_RESET_KEYS, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY};
@@ -522,12 +522,61 @@ fn reset_credentials_in(db: &Database, now_ms: i64) -> Result<(), ApiError> {
 }
 
 /// What the owner must do after the reset; `date` is the backup's.
-fn after_reset(run: &mut Run, date: &str) {
+fn after_reset(run: &mut Run, db: &Database, date: &str) {
     run.line(key!("cli.restore.credentials_reset"), &[]);
+    // An empty `users` table takes a setup code (setup's own rule, `create_first_owner`); users
+    // without an active owner have no CLI way in. A failed read only loses these hints.
+    let row = db
+        .rows(
+            "SELECT count(*) AS users, (SELECT count(*) FROM users WHERE role = 'owner' \
+             AND disabled_at IS NULL) AS owners FROM users",
+            &[],
+        )
+        .ok()
+        .and_then(|r| r.into_iter().next());
+    let n = |k: &str| row.as_ref().and_then(|r| r.get(k)).and_then(Value::as_u64);
+    if n("users") == Some(0) {
+        run.line(key!("cli.restore.credentials_next_no_owner"), &[]);
+    } else {
+        run.line(key!("cli.restore.credentials_next"), &[]);
+        if n("owners") == Some(0) {
+            run.line(key!("cli.restore.credentials_no_active_owner"), &[]);
+        }
+    }
     run.line(
-        key!("cli.restore.credentials_next"),
+        key!("cli.restore.credentials_redo"),
         &[("date", date.to_string())],
     );
+}
+
+/// Outcomes after which the backup's credentials may still work: killed or cut off after the
+/// import began, or a failed reset.
+const UNRESET: &[&str] = &["importing", "import_uncertain", "credentials_not_reset"];
+
+/// The newest database change from this folder, if it is a file restore that may have left the
+/// backup's credentials usable. A later restore or Time Travel rollback supersedes it.
+fn unreset(st: &SiteState) -> Option<RollbackRecord> {
+    st.rollbacks
+        .iter()
+        .rev()
+        .find(|r| r.kind == KIND || r.kind == "database")
+        .filter(|r| r.kind == KIND && r.outcome.as_deref().is_some_and(|o| UNRESET.contains(&o)))
+        .cloned()
+}
+
+/// Printed by `blog restore`, `blog deploy` and `blog backup` while [`unreset`] finds one, so a
+/// restore killed between the import and its credential reset is never forgotten.
+pub(crate) fn remind_reset(run: &mut Run) {
+    if let Some(r) = unreset(&run.state) {
+        run.line(
+            key!("cli.restore.reset_reminder"),
+            &[
+                ("file", printable(&r.to)),
+                ("at", r.at),
+                ("command", RESET_COMMAND.to_string()),
+            ],
+        );
+    }
 }
 
 /// The backup's date, from its file name.
@@ -1101,7 +1150,7 @@ fn replace(
     // so every table the migrations create exists.
     let reset = match reset_credentials_in(db, run.cx.now_ms) {
         Ok(()) => {
-            after_reset(run, date);
+            after_reset(run, db, date);
             Ok(())
         }
         Err(e) => Err(stopped(
@@ -1153,6 +1202,7 @@ pub fn reset_credentials(
         state: st,
         secrets: Vec::new(),
     };
+    remind_reset(&mut run);
     let db = Database::new(client, site.db_id.clone());
     migrations::check_ours(&db).map_err(|e| setup::migration_error(&run, e))?;
     let last = run
@@ -1177,8 +1227,10 @@ pub fn reset_credentials(
             ],
         )
     })?;
-    after_reset(&mut run, &date);
-    if let Some(mut rec) = last.filter(|r| r.outcome.as_deref() == Some("credentials_not_reset")) {
+    after_reset(&mut run, &db, &date);
+    if let Some(mut rec) =
+        last.filter(|r| r.outcome.as_deref().is_some_and(|o| UNRESET.contains(&o)))
+    {
         rec.outcome = Some("restored".into());
         put_record(&mut run, &rec)?;
     }
@@ -1257,6 +1309,7 @@ pub fn run(
         state: st,
         secrets: Vec::new(),
     };
+    remind_reset(&mut first);
     let (_, b) = deploy::bundle(&mut first, &deploy_opts)?;
     let bcx = Context {
         dir: cx.dir,
@@ -1302,6 +1355,11 @@ pub fn run(
     run.line(key!("cli.restore.bookmark"), &[("bookmark", mark.clone())]);
     run.line(key!("cli.restore.undo"), &[("command", undo.clone())]);
     run.line(key!("cli.restore.cancels"), &[]);
+
+    // From here the backup's credentials may be live until step 8: a run killed meanwhile
+    // leaves this outcome, which later commands remind the owner of.
+    rec.outcome = Some("importing".into());
+    put_record(&mut run, &rec)?;
 
     // 5-8. Import, migrations, cache version, credentials.
     let date = backup_date(&run, &opts.file);
