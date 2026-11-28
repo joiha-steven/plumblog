@@ -538,3 +538,10 @@ test("session.expired runs on a 401 outside /api/auth/ only", async () => {
   fakeFetch(401, '{"error":"auth.unauthenticated"}');
   assert.equal((await api.posts({})).error.code, "auth.unauthenticated");
 });
+
+test("the reset page tells an expired code from a wrong one", async () => {
+  const { message } = await bundle("web/admin/src/auth/screens.ts");
+  // Without loaded text, t() answers the key itself.
+  assert.equal(message({ code: "auth.reset_expired" }, false, "reset"), "admin.auth.err_reset_expired");
+  assert.equal(message({ code: "setup.invalid" }, false, "reset"), "admin.auth.err_reset_invalid");
+});

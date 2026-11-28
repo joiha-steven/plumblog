@@ -320,7 +320,7 @@ fn the_reset_is_logged_without_the_code() {
     let detail = rows[0]["detail"].as_str().unwrap();
     assert!(detail.contains("user\t1"), "{detail}");
     assert!(
-        detail.contains("revoked\tpassword,passkeys,sessions,tokens"),
+        detail.contains("revoked\tpassword,passkeys,sessions,invites,tokens"),
         "{detail}"
     );
     assert!(detail.contains("via\tcli"), "{detail}");
@@ -426,4 +426,79 @@ fn the_code_carries_the_reset_time_and_the_token_choice() {
         setting(&fake, "owner_reset_keep_tokens").as_deref(),
         Some("true")
     );
+}
+
+/// Unused invites of the owner, of any role, expired or not; others stay.
+const INVITES: &str = "INSERT INTO invites (code_hash, role, created_by, created_at, expires_at, \
+     used_at, used_by) VALUES ('i-owner', 'owner', 1, 1, 9999999999999, NULL, NULL), \
+     ('i-writer', 'writer', 1, 1, 9999999999999, NULL, NULL), \
+     ('i-expired', 'owner', 1, 1, 2, NULL, NULL), \
+     ('i-used', 'writer', 1, 1, 9999999999999, 5, 2), \
+     ('i-wanda', 'writer', 2, 1, 9999999999999, NULL, NULL)";
+
+#[test]
+fn reset_deletes_every_unused_invite_of_that_owner() {
+    let (fake, dir) = set_up();
+    fake.exec(DB, INVITES);
+    let r = reset(&fake, &dir, &Options::default());
+    assert!(
+        r.out.contains("Their 3 unused invites are deleted"),
+        "{}",
+        r.out
+    );
+    ok(&reset(&fake, &dir, &yes()));
+    let left = fake.sql(DB, "SELECT code_hash FROM invites ORDER BY code_hash");
+    let left: Vec<&str> = left
+        .iter()
+        .map(|r| r["code_hash"].as_str().unwrap())
+        .collect();
+    assert_eq!(left, ["i-used", "i-wanda"]);
+}
+
+#[test]
+fn the_plan_and_the_result_list_the_other_active_owners() {
+    let (fake, dir) = set_up();
+    let alone = reset(&fake, &dir, &Options::default());
+    assert!(
+        alone.out.contains("No other active owner."),
+        "{}",
+        alone.out
+    );
+    fake.exec(
+        DB,
+        &format!(
+            "INSERT INTO users (id, login, slug, display_name, role, password_hash, created_at, \
+             updated_at, disabled_at) VALUES \
+             (3, 'olga', 'olga', 'Olga', 'owner', 'pw', {}, 1, NULL), \
+             (4, 'gone', 'gone', 'Gone', 'owner', 'pw', 1, 1, 5)",
+            NOW - 86_400_000
+        ),
+    );
+    let item = "olga (owner), created 2026-09-20";
+    let o = Options {
+        login: Some("steven".into()),
+        ..Options::default()
+    };
+    let plan = reset(&fake, &dir, &o);
+    assert!(plan.out.contains("Other active owners"), "{}", plan.out);
+    assert_eq!(plan.out.matches(item).count(), 1, "{}", plan.out);
+    assert!(!plan.out.contains("gone") && !plan.out.contains("wanda"));
+    let done = reset(&fake, &dir, &Options { yes: true, ..o });
+    ok(&done);
+    assert_eq!(done.out.matches(item).count(), 2, "{}", done.out);
+}
+
+#[test]
+fn the_code_line_and_the_next_steps() {
+    let (fake, dir) = set_up();
+    let r = reset(&fake, &dir, &yes());
+    ok(&r);
+    assert!(
+        r.out
+            .contains("Reset code (shown only now, valid for 60 minutes)"),
+        "{}",
+        r.out
+    );
+    assert!(r.out.contains("webhook secrets"), "{}", r.out);
+    assert!(r.out.contains("review users and invites"), "{}", r.out);
 }

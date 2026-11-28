@@ -430,6 +430,7 @@ const STATES = [
   ["setup-invalid", "/admin/setup?auth=setup_invalid&code=0000-0000", null, submitWith(ACCOUNT)],
   ["reset", "/admin/reset"],
   ["reset-invalid", "/admin/reset?auth=setup_invalid", null, submitWith({ code: "0000-0000", ...RESET })],
+  ["reset-expired", "/admin/reset?auth=reset_expired", null, submitWith({ code: "7f3a-91c2", ...RESET })],
   ["reset-taken", "/admin/reset?auth=reset_taken", null, submitWith({ code: "7f3a-91c2", ...RESET, login: "a-very-long-login-that-someone-else-already-uses-here" })],
   ["invite", "/admin/invite?code=b2d8-44e0"],
   ["invite-invalid", "/admin/invite?auth=invite_invalid&code=0000-0000", null, submitWith(ACCOUNT)],

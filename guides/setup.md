@@ -55,6 +55,6 @@ around it. Never edit tracked files for one site: a pull must not conflict.
 
 ## Lost owner access
 
-`blog admin reset [--login <owner>] --yes` ends that owner's sessions, passkeys, password, API tokens
-(`--keep-tokens` keeps them) and prints a 1-hour code for `<origin>/admin/reset`; re-add passkeys.
-No `--yes`: plan only. `admin.reset_unmarked`: `blog setup`, `blog deploy`, retry; `admin.reset_foreign`: `blog setup`, retry.
+`blog admin reset [--login <owner>] --yes` ends that owner's sessions, passkeys, password, API tokens (`--keep-tokens` keeps them) and unused invites, and prints a 1-hour code for `<origin>/admin/reset`.
+No `--yes`: plan only. Both list the other active owners: disable any you do not know. After: re-add passkeys, rotate webhook secrets and any other secret the admin shows, review users and invites.
+`admin.reset_unmarked`: `blog setup`, `blog deploy`, retry; `admin.reset_foreign`: `blog setup`, retry; `auth.reset_expired` on the page: run it again.

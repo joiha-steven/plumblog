@@ -8,9 +8,9 @@ use plumblog_auth::password::{
 use plumblog_auth::{Crypto, base64url, constant_time_eq, session};
 use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 use plumblog_store::{
-    InviteStore, NewSession, NewUser, OWNER_RESET_HASH_KEY, OWNER_RESET_USER_KEY, ProfileUpdate,
-    Proof, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SessionStore, SettingsStore, SetupStore, User,
-    UserStore, setup_hash_json,
+    InviteStore, NewSession, NewUser, OWNER_RESET_EXPIRES_KEY, OWNER_RESET_HASH_KEY,
+    OWNER_RESET_USER_KEY, ProfileUpdate, Proof, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SessionStore,
+    SettingsStore, SetupStore, User, UserStore, setup_hash_json,
 };
 use plumblog_syslog::EventKind;
 
@@ -271,6 +271,14 @@ pub async fn redeem_reset(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply
     let stored = ctx.store.get_setting(OWNER_RESET_HASH_KEY).await?;
     let matches =
         stored.is_some_and(|s| constant_time_eq(s.as_bytes(), setup_hash_json(&hash).as_bytes()));
+    // The right code, late: told apart so it is not counted as a guess.
+    let expired = matches
+        && ctx
+            .store
+            .get_setting(OWNER_RESET_EXPIRES_KEY)
+            .await?
+            .and_then(|v| v.parse::<i64>().ok())
+            .is_some_and(|at| at <= ctx.now);
     // The owner the code names, read to build the write; the write checks it again.
     let bound = if matches {
         match ctx
@@ -316,8 +324,16 @@ pub async fn redeem_reset(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply
     };
     let Some((user, cookie)) = redeemed else {
         // Wrong, expired or raced, or its owner is gone, demoted or disabled: spend it (an
-        // expired code is deleted too) and say which in the log.
+        // expired code is deleted too) and say which in the log. Only a wrong or raced code
+        // counts as a guess.
         let Some(id) = ctx.store.take_owner_reset(&hash, ctx.now).await? else {
+            if expired {
+                limit::succeeded(ctx, &keys).await?;
+                return Err(Error::new(
+                    ErrorCode::ResetExpired,
+                    "reset code was right but expired; it is deleted",
+                ));
+            }
             code_failed(ctx, &attempt, "reset code").await?;
             return Err(Error::new(
                 ErrorCode::SetupInvalid,

@@ -234,7 +234,7 @@ pub trait SetupStore {
     /// Sets `password_hash = hash` and `profile` if given (bumping the content version),
     /// deletes every session and passkey of `id`, revokes its API tokens (with
     /// [`OWNER_RESET_KEEP_TOKENS_KEY`] true, only those created at or after
-    /// [`OWNER_RESET_AT_KEY`]), deletes its unused owner invites created since, deletes the
+    /// [`OWNER_RESET_AT_KEY`]), deletes its unused invites (any role) created since, deletes the
     /// reset keys and creates `session`. Returns the new session id. `Conflict` on a login or
     /// slug another user holds; then nothing changed and the code still works.
     async fn redeem_owner_reset(

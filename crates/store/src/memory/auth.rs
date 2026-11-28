@@ -264,6 +264,7 @@ impl TokenStore for MemoryStore {
 impl InviteStore for MemoryStore {
     async fn create_invite(&self, invite: NewInvite) -> Result<i64> {
         self.write(|s| {
+            s.require_proof(invite.created_by, &invite.proof, invite.created_at)?;
             if !s.user_exists(invite.created_by) {
                 return Err(invalid(format!(
                     "user {} does not exist",

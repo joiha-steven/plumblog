@@ -82,9 +82,16 @@ describe("owner reset", () => {
     assert.equal((await api(w, "GET", "/api/auth/me", { cookie: OLD_SESSION })).status, 200);
   });
 
-  test("after the reset: old password, old session refused; wrong and expired codes refused and counted", async () => {
+  test("after the reset: old password, old session refused; an expired code is not a guess, a wrong one is counted", async () => {
+    // Made before the reset, maybe by an attacker: the reset deletes every unused one of Bob's, any role.
+    w.exec(`INSERT INTO invites (code_hash, role, created_by, created_at, expires_at, used_at, used_by) VALUES
+      ('old-owner-invite', 'owner', 1, ${T - DAY}, ${T + DAY}, NULL, NULL), ('old-writer-invite', 'writer', 1, ${T - DAY}, ${T + DAY}, NULL, NULL),
+      ('wendy-invite', 'writer', 2, ${T - DAY}, ${T + DAY}, NULL, NULL);`);
     reset(1, "expired-code", T - 1);
-    assertError(await api(w, "POST", "/api/auth/reset", { body: { code: "expired-code", login: "Bob", password: await stretch("Bob", "x pass") }, ip: "203.0.113.2" }), 403, "setup.invalid");
+    assert.deepEqual(w.query("SELECT code_hash FROM invites ORDER BY code_hash").map((r) => r.code_hash), ["wendy-invite"], "the reset deletes the owner's unused invites");
+    const beforeExpired = failures();
+    assertError(await api(w, "POST", "/api/auth/reset", { body: { code: "expired-code", login: "Bob", password: await stretch("Bob", "x pass") }, ip: "203.0.113.2" }), 403, "auth.reset_expired");
+    assert.equal(failures(), beforeExpired, "the right code, late, is not counted as a guess");
     assert.deepEqual(resetKeys(), [], "an expired code is deleted when tried");
 
     reset(1, "good-code-1", Date.now() + HOUR);
@@ -152,20 +159,20 @@ describe("owner reset", () => {
     assert.equal(resetKeys().length, 5, "untouched by the refused writes");
   });
 
-  test("the redeem removes what a request in flight across the reset left: passkeys, tokens and owner invites since", async () => {
+  test("the redeem removes what a request in flight across the reset left: passkeys, tokens and invites since", async () => {
     reset(1, "flight-code", Date.now() + HOUR, { keepTokens: true });
     const at = Number(w.query("SELECT value_json AS v FROM settings WHERE key = 'owner_reset_at'")[0].v);
     // Written after the reset by requests that authenticated before it (what the Worker now refuses).
     // 'kept' predates the reset by more than OWNER_RESET_SINCE_MARGIN_MS (10 min), so --keep-tokens keeps it.
     w.exec(`INSERT INTO passkeys (user_id, credential_id, public_key, created_at) VALUES (1, 'late-cred', 'k', ${at + 1});
       INSERT INTO api_tokens (user_id, name, token_hash, scope, created_at) VALUES (1, 'kept', 'kept-hash', 'owner', ${at - 11 * 60 * 1000}), (1, 'late', 'late-hash', 'owner', ${at + 1});
-      INSERT INTO invites (code_hash, role, created_by, created_at, expires_at) VALUES ('late-invite', 'owner', 1, ${at + 1}, ${at + DAY});`);
+      INSERT INTO invites (code_hash, role, created_by, created_at, expires_at) VALUES ('late-invite', 'owner', 1, ${at + 1}, ${at + DAY}), ('late-writer-invite', 'writer', 1, ${at + 1}, ${at + DAY});`);
     const r = await api(w, "POST", "/api/auth/reset", { body: { code: "flight-code", login: "Bobby", password: await stretch("Bobby", "new bob pass") }, ip: "203.0.113.20" });
     assert.equal(r.status, 200, r.text);
     assert.equal(w.query("SELECT count(*) AS n FROM passkeys WHERE user_id = 1")[0].n, 0);
     const tokens = w.query("SELECT token_hash, revoked_at IS NOT NULL AS revoked FROM api_tokens WHERE token_hash IN ('kept-hash', 'late-hash') ORDER BY token_hash");
     assert.deepEqual(tokens, [{ token_hash: "kept-hash", revoked: 0 }, { token_hash: "late-hash", revoked: 1 }], "--keep-tokens keeps only tokens from before the reset");
-    assert.equal(w.query("SELECT count(*) AS n FROM invites WHERE code_hash = 'late-invite'")[0].n, 0);
+    assert.equal(w.query("SELECT count(*) AS n FROM invites WHERE code_hash IN ('late-invite', 'late-writer-invite')")[0].n, 0, "unused invites since the reset go, any role");
     assert.deepEqual(resetKeys(), []);
   });
 

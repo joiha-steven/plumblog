@@ -36,9 +36,12 @@ pub struct Options {
 }
 
 /// An active owner, as read before anything changes.
+#[derive(Clone)]
 struct Owner {
     id: i64,
     login: String,
+    role: String,
+    created_at: i64,
 }
 
 fn fail(run: &Run, code: Code, k: Key, args: &[(&str, String)]) -> Failure {
@@ -95,7 +98,7 @@ fn check_ours(run: &Run, worker: &str, db: &Database) -> Result<(), Failure> {
 fn owners(run: &Run, db: &Database) -> Result<Vec<Owner>, Failure> {
     let rows = db
         .rows(
-            "SELECT id, login FROM users WHERE role = 'owner' AND disabled_at IS NULL \
+            "SELECT id, login, role, created_at FROM users WHERE role = 'owner' AND disabled_at IS NULL \
              ORDER BY id",
             &[],
         )
@@ -106,6 +109,8 @@ fn owners(run: &Run, db: &Database) -> Result<Vec<Owner>, Failure> {
             Some(Owner {
                 id: r.get("id")?.as_i64()?,
                 login: r.get("login")?.as_str()?.to_string(),
+                role: r.get("role")?.as_str()?.to_string(),
+                created_at: r.get("created_at")?.as_i64()?,
             })
         })
         .collect())
@@ -113,7 +118,7 @@ fn owners(run: &Run, db: &Database) -> Result<Vec<Owner>, Failure> {
 
 /// The owner to reset: the only one, or the one `--login` names (ASCII case-insensitive, as
 /// the `users.login` column compares).
-fn pick(run: &Run, all: Vec<Owner>, login: Option<&str>) -> Result<Owner, Failure> {
+fn pick(run: &Run, all: &[Owner], login: Option<&str>) -> Result<Owner, Failure> {
     let list = || {
         all.iter()
             .map(|o| printable(&o.login))
@@ -131,8 +136,9 @@ fn pick(run: &Run, all: Vec<Owner>, login: Option<&str>) -> Result<Owner, Failur
     match login {
         Some(l) => {
             let names = list();
-            all.into_iter()
+            all.iter()
                 .find(|o| o.login.eq_ignore_ascii_case(l))
+                .cloned()
                 .ok_or_else(|| {
                     fail(
                         run,
@@ -148,18 +154,19 @@ fn pick(run: &Run, all: Vec<Owner>, login: Option<&str>) -> Result<Owner, Failur
             key!("cli.error.admin_reset_ambiguous"),
             &[("list", list())],
         )),
-        None => Ok(all.into_iter().next().expect("one owner")),
+        None => Ok(all[0].clone()),
     }
 }
 
-/// `(sessions, passkeys, active tokens)` of the owner, for the plan.
-fn counts(run: &Run, db: &Database, id: &str, now: &str) -> Result<[i64; 3], Failure> {
+/// `(sessions, passkeys, active tokens, unused invites)` of the owner, for the plan.
+fn counts(run: &Run, db: &Database, id: &str, now: &str) -> Result<[i64; 4], Failure> {
     let rows = db
         .rows(
             "SELECT (SELECT count(*) FROM sessions WHERE user_id = ?1) AS s, \
              (SELECT count(*) FROM passkeys WHERE user_id = ?1) AS p, \
              (SELECT count(*) FROM api_tokens WHERE user_id = ?1 AND revoked_at IS NULL \
-              AND (expires_at IS NULL OR expires_at > ?2)) AS t",
+              AND (expires_at IS NULL OR expires_at > ?2)) AS t, \
+             (SELECT count(*) FROM invites WHERE created_by = ?1 AND used_at IS NULL) AS i",
             &[id, now],
         )
         .map_err(|e| run.api(&e))?;
@@ -169,12 +176,12 @@ fn counts(run: &Run, db: &Database, id: &str, now: &str) -> Result<[i64; 3], Fai
             .and_then(Value::as_i64)
             .unwrap_or(0)
     };
-    Ok([n("s"), n("p"), n("t")])
+    Ok([n("s"), n("p"), n("t"), n("i")])
 }
 
 /// What `--yes` will do, printed before anything changes.
-fn plan(run: &mut Run, opts: &Options, login: &str, origin: &str, counted: [i64; 3]) {
-    let [sessions, passkeys, tokens] = counted;
+fn plan(run: &mut Run, opts: &Options, login: &str, origin: &str, counted: [i64; 4]) {
+    let [sessions, passkeys, tokens, invites] = counted;
     run.line(
         key!("cli.admin.plan_owner"),
         &[("login", login.to_string()), ("site", origin.to_string())],
@@ -198,9 +205,34 @@ fn plan(run: &mut Run, opts: &Options, login: &str, origin: &str, counted: [i64;
         );
     }
     run.line(
+        key!("cli.admin.plan_invites"),
+        &[("invites", invites.to_string())],
+    );
+    run.line(
         key!("cli.admin.plan_code"),
         &[("minutes", (RESET_CODE_TTL_MS / 60_000).to_string())],
     );
+}
+
+/// The other active owners, so one an attacker added stands out. Printed in the plan and
+/// again after the reset, which leaves them as they are.
+fn others(run: &mut Run, all: &[Owner], picked: &Owner) {
+    let others: Vec<&Owner> = all.iter().filter(|o| o.id != picked.id).collect();
+    if others.is_empty() {
+        run.line(key!("cli.admin.others_none"), &[]);
+        return;
+    }
+    run.line(key!("cli.admin.others_head"), &[]);
+    for o in others {
+        run.line(
+            key!("cli.admin.others_item"),
+            &[
+                ("login", printable(&o.login)),
+                ("role", o.role.clone()),
+                ("created", deploy::utc(o.created_at).0),
+            ],
+        );
+    }
 }
 
 /// One system log row, as crates/worker d1/log.rs writes them (no actor: the CLI did it).
@@ -221,9 +253,9 @@ pub struct Reset<'a> {
 #[must_use]
 pub fn reset_log(user: &str, keep_tokens: bool, now_ms: i64) -> [String; 4] {
     let revoked = if keep_tokens {
-        "password,passkeys,sessions"
+        "password,passkeys,sessions,invites"
     } else {
-        "password,passkeys,sessions,tokens"
+        "password,passkeys,sessions,invites,tokens"
     };
     let event = Event::new(
         EventKind::OwnerReset,
@@ -261,6 +293,12 @@ pub fn reset_statements(r: &Reset) -> Vec<(&'static str, Vec<String>)> {
         ),
         ("DELETE FROM passkeys WHERE user_id = ?", s(&[r.user])),
         ("DELETE FROM sessions WHERE user_id = ?", s(&[r.user])),
+        // Every unused invite they made, of any role and however old: one an attacker made
+        // before the reset would otherwise still let someone in.
+        (
+            "DELETE FROM invites WHERE created_by = ? AND used_at IS NULL",
+            s(&[r.user]),
+        ),
     ];
     if !r.keep_tokens {
         stmts.push((
@@ -309,12 +347,14 @@ pub fn run(
 
     // Read only: is this our site, and which owner.
     check_ours(&run, &site.worker, &db)?;
-    let owner = pick(&run, owners(&run, &db)?, opts.login.as_deref())?;
+    let all = owners(&run, &db)?;
+    let owner = pick(&run, &all, opts.login.as_deref())?;
     let id = owner.id.to_string();
     let now = cx.now_ms.to_string();
     let counted = counts(&run, &db, &id, &now)?;
     let login = printable(&owner.login);
     plan(&mut run, opts, &login, &site.origin, counted);
+    others(&mut run, &all, &owner);
     if !opts.yes {
         return Err(fail(
             &run,
@@ -349,10 +389,17 @@ pub fn run(
     if opts.keep_tokens {
         run.line(key!("cli.admin.tokens_kept"), &[]);
     }
-    run.line(key!("cli.admin.code"), &[("code", code)]);
+    run.line(
+        key!("cli.admin.code"),
+        &[
+            ("code", code),
+            ("minutes", (RESET_CODE_TTL_MS / 60_000).to_string()),
+        ],
+    );
     run.line(
         key!("cli.admin.code_next"),
         &[("url", format!("{}{RESET_PATH}", site.origin))],
     );
+    others(&mut run, &all, &owner);
     Ok(())
 }

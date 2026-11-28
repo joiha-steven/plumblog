@@ -361,8 +361,14 @@ impl InviteStore for D1Store {
                 int(invite.expires_at)?,
             ],
         )?;
-        let r = self.exec(s).await?;
-        Self::last_row_id("create_invite", &r)
+        self.insert_proven(
+            "create_invite",
+            invite.created_by,
+            &invite.proof,
+            invite.created_at,
+            s,
+        )
+        .await
     }
 
     // 1 query.

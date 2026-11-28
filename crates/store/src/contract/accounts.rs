@@ -168,6 +168,7 @@ pub async fn user_delete_effects<S: Store>(db: &S) -> Check {
             created_by: owner,
             created_at: T0,
             expires_at: T0 + 100,
+            proof: crate::Proof::Unchecked,
         })
         .await,
     )?;
@@ -199,6 +200,7 @@ pub async fn user_delete_effects<S: Store>(db: &S) -> Check {
             created_by: v,
             created_at: T0,
             expires_at: T0 + 100,
+            proof: crate::Proof::Unchecked,
         })
         .await,
     )?;
@@ -658,6 +660,7 @@ fn invite(by: UserId, code: &str, role: Role, created_at: i64, expires_at: i64) 
         created_by: by,
         created_at,
         expires_at,
+        proof: crate::Proof::Unchecked,
     }
 }
 

@@ -535,8 +535,8 @@ impl SetupStore for D1Store {
 }
 
 impl D1Store {
-    /// The redeem's removals: every session and passkey of `id`, its tokens and unused owner
-    /// invites since the reset, and the reset keys.
+    /// The redeem's removals: every session and passkey of `id`, its tokens and unused
+    /// invites (any role) since the reset, and the reset keys.
     fn redeem_cleanup(&self, id: UserId, now: i64) -> Result<Vec<Stmt>> {
         let mut out = Vec::new();
         let user = [bound(id.0)];
@@ -550,7 +550,7 @@ impl D1Store {
             "DELETE FROM passkeys WHERE user_id = ?",
             &user,
         )?);
-        // Absent keys (a code from an older `blog`): every token and owner invite goes.
+        // Absent keys (a code from an older `blog`): every token and unused invite goes.
         let since = format!(
             "(COALESCE((SELECT CAST(value_json AS INTEGER) FROM settings WHERE key = ?), 0) - {OWNER_RESET_SINCE_MARGIN_MS})"
         );
@@ -571,8 +571,8 @@ impl D1Store {
         out.push(self.stmt(
             "redeem_owner_reset_invites",
             &format!(
-                "DELETE FROM invites WHERE created_by = ? AND role = 'owner' \
-                 AND used_at IS NULL AND created_at >= {since}"
+                "DELETE FROM invites WHERE created_by = ? AND used_at IS NULL \
+                 AND created_at >= {since}"
             ),
             &[bound(id.0), text(OWNER_RESET_AT_KEY)],
         )?);

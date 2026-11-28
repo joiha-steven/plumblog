@@ -114,6 +114,7 @@ fn status(code: ErrorCode) -> u16 {
         // session, so not 401.
         ErrorCode::Forbidden
         | ErrorCode::SetupInvalid
+        | ErrorCode::ResetExpired
         | ErrorCode::TurnstileRequired
         | ErrorCode::ReauthRequired
         | ErrorCode::CommentsClosed

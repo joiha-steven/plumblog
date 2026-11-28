@@ -59,12 +59,17 @@ fn token(user: UserId, hash: &str, at: i64, proof: Proof) -> NewToken {
 }
 
 fn invite(by: UserId, code: &str, at: i64) -> NewInvite {
+    proven_invite(by, code, Role::Owner, at, Proof::Unchecked)
+}
+
+fn proven_invite(by: UserId, code: &str, role: Role, at: i64, proof: Proof) -> NewInvite {
     NewInvite {
         code_hash: code.into(),
-        role: Role::Owner,
+        role,
         created_by: by,
         created_at: at,
         expires_at: LATER,
+        proof,
     }
 }
 
@@ -126,7 +131,26 @@ pub async fn proof_is_for_its_own_user<S: Store>(db: &S) -> Check {
             db.create_token(token(b, &n, T0, p.clone())).await,
             ErrorCode::Unauthenticated,
         )?;
+        fails(
+            &format!("{p:?} of a: no invite by b"),
+            db.create_invite(proven_invite(b, &n, Role::Writer, T0, p.clone()))
+                .await,
+            ErrorCode::Unauthenticated,
+        )?;
     }
+    ok(
+        "a live proof makes a's invite",
+        db.create_invite(proven_invite(a, "ia", Role::Owner, T0, proofs[1].clone()))
+            .await,
+    )?;
+    eq!(
+        "only a's invite exists",
+        ok("list", db.list_invites().await)?
+            .into_iter()
+            .map(|i| i.created_by)
+            .collect::<Vec<_>>(),
+        vec![a]
+    )?;
     eq!(
         "b has no passkey",
         ok("list", db.list_passkeys(b).await)?.len(),
@@ -181,6 +205,18 @@ pub async fn stale_proof_creates_nothing<S: Store>(db: &S) -> Check {
             ErrorCode::Unauthenticated,
         )?;
         fails(
+            &format!("invite by a stale {what}"),
+            db.create_invite(proven_invite(
+                a,
+                &format!("late-{what}"),
+                Role::Owner,
+                T0 + 1,
+                p.clone(),
+            ))
+            .await,
+            ErrorCode::Unauthenticated,
+        )?;
+        fails(
             &format!("password change by a stale {what}"),
             db.change_password(
                 a,
@@ -204,6 +240,11 @@ pub async fn stale_proof_creates_nothing<S: Store>(db: &S) -> Check {
         ok("list_tokens", db.list_tokens(a).await)?.len(),
         0
     )?;
+    eq!(
+        "no invite written",
+        ok("list_invites", db.list_invites().await)?.len(),
+        0
+    )?;
     let pw = ok("get_user", db.get_user(a).await)?.password_hash;
     eq!("password untouched", pw.as_deref(), Some("pw-new"))?;
     that("b keeps its session", live(db, "sb").await?)?;
@@ -218,7 +259,7 @@ pub async fn stale_proof_creates_nothing<S: Store>(db: &S) -> Check {
 
 /// A site with owner `o` (password, session, passkey, an old token, an old owner invite, a
 /// reset code) and writer `w`; then what an attacker in flight left after the reset: a
-/// passkey, a token and an owner invite. Returns `(o, w)`.
+/// passkey, a token, an owner invite and a writer invite. Returns `(o, w)`.
 async fn after_reset<S: Store>(db: &S, keep_tokens: bool) -> Got<(UserId, UserId)> {
     let o = owner(db, "o", Role::Owner).await?;
     let w = owner(db, "w", Role::Writer).await?;
@@ -270,6 +311,17 @@ async fn after_reset<S: Store>(db: &S, keep_tokens: bool) -> Got<(UserId, UserId
     ok(
         "late invite",
         db.create_invite(invite(o, "late-invite", RESET + 10)).await,
+    )?;
+    ok(
+        "late writer invite",
+        db.create_invite(proven_invite(
+            o,
+            "late-writer-invite",
+            Role::Writer,
+            RESET + 10,
+            Proof::Unchecked,
+        ))
+        .await,
     )?;
     Ok((o, w))
 }
@@ -370,7 +422,7 @@ pub async fn owner_reset_redeem_replaces_credentials<S: Store>(db: &S) -> Check 
         named(&[("old-so", false), ("straddle", true), ("late", true)]),
     )?;
     eq!(
-        "the owner invite made after the reset is gone",
+        "the invites made after the reset are gone, whatever their role",
         invites(db).await?,
         vec!["old-invite".to_string(), "w-invite".to_string()],
     )?;

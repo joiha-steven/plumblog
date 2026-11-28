@@ -114,6 +114,8 @@ pub struct NewInvite {
     pub created_by: UserId,
     pub created_at: i64,
     pub expires_at: i64,
+    /// What the creator's request authenticated with (checked for `created_by`).
+    pub proof: Proof,
 }
 
 // Workers are single-threaded, so futures need not be `Send` (see plumblog_auth::Crypto).
@@ -174,6 +176,7 @@ pub trait TokenStore {
 
 #[allow(async_fn_in_trait)]
 pub trait InviteStore {
+    /// `Unauthenticated` if `invite.proof` no longer holds for `created_by` ([`Proof`]);
     /// `Conflict` on a duplicate hash; `InvalidInput` if the creator does not exist.
     async fn create_invite(&self, invite: NewInvite) -> Result<i64>;
     /// Newest first (`created_at` DESC, id DESC), used ones included.

@@ -387,10 +387,7 @@ impl SetupStore for MemoryStore {
                 }
             }
             s.invites.retain(|_, x| {
-                !(x.created_by == id
-                    && x.role == Role::Owner
-                    && x.used_at.is_none()
-                    && x.created_at >= since)
+                !(x.created_by == id && x.used_at.is_none() && x.created_at >= since)
             });
             for &k in OWNER_RESET_KEYS {
                 s.settings.remove(k);

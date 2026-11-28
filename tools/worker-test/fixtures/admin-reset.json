@@ -21,6 +21,12 @@
     },
     {
       "params": [
+        "$user"
+      ],
+      "sql": "DELETE FROM invites WHERE created_by = ? AND used_at IS NULL"
+    },
+    {
+      "params": [
         "owner_reset_hash",
         "$hash_json",
         "$now"
@@ -64,7 +70,7 @@
         "$now",
         "cli-admin-reset-$now",
         "auth.owner_reset",
-        "owner reset\nuser\t$user\nrevoked\tpassword,passkeys,sessions\nvia\tcli"
+        "owner reset\nuser\t$user\nrevoked\tpassword,passkeys,sessions,invites\nvia\tcli"
       ],
       "sql": "INSERT INTO system_log (at_ms, request_id, kind, actor_id, error_code, detail) VALUES (?, ?, ?, NULL, NULL, ?)"
     }
@@ -88,6 +94,12 @@
         "$user"
       ],
       "sql": "DELETE FROM sessions WHERE user_id = ?"
+    },
+    {
+      "params": [
+        "$user"
+      ],
+      "sql": "DELETE FROM invites WHERE created_by = ? AND used_at IS NULL"
     },
     {
       "params": [
@@ -141,7 +153,7 @@
         "$now",
         "cli-admin-reset-$now",
         "auth.owner_reset",
-        "owner reset\nuser\t$user\nrevoked\tpassword,passkeys,sessions,tokens\nvia\tcli"
+        "owner reset\nuser\t$user\nrevoked\tpassword,passkeys,sessions,invites,tokens\nvia\tcli"
       ],
       "sql": "INSERT INTO system_log (at_ms, request_id, kind, actor_id, error_code, detail) VALUES (?, ?, ?, NULL, NULL, ?)"
     }

@@ -138,6 +138,8 @@ export function message(e: ApiError, passkey: boolean, kind?: Kind): string | un
       return t("admin.auth.err_origin");
     case "setup.invalid":
       return kind === "reset" ? t("admin.auth.err_reset_invalid") : t("admin.auth.err_setup_invalid");
+    case "auth.reset_expired":
+      return t("admin.auth.err_reset_expired");
     case "store.conflict":
       return kind === "reset" ? t("admin.auth.err_login_taken") : t("admin.auth.err_bad_response");
     case "invite.invalid":

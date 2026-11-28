@@ -2,7 +2,7 @@
  * The same interface as client.ts over web/admin/fixtures, for building screens before their
  * API exists (`scripts/admin-dev`). Query flags force each state for review and screenshots:
  * `?mock=loading|error|offline|empty`, `?role=writer`. The auth endpoints answer from
- * `?auth=`: `out` (signed out), `wrong|locked|turnstile|origin|setup_invalid|invite_invalid|
+ * `?auth=`: `out` (signed out), `wrong|locked|turnstile|origin|setup_invalid|reset_expired|reset_taken|invite_invalid|
  * offline|cancelled` force that failure (`turnstile_hold`: like `turnstile`, then a call with a
  * token never answers, to hold the busy state for a screenshot); otherwise a call succeeds after a short wait.
  * Adding or removing a passkey (account screen): `reauth_wrong|reauth|conflict|origin|unsupported|turnstile`
@@ -82,6 +82,7 @@ async function auth<T>(params: URLSearchParams, method: Method, path: string, bo
   }
   if (path === "/api/auth/reset") {
     if (flag === "reset_taken") return fail("store.conflict", 409);
+    if (flag === "reset_expired") return fail("auth.reset_expired", 403);
     return flag === "setup_invalid" ? fail("setup.invalid", 403) : signedIn();
   }
   if (path === "/api/auth/invite/accept") {
