@@ -850,3 +850,86 @@ fn a_refused_id_counter_write_only_warns() {
         "{log:?}"
     );
 }
+
+#[test]
+fn a_long_row_in_a_table_without_integer_primary_key_lands_on_its_own_row() {
+    let (fake, dir) = set_up();
+    let long = "n\u{1ea1}m ".repeat(40_000);
+    {
+        let st = fake.state();
+        let conn = &st.sqlite[DB];
+        // Rowids 5 and 9, so rows inserted without them would get 1 and 2.
+        conn.execute_batch(
+            "CREATE TABLE notes (slug TEXT PRIMARY KEY, body TEXT);\
+             INSERT INTO notes (rowid, slug, body) VALUES (5, 'short', 'a');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO notes (rowid, slug, body) VALUES (9, 'long', ?)",
+            rusqlite::params![long],
+        )
+        .unwrap();
+    }
+    let (before, after, text) = round_trip(&fake, &dir);
+    assert_eq!(before["notes"], after["notes"]);
+    assert_statements_fit(&text);
+    let restored = import_into_empty(&text);
+    let rows: Vec<(i64, String, i64)> = restored
+        .prepare("SELECT rowid, slug, length(body) FROM notes ORDER BY rowid")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (5, "short".to_string(), 1),
+            (
+                9,
+                "long".to_string(),
+                i64::try_from(long.chars().count()).unwrap()
+            )
+        ]
+    );
+}
+
+#[test]
+fn search_rows_match_their_posts_when_a_post_is_edited_mid_dump() {
+    let (fake, dir) = set_up();
+    seed(&fake);
+    {
+        let st = fake.state();
+        let conn = &st.sqlite[DB];
+        // Enough text for the posts to take several pages cut by bytes.
+        let text = "ch\u{1eef} ".repeat(1_500);
+        for id in 10..160 {
+            conn.execute(
+                "INSERT INTO posts (id, kind, translation_group, lang, slug, status, \
+                   published_at, author_id, title, markdown, html, created_at, updated_at) \
+                 VALUES (?1, 'post', ?1, 'vi', 'p' || ?1, 'published', 1, 1, 't' || ?1, ?2, ?2, 1, 1)",
+                rusqlite::params![id, text],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO posts_fts (rowid, title, body) VALUES (?1, 't' || ?1, ?2)",
+                rusqlite::params![id, text],
+            )
+            .unwrap();
+        }
+    }
+    let before = live(&fake);
+    // Post 1 is edited (post and search text in one batch, as the app does) after the posts
+    // were read, while later tables are read.
+    after_first_page(
+        &fake,
+        "post_tags",
+        "UPDATE posts SET title = 'edited', markdown = 'edited' WHERE id = 1;\
+         UPDATE posts_fts SET title = 'edited', body = 'edited' WHERE rowid = 1;",
+    );
+    let text = dumped(&fake, &dir);
+    let after = snapshot(&import_into_empty(&text));
+    assert_eq!(before["posts"], after["posts"]);
+    assert_eq!(before["posts_fts"], after["posts_fts"]);
+    assert!(page_queries(&fake, "posts").len() >= 3);
+}

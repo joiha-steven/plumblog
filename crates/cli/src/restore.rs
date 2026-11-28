@@ -417,6 +417,18 @@ pub fn date_from_name(name: &str) -> Option<String> {
 }
 
 /// A quoted SQL name.
+/// Tables the Worker empties of expired or spent rows by itself, on its cron or on use
+/// (`crates/worker/src/d1`: `auth.rs` sessions, `signin.rs` challenges and login failures,
+/// `log.rs` retention, `webhooks.rs` delivered jobs). Fewer rows in them after an import is
+/// the site at work, not a lost row: it only warns. Every other table keeps the hard check.
+pub const SELF_PRUNING: &[&str] = &[
+    "sessions",
+    "auth_challenges",
+    "login_failures",
+    "system_log",
+    "webhook_deliveries",
+];
+
 /// How far the content version moves past the highest value read before the import: the
 /// live site keeps bumping it during the upload and the import, and none of those values may
 /// come back for pages cached under them.
@@ -732,6 +744,7 @@ fn check_counts(
     counts: &[(String, u64)],
     undo: &str,
 ) -> Result<(), Stopped> {
+    let mut pruned = Vec::new();
     for chunk in counts.chunks(50) {
         let cols: Vec<String> = chunk
             .iter()
@@ -742,19 +755,22 @@ fn check_counts(
             .rows(&format!("SELECT {}", cols.join(", ")), &[])
             .map_err(|e| uncertain(run, undo, e.to_string()))?;
         let row = row.first().cloned().unwrap_or_default();
-        let wrong: Vec<String> = chunk
-            .iter()
-            .enumerate()
-            .filter_map(|(i, (t, want))| {
-                let got = row.get(&format!("c{i}")).and_then(Value::as_u64);
-                got.is_none_or(|g| g < *want).then(|| {
-                    format!(
-                        "{t} {want} -> {}",
-                        got.map_or_else(|| "?".into(), |g| g.to_string())
-                    )
-                })
-            })
-            .collect();
+        let mut wrong = Vec::new();
+        for (i, (t, want)) in chunk.iter().enumerate() {
+            let got = row.get(&format!("c{i}")).and_then(Value::as_u64);
+            if got.is_some_and(|g| g >= *want) {
+                continue;
+            }
+            let shown = format!(
+                "{t} {want} -> {}",
+                got.map_or_else(|| "?".into(), |g| g.to_string())
+            );
+            if got.is_some() && SELF_PRUNING.contains(&t.as_str()) {
+                pruned.push(shown);
+            } else {
+                wrong.push(shown);
+            }
+        }
         if !wrong.is_empty() {
             return Err(stopped(
                 "count_mismatch",
@@ -770,6 +786,12 @@ fn check_counts(
             ));
         }
     }
+    if !pruned.is_empty() {
+        run.line(
+            key!("cli.restore.counts_pruned"),
+            &[("tables", printable(&pruned.join(", ")))],
+        );
+    }
     run.line(
         key!("cli.restore.counts_ok"),
         &[
@@ -782,7 +804,13 @@ fn check_counts(
 
 /// After the import: the bundle's migrations the backup lacks, then the cache version, set
 /// above `floor`.
-fn after_import(run: &mut Run, db: &Database, reply: &Value, floor: i64) -> Result<(), Stopped> {
+fn after_import(
+    run: &mut Run,
+    db: &Database,
+    reply: &Value,
+    floor: i64,
+    mark: &str,
+) -> Result<(), Stopped> {
     let result = reply.get("result").cloned().unwrap_or_default();
     run.line(
         key!("cli.restore.imported"),
@@ -812,7 +840,7 @@ fn after_import(run: &mut Run, db: &Database, reply: &Value, floor: i64) -> Resu
     if let Some(f) = failed {
         run.line(key!("cli.rollback.failed_cleared"), &[("name", f.name)]);
     }
-    setup::apply_migrations(run, db, false).map_err(as_failed)?;
+    setup::apply_migrations_undoing_to(run, db, false, Some(mark)).map_err(as_failed)?;
     d1::bump_content_version_above(db, floor).map_err(|e| stopped("restored", run.api(&e)))
 }
 
@@ -946,7 +974,7 @@ fn replace(
     clock: &dyn Clock,
     (bytes, dump): (&[u8], &Dump),
     version_before: Option<i64>,
-    undo: &str,
+    (mark, undo): (&str, &str),
 ) -> Result<(), Stopped> {
     let (drops, sequences) = drop_sql(db).map_err(|e| stopped("failed", run.api(&e)))?;
     // Read again just before the import: the site kept running since step 2.
@@ -962,7 +990,7 @@ fn replace(
     // the code and no stale page is served until the owner undoes the restore.
     let counted = check_counts(run, db, &dump.counts, undo);
     raise_sequences(run, db, &sequences, &dump.sequences);
-    let after = after_import(run, db, &reply, floor);
+    let after = after_import(run, db, &reply, floor, mark);
     match (counted, after) {
         (Ok(()), after) => after,
         (Err(c), Ok(())) => Err(c),
@@ -1100,7 +1128,7 @@ pub fn run(
         clock,
         (&bytes, &dump),
         version_before,
-        &undo,
+        (&mark, &undo),
     );
     rec.outcome = Some(match &result {
         Ok(()) => "restored".into(),
@@ -1202,6 +1230,21 @@ mod tests {
         assert_eq!(date_from_name("backup.sql"), None);
         assert_eq!(date_from_name("2026110xT080000Z-a.sql"), None);
         assert_eq!(date_from_name("20261101T080000Z.sql"), None);
+    }
+
+    #[test]
+    fn self_pruning_tables_exist() {
+        let schema: String = crate::migrations::bundled()
+            .into_iter()
+            .map(|m| m.sql)
+            .collect();
+        for t in SELF_PRUNING {
+            assert!(
+                schema.contains(&format!("TABLE {t} ("))
+                    || schema.contains(&format!("EXISTS {t} (")),
+                "{t}"
+            );
+        }
     }
 
     #[test]

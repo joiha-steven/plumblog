@@ -650,3 +650,99 @@ fn a_failed_upload_is_told_in_the_owners_language() {
     );
     assert!(message(&r).contains(&reason), "{}", message(&r));
 }
+
+/// `blog deploy` (or `blog rollback` with `rb`) from the restore test's folder.
+fn deploy_or_rollback(
+    fake: &Fake,
+    dir: &TempDir,
+    bundle: &Path,
+    rb: Option<&plumblog_cli::deploy::RollbackOptions>,
+) -> Ran {
+    let mut c = client(fake, GOOD);
+    let migs = migrations::bundled();
+    let text = en();
+    let cx = Context {
+        dir: &dir.0,
+        migrations: &migs,
+        now_ms: NOW,
+        text: &text,
+    };
+    let clock = FakeClock::default();
+    let rt = plumblog_cli::deploy::Runtime {
+        clock: &clock,
+        smoke_base: Some(fake.base.clone()),
+        smoke_budget: plumblog_cli::deploy::SMOKE_BUDGET,
+    };
+    let opts = plumblog_cli::deploy::Options {
+        bundle: Some(bundle.to_path_buf()),
+        ..plumblog_cli::deploy::Options::default()
+    };
+    let mut buf = Vec::new();
+    let result = match rb {
+        Some(o) => plumblog_cli::deploy::rollback(&mut c, None, o, &cx, &rt, &mut buf),
+        None => plumblog_cli::deploy::run(&mut c, None, &opts, &cx, &rt, &mut buf),
+    };
+    Ran {
+        result,
+        out: String::from_utf8(buf).unwrap(),
+    }
+}
+
+#[test]
+fn a_migration_failing_after_the_restore_points_back_to_before_the_restore() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    save_backup(&fake, &dir);
+    let mut migs = migrations::bundled();
+    migs.push(Migration {
+        name: "9999_broken.sql".into(),
+        sql: "CREATE TABLE posts (x);".into(),
+    });
+    write_migrations(&bundle, &migs);
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::MigrationFailed, "{}", r.out);
+    let st = load(&dir);
+    let mark = st.rollbacks.last().unwrap().previous.clone().unwrap();
+    let after_import = st.migrations.last_bookmark.clone().unwrap();
+    assert_ne!(mark, after_import);
+    let undo = format!("blog rollback --db {mark} --yes");
+    // The restore's own undo, in the error, in the state and in what deploy says.
+    assert!(message(&r).contains(&undo), "{}", message(&r));
+    assert!(!message(&r).contains(&after_import), "{}", message(&r));
+    assert_eq!(st.migrations.failed.unwrap().bookmark, mark);
+    let d = deploy_or_rollback(&fake, &dir, &bundle, None);
+    assert_eq!(code(&d), Code::MigrationRestorePending, "{}", d.out);
+    assert!(message(&d).contains(&undo), "{}", message(&d));
+    assert!(!message(&d).contains(&after_import), "{}", message(&d));
+    // Running the printed undo clears the failure.
+    let rb = plumblog_cli::deploy::RollbackOptions {
+        db: Some(mark.clone()),
+        yes: true,
+        ..plumblog_cli::deploy::RollbackOptions::default()
+    };
+    ok(&deploy_or_rollback(&fake, &dir, &bundle, Some(&rb)));
+    assert_eq!(load(&dir).migrations.failed, None);
+    let d = deploy_or_rollback(&fake, &dir, &bundle, None);
+    if let Err(e) = &d.result {
+        assert_ne!(e.code, Code::MigrationRestorePending, "{}", e.message);
+    }
+}
+
+#[test]
+fn rows_the_site_prunes_itself_only_warn_but_other_tables_still_stop() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    fake.exec(
+        DB,
+        "INSERT INTO auth_challenges (challenge_hash, purpose, expires_at) \
+           VALUES ('h1', 'login', 1);",
+    );
+    save_backup(&fake, &dir);
+    // The cron removes the expired challenge between the import and the count.
+    fake.state().after_import = Some("DELETE FROM auth_challenges".into());
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    ok(&r);
+    assert!(r.out.contains("auth_challenges 1 -> 0"), "{}", r.out);
+    // A row lost from a table the site never prunes is still a mismatch.
+    fake.state().after_import = Some("DELETE FROM settings WHERE key = 'site_id'".into());
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::RestoreCountMismatch, "{}", r.out);
+}

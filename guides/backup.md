@@ -28,9 +28,8 @@ Media copying resumes: `backups/media/manifest.json` lists each file's size and 
 re-run fetches only what is missing or changed. Each file is checked against the size the
 database records, and against R2's checksum when it is a plain MD5. A file that fails is not
 saved; the run goes on and ends with exit code 1 (`backup.incomplete`) and a list: run it
-again to retry. A row whose file is not in R2 is reported (`backup.object_missing`); retrying
-cannot fix it, and the backup counts as not complete. The token needs R2 permission
-(`blog guide token`).
+again to retry. A file not in R2 (`backup.object_missing`) also ends with exit code 1; if all
+are missing, suspect the token's R2 permission (`blog guide token`) or the bucket first.
 
 Each run records itself as the site's `last_backup` setting (`at`, `database`, `media`
 counts or null, `complete`) and in `site.local.toml`; only `blog backup` writes it.
@@ -51,8 +50,9 @@ the undo command they print. Without `--yes`, `blog restore` only checks the fil
 its plan. It refuses a file that is not a blog backup, another site's (`--allow-other-site`),
 one from newer code (`restore.backup_newer`: update `blog` first) or a cut one (no row
 counts). It saves a bookmark, imports (ids used since the backup are never handed out again),
-reruns missing migrations and moves the cache version past every value used before. A table
-holding fewer rows than the file is `restore.count_mismatch`: tell the owner its undo command.
+reruns missing migrations and moves the cache version past every value used before. Fewer
+rows than the file in a table the site never prunes is `restore.count_mismatch`; if that or a
+migration fails, give the owner the undo command it prints (deploy names the same one).
 
 ## Not covered yet
 

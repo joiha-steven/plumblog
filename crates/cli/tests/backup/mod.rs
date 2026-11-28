@@ -385,19 +385,48 @@ fn an_unsafe_key_is_refused_before_any_request_for_it() {
 }
 
 #[test]
-fn a_missing_object_is_reported_and_the_run_goes_on() {
+fn a_missing_object_fails_the_run_after_copying_the_rest() {
     let (fake, dir) = set_up();
     row(&fake, 1, "media/gone/gone.png", 5, &[]);
     media(&fake, 2, "media/ok/ok.png", "OK!", &[]);
     let r = backup(&fake, &dir);
-    ok(&r);
+    assert_eq!(code(&r), Code::BackupIncomplete, "{}", r.out);
     assert!(r.out.contains("backup.object_missing"), "{}", r.out);
-    assert!(r.out.contains("not complete"), "{}", r.out);
+    let msg = r.result.as_ref().unwrap_err().message.clone();
+    assert!(
+        msg.contains("1 media files") && msg.contains("media/gone/gone.png"),
+        "{msg}"
+    );
     assert!(media_file(&dir, "media/ok/ok.png").exists());
     let rec = load(&dir).last_backup.unwrap();
     assert!(!rec.complete);
     let m = rec.media.unwrap();
     assert_eq!((m.objects, m.missing, m.failed), (1, 1, 0));
+}
+
+#[test]
+fn every_object_missing_fails_with_a_capped_list_and_a_hint() {
+    let (fake, dir) = set_up();
+    for id in 1..=30 {
+        row(&fake, id, &format!("media/m{id}.png"), 5, &[]);
+    }
+    let r = backup(&fake, &dir);
+    assert_eq!(code(&r), Code::BackupIncomplete, "{}", r.out);
+    let msg = r.result.as_ref().unwrap_err().message.clone();
+    assert!(
+        msg.contains("30 media files") && msg.contains("and 10 more"),
+        "{msg}"
+    );
+    assert!(msg.contains("R2 permission"), "{msg}");
+    assert_eq!(
+        r.out.matches("backup.object_missing").count(),
+        20,
+        "{}",
+        r.out
+    );
+    let rec = load(&dir).last_backup.unwrap();
+    assert!(!rec.complete);
+    assert_eq!(rec.media.unwrap().missing, 30);
 }
 
 #[test]

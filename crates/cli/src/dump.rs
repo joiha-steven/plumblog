@@ -276,8 +276,14 @@ fn tables(db: &Database, objects: &[Map<String, Value>]) -> Result<Vec<Table>, D
                 .ok_or_else(|| malformed(format!("no rowid name free in table {}", t.name)))?;
             t.keys = vec![rowid.to_string()];
             t.cols = quoted;
-            if t.virt {
-                // FTS rows keep their rowid: it is the post's id.
+            // An INTEGER PRIMARY KEY column is the rowid; without one the rowid is written
+            // too, so it survives the import and a split row's UPDATEs find it (FTS rows keep
+            // theirs anyway: it is the post's id).
+            let alias = pk.len() == 1
+                && info.iter().any(|c| {
+                    text(c, "name") == pk[0].1 && text(c, "type").eq_ignore_ascii_case("INTEGER")
+                });
+            if t.virt || !alias {
                 t.cols.insert(0, rowid.to_string());
             }
         }
@@ -362,7 +368,15 @@ fn row_of(t: &Table, r: &Map<String, Value>) -> Result<Row, DumpError> {
     Ok((keys, vals))
 }
 
-fn page(db: &Database, t: &Table, cursor: Option<&[String]>, n: u64) -> Result<Page, DumpError> {
+/// [`page`], and with `fts` the rows of that virtual table whose rowid is among the rows the
+/// page read, in the same batch (one transaction, so the two agree).
+fn page(
+    db: &Database,
+    t: &Table,
+    cursor: Option<&[String]>,
+    n: u64,
+    fts: Option<&Table>,
+) -> Result<(Page, Vec<Row>), DumpError> {
     let (key_lits, vals) = literal_columns(t);
     let raw_keys: Vec<String> = t
         .keys
@@ -405,7 +419,37 @@ fn page(db: &Database, t: &Table, cursor: Option<&[String]>, n: u64) -> Result<P
         table = ident(&t.name),
         budget = PAGE_BYTES,
     );
-    let rows = db.rows(&sql, &[])?;
+    let (rows, fts_rows) = match fts {
+        None => (db.rows(&sql, &[])?, Vec::new()),
+        Some(v) => {
+            let (vk, vv) = literal_columns(v);
+            let fts_sql = format!(
+                "SELECT {}, {} FROM {} WHERE {} IN (SELECT {} FROM {} {filter} ORDER BY {order_raw} LIMIT {n})",
+                vk.join(", "),
+                vv.join(", "),
+                ident(&v.name),
+                v.keys[0],
+                t.keys[0],
+                ident(&t.name),
+            );
+            let mut r = db.batch(&[(sql.as_str(), &[][..]), (fts_sql.as_str(), &[][..])])?;
+            if r.len() != 2 {
+                return Err(malformed(format!(
+                    "batch for table {} lost a reply",
+                    t.name
+                )));
+            }
+            let second = r.pop().map(|x| x.results).unwrap_or_default();
+            (r.pop().map(|x| x.results).unwrap_or_default(), second)
+        }
+    };
+    let fts_rows = match fts {
+        Some(v) => fts_rows
+            .iter()
+            .map(|r| row_of(v, r))
+            .collect::<Result<Vec<_>, _>>()?,
+        None => Vec::new(),
+    };
     let read = rows
         .first()
         .and_then(|r| r.get("_pb_n"))
@@ -416,7 +460,7 @@ fn page(db: &Database, t: &Table, cursor: Option<&[String]>, n: u64) -> Result<P
         .map(|r| row_of(t, r))
         .collect::<Result<Vec<_>, _>>()?;
     let end = out.is_empty() || (out.len() as u64 == read && read < n);
-    Ok((out, end))
+    Ok(((out, end), fts_rows))
 }
 
 /// A key as shown in an error: short and printable.
@@ -545,7 +589,14 @@ struct Dumper<'a> {
     referenced: HashMap<(usize, Vec<String>), BTreeSet<Vec<String>>>,
     counts: Vec<u64>,
     left_out: Vec<u64>,
+    /// Base table -> its search table ([`FTS_OF`]), read and written together.
+    fts: HashMap<usize, usize>,
 }
+
+/// `(virtual table, base table)` whose rowids are the base table's: `posts_fts` holds each
+/// post's search text under the post's id (`migrations/0001_init.sql`). Read in the same batch
+/// as the base table's page, so a post edited while the dump runs keeps matching search text.
+const FTS_OF: &[(&str, &str)] = &[("posts_fts", "posts")];
 
 impl<'a> Dumper<'a> {
     fn new(db: &'a Database<'a>, tables: &'a [Table], out: &'a mut dyn Write) -> Self {
@@ -562,7 +613,19 @@ impl<'a> Dumper<'a> {
                 referenced.insert((p, fk.to.clone()), BTreeSet::new());
             }
         }
+        let fts = FTS_OF
+            .iter()
+            .filter_map(|(v, b)| {
+                let (vi, bi) = (*index.get(*v)?, *index.get(*b)?);
+                let ok = tables[vi].virt
+                    && !tables[bi].virt
+                    && tables[bi].keys.len() == 1
+                    && tables[vi].keys.len() == 1;
+                ok.then_some((bi, vi))
+            })
+            .collect();
         Self {
+            fts,
             db,
             tables,
             index,
@@ -579,11 +642,15 @@ impl<'a> Dumper<'a> {
         let tables = self.tables;
         let t = &tables[ti];
         let mut stmt = String::new();
+        let mut fts_stmt = String::new();
+        let fts = self.fts.get(&ti).copied();
         let mut cursor: Option<Vec<String>> = None;
         let mut n = FIRST_PAGE_ROWS;
         loop {
-            let (rows, end) = page(self.db, t, cursor.as_deref(), n)?;
+            let ((rows, end), fts_rows) =
+                page(self.db, t, cursor.as_deref(), n, fts.map(|v| &tables[v]))?;
             let got = rows.len() as u64;
+            let mut emitted = BTreeSet::new();
             for (keys, vals) in rows {
                 if cursor.as_ref() == Some(&keys) {
                     return Err(malformed(format!("table {} repeats a key", t.name)));
@@ -598,6 +665,15 @@ impl<'a> Dumper<'a> {
                     continue;
                 }
                 self.emit(ti, &keys, vals, Some(&mut stmt))?;
+                emitted.insert(keys);
+            }
+            // Search rows of the posts just written; the rest come with their own page.
+            if let Some(v) = fts {
+                for (keys, vals) in fts_rows {
+                    if emitted.contains(&keys) {
+                        self.emit(v, &keys, vals, Some(&mut fts_stmt))?;
+                    }
+                }
             }
             if end {
                 break;
@@ -609,9 +685,11 @@ impl<'a> Dumper<'a> {
                 (n * 2).min(MAX_PAGE_ROWS)
             };
         }
-        if !stmt.is_empty() {
-            stmt.push_str(";\n");
-            self.out.write_all(stmt.as_bytes())?;
+        for st in [&mut stmt, &mut fts_stmt] {
+            if !st.is_empty() {
+                st.push_str(";\n");
+                self.out.write_all(st.as_bytes())?;
+            }
         }
         Ok(())
     }
@@ -667,7 +745,35 @@ impl<'a> Dumper<'a> {
             cols.join(", "),
             tuple.join(", ")
         );
-        let Some(r) = self.db.rows(&sql, &[])?.into_iter().next() else {
+        let fts = self.fts.get(&p).copied();
+        let (found, fts_rows) = match fts {
+            None => (self.db.rows(&sql, &[])?, Vec::new()),
+            Some(v) => {
+                let vt = &tables[v];
+                let (vk, vv) = literal_columns(vt);
+                let fts_sql = format!(
+                    "SELECT {}, {} FROM {} WHERE {} IN (SELECT {} FROM {} WHERE ({}) = ({}) LIMIT 1)",
+                    vk.join(", "),
+                    vv.join(", "),
+                    ident(&vt.name),
+                    vt.keys[0],
+                    t.keys[0],
+                    ident(&t.name),
+                    cols.join(", "),
+                    tuple.join(", ")
+                );
+                let mut r = self
+                    .db
+                    .batch(&[(sql.as_str(), &[][..]), (fts_sql.as_str(), &[][..])])?;
+                let second = r.pop().map(|x| x.results).unwrap_or_default();
+                let fts_rows = second
+                    .iter()
+                    .map(|x| row_of(vt, x).map(|row| (v, row)))
+                    .collect::<Result<Vec<_>, _>>()?;
+                (r.pop().map(|x| x.results).unwrap_or_default(), fts_rows)
+            }
+        };
+        let Some(r) = found.into_iter().next() else {
             return Ok(false);
         };
         let (keys, vals) = row_of(t, &r)?;
@@ -686,6 +792,9 @@ impl<'a> Dumper<'a> {
             return Ok(false);
         }
         self.emit(p, &keys, vals, None)?;
+        for (v, (k, vals)) in fts_rows {
+            self.emit(v, &k, vals, None)?;
+        }
         Ok(true)
     }
 
@@ -919,7 +1028,8 @@ pub fn write(db: &Database, bookmark: &str, out: &mut dyn Write) -> Result<Writt
         out.write_all(format!("{};\n", t.sql).as_bytes())?;
     }
     let mut d = Dumper::new(db, &tables, out);
-    for ti in 0..tables.len() {
+    let paired: BTreeSet<usize> = d.fts.values().copied().collect();
+    for ti in (0..tables.len()).filter(|i| !paired.contains(i)) {
         d.table(ti)?;
     }
     let (counts, left_out) = (d.counts, d.left_out);

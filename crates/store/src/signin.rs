@@ -28,8 +28,8 @@ pub const SETUP_CODE_EXPIRES_KEY: &str = "setup_code_expires_at";
 /// stretch salt. Public: the sign-in page needs it before anyone is signed in.
 pub const SITE_ID_KEY: &str = "site_id";
 /// Settings key `blog backup` writes (JSON `{at, database, media, complete}`): when the data
-/// was last copied off Cloudflare. Read-only to the API, like [`SITE_ID_KEY`]: only `blog`
-/// says what it backed up.
+/// was last copied off Cloudflare. Internal: never handed to the API or themes, and not
+/// writable through it; only `blog` says what it backed up.
 pub const LAST_BACKUP_KEY: &str = "last_backup";
 /// Settings key holding the Turnstile site key (a JSON string); absent = Turnstile off.
 pub const TURNSTILE_SITE_KEY: &str = "turnstile_site_key";
@@ -40,7 +40,8 @@ pub const TURNSTILE_SITE_KEY: &str = "turnstile_site_key";
 pub const ORIGIN_KEY: &str = "origin";
 
 /// Settings that must never leave the Worker (API responses, theme data, exports).
-pub const INTERNAL_SETTING_KEYS: &[&str] = &[SETUP_CODE_HASH_KEY, SETUP_CODE_EXPIRES_KEY];
+pub const INTERNAL_SETTING_KEYS: &[&str] =
+    &[SETUP_CODE_HASH_KEY, SETUP_CODE_EXPIRES_KEY, LAST_BACKUP_KEY];
 
 /// Whether `key` is in [`INTERNAL_SETTING_KEYS`].
 #[must_use]
@@ -175,4 +176,22 @@ pub trait SetupStore {
     /// `SetupInvalid` and nothing changes. Two setups racing: at most one succeeds.
     /// Comparing in constant time is the caller's job. No version bump.
     async fn create_first_owner(&self, code_hash: &str, user: NewUser, now: i64) -> Result<UserId>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_backup_record_is_internal_and_the_site_id_is_not() {
+        let all = vec![
+            (LAST_BACKUP_KEY.to_string(), "{}".to_string()),
+            (SETUP_CODE_HASH_KEY.to_string(), "\"h\"".to_string()),
+            (SITE_ID_KEY.to_string(), "\"s\"".to_string()),
+            ("title".to_string(), "\"t\"".to_string()),
+        ];
+        let shown: Vec<String> = public_settings(all).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(shown, [SITE_ID_KEY, "title"]);
+        assert!(is_internal_setting(LAST_BACKUP_KEY));
+    }
 }

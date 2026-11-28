@@ -184,7 +184,13 @@ struct Tally {
     bytes: u64,
     missing: u64,
     failed: u64,
+    /// The first [`MISSING_SHOWN`] missing keys, as shown.
+    missing_keys: Vec<String>,
 }
+
+/// Missing keys named one by one; a wrong path or bucket makes every object missing, and
+/// thousands of lines would hide the summary.
+const MISSING_SHOWN: usize = 20;
 
 impl Tally {
     fn record(&self) -> BackupMedia {
@@ -279,12 +285,15 @@ impl Media<'_, '_> {
             Ok(Some(o)) => o,
             Ok(None) => {
                 self.tally.missing += 1;
-                problem(
-                    self.run,
-                    Code::BackupObjectMissing,
-                    key!("cli.error.backup_object_missing"),
-                    &[("key", shown)],
-                );
+                if self.tally.missing_keys.len() < MISSING_SHOWN {
+                    self.tally.missing_keys.push(shown.clone());
+                    problem(
+                        self.run,
+                        Code::BackupObjectMissing,
+                        key!("cli.error.backup_object_missing"),
+                        &[("key", shown)],
+                    );
+                }
                 return Ok(());
             }
             Err(e) => return self.read_failed(&e, shown),
@@ -536,26 +545,33 @@ pub fn run(
         ],
     );
     saved?;
-    if t.failed > 0 {
+    if t.failed > 0 || t.missing > 0 {
+        let mut list = t.missing_keys.join(", ");
+        let more = t.missing.saturating_sub(t.missing_keys.len() as u64);
+        if more > 0 {
+            list = run.t(
+                key!("cli.backup.missing_more"),
+                &[("list", list), ("more", more.to_string())],
+            );
+        }
+        let k = if t.missing == 0 {
+            key!("cli.error.backup_incomplete")
+        } else {
+            key!("cli.error.backup_missing")
+        };
         return Err(Failure::new(
             Code::BackupIncomplete,
             cx.text,
-            key!("cli.error.backup_incomplete"),
+            k,
             &[
                 ("failed", t.failed.to_string()),
                 ("missing", t.missing.to_string()),
                 ("objects", (t.copied + t.kept).to_string()),
+                ("list", list),
             ],
         ));
     }
-    if t.missing > 0 {
-        run.line(
-            key!("cli.backup.with_missing"),
-            &[("missing", t.missing.to_string())],
-        );
-    } else {
-        run.line(key!("cli.backup.complete"), &[]);
-    }
+    run.line(key!("cli.backup.complete"), &[]);
     Ok(())
 }
 
