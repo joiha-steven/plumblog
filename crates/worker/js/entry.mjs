@@ -26,9 +26,16 @@ const wasm = async () => (await load()).default;
 
 const MARK = "x-plumblog-entry";
 
-// What lib.rs routes to pages::serve (media::serve owns /media/) besides /search, which is never cached.
+// What lib.rs routes to pages::serve (media::serve owns /media/) besides search (/search and
+// /<lang>/search), which is never cached.
+// First segments the router owns (pages::routes::RESERVED): never a language, so /tag/search is a page. (`/series` alone may still be a post: see routes.rs.)
+const OWNED = new Set(["page", "tag", "series", "archive", "search", "theme", "plugin", "media", "admin", "api", "healthz"]);
+const isLangSearch = (p) => {
+  const m = /^\/([a-z]{2,3}(?:-[a-z0-9]{2,8})*)\/search$/.exec(p);
+  return m !== null && !OWNED.has(m[1]);
+};
 const isReaderPath = (p) =>
-  !(p.startsWith("/api/") || p === "/mcp" || p.startsWith("/media/") || p === "/admin" || p.startsWith("/admin/") || p === "/healthz" || p === "/search");
+  !(p.startsWith("/api/") || p === "/mcp" || p.startsWith("/media/") || p === "/admin" || p.startsWith("/admin/") || p === "/healthz" || p === "/search" || isLangSearch(p));
 
 /** "" (embedded theme), "-t<16 hex>" (pushed theme with its tag binding), or null (ask wasm). */
 function themeTag(env) {

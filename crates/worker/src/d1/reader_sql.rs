@@ -14,6 +14,10 @@ use super::users::USER_COLS;
 const TAGS_COL: &str = "(SELECT json_group_array(json_array(t.id, t.slug, t.name)) \
      FROM post_tags pt JOIN tags t ON t.id = pt.tag_id WHERE pt.post_id = p.id)";
 
+/// The post's series slug and title, NULL without one: its primary key, once, on the post page.
+const SERIES_COLS: &str = "(SELECT s.slug FROM series s WHERE s.id = p.series_id), \
+     (SELECT s.title FROM series s WHERE s.id = p.series_id)";
+
 /// Every reader listing: published posts, never pages.
 pub(super) const LISTED: &str = "p.status = 'published' AND p.kind = 'post'";
 
@@ -25,9 +29,15 @@ pub(super) fn listing_from(filter: ReaderFilter<'_>) -> Option<String> {
         ReaderFilter::Home(_) | ReaderFilter::Lang(_) => {
             format!("posts p WHERE {LISTED} AND p.lang = ?")
         }
-        ReaderFilter::Tag(_) => format!(
+        ReaderFilter::Tag(..) => format!(
             "post_tags pt CROSS JOIN posts p ON p.id = pt.post_id \
-             WHERE pt.tag_id = ? AND {LISTED}"
+             WHERE pt.tag_id = ? AND {LISTED} AND p.lang = ?"
+        ),
+        // Named: with `status`, `kind` and `lang` all equal the planner may take
+        // `posts_listing` and read the whole language instead of the series.
+        ReaderFilter::Series(..) => format!(
+            "posts p INDEXED BY posts_series \
+             WHERE p.series_id = ? AND {LISTED} AND p.lang = ?"
         ),
         ReaderFilter::Year(y) => {
             year_bounds(y)?;
@@ -84,10 +94,27 @@ pub(super) fn rows(from: &str, all: bool) -> String {
     )
 }
 
-/// A post page: `posts_lang_slug`, then the tags through the `post_tags` primary key.
+/// One page of a series: reading order. The index gives `series_position` (after the
+/// `series_id` equality); the date and id tie-breaks sort the rows of one series in a TEMP
+/// B-TREE, bounded by the series' size and unavoidable without an index on the date.
+pub(super) fn rows_series(from: &str) -> String {
+    format!(
+        "SELECT {SUMMARY_COLS}, {TAGS_COL} FROM \
+         (SELECT p.id, p.series_position, p.published_at FROM {from} \
+          ORDER BY p.series_position, p.published_at, p.id LIMIT ? OFFSET ?) k \
+         CROSS JOIN posts p ON p.id = k.id \
+         ORDER BY k.series_position, k.published_at, k.id"
+    )
+}
+
+/// A post page: `posts_lang_slug`, then the tags through the `post_tags` primary key, the
+/// series through the `series` primary key and the cover through the `media` primary key
+/// (LEFT JOIN: no cover is all NULL).
 pub(super) fn post() -> String {
     format!(
-        "SELECT {POST_COLS}, {TAGS_COL} FROM posts p \
+        "SELECT {POST_COLS}, {TAGS_COL}, {SERIES_COLS}, \
+         m.id, m.r2_key, m.width, m.height, m.alt, m.variants_json \
+         FROM posts p LEFT JOIN media m ON m.id = p.cover_media_id \
          WHERE p.lang = ? AND p.slug = ? AND p.status = 'published'"
     )
 }
@@ -149,6 +176,19 @@ pub(super) fn sitemap() -> String {
     format!("{} UNION ALL {}", arm("post"), arm("page"))
 }
 
+/// Reader search: FTS5 `MATCH` first, then each hit's post by its integer primary key, with
+/// the status and language filter on that row. CROSS JOIN fixes the order: without it the
+/// planner (no ANALYZE on D1) drives from `posts_admin` and runs one MATCH per published post.
+/// The only TEMP B-TREE is the sort of the hits
+/// (a wide query is cut to `LIMIT` after it); there is no index on `published_at` to avoid it.
+pub(super) fn search() -> String {
+    format!(
+        "SELECT {SUMMARY_COLS} FROM posts_fts CROSS JOIN posts p ON p.id = posts_fts.rowid \
+         WHERE posts_fts MATCH ? AND p.status = 'published' AND p.lang = ? \
+         ORDER BY p.published_at DESC, p.id DESC LIMIT ?"
+    )
+}
+
 /// A published post or page at `(lang, slug)`: the unique `posts_lang_slug` lookup, no columns.
 pub(super) fn post_exists() -> String {
     "SELECT 1 FROM posts p WHERE p.lang = ? AND p.slug = ? AND p.status = 'published' LIMIT 1"
@@ -165,12 +205,55 @@ pub(super) fn langs_with_posts(n: usize) -> String {
     )
 }
 
-/// Tags with a published post: each tag stops at its first one (`post_tags_tag`, then the post).
-pub(super) fn tags() -> String {
+/// `(SELECT ? AS v, 0 AS o) UNION ALL ...`: `n` languages, `o` keeping the caller's order.
+fn lang_values(n: usize) -> String {
+    (0..n)
+        .map(|i| format!("SELECT ? AS v, {i} AS o"))
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ")
+}
+
+/// Tag pages that exist: each (tag, language) stops at its first published post
+/// (`post_tags_tag`, then the post). Binds the `n` languages. `tags` is read whole; the
+/// sort is of the tags.
+pub(super) fn tag_pages(n: usize) -> String {
     format!(
-        "SELECT t.id, t.slug, t.name FROM tags t WHERE EXISTS (SELECT 1 \
+        "SELECT t.slug, t.name, l.v FROM tags t CROSS JOIN ({}) l WHERE EXISTS (SELECT 1 \
          FROM post_tags pt CROSS JOIN posts p ON p.id = pt.post_id \
-         WHERE pt.tag_id = t.id AND {LISTED}) ORDER BY t.name, t.id"
+         WHERE pt.tag_id = t.id AND {LISTED} AND p.lang = l.v) ORDER BY t.name, t.id, l.o",
+        lang_values(n)
+    )
+}
+
+/// Series pages that exist: each (series, language) stops at its first published post
+/// (`posts_series`). Binds the `n` languages.
+pub(super) fn series_pages(n: usize) -> String {
+    format!(
+        "SELECT s.slug, s.title, l.v FROM series s CROSS JOIN ({}) l WHERE EXISTS (SELECT 1 \
+         FROM posts p INDEXED BY posts_series WHERE p.series_id = s.id AND {LISTED} \
+         AND p.lang = l.v) ORDER BY s.title, s.id, l.o",
+        lang_values(n)
+    )
+}
+
+/// Which of `n` languages (bound first) have a post with tag `?` (bound last): one `EXISTS`
+/// each on `post_tags_tag`.
+pub(super) fn tag_langs(n: usize) -> String {
+    format!(
+        "SELECT l.v FROM ({}) l WHERE EXISTS (SELECT 1 \
+         FROM post_tags pt CROSS JOIN posts p ON p.id = pt.post_id \
+         WHERE pt.tag_id = ? AND {LISTED} AND p.lang = l.v) ORDER BY l.o",
+        lang_values(n)
+    )
+}
+
+/// As [`tag_langs`] for series `?`, on `posts_series`.
+pub(super) fn series_langs(n: usize) -> String {
+    format!(
+        "SELECT l.v FROM ({}) l WHERE EXISTS (SELECT 1 \
+         FROM posts p INDEXED BY posts_series WHERE p.series_id = ? AND {LISTED} \
+         AND p.lang = l.v) ORDER BY l.o",
+        lang_values(n)
     )
 }
 
@@ -196,7 +279,7 @@ pub(super) fn users_by_id() -> String {
 #[cfg(test)]
 mod plans {
     use super::*;
-    use plumblog_model::TagId;
+    use plumblog_model::{SeriesId, TagId};
     use rusqlite::{Connection, params_from_iter, types::Value};
 
     /// The migrations in order, in real SQLite, with no rows and no ANALYZE: the planner
@@ -341,6 +424,31 @@ mod plans {
     }
 
     /// The language-home helpers: a point lookup, and one covering `EXISTS` per language.
+    /// Search reads the FTS5 hits, then their posts by primary key: no scan of `posts`.
+    #[test]
+    fn search_matches_first_then_reads_posts_by_primary_key() {
+        let c = db();
+        let lines = plan(&c, &search());
+        let all = lines.join("\n");
+        assert_eq!(
+            lines[0], "SCAN posts_fts VIRTUAL TABLE INDEX 0:M2",
+            "MATCH first:\n{all}"
+        );
+        assert!(
+            all.contains("SEARCH p USING INTEGER PRIMARY KEY (rowid=?)"),
+            "posts by rowid:\n{all}"
+        );
+        assert!(
+            !lines.iter().any(|l| l == "SCAN p"),
+            "no scan of posts:\n{all}"
+        );
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("TEMP B-TREE")).count(),
+            1,
+            "one sort of the hits:\n{all}"
+        );
+    }
+
     #[test]
     fn language_home_helpers_use_their_indexes() {
         let c = db();
@@ -372,7 +480,7 @@ mod plans {
     fn every_reader_query_uses_the_index_it_is_meant_to() {
         let c = db();
         let home = listing_from(ReaderFilter::Home("en")).unwrap();
-        let tag = listing_from(ReaderFilter::Tag(TagId(1))).unwrap();
+        let tag = listing_from(ReaderFilter::Tag(TagId(1), "en")).unwrap();
         let year = listing_from(ReaderFilter::Year(2024)).unwrap();
         let lang = listing_from(ReaderFilter::Lang("en")).unwrap();
 
@@ -429,7 +537,18 @@ mod plans {
             false,
         );
 
-        check(&c, "post", &post(), &["posts_lang_slug"], false);
+        // The cover and the series are primary-key lookups, not scans of `media` or `series`.
+        check(
+            &c,
+            "post",
+            &post(),
+            &[
+                "posts_lang_slug",
+                "SEARCH m USING INTEGER PRIMARY KEY",
+                "SEARCH s USING INTEGER PRIMARY KEY",
+            ],
+            false,
+        );
         // The D1 engine chose posts_admin (status) here and read every published row; the
         // SQLite bundled for tests does not, so the pin itself is asserted as well.
         assert!(TRANSLATIONS.contains("INDEXED BY posts_group_lang"));
@@ -448,7 +567,6 @@ mod plans {
             &["COVERING INDEX posts_by_date"],
             true,
         );
-        check_scans(&c, "tags", &tags(), &["post_tags_tag"], true, &["t"]);
         check(&c, "feed", &feed(), &["posts_listing"], false);
         // The sitemap also reads each row's kind (language homes skip pages): same plan.
         assert!(sitemap().contains("p.kind = 'page'"));
@@ -471,6 +589,104 @@ mod plans {
                 false,
             );
         }
+    }
+
+    /// Series pages and the per-language tag and series lists (issue #132).
+    #[test]
+    fn series_and_per_language_queries_use_their_indexes() {
+        let c = db();
+        let series = listing_from(ReaderFilter::Series(SeriesId(1), "en")).unwrap();
+        check(
+            &c,
+            "count series",
+            &count(&series),
+            &["posts_series (series_id=?)"],
+            false,
+        );
+        // One series, read by posts_series: only the date and id tie-breaks sort it.
+        check(
+            &c,
+            "rows series",
+            &rows_series(&series),
+            &["posts_series (series_id=?)"],
+            true,
+        );
+        // Per-language pages and hreflang sets: one EXISTS per (taxon, language), stopping at
+        // the first post. The taxon tables are read whole, like `tags`; the language list is a
+        // handful of constant rows.
+        for (name, sql, want, scans) in [
+            (
+                "tag pages",
+                tag_pages(3),
+                "post_tags_tag",
+                &["t", "l", "CONSTANT ROW"][..],
+            ),
+            (
+                "series pages",
+                series_pages(3),
+                "posts_series (series_id=?)",
+                &["s", "l", "CONSTANT ROW"][..],
+            ),
+        ] {
+            check_scans(&c, name, &sql, &[want], true, scans);
+        }
+        check_scans(
+            &c,
+            "tag langs",
+            &tag_langs(3),
+            &["post_tags_tag"],
+            true,
+            &["l", "CONSTANT ROW"],
+        );
+        check_scans(
+            &c,
+            "series langs",
+            &series_langs(3),
+            &["posts_series (series_id=?)"],
+            true,
+            &["l", "CONSTANT ROW"],
+        );
+    }
+
+    /// The sitemap's tag and series lookups on a large site (10,000 posts, 200 tags with 5 per
+    /// post, 50 series (20 used), 3 languages): prints the time of each query (`--nocapture`); no
+    /// wall-clock gate (#57), only that every page that should exist is found.
+    #[test]
+    fn taxon_sitemap_queries_at_ten_thousand_posts() {
+        let c = db();
+        c.execute_batch(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 8000) \
+             INSERT INTO posts (kind, translation_group, lang, slug, status, published_at, \
+             author_id, title, markdown, html, created_at, updated_at) \
+             SELECT 'post', 100000 + i, CASE i % 3 WHEN 0 THEN 'en' WHEN 1 THEN 'vi' ELSE 'fr' END, \
+             'b' || i, 'published', i * 1000, 1, 't', 'm', 'h', i, i FROM n; \
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200) \
+             INSERT INTO tags (id, slug, name) SELECT i, 't' || i, 'Tag ' || i FROM n; \
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 50) \
+             INSERT INTO series (id, slug, title) SELECT i, 's' || i, 'Series ' || i FROM n; \
+             WITH RECURSIVE k(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM k WHERE k < 4) \
+             INSERT INTO post_tags (post_id, tag_id) SELECT p.id, (p.id + k * 37) % 200 + 1 \
+             FROM posts p CROSS JOIN k; \
+             UPDATE posts SET series_id = id % 50 + 1, series_position = id WHERE id % 5 < 2;",
+        )
+        .unwrap();
+        let langs = ["en", "vi", "fr"];
+        let run = |name: &str, sql: &str, extra: Option<i64>| {
+            let mut st = c.prepare(sql).unwrap();
+            let mut args: Vec<Value> = langs.iter().map(|l| Value::Text((*l).to_owned())).collect();
+            args.extend(extra.map(Value::Integer));
+            let t = std::time::Instant::now();
+            let n = st
+                .query_map(params_from_iter(args), |_| Ok(()))
+                .unwrap()
+                .count();
+            eprintln!("sitemap query {name}: {n} rows in {:?}", t.elapsed());
+            n
+        };
+        assert_eq!(run("tag pages", &tag_pages(3), None), 600);
+        assert_eq!(run("series pages", &series_pages(3), None), 60);
+        assert_eq!(run("tag langs", &tag_langs(3), Some(1)), 3);
+        assert_eq!(run("series langs", &series_langs(3), Some(1)), 3);
     }
 
     /// The export listings: a primary-key range read in key order, nothing else.

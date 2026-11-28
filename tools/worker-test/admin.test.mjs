@@ -1,6 +1,7 @@
 // The admin shell, manifest and icon from the real Worker, and the built client running in
 // the system Chrome under the shell's CSP (docs/ARCHITECTURE.md, Admin and editor).
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 import { chromium } from "playwright-core";
@@ -225,4 +226,124 @@ test("a draft previews as the published page, with no script for the frame to bl
   assert.match(html, /<math/);
   assert.doesNotMatch(html, /<b>raw/);
   assert.doesNotMatch(html, /<script/i);
+});
+
+// --- System log screen (web/admin/src/syslog/) ---
+
+const sq = (v) => `'${String(v).replaceAll("'", "''")}'`;
+const sha256hex = (b) => createHash("sha256").update(b).digest("hex");
+const en = (() => {
+  const out = {};
+  let section = "";
+  for (const line of readFileSync(new URL("../../locales/en.toml", import.meta.url), "utf8").split("\n")) {
+    const s = /^\[(.+)\]$/.exec(line);
+    if (s) section = s[1];
+    const kv = /^(\w+) = "((?:[^"\\]|\\.)*)"$/.exec(line);
+    if (kv) out[`${section}.${kv[1]}`] = kv[2].replaceAll('\\"', '"');
+  }
+  return out;
+})();
+const tx = (key) => {
+  assert.ok(en[key], `locale key ${key}`);
+  return en[key];
+};
+
+/** A page that records page errors, CSP violations and console errors other than refused calls. */
+async function logPage(browser) {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: "en-US" });
+  await context.addInitScript(() => {
+    document.addEventListener("securitypolicyviolation", (e) => console.error(`CSPVIOLATION ${e.violatedDirective} ${e.blockedURI}`));
+  });
+  const page = await context.newPage();
+  const problems = [];
+  page.on("pageerror", (e) => problems.push(`page error: ${e}`));
+  page.on("console", (m) => {
+    if (m.type() === "error" && !/^Failed to load resource: the server responded with a status of 40[134]/.test(m.text())) problems.push(`console: ${m.text()}`);
+  });
+  return { page, problems };
+}
+
+test("the owner reads the System log and opens an entry; a writer sees the lock and never asks the API", async () => {
+  const T = Date.now();
+  const SETUP_CODE = "setup-code-syslog-0123456789";
+  const INVITE = "invite-writer-syslog-code";
+  const at = (w, path) => `${w.url.replace("127.0.0.1", "localhost")}${path}`;
+  const [owner, invited] = await Promise.all([
+    startWorker({
+      seedSql: (url) => `INSERT INTO settings (key, value_json, updated_at) VALUES
+        ('site_id', ${sq(JSON.stringify("site-syslog-1"))}, ${T}),
+        ('origin', ${sq(JSON.stringify(url.replace("127.0.0.1", "localhost")))}, ${T}),
+        ('setup_code_hash', ${sq(JSON.stringify(sha256hex(SETUP_CODE)))}, ${T}),
+        ('setup_code_expires_at', '${T + 86_400_000}', ${T});
+        INSERT INTO system_log (at_ms, request_id, kind, detail) VALUES (${T - 60_000}, 'req-smoke-1', 'job.run', ${sq("Smoke test entry\nrows\t3")});`,
+    }),
+    startWorker({
+      seedSql: `INSERT INTO settings (key, value_json, updated_at) VALUES ('site_id', ${sq(JSON.stringify("site-syslog-2"))}, ${T});
+        INSERT INTO users (id, login, slug, display_name, role, password_hash, disabled_at, created_at, updated_at)
+          VALUES (1, 'boss', 'boss', 'Boss', 'owner', 'p1$1000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', NULL, ${T}, ${T});
+        INSERT INTO invites (code_hash, role, created_by, created_at, expires_at)
+          VALUES (${sq(sha256hex(INVITE))}, 'writer', 1, ${T}, ${T + 86_400_000});`,
+    }),
+  ]);
+  const browser = await chromium.launch({ channel: "chrome", headless: true });
+  try {
+    const signUp = async (page, w, path, values) => {
+      await page.goto(at(w, path));
+      await page.getByLabel(tx("admin.auth.login")).fill(values.login);
+      await page.getByLabel(tx("admin.auth.slug")).fill(values.slug);
+      if (values.name) await page.getByLabel(tx("admin.auth.display_name")).fill(values.name);
+      await page.getByLabel(tx("admin.auth.password"), { exact: true }).fill(values.password);
+      await page.getByLabel(tx("admin.auth.password_repeat")).fill(values.password);
+      await page.getByRole("button", { name: tx("admin.auth.create") }).click();
+      await page.waitForURL(/\/admin\/$/);
+    };
+
+    // Owner: the entry is there, opens in place and shows its request id.
+    const o = await logPage(browser);
+    await signUp(o.page, owner, `/admin/setup?code=${SETUP_CODE}`, { login: "Hana", slug: "hana", name: "Hana Owner", password: "correct horse battery" });
+    await o.page.goto(at(owner, "/admin/settings/log"), { waitUntil: "networkidle" });
+    assert.equal(await o.page.locator("h1").innerText(), tx("admin.nav.settings"), "the log wears the Settings header");
+    await o.page.locator(".log-btn").first().waitFor();
+    assert.ok((await o.page.locator(".log-btn").count()) >= 1);
+    const smoke = o.page.locator(".log-btn", { hasText: "Smoke test entry" });
+    assert.equal(await smoke.getAttribute("aria-expanded"), "false");
+    await smoke.click();
+    assert.equal(await smoke.getAttribute("aria-expanded"), "true");
+    const detail = o.page.locator(".log-detail:not([hidden])");
+    await detail.getByText("req-smoke-1", { exact: true }).waitFor();
+    await detail.getByRole("button", { name: tx("admin.syslog.copy_ai") }).waitFor();
+    assert.equal(await o.page.locator('.nav a[aria-current="page"]').count(), 1, "Settings is the current item");
+    // The Settings section list: System log is the current section and General links back.
+    const subnav = o.page.locator(".settings-main").locator("xpath=preceding-sibling::nav[contains(@class,'subnav')]");
+    assert.equal(await subnav.locator('a[aria-current="page"]').innerText(), tx("admin.syslog.title"));
+    assert.equal(await subnav.getByRole("link", { name: tx("admin.settings.general") }).getAttribute("href"), "/admin/settings");
+    // A filter with no match says so, and Clear brings the entry back.
+    await o.page.getByRole("searchbox", { name: tx("admin.syslog.search") }).fill("no such text");
+    await o.page.getByText(tx("admin.syslog.none_title")).waitFor();
+    assert.match(o.page.url(), /\?q=no\+such\+text$/);
+    await o.page.getByRole("button", { name: tx("admin.syslog.clear") }).click();
+    await o.page.locator(".log-btn", { hasText: "Smoke test entry" }).waitFor();
+    assert.deepEqual(o.problems, []);
+
+    // Writer: the lock, and no request to the log API.
+    const w = await logPage(browser);
+    const asked = [];
+    w.page.on("request", (r) => /\/api\/v1\/log/.test(r.url()) && asked.push(r.url()));
+    await w.page.goto(at(invited, `/admin/invite?code=${INVITE}`));
+    await w.page.getByLabel(tx("admin.auth.login")).fill("wren");
+    await w.page.getByLabel(tx("admin.auth.slug")).fill("wren");
+    await w.page.getByLabel(tx("admin.auth.display_name")).fill("Wren Writer");
+    await w.page.getByLabel(tx("admin.auth.password"), { exact: true }).fill("writer pass phrase 1");
+    await w.page.getByLabel(tx("admin.auth.password_repeat")).fill("writer pass phrase 1");
+    await w.page.getByRole("button", { name: tx("admin.auth.create") }).click();
+    await w.page.waitForURL(/\/admin\/$/);
+    await w.page.goto(at(invited, "/admin/settings/log"), { waitUntil: "networkidle" });
+    await w.page.getByText(tx("admin.state.no_permission_title")).waitFor();
+    assert.equal(await w.page.locator(".log-btn").count(), 0);
+    assert.deepEqual(asked, [], "a writer never calls the log API");
+    assert.deepEqual(w.problems, []);
+  } finally {
+    await browser.close();
+    await Promise.all([owner.stop(), invited.stop()]);
+  }
 });

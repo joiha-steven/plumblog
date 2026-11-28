@@ -88,6 +88,7 @@ fn post(slug: &str, title: &str, at: i64, pinned: bool) -> Post {
         cover: None,
         thumb: None,
         translations: vec![],
+        series: None,
     }
 }
 
@@ -450,6 +451,13 @@ fn post_seo_uses_cover_translations_and_absolute_urls() {
         )
     );
     assert!(html.contains("<meta name=\"twitter:card\" content=\"summary_large_image\">"));
+    assert!(html.contains("<meta property=\"og:image:width\" content=\"1200\">"));
+    assert!(html.contains("<meta property=\"og:image:height\" content=\"630\">"));
+    assert!(html.contains(
+        "<meta name=\"twitter:image\" content=\"https://example.com/media/cover.avif\">"
+    ));
+    // No description, no alt tags.
+    assert!(!html.contains("og:image:alt") && !html.contains("twitter:image:alt"));
     assert!(
         html.contains(
             "<meta property=\"article:published_time\" content=\"2026-10-02T12:00:00Z\">"
@@ -633,4 +641,41 @@ fn empty_site_description_falls_back_in_meta() {
         )
         .unwrap();
     assert!(set.contains("<meta name=\"description\" content=\"A test blog.\">"));
+}
+
+#[test]
+fn a_cover_alt_is_printed_and_an_unset_origin_prints_no_image() {
+    let files = theme_files();
+    let theme = load(&files, &BTreeMap::new());
+    let mut p = post("hello", "Hello", 1_790_942_400, false);
+    p.cover = Some(Image {
+        src: "/media/cover.webp".into(),
+        srcset: None,
+        width: 960,
+        height: 480,
+        alt: "A \"view\"".into(),
+    });
+    let render = |origin: &str| {
+        let mut info = page("en");
+        info.origin = origin.into();
+        theme
+            .render(
+                &site(),
+                &info,
+                &Body::Post {
+                    post: &p,
+                    prev: None,
+                    next: None,
+                    comments: None,
+                },
+            )
+            .unwrap()
+    };
+    let html = render("https://example.com");
+    assert!(html.contains("<meta property=\"og:image:alt\" content=\"A &quot;view&quot;\">"));
+    assert!(html.contains("<meta name=\"twitter:image:alt\" content=\"A &quot;view&quot;\">"));
+    let none = render(plumblog_render::UNSET_ORIGIN);
+    assert!(!none.contains("og:image") && !none.contains("twitter:image"));
+    assert!(!none.contains("\"image\":["));
+    assert!(none.contains("<meta name=\"twitter:card\" content=\"summary\">"));
 }

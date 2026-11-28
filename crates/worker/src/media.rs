@@ -64,40 +64,70 @@ fn pick(m: &Media, name: Option<&str>) -> std::result::Result<Option<Target>, St
             bytes: m.bytes,
         }));
     };
-    // The same wrapping as `/api/v1/media`: the strict reader takes an object at the top.
-    let wrapped = format!("{{\"v\":{}}}", m.variants_json);
-    let list = match json::parse_document(wrapped.as_bytes(), usize::MAX) {
-        Ok(mut members) if members.len() == 1 => members.remove(0).1,
+    let Some(v) = variants(&m.variants_json)?
+        .into_iter()
+        .find(|v| last_segment(&v.key) == name)
+    else {
+        return Ok(None);
+    };
+    let bytes = v
+        .bytes
+        .ok_or_else(|| format!("variant {} has no bytes", v.key))?;
+    Ok(Some(Target {
+        key: v.key,
+        mime: v.mime,
+        bytes,
+    }))
+}
+
+/// One `variants_json` entry, as `POST /api/v1/media/{id}/variants` writes it.
+#[derive(Default)]
+pub(crate) struct Variant {
+    pub key: String,
+    pub mime: String,
+    pub width: i64,
+    pub bytes: Option<i64>,
+    /// `""` when absent.
+    pub sha256: String,
+}
+
+/// An item's stored sizes, or why `variants_json` is unreadable: each entry needs `key`,
+/// `mime` and `width`. `{}` is what older rows and fixtures hold: no sizes.
+pub(crate) fn variants(text: &str) -> std::result::Result<Vec<Variant>, String> {
+    // The strict reader takes an object at the top.
+    let wrapped = format!("{{\"v\":{text}}}");
+    let items = match json::parse_document(wrapped.as_bytes(), usize::MAX) {
+        Ok(mut doc) if doc.len() == 1 => match doc.remove(0).1 {
+            Value::Arr(items) => items,
+            Value::Obj(o) if o.is_empty() => return Ok(Vec::new()),
+            _ => return Err("variants_json is not an array".into()),
+        },
         _ => return Err("variants_json is not JSON".into()),
     };
-    let items = match list {
-        Value::Arr(items) => items,
-        // `{}` is what older rows and fixtures hold: no variants.
-        Value::Obj(o) if o.is_empty() => return Ok(None),
-        _ => return Err("variants_json is not an array".into()),
-    };
-    for item in items {
-        let Value::Obj(fields) = item else {
-            return Err("a variant is not an object".into());
-        };
-        let field = |k: &str| fields.iter().find(|(f, _)| f == k).map(|(_, v)| v);
-        let Some(Value::Str(key)) = field("key") else {
-            return Err("a variant has no key".into());
-        };
-        if last_segment(key) != name {
-            continue;
-        }
-        let (Some(Value::Str(mime)), Some(Value::Int(bytes))) = (field("mime"), field("bytes"))
-        else {
-            return Err(format!("variant {key} has no mime or bytes"));
-        };
-        return Ok(Some(Target {
-            key: key.clone(),
-            mime: mime.clone(),
-            bytes: *bytes,
-        }));
-    }
-    Ok(None)
+    items
+        .into_iter()
+        .map(|item| {
+            let Value::Obj(fields) = item else {
+                return Err("a variant is not an object".into());
+            };
+            let (mut v, mut seen) = (Variant::default(), 0);
+            for (k, val) in fields {
+                match (k.as_str(), val) {
+                    ("key", Value::Str(t)) => (v.key, seen) = (t, seen | 1),
+                    ("mime", Value::Str(t)) => (v.mime, seen) = (t, seen | 2),
+                    ("width", Value::Int(n)) => (v.width, seen) = (n, seen | 4),
+                    ("bytes", Value::Int(n)) => v.bytes = Some(n),
+                    ("sha256", Value::Str(t)) => v.sha256 = t,
+                    _ => {}
+                }
+            }
+            if seen == 7 {
+                Ok(v)
+            } else {
+                Err(format!("variant {:?} has no key, mime or width", v.key))
+            }
+        })
+        .collect()
 }
 
 /// What a `Range` header asks of an object of `size` bytes.

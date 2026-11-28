@@ -2,7 +2,8 @@ use super::db::Db;
 use super::routes::{Route, parse};
 use super::sample::SampleSource;
 use super::source::{
-    Filter, Neighbours, ReaderSource, Settings, SitemapPost, Slice, StoredPost, Tag,
+    Filter, Neighbours, ReaderSource, SeriesInfo, Settings, SitemapPost, Slice, StoredPost, Tag,
+    TaxonPage,
 };
 use super::{Outcome, render};
 use plumblog_model::Result;
@@ -95,8 +96,20 @@ impl ReaderSource for Fixture {
     async fn tag(&self, slug: &str) -> Result<Option<Tag>> {
         self.posts.tag(slug).await
     }
-    async fn tags(&self) -> Result<Vec<Tag>> {
-        self.posts.tags().await
+    async fn series(&self, slug: &str) -> Result<Option<SeriesInfo>> {
+        self.posts.series(slug).await
+    }
+    async fn tag_pages(&self, langs: &[String]) -> Result<Vec<TaxonPage>> {
+        self.posts.tag_pages(langs).await
+    }
+    async fn series_pages(&self, langs: &[String]) -> Result<Vec<TaxonPage>> {
+        self.posts.series_pages(langs).await
+    }
+    async fn tag_langs(&self, tag: &Tag, langs: &[String]) -> Result<Vec<String>> {
+        self.posts.tag_langs(tag, langs).await
+    }
+    async fn series_langs(&self, series: &SeriesInfo, langs: &[String]) -> Result<Vec<String>> {
+        self.posts.series_langs(series, langs).await
     }
     async fn years(&self) -> Result<Vec<i32>> {
         self.posts.years().await
@@ -120,6 +133,64 @@ fn router_owned_segments_are_not_posts() {
             "/{owned}"
         );
         assert!(super::routes::RESERVED.contains(&owned), "{owned}");
+    }
+    // `series` is reserved for new posts, but `/series` alone stays a post path so a post
+    // stored before the series pages is still served.
+    assert!(super::routes::RESERVED.contains(&"series"));
+    assert_eq!(
+        parse("/series"),
+        Route::Post {
+            lang: None,
+            slug: "series".into()
+        }
+    );
+}
+
+#[test]
+fn taxon_routes() {
+    let tag = |lang: Option<&str>, page| Route::Tag {
+        lang: lang.map(Into::into),
+        slug: "rust".into(),
+        page,
+    };
+    let series = |lang: Option<&str>, page| Route::Series {
+        lang: lang.map(Into::into),
+        slug: "rust".into(),
+        page,
+    };
+    assert_eq!(parse("/tag/rust"), tag(None, 1));
+    assert_eq!(parse("/vi/tag/rust"), tag(Some("vi"), 1));
+    assert_eq!(parse("/vi/tag/rust/page/2"), tag(Some("vi"), 2));
+    assert_eq!(parse("/series/rust"), series(None, 1));
+    assert_eq!(parse("/series/rust/page/4"), series(None, 4));
+    assert_eq!(parse("/pt-br/series/rust"), series(Some("pt-br"), 1));
+    assert_eq!(
+        parse("/series/rust/page/1"),
+        Route::Redirect("/series/rust".into())
+    );
+    assert_eq!(
+        parse("/vi/series/rust/page/1"),
+        Route::TaxonFirstPage {
+            kind: super::routes::Taxon::Series,
+            lang: "vi".into(),
+            slug: "rust".into()
+        }
+    );
+    for bad in [
+        "/series",
+        "/vi/tag",
+        "/tag/Rust",
+        "/tag/rust/page",
+        "/tag/rust/page/0",
+        "/tag/rust/extra",
+        "/vi/series/rust/page/02",
+        "/api/tag/rust",
+        "/tag/tag/rust",
+    ] {
+        assert!(
+            !matches!(parse(bad), Route::Tag { .. } | Route::Series { .. }),
+            "{bad}"
+        );
     }
 }
 
@@ -145,7 +216,15 @@ fn language_home_routes() {
         Route::Redirect("/hello-world".into())
     );
     assert_eq!(parse("/tag/page/2"), Route::NotFound);
-    assert_eq!(parse("/vi/tag/x"), Route::NotFound);
+    // A language's tag page is a route (whether the language is listed is the page's call).
+    assert_eq!(
+        parse("/vi/tag/x"),
+        Route::Tag {
+            lang: Some("vi".into()),
+            slug: "x".into(),
+            page: 1
+        }
+    );
     // `/vi` stays a post slug.
     assert_eq!(
         parse("/vi"),
@@ -154,6 +233,21 @@ fn language_home_routes() {
             slug: "vi".into()
         }
     );
+}
+
+#[test]
+fn search_routes() {
+    assert_eq!(parse("/search"), Route::Search { lang: None });
+    assert_eq!(
+        parse("/vi/search"),
+        Route::Search {
+            lang: Some("vi".into())
+        }
+    );
+    assert_eq!(parse("/vi/search/"), Route::Redirect("/vi/search".into()));
+    // Reserved first segments are not languages.
+    assert_eq!(parse("/api/search"), Route::NotFound);
+    assert_eq!(parse("/vi/search/x"), Route::NotFound);
 }
 
 #[test]
@@ -179,6 +273,7 @@ fn routes_parse_to_one_canonical_url() {
     assert_eq!(
         parse("/tag/rust"),
         Route::Tag {
+            lang: None,
             slug: "rust".into(),
             page: 1
         }
@@ -186,6 +281,7 @@ fn routes_parse_to_one_canonical_url() {
     assert_eq!(
         parse("/tag/rust/page/3"),
         Route::Tag {
+            lang: None,
             slug: "rust".into(),
             page: 3
         }

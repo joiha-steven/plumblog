@@ -34,7 +34,7 @@ import { h } from "../dom";
 import { t } from "../i18n";
 import { editHref } from "../router";
 import { toast } from "../ui";
-import { draftKey, dropDraft, type EdState, loadDraft, moveDraft } from "./drafts";
+import { createIdKey, draftKey, dropDraft, type EdState, forgetStoredCreateId, loadDraft, moveDraft } from "./drafts";
 
 export interface SyncHost {
   api: Api;
@@ -92,7 +92,6 @@ const LOST_MAX = 20;
 
 /** The new post's `client_id` by draft key, for this page; localStorage keeps it over a reload. */
 const createIds = new Map<string, string>();
-const createIdKey = (key: string): string => `plumblog-create:${key}`;
 
 /** The request id every create of the new post under draft key `key` sends (crypto.randomUUID). */
 export function createId(key: string): string {
@@ -125,11 +124,7 @@ const refusesContent = (status: number): boolean => status >= 400 && status < 50
 /** A create answered (a post, or a refusal that made none): the next post gets a new id. */
 function forgetCreateId(key: string): void {
   createIds.delete(key);
-  try {
-    localStorage.removeItem(createIdKey(key));
-  } catch (e) {
-    console.warn("admin editor: localStorage unwritable; a used create id stays", e);
-  }
+  forgetStoredCreateId(key);
 }
 
 /** A URL slug from a title: diacritics folded, `a-z 0-9` and inner hyphens, at most 100. */

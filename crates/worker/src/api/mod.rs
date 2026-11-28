@@ -148,17 +148,19 @@ fn status(code: ErrorCode) -> u16 {
         | ErrorCode::UserNotFound
         | ErrorCode::NotFound
         | ErrorCode::RouteNotFound => 404,
-        ErrorCode::Conflict | ErrorCode::ThemeUnavailable => 409,
+        ErrorCode::Conflict | ErrorCode::ThemeUnavailable | ErrorCode::LastOwner => 409,
         ErrorCode::InviteInvalid => 410,
         ErrorCode::LengthRequired => 411,
         // A size cap like the byte cap: the client must send less, not fix a field.
         ErrorCode::BodyTooLarge | ErrorCode::TooComplex => 413,
         ErrorCode::Locked | ErrorCode::CommentRateLimited => 429,
-        // PageStoreFailed is only ever logged; 500 if an API answer ever carries it.
+        // The pages.* codes are only ever logged; 500 if an API answer ever carries one.
         ErrorCode::Storage
         | ErrorCode::Internal
         | ErrorCode::WebhookSecretUnreadable
-        | ErrorCode::PageStoreFailed => 500,
+        | ErrorCode::PageStoreFailed
+        | ErrorCode::PagePrerenderFailed
+        | ErrorCode::PageCleanupFailed => 500,
         // The receiver failed, not this server.
         ErrorCode::WebhookDeliveryFailed => 502,
         // The site is not set up for this yet (no configured origin, no WEBHOOK_KEY): not the

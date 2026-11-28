@@ -500,6 +500,7 @@ fn whole_numbers_stored_as_floats_still_count() {
         cover: None,
         thumb: None,
         translations: vec![],
+        series: None,
     };
     let home = |t: &Theme| {
         t.render_reporting(

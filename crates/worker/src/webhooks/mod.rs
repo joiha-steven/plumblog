@@ -32,13 +32,21 @@ pub const SUBREQUESTS: u32 = 50;
 pub const DELIVERY_FIXED: u32 = 2;
 /// Per delivery: the `fetch`, `finish_attempt`, and its `webhook.delivery` log entry.
 pub const PER_DELIVERY: u32 = 3;
-/// Per post published by cron: `get_post`, list webhooks, queue its deliveries.
+/// Per post published by cron: `get_post`, list webhooks, queue its deliveries (the
+/// settings for its URL are read once per run, in [`PUBLISH_FIXED`]). A worker-test
+/// measures the real calls per post (tools/worker-test/r2cron.test.mjs): a call added per
+/// post must be added here.
 pub const PER_PUBLISHED: u32 = 3;
-/// The publish job's own calls: `publish_due` and its `job.run` entry.
-pub const PUBLISH_FIXED: u32 = 2;
-/// The daily jobs: system log prune + entry, delivery prune + entry.
-pub const DAILY_JOBS: u32 = 4;
-/// Most posts one cron run publishes: (50 - 2 - 4) / 3 = 14, so publishing plus the daily
+/// The publish job's own calls when it publishes: `publish_due`, the settings for the posts'
+/// URLs, and its `job.run` entry.
+pub const PUBLISH_FIXED: u32 = 3;
+/// The system log retention job: its prune query and its `job.run` entry.
+pub const RETENTION_USED: u32 = 2;
+/// The delivery prune job: its prune query and its `job.run` entry.
+pub const PRUNE_USED: u32 = 2;
+/// The daily jobs together.
+pub const DAILY_JOBS: u32 = RETENTION_USED + PRUNE_USED;
+/// Most posts one cron run publishes: (50 - 3 - 4) / 3 = 14, so publishing plus the daily
 /// jobs always fit, whatever deliveries are left. Further due posts go live 10 min later
 /// with their events; none is published without its `post.published` being queued.
 pub const PUBLISH_PER_RUN: u32 = (SUBREQUESTS - PUBLISH_FIXED - DAILY_JOBS) / PER_PUBLISHED;
@@ -104,10 +112,22 @@ fn ms(t: i64) -> u64 {
     u64::try_from(t).unwrap_or(0)
 }
 
-/// What payloads say about post `id`, as stored now.
+/// What payloads say about post `id`, as stored now. Only the test routes take one post
+/// alone; the cron reads the URL settings once for all ([`post_info_with`]).
+#[cfg(feature = "contract-tests")]
 async fn post_info(store: &D1Store, id: PostId) -> Result<PostInfo> {
+    let urls = crate::pages::post_urls(store).await;
+    post_info_with(store, &urls, id).await
+}
+
+/// [`post_info`] with the URL settings already read: one query per post.
+async fn post_info_with(
+    store: &D1Store,
+    urls: &crate::pages::PostUrls,
+    id: PostId,
+) -> Result<PostInfo> {
     let post = store.get_post(id).await?;
-    let url = crate::pages::post_url(store, &post.lang, &post.slug).await;
+    let url = urls.url(&post.lang, &post.slug);
     Ok(PostInfo::from_post(&post, url))
 }
 
@@ -133,11 +153,12 @@ pub async fn publish_job(store: &D1Store, scope: &Scope) -> u32 {
     if ids.is_empty() {
         return publish_used(0);
     }
+    let urls = crate::pages::post_urls(store).await;
     let mut queued = 0usize;
     let mut failed: Vec<String> = Vec::new();
     for id in &ids {
         let queue = async {
-            let after = post_info(store, *id).await?;
+            let after = post_info_with(store, &urls, *id).await?;
             // publish_due only moves scheduled -> published.
             let before = PostInfo {
                 status: PostStatus::Scheduled,
@@ -178,7 +199,8 @@ pub async fn publish_job(store: &D1Store, scope: &Scope) -> u32 {
 }
 
 /// Sends up to `max` due deliveries, within what is left of the subrequest budget after
-/// `used`; with no room left it makes no call at all.
+/// `used`; with no room left it makes no call at all. Returns the subrequests it may have
+/// used, counted high, for the jobs after it (`crate::jobs`).
 /// A missing or malformed `WEBHOOK_KEY` sends nothing and leaves every row due; it is
 /// logged only when some webhook exists, so a blog without webhooks needs no key. The
 /// system log gets it on the `daily` run only (one entry a day, not 144); other runs write
@@ -190,29 +212,29 @@ pub async fn deliver_job(
     used: u32,
     max: u32,
     daily: bool,
-) {
+) -> u32 {
     let limit = delivery_limit(used).min(max);
     if limit == 0 {
-        return;
+        return 0;
     }
     let prefix = scope.log_prefix();
     let report = |m: &str| console_error!("{m}");
     let raw = raw_key(env);
     if let Err(e) = SealKey::parse(raw.as_deref()) {
         match store.list_webhooks().await {
-            Ok(w) if w.is_empty() => return,
+            Ok(w) if w.is_empty() => return 1,
             _ => {}
         }
         console_error!("{prefix} job.run {DELIVERY_JOB} not sent: {e}");
         if !daily {
-            return;
+            return 1;
         }
         let event = scope
             .event(EventKind::ScheduledJob, ms(now_ms()))
             .subject(DELIVERY_JOB)
             .error(e.code);
         plumblog_syslog::record(store, event, report).await;
-        return;
+        return 2;
     }
     let sender = Sender {
         store,
@@ -222,15 +244,21 @@ pub async fn deliver_job(
         policy: policy(env),
     };
     match sender.deliver_due(scope, now_ms, limit, report).await {
-        Ok(run) if run.claimed == 0 => {}
-        Ok(run) => console_log!(
-            "{prefix} job.run {DELIVERY_JOB} claimed={} delivered={} failed={} skipped={}",
-            run.claimed,
-            run.delivered,
-            run.failed,
-            run.skipped
-        ),
-        Err(e) => console_error!("{prefix} job.run {DELIVERY_JOB} failed: {e}"),
+        Ok(run) if run.claimed == 0 => DELIVERY_FIXED,
+        Ok(run) => {
+            console_log!(
+                "{prefix} job.run {DELIVERY_JOB} claimed={} delivered={} failed={} skipped={}",
+                run.claimed,
+                run.delivered,
+                run.failed,
+                run.skipped
+            );
+            DELIVERY_FIXED + u32::try_from(run.claimed).unwrap_or(limit) * PER_DELIVERY
+        }
+        Err(e) => {
+            console_error!("{prefix} job.run {DELIVERY_JOB} failed: {e}");
+            DELIVERY_FIXED + limit * PER_DELIVERY
+        }
     }
 }
 
@@ -272,6 +300,6 @@ mod tests {
                 assert!(used + deliver <= SUBREQUESTS, "n={n} daily={daily}");
             }
         }
-        assert_eq!(publish_used(PUBLISH_PER_RUN) + DAILY_JOBS, 48);
+        assert_eq!(publish_used(PUBLISH_PER_RUN) + DAILY_JOBS, 49);
     }
 }

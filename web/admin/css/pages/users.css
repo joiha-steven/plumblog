@@ -1,0 +1,12 @@
+/* Settings > People. Rows reuse the passkey row look (.pk-main, .pk-name, .pk-meta in settings.css). */
+.usr, .inv { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-12); padding: var(--sp-12) 0; border-top: 1px solid var(--line); }
+.usr .pk-main, .inv .pk-main { flex: 1 1 14rem; }
+/* Names are people: they wrap instead of being cut (the passkey rows' one-line cut is for device names). */
+.usr .pk-name, .inv .pk-name { white-space: normal; overflow-wrap: anywhere; }
+.pk-list > :first-child { border-top: 0; padding-top: 0; }
+.usr-tag { display: inline-block; margin-inline-start: var(--sp-8); padding: 0 var(--sp-8); border: 1px solid var(--line-ctl); border-radius: var(--r-pill); font: var(--type-micro); color: var(--muted); vertical-align: middle; }
+.usr-act { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: var(--sp-8); flex: none; }
+.usr-off { color: var(--st-err); }
+.usr-more { justify-self: start; }
+.inv-warn { color: var(--st-err); }
+@media (max-width: 599px) { .usr-act { justify-content: flex-start; flex-basis: 100%; } }

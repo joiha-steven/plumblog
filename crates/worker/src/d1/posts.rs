@@ -462,11 +462,7 @@ impl PostStore for D1Store {
         };
         let s = self.stmt(
             "search",
-            &format!(
-                "SELECT {SUMMARY_COLS} FROM posts_fts JOIN posts p ON p.id = posts_fts.rowid \
-                 WHERE posts_fts MATCH ? AND p.status = 'published' AND p.lang = ? \
-                 ORDER BY p.published_at DESC, p.id DESC LIMIT ?"
-            ),
+            &super::reader_sql::search(),
             &[text(&fts), text(lang), limit(limit_n)],
         )?;
         self.rows(s).await?.iter_mut().map(read_summary).collect()

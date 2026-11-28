@@ -2,13 +2,13 @@
 
 use std::cmp::Reverse;
 
-use plumblog_model::{PostId, Result};
+use plumblog_model::{PostId, Result, SeriesId, TagId};
 
 use super::{MemoryStore, State, count};
 use crate::{
-    Post, PostKind, PostStatus, PostSummary, READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderFilter,
-    ReaderLink, ReaderNeighbours, ReaderPage, ReaderPost, ReaderRow, ReaderSitemapRow, ReaderStore,
-    ReaderTag, Tag, page_len, year_bounds, year_of,
+    Post, PostKind, PostStatus, PostSummary, READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderCover,
+    ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage, ReaderPost, ReaderRow, ReaderSeries,
+    ReaderSitemapRow, ReaderStore, ReaderTag, ReaderTaxonPage, Tag, page_len, year_bounds, year_of,
 };
 
 fn listed(p: &Post) -> bool {
@@ -44,7 +44,8 @@ impl State {
     fn matches(filter: ReaderFilter<'_>, p: &Post) -> bool {
         match filter {
             ReaderFilter::Home(l) | ReaderFilter::Lang(l) => p.lang == l,
-            ReaderFilter::Tag(t) => p.tag_ids.contains(&t),
+            ReaderFilter::Tag(t, l) => p.lang == l && p.tag_ids.contains(&t),
+            ReaderFilter::Series(id, l) => p.lang == l && p.series_id == Some(id),
             ReaderFilter::Year(y) => year_bounds(y)
                 .is_some_and(|(a, b)| p.published_at.is_some_and(|at| (a..b).contains(&at))),
         }
@@ -75,8 +76,12 @@ impl ReaderStore for MemoryStore {
                     rows: Vec::new(),
                 };
             }
-            let pinned_first = matches!(filter, ReaderFilter::Home(_));
-            rows.sort_by_key(|p| Reverse((pinned_first && p.pinned, date_key(p))));
+            if matches!(filter, ReaderFilter::Series(..)) {
+                rows.sort_by_key(|p| (p.series_position, date_key(p)));
+            } else {
+                let pinned_first = matches!(filter, ReaderFilter::Home(_));
+                rows.sort_by_key(|p| Reverse((pinned_first && p.pinned, date_key(p))));
+            }
             let rows = rows
                 .into_iter()
                 .skip(usize::try_from(offset).unwrap_or(usize::MAX))
@@ -98,6 +103,24 @@ impl ReaderStore for MemoryStore {
                 .map(|p| ReaderPost {
                     post: p.clone(),
                     tags: s.reader_tags_of(p),
+                    series: p
+                        .series_id
+                        .and_then(|id| s.series.get(&id))
+                        .map(|x| ReaderSeries {
+                            slug: x.slug.clone(),
+                            title: x.title.clone(),
+                        }),
+                    cover: p
+                        .cover_media_id
+                        .and_then(|id| s.media.get(&id))
+                        .map(|m| ReaderCover {
+                            id: m.id,
+                            r2_key: m.r2_key.clone(),
+                            width: m.width,
+                            height: m.height,
+                            alt: m.alt.clone(),
+                            variants_json: m.variants_json.clone(),
+                        }),
                 })
         }))
     }
@@ -185,6 +208,8 @@ impl ReaderStore for MemoryStore {
                 .map(|p| ReaderPost {
                     post: p.clone(),
                     tags: s.reader_tags_of(p),
+                    series: None,
+                    cover: None,
                 })
                 .collect()
         }))
@@ -211,20 +236,77 @@ impl ReaderStore for MemoryStore {
         }))
     }
 
-    async fn reader_tags(&self) -> Result<Vec<Tag>> {
+    async fn reader_tag_pages(&self, langs: &[String]) -> Result<Vec<ReaderTaxonPage>> {
         Ok(self.read(|s| {
-            let mut tags: Vec<Tag> = s
-                .tags
-                .values()
-                .filter(|t| {
+            let mut tags: Vec<&Tag> = s.tags.values().collect();
+            tags.sort_by(|a, b| (&a.name, a.id).cmp(&(&b.name, b.id)));
+            let mut out = Vec::new();
+            for t in tags {
+                for l in langs {
+                    if s.posts
+                        .values()
+                        .any(|p| listed(p) && p.lang == *l && p.tag_ids.contains(&t.id))
+                    {
+                        out.push(ReaderTaxonPage {
+                            slug: t.slug.clone(),
+                            name: t.name.clone(),
+                            lang: l.clone(),
+                        });
+                    }
+                }
+            }
+            out
+        }))
+    }
+
+    async fn reader_series_pages(&self, langs: &[String]) -> Result<Vec<ReaderTaxonPage>> {
+        Ok(self.read(|s| {
+            let mut all: Vec<_> = s.series.values().collect();
+            all.sort_by(|a, b| (&a.title, a.id).cmp(&(&b.title, b.id)));
+            let mut out = Vec::new();
+            for x in all {
+                for l in langs {
+                    if s.posts
+                        .values()
+                        .any(|p| listed(p) && p.lang == *l && p.series_id == Some(x.id))
+                    {
+                        out.push(ReaderTaxonPage {
+                            slug: x.slug.clone(),
+                            name: x.title.clone(),
+                            lang: l.clone(),
+                        });
+                    }
+                }
+            }
+            out
+        }))
+    }
+
+    async fn reader_tag_langs(&self, tag: TagId, langs: &[String]) -> Result<Vec<String>> {
+        Ok(self.read(|s| {
+            langs
+                .iter()
+                .filter(|l| {
                     s.posts
                         .values()
-                        .any(|p| listed(p) && p.tag_ids.contains(&t.id))
+                        .any(|p| listed(p) && p.lang == **l && p.tag_ids.contains(&tag))
                 })
                 .cloned()
-                .collect();
-            tags.sort_by(|a, b| (&a.name, a.id).cmp(&(&b.name, b.id)));
-            tags
+                .collect()
+        }))
+    }
+
+    async fn reader_series_langs(&self, series: SeriesId, langs: &[String]) -> Result<Vec<String>> {
+        Ok(self.read(|s| {
+            langs
+                .iter()
+                .filter(|l| {
+                    s.posts
+                        .values()
+                        .any(|p| listed(p) && p.lang == **l && p.series_id == Some(series))
+                })
+                .cloned()
+                .collect()
         }))
     }
 }

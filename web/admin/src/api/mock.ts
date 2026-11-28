@@ -15,11 +15,25 @@
  * taken slug; trash and restore work on the same list. `?create=slow` leaves every create
  * unanswered (the editor's "still saving" message).
  *
+ * The system log (`logList`) answers as `GET /api/v1/log` does: filters, opaque cursor, newest first,
+ * `auth.forbidden` for a writer. fixtures/log.json holds fixed times; the mock shifts them so the
+ * newest entry is 20 minutes old, which keeps "Last 24 hours" and the day headings meaningful.
+ * `?log=loading|error|offline|empty` forces a state on the log alone.
  * The media library lives in memory too (fixtures/media.json; `?mock=empty` empties it, `?media=error`
  * fails only its list; delete answers 403 for another's picture to a writer and 409 with the posts while in use).
  * Settings (`/api/v1/settings`): a map kept in memory from fixtures/settings.json (`?mock=empty`: every key
  * absent, so the defaults show). Writes need the owner (`?role=writer` gets 403 `auth.forbidden`);
  * `?settings=invalid` makes writing `site_per_page` fail with 400 `input.invalid`, as a refused value would.
+ * Appearance and Plugins (`/api/v1/themes`, `/api/v1/plugins`, fixtures/theme-declarations.json and plugins.json): option
+ * values and plugin states are kept in memory; declarations answer in `?lang=` (English and Vietnamese fixtures).
+ * `?mock=empty` leaves no plugins and every option at its default. `?options=` forces `invalid` (writing `excerpt_words`
+ * or a plugin's `heading` fails with 400 `input.invalid`), `unavailable` (the bound theme did not load: the list says so, its
+ * declarations answer 409 `theme.unavailable`), `bare` (a theme with no options) or `plugin-error` (switching a plugin fails).
+ *
+ * People and invitations (`/api/v1/users`, `/api/v1/invites`, Settings): in memory from fixtures/users.json
+ * (`?mock=empty`: only you, no invitations; `?role=writer`: 403). The last-owner rule is the server's.
+ * `?users=error` fails only the people list, `last_owner|gone|forbidden|posts` makes every change fail that way
+ * (`posts`: delete refused because the person still has posts); `?invites=error` fails only the invitations list.
  *
  * Posts live in memory, from fixtures/posts.json, and reset on page load; the long post (id 1)
  * keeps its body in post-1.txt, so its `markdown` in the JSON is empty and is filled in here.
@@ -30,13 +44,15 @@
  */
 
 import me from "../../fixtures/me.json";
+import logEntries from "../../fixtures/log.json";
 import mediaFixtures from "../../fixtures/media.json";
 import posts from "../../fixtures/posts.json";
 import settingsFixture from "../../fixtures/settings.json";
 import tokenFixtures from "../../fixtures/tokens.json";
+import usersFixture from "../../fixtures/users.json";
 import longPost from "../../fixtures/post-1.txt";
-import { type Api, type JsonBody, type Me, type Media, type MediaItem, type MediaPage, type Method, type Result, fail } from "./client";
-import type { Post, PostCreateInput, PostPage, PostUpdateInput, RenderWarning } from "./model.gen";
+import { type Api, type JsonBody, type LogQuery, type Me, type Media, type MediaItem, type MediaPage, type Method, type Result, fail } from "./client";
+import { LOG_KINDS, LOG_LEVELS, type Invite, type LogEntry, type LogPage, type Post, type PostCreateInput, type PostPage, type PostUpdateInput, type RenderWarning, type User } from "./model.gen";
 
 /** Cloudflare's public always-pass Turnstile key: the real widget works in dev. */
 const TEST_SITE_KEY = "1x00000000000000000000AA";
@@ -176,6 +192,25 @@ async function auth<T>(params: URLSearchParams, method: Method, path: string, bo
 }
 
 const PAGE = 20;
+const LOG_PAGE = 50;
+const LOG_LEVEL_RANK: Record<string, number> = Object.fromEntries(LOG_LEVELS.map((l, i) => [l, i]));
+const LOG_NEWEST_AGO = 20 * 60_000;
+
+/** Whether an entry passes the filters, as the server applies them (`level` is a minimum). */
+function logMatches(e: LogEntry, q: LogQuery): boolean {
+  if (q.kind !== undefined && e.kind !== q.kind) return false;
+  if (q.level !== undefined && (LOG_LEVEL_RANK[e.level] ?? 0) < (LOG_LEVEL_RANK[q.level] ?? 0)) return false;
+  if (q.code !== undefined && e.error_code !== q.code) return false;
+  if (q.actor !== undefined && e.actor_id !== q.actor) return false;
+  if (q.from !== undefined && e.at < q.from) return false;
+  if (q.to !== undefined && e.at >= q.to) return false;
+  if (q.q !== undefined) {
+    const needle = q.q.toLowerCase();
+    const hit = e.request_id === q.q || e.subject.toLowerCase().includes(needle) || e.fields.some((f) => f.value.toLowerCase().includes(needle));
+    if (!hit) return false;
+  }
+  return true;
+}
 
 /** The mock's settings; reset by a page load, like the rest of the mock. */
 let settings: Record<string, unknown> | undefined;
@@ -199,6 +234,167 @@ async function settingsCall<T>(params: URLSearchParams, method: Method, key: str
   return { ok: true, value: undefined as T };
 }
 
+/** The mock's option values (`themes/<name>`, `plugins/<name>`) and plugin switches; reset by a page load. */
+interface OptionState {
+  values: Record<string, Record<string, unknown>>;
+  plugins: { name: string; enabled: boolean; disabled_reason: string | null; updated_at: number }[];
+}
+const optionStates = new WeakMap<URLSearchParams, OptionState>();
+
+/** `/api/v1/themes[...]` and `/api/v1/plugins[...]`; undefined for any other path. */
+async function optionsCall<T>(params: URLSearchParams, method: Method, path: string, body: Body): Promise<Result<T> | undefined> {
+  const url = /^\/api\/v1\/(themes|plugins)(?:\/([a-z0-9_-]+)(?:\/(declarations|options)(?:\/([a-z0-9_]+))?)?)?(?:\?lang=([\w-]+))?$/.exec(path);
+  if (!url) return undefined;
+  const [, kind, name, what, key, lang] = url;
+  const mode = params.get("mock");
+  if (mode === "loading") await new Promise(() => undefined);
+  await new Promise((r) => setTimeout(r, 250));
+  if (mode === "error") return fail("internal", 500);
+  if (mode === "offline") return fail("network", 0);
+  // Loaded on first use so the dev shell does not carry them (the shell has a size budget).
+  const [themeFixtures, pluginFixtures] = await Promise.all([import("../../fixtures/theme-declarations.json"), import("../../fixtures/plugins.json")]).then(([a, b]) => [a.default, b.default] as const);
+  const flag = params.get("options");
+  const done = (value: unknown): Result<T> => ({ ok: true, value: structuredClone(value) as T });
+  const writer = params.get("role") === "writer";
+  const l = lang?.startsWith("vi") ? "vi" : "en";
+  let state = optionStates.get(params);
+  if (!state) {
+    state = {
+      values: {
+        "themes/minimal": mode === "empty" ? {} : structuredClone(themeFixtures.stored),
+        ...Object.fromEntries(Object.entries(pluginFixtures.stored).map(([n, v]) => [`plugins/${n}`, mode === "empty" ? {} : structuredClone(v)])),
+      },
+      plugins: mode === "empty" ? [] : structuredClone(pluginFixtures.plugins),
+    };
+    optionStates.set(params, state);
+  }
+  const { values: optionValues, plugins } = state;
+  if (kind === "themes" && name === undefined) {
+    const themes = structuredClone(themeFixtures.themes) as { name: string; version: string | null; active: boolean; source: string; available: boolean }[];
+    if (flag === "unavailable") themes.push({ name: "journal", version: null, active: false, source: "pushed", available: false });
+    return done({ themes });
+  }
+  if (kind === "plugins" && name === undefined) return writer ? fail("auth.forbidden", 403) : done({ plugins });
+  if (kind === "plugins" && what === undefined && method === "PUT") {
+    if (writer) return fail("auth.forbidden", 403);
+    const p = plugins.find((x) => x.name === name);
+    if (!p) return fail("store.not_found", 404);
+    if (flag === "plugin-error") return fail("internal", 500);
+    p.enabled = body?.["enabled"] === true;
+    p.disabled_reason = null;
+    return { ok: true, value: undefined as T };
+  }
+  const owner = `${kind}/${name}`;
+  const known = kind === "themes" ? name === "minimal" || name === "journal" : plugins.some((x) => x.name === name);
+  if (!known) return fail("store.not_found", 404, { field: "name" });
+  if (what === "declarations") {
+    if (kind === "plugins" && writer) return fail("auth.forbidden", 403);
+    if (kind === "themes") {
+      if (name === "journal" || flag === "unavailable") return fail("theme.unavailable", 409);
+      const d = structuredClone(themeFixtures.declarations[l]);
+      return done(flag === "bare" ? { ...d, groups: [], options: [] } : d);
+    }
+    const all = pluginFixtures.declarations as Record<string, Record<string, unknown>>;
+    return done(all[name ?? ""]?.[l]);
+  }
+  const values = (optionValues[owner] ??= {});
+  if (what === "options" && method === "GET" && key === undefined) return done({ options: values });
+  if (writer) return fail("auth.forbidden", 403);
+  if (what === "options" && method === "PUT" && key !== undefined) {
+    if (body?.["value"] === undefined) return fail("input.invalid", 400, { field: "value" });
+    if (flag === "invalid" && (key === "excerpt_words" || key === "heading")) return fail("input.invalid", 400, { field: "value" });
+    values[key] = body["value"];
+    return { ok: true, value: undefined as T };
+  }
+  if (what === "options" && method === "DELETE" && key === undefined) {
+    optionValues[owner] = {};
+    return { ok: true, value: undefined as T };
+  }
+  return fail("api.not_found", 404);
+}
+
+const DAY = 86_400_000;
+
+/** The mock's people and invitations; each mock API starts from the fixture. */
+function peopleMock(params: URLSearchParams, signedIn: number) {
+  const empty = params.get("mock") === "empty";
+  let users: User[] = (usersFixture.users as User[]).filter((u) => !empty || u.id === signedIn).map((u) => structuredClone(u));
+  let invites: Invite[] = empty
+    ? []
+    : usersFixture.invites.map((i) => ({ id: i.id, role: i.role, created_by: i.created_by, created_at: Date.now() - i.created_ago_days * DAY, expires_at: Date.now() + i.expires_in_days * DAY }));
+  const flag = params.get("users");
+  const activeOwners = (): User[] => users.filter((u) => u.role === "owner" && u.disabled_at === null);
+
+  return async <T>(method: Method, path: string, body: Body): Promise<Result<T> | undefined> => {
+    const um = /^\/api\/v1\/users(?:\?(.*)|\/(\d+)(?:\/(role|disabled))?)?$/.exec(path);
+    const im = /^\/api\/v1\/invites(?:\/(\d+))?$/.exec(path);
+    if (!um && !im) return undefined;
+    const mode = params.get("mock");
+    if (mode === "loading") await new Promise(() => undefined);
+    await new Promise((r) => setTimeout(r, 200));
+    if (mode === "offline") return fail("network", 0);
+    if (mode === "error") return fail("internal", 500);
+    if (params.get("role") === "writer") return fail("auth.forbidden", 403);
+    const done = (value: unknown): Result<T> => ({ ok: true, value: value as T });
+    if (im) {
+      if (method === "GET" && im[1] === undefined) return params.get("invites") === "error" ? fail("internal", 500) : done({ invites: structuredClone(invites) });
+      if (method === "POST" && im[1] === undefined) {
+        const role = body?.["role"];
+        const at = body?.["expires_at"];
+        if ((role !== "owner" && role !== "writer") || (at !== undefined && (typeof at !== "number" || at <= Date.now() || at > Date.now() + 30 * DAY))) return fail("input.invalid", 400, { field: "expires_at" });
+        const made = { id: Math.max(0, ...invites.map((i) => i.id)) + 1, role, created_by: signedIn, created_at: Date.now(), expires_at: at ?? Date.now() + 7 * DAY };
+        invites.push(made);
+        return done({ ...made, code: "mock-7f3a-91c2-b2d8-44e0" });
+      }
+      if (method === "DELETE" && im[1] !== undefined) {
+        const at = invites.findIndex((i) => i.id === Number(im[1]));
+        if (at < 0 || flag === "gone") return fail("store.not_found", 404);
+        invites.splice(at, 1);
+        return done(undefined);
+      }
+      return fail("api.not_found", 404);
+    }
+    if (um && method === "GET" && um[2] === undefined) {
+      if (flag === "error") return fail("internal", 500);
+      const q = new URLSearchParams(um[1] ?? "");
+      const after = Number(q.get("cursor") ?? 0);
+      const limit = Number(q.get("limit") ?? PAGE);
+      const rest = [...users].sort((a, b) => a.id - b.id).filter((u) => u.id > after);
+      const page = rest.slice(0, limit);
+      const last = page[page.length - 1];
+      return done({ users: structuredClone(page), next_cursor: rest.length > limit && last ? String(last.id) : null });
+    }
+    const target = users.find((u) => u.id === Number(um?.[2]));
+    if (!um || um[2] === undefined || !target || flag === "gone") return fail("user.not_found", 404);
+    if (flag === "forbidden") return fail("auth.forbidden", 403);
+    // Takes the person out of the active owners: refused when they are the only one left.
+    const leaving = target.role === "owner" && target.disabled_at === null && activeOwners().length === 1;
+    if (method === "PUT" && um[3] === "role") {
+      const role = body?.["role"];
+      if (role !== "owner" && role !== "writer") return fail("input.invalid", 400, { field: "role" });
+      if (role !== "owner" && (flag === "last_owner" || leaving)) return fail("user.last_owner", 409);
+      if (target.role === "owner" && role !== "owner") invites = invites.filter((i) => i.created_by !== target.id);
+      target.role = role;
+      target.updated_at = Date.now();
+      return done(structuredClone(target));
+    }
+    if (method === "PUT" && um[3] === "disabled") {
+      const off = body?.["disabled"] === true;
+      if (off && (flag === "last_owner" || leaving)) return fail("user.last_owner", 409);
+      target.disabled_at = off ? Date.now() : null;
+      target.updated_at = Date.now();
+      return done(structuredClone(target));
+    }
+    if (method === "DELETE" && um[3] === undefined) {
+      if (flag === "last_owner" || leaving) return fail("user.last_owner", 409);
+      if (flag === "posts" || (posts as Post[]).some((p) => p.author_id === target.id)) return fail("store.conflict", 409);
+      users = users.filter((u) => u !== target);
+      return done(undefined);
+    }
+    return fail("api.not_found", 404);
+  };
+}
+
 /** An approximation: the server warns on TeX that does not render (`$\notacommand$`); the mock
  * only knows a `$$` that never closes, enough to show a warning. */
 const warningsOf = (markdown: string): RenderWarning[] =>
@@ -212,6 +408,9 @@ export function mockApi(params: URLSearchParams): Api {
   let mediaId = 100;
   const role = params.get("role") === "writer" ? "writer" : "owner";
   const store: Post[] = (posts as Post[]).map((p) => structuredClone(p));
+  // Fixed times in the fixture, shifted once so the newest entry is 20 minutes old.
+  const newest = Math.max(...(logEntries as LogEntry[]).map((e) => e.at));
+  const logStore: LogEntry[] = (logEntries as LogEntry[]).map((e) => ({ ...structuredClone(e), at: e.at + Date.now() - LOG_NEWEST_AGO - newest }));
   const library: MediaItem[] = (mediaFixtures as MediaItem[]).map((m) => structuredClone(m));
   const first = store.find((p) => p.id === 1);
   if (first) first.markdown = longPost;
@@ -219,6 +418,7 @@ export function mockApi(params: URLSearchParams): Api {
   let conflictPending = params.get("conflict") === "1";
   /** The first publish fails once with a taken slug when `?slug=taken`. */
   let slugPending = params.get("slug") === "taken";
+  const people = peopleMock(params, me.user.id);
   const down = <T>(): Result<T> | undefined => {
     if (mode === "error") return fail("internal", 500);
     if (mode === "offline") return fail("network", 0);
@@ -268,6 +468,32 @@ export function mockApi(params: URLSearchParams): Api {
       if (mode === "offline") return fail("network", 0);
       const p = store.find((x) => x.id === id);
       return p ? { ok: true, value: structuredClone(p) } : fail("post.not_found", 404);
+    },
+    async logList(q) {
+      // `?log=loading|error|offline|empty` forces a state on the log alone (`?mock=` also stops `me`, so the shell fails first).
+      const state = params.get("log") ?? mode;
+      if (state === "loading") await new Promise(() => undefined);
+      await new Promise((r) => setTimeout(r, 150));
+      if (state === "error") return fail("internal", 500);
+      if (state === "offline") return fail("network", 0);
+      if (role !== "owner") return fail("auth.forbidden", 403);
+      if (q.kind !== undefined && !(LOG_KINDS as readonly string[]).includes(q.kind)) return fail("input.invalid", 400, { field: "kind" });
+      if (q.q !== undefined && (q.q.length < 1 || q.q.length > 100)) return fail("input.invalid", 400, { field: "q" });
+      const limit = q.limit ?? LOG_PAGE;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) return fail("input.invalid", 400, { field: "limit" });
+      let offset = 0;
+      if (q.cursor !== undefined) {
+        try {
+          offset = Number(atob(q.cursor));
+        } catch {
+          offset = -1;
+        }
+        if (!Number.isInteger(offset) || offset < 0) return fail("input.invalid", 400, { field: "cursor" });
+      }
+      const all = state === "empty" ? [] : logStore.filter((e) => logMatches(e, q)).map((e) => structuredClone(e));
+      all.sort((a, b) => b.at - a.at || b.id - a.id);
+      const next = offset + limit < all.length ? btoa(String(offset + limit)) : null;
+      return { ok: true, value: { entries: all.slice(offset, offset + limit), next_cursor: next } };
     },
     async createPost(input: PostCreateInput) {
       await settle();
@@ -349,6 +575,10 @@ export function mockApi(params: URLSearchParams): Api {
     async call<T>(method: Method, path: string, body?: Body): Promise<Result<T>> {
       const sm = /^\/api\/v1\/settings(?:\/([a-z0-9_-]+))?$/.exec(path);
       if (sm) return settingsCall<T>(params, method, sm[1], body);
+      const pm = await people<T>(method, path, body);
+      if (pm) return pm;
+      const om = await optionsCall<T>(params, method, path, body);
+      if (om) return om;
       const m = /^\/api\/v1\/posts\/(\d+)\/(trash|restore)$/.exec(path);
       if (method !== "POST" || !m) return auth<T>(params, method, path, body);
       await settle();
@@ -435,8 +665,13 @@ export function mockApi(params: URLSearchParams): Api {
         img.onerror = () => resolve([0, 0]);
         img.src = url;
       });
-      const media: Media = { id: ++mediaId, url, width: size[0], height: size[1] };
-      return { ok: true, value: media };
+      if (up === "refuse") return fail("input.invalid", 400, { field: "sha256" });
+      // `?upload=dup`: the caller's own first picture answers, as the server does for a known hash.
+      const known = up === "dup" ? library[0] : undefined;
+      if (known) return { ok: true, value: { id: known.id, url: known.src, width: known.width, height: known.height, item: known, existing: true } };
+      const item: MediaItem = { id: ++mediaId, src: url, mime: file.type, bytes: file.size, width: size[0], height: size[1], alt: "", uploaded_by: me.user.id, created_at: Date.now() };
+      library.unshift(item);
+      return { ok: true, value: { id: item.id, url, width: size[0], height: size[1], item, existing: false } };
     },
   };
 }

@@ -2,8 +2,10 @@
 //! kept in the Cache API under a key that includes the site content version.
 
 mod cache;
+mod cover;
 mod db;
 mod docs;
+mod prerender;
 pub(crate) mod reader_db;
 pub(crate) mod routes;
 #[cfg(any(test, feature = "contract-tests"))]
@@ -23,6 +25,8 @@ use search::SearchSource;
 use source::{Filter, ReaderSource, Settings, StoredPost};
 use std::cell::Cell;
 use worker::{Context, Env, Headers, Request, Response, Result, console_error};
+
+pub(crate) use prerender::{PRERENDER_JOB, cron as store_cron};
 
 /// Where the default theme's `assets/` folder is served (Workers static assets).
 pub const THEME_ASSETS_URL: &str = "/theme/minimal";
@@ -124,6 +128,15 @@ fn cache_policy(status: u16, cacheable: bool) -> (bool, &'static str) {
     }
 }
 
+/// Same content version, theme and engine build means the same bytes, so browsers may
+/// revalidate.
+fn etag(version: u64) -> String {
+    format!(
+        "\"{version}{}-{VERSION}\"",
+        crate::theme_runtime::cache_tag()
+    )
+}
+
 /// Serves a reader page, from cache when possible.
 pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> {
     let url = req.url()?;
@@ -136,25 +149,18 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
     let db = Db(&d1);
     let src = &db;
     // Search results depend on the query string and on the store, neither of which is in
-    // the cache key or the ETag, so they skip both.
-    if path == routes::SEARCH {
-        let query = url
-            .query_pairs()
-            .find(|(k, _)| k == "q")
-            .map(|(_, v)| v.into_owned())
-            .unwrap_or_default();
-        return live(src, &db, &path, &query).await;
+    // the cache key or the ETag, so they skip both. `/<lang>/search` without `q` is not a
+    // search yet: a post stored with the slug `search` is served there (cached like any post);
+    // when there is none, `route` answers the form and marks it uncached.
+    if let Some(query) = live_search_query(&url, &path) {
+        return live(src, &db, &origin, &path, &query).await;
     }
     // From the store: option and plugin changes bump it too, so they reach cached pages.
     let version = match db.content_version().await {
         Ok(v) => v,
         Err(e) => return Ok(failure(&format!("content version: {e}"))),
     };
-    // Same content version and engine build means the same bytes, so browsers may revalidate.
-    let etag = format!(
-        "\"{version}{}-{VERSION}\"",
-        crate::theme_runtime::cache_tag()
-    );
+    let etag = etag(version);
     if req.headers().get("if-none-match")?.as_deref() == Some(etag.as_str()) {
         let h = Headers::new();
         h.set("etag", &etag)?;
@@ -258,6 +264,7 @@ fn stored_copy(
     }
     Ok(Some(cache::Stored {
         key,
+        version_id: id,
         body: body.as_bytes().to_vec(),
         content_type,
         etag: etag.to_owned(),
@@ -268,10 +275,80 @@ fn stored_copy(
     }))
 }
 
+/// `path` as a reader miss renders it, for the cron to store in R2 under version id `id`:
+/// the same render, cache policy and store guards (an anonymous GET), so the object is the
+/// one a miss would have put. `None` when a miss would not store it either: a redirect, a
+/// page the Cache API would not keep, or one the active theme's templates fail on (readers
+/// get the default theme's uncached fallback, which never goes to R2).
+///
+/// # Errors
+/// A storage failure, as a detail for the log.
+async fn render_stored(
+    env: &Env,
+    d1: &D1Store,
+    id: &str,
+    version: u64,
+    path: &str,
+) -> std::result::Result<Option<cache::Stored>, String> {
+    let db = Db(d1);
+    let outcome = match render(&db, &db, &db, path, "").await {
+        Ok(o) => o,
+        Err(RenderError::Theme(_)) => return Ok(None),
+        Err(RenderError::Other(d)) => return Err(d),
+    };
+    let Outcome::Page {
+        status,
+        content_type,
+        body,
+        cacheable,
+    } = outcome
+    else {
+        return Ok(None);
+    };
+    let (store, cache_control) = cache_policy(status, cacheable);
+    let key = cache::store_key(id, version, crate::theme_runtime::cache_tag(), path);
+    if !store || !cache::may_store(true, false, body.len(), &key, cache::store_limit(env)) {
+        return Ok(None);
+    }
+    Ok(Some(cache::Stored {
+        key,
+        version_id: id.to_owned(),
+        body: body.into_bytes(),
+        content_type,
+        etag: etag(version),
+        cache_control,
+        theme: crate::theme_runtime::served_tag(),
+        path: path.to_owned(),
+        cf_ray: None,
+    }))
+}
+
+/// The `q` of a request the search page answers live (never cached), else `None`: `/search`
+/// always, `/<lang>/search` only with a `q` parameter, so one without it can still serve a post
+/// stored with the slug `search`. `?q=` is a search even when empty; a blank keeps `route` from
+/// reading it as "no q".
+fn live_search_query(url: &worker::Url, path: &str) -> Option<String> {
+    let q = url
+        .query_pairs()
+        .find(|(k, _)| k == "q")
+        .map(|(_, v)| v.into_owned());
+    match routes::parse(path) {
+        Route::Search { lang: None } => {}
+        Route::Search { lang: Some(_) } if q.is_some() => {}
+        _ => return None,
+    }
+    Some(match q {
+        Some(v) if !v.is_empty() => v,
+        Some(_) => " ".to_owned(),
+        None => String::new(),
+    })
+}
+
 /// A page rendered for this request only: no `ETag`, no Cache API, never stored by browsers.
 async fn live<S: ExtSource + SearchSource>(
     src: &impl ReaderSource,
     db: &S,
+    origin: &str,
     path: &str,
     query: &str,
 ) -> Result<Response> {
@@ -279,14 +356,19 @@ async fn live<S: ExtSource + SearchSource>(
         Ok(o) => o,
         Err(e) => return Ok(failure(e.detail())),
     };
-    let Outcome::Page {
-        status,
-        content_type,
-        body,
-        ..
-    } = outcome
-    else {
-        return Ok(failure("live page asked for a redirect"));
+    let (status, content_type, body) = match outcome {
+        Outcome::Page {
+            status,
+            content_type,
+            body,
+            ..
+        } => (status, content_type, body),
+        // Built by `search_redirect` from a constant path: never leaves the site.
+        Outcome::Redirect(to) if to.starts_with("/search") => {
+            let url = worker::Url::parse(&format!("{origin}{to}"))?;
+            return Response::redirect_with_status(url, 301);
+        }
+        Outcome::Redirect(to) => return Ok(failure(&format!("live page redirected to {to:?}"))),
     };
     let h = Headers::new();
     h.set("content-type", content_type)?;
@@ -448,6 +530,7 @@ pub async fn preview(
         cover: None,
         thumb: None,
         translations: Vec::new(),
+        series: None,
     };
     // A draft has no comments yet; the preview shows the page as it publishes.
     p.render(&Body::Post {
@@ -503,6 +586,7 @@ async fn route(
         complete: Cell::new(true),
         theme_failed: failed,
     };
+    let mut form_only = false;
     let page = match routes::parse(path) {
         Route::Redirect(to) => return Ok(Outcome::Redirect(to)),
         Route::Home { page } => p.home(&settings.lang, page).await?,
@@ -536,9 +620,33 @@ async fn route(
             p.post(lang.as_deref().unwrap_or(&settings.lang), &slug, ext)
                 .await?
         }
-        Route::Tag { slug, page } => p.tag(&slug, page).await?,
+        r @ (Route::Tag { .. } | Route::Series { .. } | Route::TaxonFirstPage { .. }) => {
+            match p.taxon_route(r).await? {
+                Step::Page(html) => html,
+                Step::Redirect(to) => return Ok(Outcome::Redirect(to)),
+            }
+        }
         Route::Archive { year, page } => p.archive(year, page).await?,
-        Route::Search => p.search(search, query).await?,
+        Route::Search { lang: None } => p.search(search, query, &settings.lang).await?,
+        Route::Search { lang: Some(l) } if l == settings.lang => {
+            return Ok(Outcome::Redirect(search_redirect(query)));
+        }
+        // A post stored with the slug `search` in a listed language was served here before the
+        // search page took the address, and stays served when the request is no search
+        // (no `q`); the form, when there is no such post, is never cached.
+        Route::Search { lang: Some(l) } if settings.languages.contains(&l) => {
+            let stored = if query.is_empty() {
+                p.post(&l, "search", ext).await?
+            } else {
+                None
+            };
+            if stored.is_some() {
+                stored
+            } else {
+                form_only = query.is_empty();
+                p.search(search, query, &l).await?
+            }
+        }
         Route::Feed { lang, format } => {
             return Ok(match p.feed(&settings, lang.as_deref(), format).await? {
                 Some(body) => doc(format.content_type(), body),
@@ -548,6 +656,8 @@ async fn route(
         Route::Sitemap => return Ok(doc(docs::XML, p.sitemap(&settings).await?)),
         Route::Robots => return Ok(doc(docs::TEXT, docs::robots(origin))),
         Route::Llms => return Ok(doc(docs::TEXT, p.llms(&settings).await?)),
+        // `/<seg>/search` where `seg` is no site language: an ordinary post path as before.
+        Route::Search { lang: Some(l) } => p.post(&l, "search", ext).await?,
         // A language home past page 1 of an unlisted language, or nothing at all.
         Route::LangHome { .. } | Route::LangFirstPage { .. } | Route::NotFound => None,
     };
@@ -556,12 +666,47 @@ async fn route(
         None => p.not_found_page().await?,
     };
     if let Outcome::Page { cacheable, .. } = &mut out {
-        *cacheable &= p.complete.get();
+        *cacheable &= p.complete.get() && !form_only;
     }
     Ok(out)
 }
 
+/// What a tag or series route comes to.
+enum Step {
+    Page(Option<String>),
+    Redirect(String),
+}
+
+/// How a tag or series route's language prefix resolves.
+enum Choice {
+    /// List this language's posts.
+    Serve(String),
+    /// The default language: its pages are at the root, so the prefixed URL redirects there.
+    Root,
+    /// Not a site language: a 404, as `/xx/tag/x` always was.
+    Unlisted,
+}
+
+fn lang_choice(s: &Settings, lang: Option<&str>) -> Choice {
+    match lang {
+        None => Choice::Serve(s.lang.clone()),
+        Some(l) if l == s.lang => Choice::Root,
+        Some(l) if s.languages.iter().any(|x| x == l) => Choice::Serve(l.to_owned()),
+        Some(_) => Choice::Unlisted,
+    }
+}
+
 const HTML: &str = "text/html; charset=utf-8";
+
+/// `/search` with the query kept, for the default language's `/<lang>/search`.
+fn search_redirect(query: &str) -> String {
+    if query.is_empty() {
+        return routes::SEARCH.to_owned();
+    }
+    let mut u = worker::Url::parse("http://host/").expect("constant URL");
+    u.query_pairs_mut().append_pair("q", query);
+    format!("{}?{}", routes::SEARCH, u.query().unwrap_or_default())
+}
 
 fn doc(content_type: &'static str, body: String) -> Outcome {
     Outcome::Page {
@@ -574,22 +719,34 @@ fn doc(content_type: &'static str, body: String) -> Outcome {
 
 /// Public URLs when the site has no configured origin: fixed, so every host serves the same
 /// ids, and plainly not the real site, so the warning below gets noticed.
-pub const UNSET_ORIGIN: &str = "http://localhost";
+pub const UNSET_ORIGIN: &str = plumblog_render::UNSET_ORIGIN;
 
-/// A post's public URL for webhook payloads, by the same origin and language rules as reader
-/// pages. 1 query.
-pub async fn post_url(store: &D1Store, lang: &str, slug: &str) -> String {
+/// Posts' public URLs for webhook payloads, by the same origin and language rules as reader
+/// pages. What [`PostUrls::url`] needs: the origin and default language, or `None` when the
+/// settings could not be read (logged once, by [`post_urls`]).
+pub struct PostUrls(Option<(String, String)>);
+
+/// Reads the settings post URLs need, once: a cron run publishing many posts makes one
+/// query for all of them, not one each (`webhooks::PUBLISH_FIXED`). 1 query.
+pub async fn post_urls(store: &D1Store) -> PostUrls {
     match Db(store).settings().await {
-        Ok(s) => format!(
-            "{}{}",
-            public_origin(&s),
-            routes::post_in(lang, &s.lang, slug)
-        ),
+        Ok(s) => PostUrls(Some((public_origin(&s).to_owned(), s.lang.clone()))),
         Err(e) => {
             warn(&format!(
                 "webhook.post_url: settings unreadable ({e}); using {UNSET_ORIGIN}"
             ));
-            format!("{UNSET_ORIGIN}/{lang}/{slug}")
+            PostUrls(None)
+        }
+    }
+}
+
+impl PostUrls {
+    /// The public URL of the post `slug` in `lang`.
+    #[must_use]
+    pub fn url(&self, lang: &str, slug: &str) -> String {
+        match &self.0 {
+            Some((origin, default)) => format!("{origin}{}", routes::post_in(lang, default, slug)),
+            None => format!("{UNSET_ORIGIN}/{lang}/{slug}"),
         }
     }
 }
@@ -775,7 +932,8 @@ impl<S: ReaderSource> Pages<'_, S> {
         let Some(n) = self.src.post(lang, slug).await.map_err(err)? else {
             return Ok(None);
         };
-        let post = self.to_render(&n.post);
+        let mut post = self.to_render(&n.post);
+        self.relink_unlisted(&mut post, &n.post).await?;
         let older = n.older.as_ref().map(|p| self.to_render(p));
         let newer = n.newer.as_ref().map(|p| self.to_render(p));
         // Comments are for posts: a static page shows no form (the comment route refuses it),
@@ -801,7 +959,84 @@ impl<S: ReaderSource> Pages<'_, S> {
         })
     }
 
-    async fn tag(&self, slug: &str, n: usize) -> PageResult {
+    /// Tag and series routes: the page of a listed language, the root form's redirect for the
+    /// default language, a 404 for any other prefix.
+    async fn taxon_route(&self, route: Route) -> std::result::Result<Step, String> {
+        let s = self.settings;
+        let (kind, lang, slug, page, first) = match route {
+            Route::Tag { lang, slug, page } => (routes::Taxon::Tag, lang, slug, page, false),
+            Route::Series { lang, slug, page } => (routes::Taxon::Series, lang, slug, page, false),
+            Route::TaxonFirstPage { kind, lang, slug } => (kind, Some(lang), slug, 1, true),
+            _ => return Ok(Step::Page(None)),
+        };
+        let url = |l: &str, n| match kind {
+            routes::Taxon::Tag => routes::tag_in(l, &s.lang, &slug, n),
+            routes::Taxon::Series => routes::series_in(l, &s.lang, &slug, n),
+        };
+        Ok(match lang_choice(s, lang.as_deref()) {
+            // `/<lang>/.../page/1` is the page without it.
+            Choice::Serve(l) if first => Step::Redirect(url(&l, 1)),
+            Choice::Serve(l) => Step::Page(match kind {
+                routes::Taxon::Tag => self.tag(&l, &slug, page).await?,
+                routes::Taxon::Series => self.series(&l, &slug, page).await?,
+            }),
+            Choice::Root => Step::Redirect(url(&s.lang, page)),
+            Choice::Unlisted => Step::Page(None),
+        })
+    }
+
+    /// A post in a language the site does not list is still served at `/<lang>/<slug>`, but
+    /// that language has no tag or series pages (they would be 404s). Its tags and series
+    /// link to the default language's pages when those have posts, else show as plain text
+    /// (an empty `url`; the theme prints no link).
+    async fn relink_unlisted(
+        &self,
+        post: &mut Post,
+        stored: &StoredPost,
+    ) -> std::result::Result<(), String> {
+        let s = self.settings;
+        if s.languages.contains(&stored.lang) {
+            return Ok(());
+        }
+        let root = std::slice::from_ref(&s.lang);
+        for (link, t) in post.tags.iter_mut().zip(&stored.tags) {
+            let found = match self.src.tag(&t.slug).await.map_err(err)? {
+                Some(tag) => !self
+                    .src
+                    .tag_langs(&tag, root)
+                    .await
+                    .map_err(err)?
+                    .is_empty(),
+                None => false,
+            };
+            link.url = if found {
+                routes::tag_in(&s.lang, &s.lang, &t.slug, 1)
+            } else {
+                String::new()
+            };
+        }
+        if let (Some(r), Some(sp)) = (post.series.as_mut(), stored.series.as_ref()) {
+            let found = match self.src.series(&sp.slug).await.map_err(err)? {
+                Some(x) => !self
+                    .src
+                    .series_langs(&x, root)
+                    .await
+                    .map_err(err)?
+                    .is_empty(),
+                None => false,
+            };
+            r.url = if found {
+                routes::series_in(&s.lang, &s.lang, &sp.slug, 1)
+            } else {
+                String::new()
+            };
+        }
+        Ok(())
+    }
+
+    /// Page `n` of the tag `slug` in `lang`: that language's posts only. A tag with none in
+    /// `lang` is a 404, not an empty page.
+    async fn tag(&self, lang: &str, slug: &str, n: usize) -> PageResult {
         let Some(offset) = self.offset(n) else {
             return Ok(None);
         };
@@ -810,7 +1045,7 @@ impl<S: ReaderSource> Pages<'_, S> {
         };
         let slice = self
             .src
-            .posts(Filter::Tag(&tag), offset, self.per)
+            .posts(Filter::Tag(&tag, lang), offset, self.per)
             .await
             .map_err(err)?;
         if slice.posts.is_empty() {
@@ -818,17 +1053,104 @@ impl<S: ReaderSource> Pages<'_, S> {
         }
         let posts = self.render_posts(&slice.posts);
         let refs: Vec<&Post> = posts.iter().collect();
+        let default = &self.settings.lang;
         let link = Link {
-            name: tag.name,
-            url: routes::tag_page(&tag.slug, 1),
+            name: tag.name.clone(),
+            url: routes::tag_in(lang, default, &tag.slug, 1),
         };
-        self.show(&Body::Tag {
-            tag: &link,
-            posts: &refs,
-            older_url: (offset + slice.posts.len() < slice.total)
-                .then(|| routes::tag_page(slug, n + 1)),
-            newer_url: (n > 1).then(|| routes::tag_page(slug, n - 1)),
-        })
+        let alternates = if n == 1 {
+            let with = self
+                .src
+                .tag_langs(&tag, &self.settings.languages)
+                .await
+                .map_err(|e| self.alternates_failed("tag", lang, &e));
+            self.taxon_alternates(lang, with, |l| routes::tag_in(l, default, &tag.slug, 1))
+        } else {
+            Vec::new()
+        };
+        self.render_in(
+            lang,
+            &Body::Tag {
+                tag: &link,
+                posts: &refs,
+                older_url: (offset + slice.posts.len() < slice.total)
+                    .then(|| routes::tag_in(lang, default, slug, n + 1)),
+                newer_url: (n > 1).then(|| routes::tag_in(lang, default, slug, n - 1)),
+            },
+            &alternates,
+        )
+        .map(Some)
+    }
+
+    /// Page `n` of the series `slug` in `lang`, in reading order; like [`Pages::tag`], none in
+    /// `lang` is a 404.
+    async fn series(&self, lang: &str, slug: &str, n: usize) -> PageResult {
+        let Some(offset) = self.offset(n) else {
+            return Ok(None);
+        };
+        let Some(series) = self.src.series(slug).await.map_err(err)? else {
+            return Ok(None);
+        };
+        let slice = self
+            .src
+            .posts(Filter::Series(&series, lang), offset, self.per)
+            .await
+            .map_err(err)?;
+        if slice.posts.is_empty() {
+            return Ok(None);
+        }
+        let posts = self.render_posts(&slice.posts);
+        let refs: Vec<&Post> = posts.iter().collect();
+        let default = &self.settings.lang;
+        let link = Link {
+            name: series.title.clone(),
+            url: routes::series_in(lang, default, &series.slug, 1),
+        };
+        let alternates = if n == 1 {
+            let with = self
+                .src
+                .series_langs(&series, &self.settings.languages)
+                .await
+                .map_err(|e| self.alternates_failed("series", lang, &e));
+            self.taxon_alternates(lang, with, |l| {
+                routes::series_in(l, default, &series.slug, 1)
+            })
+        } else {
+            Vec::new()
+        };
+        self.render_in(
+            lang,
+            &Body::Series {
+                series: &link,
+                description: &series.description,
+                posts: &refs,
+                prev_url: (n > 1).then(|| routes::series_in(lang, default, slug, n - 1)),
+                next_url: (offset + slice.posts.len() < slice.total)
+                    .then(|| routes::series_in(lang, default, slug, n + 1)),
+            },
+            &alternates,
+        )
+        .map(Some)
+    }
+
+    /// Logs a failed language lookup and leaves the page uncached, without alternates.
+    fn alternates_failed(&self, what: &str, lang: &str, e: &impl std::fmt::Display) {
+        warn(&format!("{what}.alternates_failed lang={lang} detail={e}"));
+        self.complete.set(false);
+    }
+
+    /// The hreflang set of page 1 of a tag or series page: the site languages that have posts
+    /// in it (`with`, from one query); empty on a failed read.
+    fn taxon_alternates(
+        &self,
+        lang: &str,
+        with: std::result::Result<Vec<String>, ()>,
+        url: impl Fn(&str) -> String,
+    ) -> Vec<Alternate> {
+        with.map_or_else(
+            |()| Vec::new(),
+            |with| taxon_alternates(&self.settings.lang, lang, &with, url),
+        )
     }
 
     async fn archive(&self, year: i32, n: usize) -> PageResult {
@@ -938,6 +1260,33 @@ fn home_alternates(s: &Settings, lang: &str, with_posts: &[String]) -> Vec<Alter
     all
 }
 
+/// The hreflang set of a tag or series page (site-relative): its versions in the languages
+/// that have posts (`with`, listed order), this page first, then `x-default` = the default
+/// language's when it has posts. Empty when only one language has the page.
+fn taxon_alternates(
+    default: &str,
+    lang: &str,
+    with: &[String],
+    url: impl Fn(&str) -> String,
+) -> Vec<Alternate> {
+    if with.len() < 2 || !with.iter().any(|l| l == lang) {
+        return Vec::new();
+    }
+    let alt = |l: &str| Alternate {
+        lang: l.to_owned(),
+        url: url(l),
+    };
+    let mut all = vec![alt(lang)];
+    all.extend(with.iter().filter(|l| *l != lang).map(|l| alt(l)));
+    if with.iter().any(|l| l == default) {
+        all.push(Alternate {
+            lang: "x-default".to_owned(),
+            url: url(default),
+        });
+    }
+    all
+}
+
 /// Site facts for a page in `lang`: its feed links are that language's feeds.
 fn site(s: &Settings, lang: &str) -> Site {
     let feed_lang = (lang != s.lang).then_some(lang);
@@ -946,7 +1295,7 @@ fn site(s: &Settings, lang: &str) -> Site {
         description: s.description.clone(),
         default_lang: s.lang.clone(),
         home_url: "/".to_owned(),
-        search_url: Some(routes::SEARCH.to_owned()),
+        search_url: Some(routes::search_in(lang, &s.lang)),
         feed_url: routes::feed(feed_lang, routes::FeedFormat::Atom),
         rss_url: routes::feed(feed_lang, routes::FeedFormat::Rss),
         json_feed_url: routes::feed(feed_lang, routes::FeedFormat::Json),
@@ -974,10 +1323,10 @@ fn to_render(p: &StoredPost, default_lang: &str) -> Post {
             .iter()
             .map(|t| Link {
                 name: t.name.clone(),
-                url: routes::tag_page(&t.slug, 1),
+                url: routes::tag_in(&p.lang, default_lang, &t.slug, 1),
             })
             .collect(),
-        cover: None,
+        cover: p.cover.clone(),
         thumb: None,
         translations: p
             .translations
@@ -987,6 +1336,11 @@ fn to_render(p: &StoredPost, default_lang: &str) -> Post {
                 url: routes::post_in(lang, default_lang, slug),
             })
             .collect(),
+        series: p.series.as_ref().map(|s| plumblog_render::SeriesRef {
+            name: s.title.clone(),
+            url: routes::series_in(&p.lang, default_lang, &s.slug, 1),
+            position: s.position,
+        }),
     }
 }
 
@@ -1000,6 +1354,8 @@ mod reader_tests;
 mod search_tests;
 #[cfg(any(test, feature = "contract-tests"))]
 pub mod seed;
+#[cfg(test)]
+mod taxon_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

@@ -1,0 +1,594 @@
+[
+  {
+    "id": 200,
+    "at": 1795858812000,
+    "request_id": "8f3c1a2b3ca0-SIN",
+    "kind": "auth.sign_in",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "Lan Nguyen signed in",
+    "fields": [
+      {
+        "key": "method",
+        "value": "password"
+      }
+    ]
+  },
+  {
+    "id": 199,
+    "at": 1795857972000,
+    "request_id": "8f3c1a4a2ba5-SIN",
+    "kind": "content.changed",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "Đăng bài: Một buổi chiều ở Hội An",
+    "fields": [
+      {
+        "key": "post_id",
+        "value": "3"
+      },
+      {
+        "key": "action",
+        "value": "published"
+      }
+    ]
+  },
+  {
+    "id": 198,
+    "at": 1795856952000,
+    "request_id": "8f3c1a691aaa-SIN",
+    "kind": "settings.changed",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "Site description changed",
+    "fields": [
+      {
+        "key": "setting",
+        "value": "description"
+      }
+    ]
+  },
+  {
+    "id": 197,
+    "at": 1795855332000,
+    "request_id": "8f3c1a8809af-SIN",
+    "kind": "webhook.delivery",
+    "level": "warning",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": "webhook.delivery_failed",
+    "subject": "Webhook to hooks.example.com",
+    "fields": [
+      {
+        "key": "status",
+        "value": "502"
+      },
+      {
+        "key": "attempts",
+        "value": "3"
+      },
+      {
+        "key": "url",
+        "value": "https://hooks.example.com/blog/notify/segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-end"
+      }
+    ]
+  },
+  {
+    "id": 196,
+    "at": 1795853112000,
+    "request_id": "8f3c1aa6f8a4-SIN",
+    "kind": "auth.sign_in_failed",
+    "level": "warning",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": "auth.invalid_credentials",
+    "subject": "Sign-in failed for login lan",
+    "fields": [
+      {
+        "key": "method",
+        "value": "password"
+      },
+      {
+        "key": "attempt",
+        "value": "2"
+      }
+    ]
+  },
+  {
+    "id": 195,
+    "at": 1795853052000,
+    "request_id": "8f3c1ac5e7a9-SIN",
+    "kind": "auth.sign_in_failed",
+    "level": "warning",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": "auth.invalid_credentials",
+    "subject": "Sign-in failed for login lan",
+    "fields": [
+      {
+        "key": "method",
+        "value": "password"
+      },
+      {
+        "key": "attempt",
+        "value": "1"
+      }
+    ]
+  },
+  {
+    "id": 194,
+    "at": 1795848012000,
+    "request_id": "8f3c1ae4d6ae-SIN",
+    "kind": "comment.created",
+    "level": "info",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": null,
+    "subject": "Comment on: Vì sao tôi bỏ thói quen đọc tin buổi sáng",
+    "fields": [
+      {
+        "key": "comment_id",
+        "value": "12"
+      },
+      {
+        "key": "status",
+        "value": "pending"
+      }
+    ]
+  },
+  {
+    "id": 193,
+    "at": 1795838412000,
+    "request_id": "8f3c1b03c5a3-SIN",
+    "kind": "auth.token_created",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "API token created: Backup script",
+    "fields": [
+      {
+        "key": "name",
+        "value": "Backup script"
+      },
+      {
+        "key": "token",
+        "value": "{redacted}"
+      }
+    ]
+  },
+  {
+    "id": 192,
+    "at": 1795822812000,
+    "request_id": "8f3c1b22b4a8-SIN",
+    "kind": "error",
+    "level": "error",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": "internal",
+    "subject": "Rendering the home page failed",
+    "fields": [
+      {
+        "key": "route",
+        "value": "/"
+      },
+      {
+        "key": "detail",
+        "value": "theme template raised an error"
+      }
+    ]
+  },
+  {
+    "id": 191,
+    "at": 1795771212000,
+    "request_id": "8f3c1b41a3ad-SIN",
+    "kind": "job.run",
+    "level": "info",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": null,
+    "subject": "Log retention",
+    "fields": [
+      {
+        "key": "deleted",
+        "value": "240"
+      },
+      {
+        "key": "retention_days",
+        "value": "90"
+      }
+    ]
+  },
+  {
+    "id": 190,
+    "at": 1795769712000,
+    "request_id": "8f3c1b6092a2-SIN",
+    "kind": "content.changed",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "Updated: Kế hoạch chuyến đi",
+    "fields": [
+      {
+        "key": "post_id",
+        "value": "5"
+      },
+      {
+        "key": "action",
+        "value": "updated"
+      }
+    ]
+  },
+  {
+    "id": 189,
+    "at": 1795765212000,
+    "request_id": "8f3c1b7f81a7-SIN",
+    "kind": "plugin.disabled",
+    "level": "warning",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": "theme.unavailable",
+    "subject": "Plugin comments-guard turned off after 3 failures",
+    "fields": [
+      {
+        "key": "plugin",
+        "value": "comments-guard"
+      },
+      {
+        "key": "failures",
+        "value": "3"
+      }
+    ]
+  },
+  {
+    "id": 188,
+    "at": 1795750812000,
+    "request_id": "8f3c1b9e70ac-SIN",
+    "kind": "auth.sign_out",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "Lan Nguyen signed out",
+    "fields": []
+  },
+  {
+    "id": 187,
+    "at": 1795685412000,
+    "request_id": "8f3c1bbd5fa1-SIN",
+    "kind": "auth.passkey_added",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "Passkey added: MacBook Pro",
+    "fields": [
+      {
+        "key": "name",
+        "value": "MacBook Pro"
+      }
+    ]
+  },
+  {
+    "id": 186,
+    "at": 1795680612000,
+    "request_id": "8f3c1bdc4ea6-SIN",
+    "kind": "theme.changed",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "Theme options changed",
+    "fields": [
+      {
+        "key": "theme",
+        "value": "minimal"
+      },
+      {
+        "key": "option",
+        "value": "accent"
+      }
+    ]
+  },
+  {
+    "id": 185,
+    "at": 1795599612000,
+    "request_id": "8f3c1bfb3dab-SIN",
+    "kind": "user.created",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "Writer added: Minh Anh",
+    "fields": [
+      {
+        "key": "role",
+        "value": "writer"
+      }
+    ]
+  },
+  {
+    "id": 184,
+    "at": 1795597212000,
+    "request_id": "8f3c1c1a2ca0-SIN",
+    "kind": "auth.sign_in_locked",
+    "level": "warning",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": "auth.locked",
+    "subject": "Sign-in locked for login minh",
+    "fields": [
+      {
+        "key": "minutes",
+        "value": "15"
+      }
+    ]
+  },
+  {
+    "id": 183,
+    "at": 1795513212000,
+    "request_id": "8f3c1c391ba5-SIN",
+    "kind": "comment.moderated",
+    "level": "info",
+    "actor_id": 2,
+    "actor_name": null,
+    "error_code": null,
+    "subject": "Comment approved",
+    "fields": [
+      {
+        "key": "comment_id",
+        "value": "9"
+      },
+      {
+        "key": "action",
+        "value": "approved"
+      }
+    ]
+  },
+  {
+    "id": 182,
+    "at": 1795426812000,
+    "request_id": "8f3c1c580aaa-SIN",
+    "kind": "system.deploy",
+    "level": "info",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": null,
+    "subject": "Version 0.4.2 deployed",
+    "fields": [
+      {
+        "key": "version",
+        "value": "0.4.2"
+      }
+    ]
+  },
+  {
+    "id": 181,
+    "at": 1795426512000,
+    "request_id": "8f3c1c76f9af-SIN",
+    "kind": "system.migration",
+    "level": "info",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": null,
+    "subject": "Migration 0007 applied",
+    "fields": [
+      {
+        "key": "migration",
+        "value": "0007_media_hash"
+      }
+    ]
+  },
+  {
+    "id": 180,
+    "at": 1795340412000,
+    "request_id": "8f3c1c95e8a4-SIN",
+    "kind": "webhook.delivery",
+    "level": "info",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": null,
+    "subject": "Webhook to hooks.example.com",
+    "fields": [
+      {
+        "key": "status",
+        "value": "200"
+      },
+      {
+        "key": "attempts",
+        "value": "1"
+      }
+    ]
+  },
+  {
+    "id": 179,
+    "at": 1795167612000,
+    "request_id": "8f3c1cb4d7a9-SIN",
+    "kind": "content.changed",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "Đăng bài: Một buổi chiều dài ở Hội An, nơi những con phố cũ, đèn lồng và tiếng chuông xe đạp quyện vào nhau thành một câu chuyện không có hồi kết Một buổi chiều dài ở Hội An, nơi những con phố cũ, đèn",
+    "fields": [
+      {
+        "key": "post_id",
+        "value": "4"
+      },
+      {
+        "key": "action",
+        "value": "published"
+      }
+    ]
+  },
+  {
+    "id": 178,
+    "at": 1795081212000,
+    "request_id": "8f3c1cd3c6ae-SIN",
+    "kind": "auth.password_changed",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "Password changed",
+    "fields": []
+  },
+  {
+    "id": 177,
+    "at": 1794994812000,
+    "request_id": "8f3c1cf2b5a3-SIN",
+    "kind": "auth.token_revoked",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "API token revoked: Old script",
+    "fields": [
+      {
+        "key": "name",
+        "value": "Old script"
+      }
+    ]
+  },
+  {
+    "id": 176,
+    "at": 1794822012000,
+    "request_id": "8f3c1d11a4a8-SIN",
+    "kind": "error",
+    "level": "error",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": "store.failed",
+    "subject": "Saving a comment failed",
+    "fields": [
+      {
+        "key": "route",
+        "value": "/api/comments"
+      },
+      {
+        "key": "detail",
+        "value": "database busy"
+      }
+    ]
+  },
+  {
+    "id": 175,
+    "at": 1794649212000,
+    "request_id": "8f3c1d3093ad-SIN",
+    "kind": "plugin.changed",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "Plugin enabled: related-posts",
+    "fields": [
+      {
+        "key": "plugin",
+        "value": "related-posts"
+      }
+    ]
+  },
+  {
+    "id": 174,
+    "at": 1794303612000,
+    "request_id": "8f3c1d4f82a2-SIN",
+    "kind": "auth.owner_reset",
+    "level": "warning",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": null,
+    "subject": "Owner reset started",
+    "fields": []
+  },
+  {
+    "id": 173,
+    "at": 1794301812000,
+    "request_id": "8f3c1d6e71a7-SIN",
+    "kind": "auth.owner_reset_redeemed",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "Owner reset used",
+    "fields": []
+  },
+  {
+    "id": 172,
+    "at": 1794044412000,
+    "request_id": "8f3c1d8d60ac-SIN",
+    "kind": "auth.global_cap",
+    "level": "warning",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": "auth.locked",
+    "subject": "Too many sign-in attempts across the site",
+    "fields": [
+      {
+        "key": "window_minutes",
+        "value": "10"
+      }
+    ]
+  },
+  {
+    "id": 171,
+    "at": 1793612412000,
+    "request_id": "8f3c1dac4fa1-SIN",
+    "kind": "auth.passkey_removed",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "Passkey removed: iPhone 12",
+    "fields": [
+      {
+        "key": "name",
+        "value": "iPhone 12"
+      }
+    ]
+  },
+  {
+    "id": 170,
+    "at": 1792402812000,
+    "request_id": "8f3c1dcb3ea6-SIN",
+    "kind": "job.run",
+    "level": "info",
+    "actor_id": null,
+    "actor_name": null,
+    "error_code": null,
+    "subject": "Log retention",
+    "fields": [
+      {
+        "key": "deleted",
+        "value": "0"
+      },
+      {
+        "key": "retention_days",
+        "value": "90"
+      }
+    ]
+  },
+  {
+    "id": 169,
+    "at": 1791366012000,
+    "request_id": "8f3c1dea2dab-SIN",
+    "kind": "settings.changed",
+    "level": "info",
+    "actor_id": 1,
+    "actor_name": "Lan Nguyen",
+    "error_code": null,
+    "subject": "Site title changed",
+    "fields": [
+      {
+        "key": "setting",
+        "value": "title"
+      }
+    ]
+  }
+]
