@@ -1,11 +1,13 @@
 //! `/api/v1/media`: the library. An upload stores the original bytes in R2 (`MEDIA`) and a
-//! row in D1; the AVIF sizes are made by the admin's encoder (issue #13), not here.
+//! row in D1; the smaller AVIF/WebP sizes are made by the admin's encoder (issue #13) and
+//! stored one per call by `POST /api/v1/media/<id>/variants`.
 //!
 //! R2 and D1 cannot share a transaction, so each write orders them to leave at worst an
 //! unreferenced R2 object, never a row without its bytes: upload writes R2 first and removes
 //! the object if the row fails; delete removes the row first and the object after. Any object
 //! left behind is logged with its key.
 
+use plumblog_auth::json::{self, Value};
 use plumblog_auth::{Crypto, base64url};
 use plumblog_model::api::{DEFAULT_LIMIT, MAX_LIMIT, MAX_MEDIA_BODY, MEDIA_MIMES};
 use plumblog_model::{Error, ErrorCode, MediaId, Permission, PostId, Result, image};
@@ -293,6 +295,301 @@ async fn existing(ctx: &Ctx, m: &Media) -> Result<Reply> {
     Ok(Reply::json(200, media_json(ctx, m, Some(&usage))))
 }
 
+/// Most sizes one item keeps: four widths in two formats.
+const MAX_VARIANTS: usize = 8;
+/// The types a size may be, with the extension its R2 key gets.
+const VARIANT_TYPES: &[(&str, &str)] = &[("image/avif", "avif"), ("image/webp", "webp")];
+
+/// An item's stored sizes, `(mime, width, sha256)` each, or why `variants_json` is unreadable.
+/// `{}` is what older rows and fixtures hold: no sizes.
+fn variant_list(text: &str) -> std::result::Result<Vec<(String, i64, String, String)>, String> {
+    let wrapped = format!("{{\"v\":{text}}}");
+    let mut doc = json::parse_document(wrapped.as_bytes(), usize::MAX)
+        .map_err(|e| format!("variants_json is not JSON: {e:?}"))?;
+    let items = match doc.pop() {
+        Some((_, Value::Arr(items))) => items,
+        Some((_, Value::Obj(o))) if o.is_empty() => Vec::new(),
+        _ => return Err("variants_json is not an array".to_owned()),
+    };
+    items
+        .into_iter()
+        .map(|item| {
+            let Value::Obj(fields) = item else {
+                return Err("a variant is not an object".to_owned());
+            };
+            let (mut key, mut mime, mut width, mut sha) = (None, None, None, String::new());
+            for (k, v) in fields {
+                match (k.as_str(), v) {
+                    ("key", Value::Str(t)) => key = Some(t),
+                    ("mime", Value::Str(t)) => mime = Some(t),
+                    ("width", Value::Int(n)) => width = Some(n),
+                    ("sha256", Value::Str(t)) => sha = t,
+                    _ => {}
+                }
+            }
+            match (key, mime, width) {
+                (Some(key), Some(mime), Some(width)) => Ok((mime, width, sha, key)),
+                _ => Err("a variant has no key, mime or width".to_owned()),
+            }
+        })
+        .collect()
+}
+
+/// Where a new size would go in an item's list.
+#[derive(Debug, PartialEq, Eq)]
+enum Slot {
+    /// Not there yet: the `variants_json` with it appended.
+    Free(String),
+    /// The same bytes are there already (a retry).
+    Same,
+    /// This (mime, width) holds other bytes.
+    Taken,
+    Full,
+}
+
+/// Where `entry` (one encoded JSON object) for (mime, width, sha256) goes in `text`.
+fn slot(text: &str, mime: &str, width: i64, sha: &str, entry: &str) -> Result<Slot> {
+    let list = variant_list(text).map_err(|why| Error::new(ErrorCode::Storage, why))?;
+    if let Some((_, _, had, _)) = list.iter().find(|(m, w, _, _)| m == mime && *w == width) {
+        return Ok(if had == sha { Slot::Same } else { Slot::Taken });
+    }
+    if list.len() >= MAX_VARIANTS {
+        return Ok(Slot::Full);
+    }
+    // Appended as text, so fields this code does not know are kept as stored.
+    Ok(Slot::Free(match text.trim().strip_suffix(']') {
+        Some(head) if !list.is_empty() => format!("{head},{entry}]"),
+        _ => format!("[{entry}]"),
+    }))
+}
+
+/// `media/<random>/heron.jpg` -> `media/<random>/heron-480-<sha8>.avif`. The hash part keeps
+/// two encodings of one (mime, width) in separate objects, so a lost race removes only its own.
+fn variant_key(original: &str, width: i64, sha: &str, ext: &str) -> String {
+    let (dir, name) = original.rsplit_once('/').unwrap_or(("", original));
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    let dir = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{dir}/")
+    };
+    format!("{dir}{stem}-{width}-{}.{ext}", sha.get(..8).unwrap_or(sha))
+}
+
+/// The item, when the caller may change it (delete it, add a size): their own upload, else
+/// `media.delete_any`, which an item whose uploader was deleted needs too.
+pub async fn owned(ctx: &Ctx, p: &Principal, id: MediaId) -> Result<Media> {
+    let user = p.require(Permission::UploadMedia)?;
+    let m = ctx.store.get_media(id).await?;
+    // The row may change after this read, but harmlessly: ids are AUTOINCREMENT (never
+    // reused) and `uploaded_by` only ever changes to NULL (user deletion), which would only
+    // have made this check stricter.
+    if m.uploaded_by != Some(user.id) {
+        p.require(Permission::DeleteAnyMedia)?;
+    }
+    Ok(m)
+}
+
+fn taken() -> Error {
+    Error::new(
+        ErrorCode::Conflict,
+        "this mime and width already hold other bytes",
+    )
+    .at("width")
+}
+
+fn full() -> Error {
+    Error::new(
+        ErrorCode::Conflict,
+        format!("an item keeps at most {MAX_VARIANTS} sizes"),
+    )
+    .at("variants")
+}
+
+/// A size as checked against its original, ready to store.
+struct NewVariant {
+    mime: &'static str,
+    width: i64,
+    key: String,
+    /// Its `variants_json` entry.
+    entry: String,
+    hex: String,
+    sum: Vec<u8>,
+}
+
+/// The input checks of a new size: an upload's (type, magic bytes, header size, `sha256`),
+/// then never wider than the original and in its aspect within one pixel of rounding.
+fn new_variant(m: &Media, input: &Input, body: &[u8]) -> Result<NewVariant> {
+    let want = input.str("mime").unwrap_or_default();
+    let (mime, ext) = *VARIANT_TYPES
+        .iter()
+        .find(|(t, _)| *t == want)
+        .ok_or_else(|| invalid("mime", "image/avif or image/webp"))?;
+    let width = input.int("width").unwrap_or(0);
+    let height = input.int("height").unwrap_or(0);
+    for (field, v) in [("width", width), ("height", height)] {
+        if !(1..=MAX_SIDE).contains(&v) {
+            return Err(invalid(field, "1-65536"));
+        }
+    }
+    let (hex, sum) = sha256_field(input.str("sha256").unwrap_or_default())?;
+    if image::sniff(body) != Some(mime) {
+        return Err(invalid("mime", "the bytes are not this type"));
+    }
+    if !image::size_matches(mime, body, width, height) {
+        return Err(invalid("width", "not the size in the image header"));
+    }
+    // JPEG and AVIF originals may be stored in header order, turned a quarter from the
+    // display order the browser encodes in: either orientation's aspect, within 1 px, and
+    // never wider than that orientation (equal width is a format conversion).
+    let max = [(m.width, m.height), (m.height, m.width)]
+        .into_iter()
+        .filter(|&(w, h)| (height * w - h * width).abs() <= w)
+        .map(|(w, _)| w)
+        .max()
+        .ok_or_else(|| invalid("height", "not the original's aspect"))?;
+    if width > max {
+        return Err(invalid("width", "wider than the original"));
+    }
+    let key = variant_key(&m.r2_key, width, &hex, ext);
+    let bytes = i64::try_from(body.len()).unwrap_or(i64::MAX);
+    let entry = object(&[
+        ("key", Out::Str(key.clone())),
+        ("width", Out::Int(width)),
+        ("height", Out::Int(height)),
+        ("bytes", Out::Int(bytes)),
+        ("mime", Out::Str(mime.to_owned())),
+        ("sha256", Out::Str(hex.clone())),
+    ]);
+    Ok(NewVariant {
+        mime,
+        width,
+        key,
+        entry,
+        hex,
+        sum,
+    })
+}
+
+/// `POST /api/v1/media/<id>/variants`: one smaller AVIF or WebP of the original, made by the
+/// admin's encoder. Checked like an upload (magic bytes, header size, R2-verified `sha256`),
+/// never wider than the original and in its aspect within 1 px. One size per (mime, width):
+/// the same bytes again answer 200 with the item, other bytes 409. The key is the original's
+/// with `-<width>.<ext>`, so a retry overwrites its own object with the same bytes.
+///
+/// R2 first, then the row by compare and swap ([`MediaStore::replace_media_variants`]), so two
+/// sizes added at once are both kept. An object is removed only when no row can name it.
+pub async fn add_variant(ctx: &Ctx, p: &Principal, input: &Input, body: Vec<u8>) -> Result<Reply> {
+    let m = owned(ctx, p, MediaId(input.id())).await?;
+    let NewVariant {
+        mime,
+        width,
+        key,
+        entry,
+        hex,
+        sum,
+    } = new_variant(&m, input, &body)?;
+    // Refused before the put where the row already says so, so nothing is written.
+    match slot(&m.variants_json, mime, width, &hex, &entry)? {
+        Slot::Free(_) => {}
+        Slot::Same => return answer(ctx, &m, 200).await,
+        Slot::Taken => return Err(taken()),
+        Slot::Full => return Err(full()),
+    }
+    let r2 = bucket(ctx)?;
+    r2.put(key.clone(), body)
+        .http_metadata(HttpMetadata {
+            content_type: Some(mime.to_owned()),
+            ..HttpMetadata::default()
+        })
+        .sha256(sum)
+        .execute()
+        .await
+        .map_err(|e| {
+            if checksum_mismatch(&e) {
+                invalid("sha256", "not the SHA-256 of the body")
+            } else {
+                Error::new(ErrorCode::Storage, format!("R2 put {key}: {e}"))
+            }
+        })?;
+    let rid = ctx.request_id.as_str();
+    let remove = || async {
+        if let Err(e) = r2.delete(key.clone()).await {
+            worker::console_error!(
+                "[{rid}] media {}: R2 object {key} is left behind: {e}",
+                m.id.0
+            );
+        }
+    };
+    let mut cur = m.clone();
+    // Each lost swap means another size was added, and there are at most MAX_VARIANTS.
+    for _ in 0..=MAX_VARIANTS {
+        let next = match slot(&cur.variants_json, mime, width, &hex, &entry)? {
+            Slot::Free(next) => next,
+            // A retry of these bytes won the race: the object holds them either way.
+            Slot::Same => return answer(ctx, &cur, 200).await,
+            // Other bytes won this (mime, width), or the list filled up. Entries are never
+            // removed while the item exists, and the key holds this request's hash, so no row
+            // can come to name this object.
+            Slot::Taken => {
+                remove().await;
+                return Err(taken());
+            }
+            Slot::Full => {
+                remove().await;
+                return Err(full());
+            }
+        };
+        match ctx
+            .store
+            .replace_media_variants(m.id, &cur.variants_json, &next)
+            .await
+        {
+            Ok(()) => {
+                changed(ctx, p, "media.variant", &m.id.0.to_string()).await;
+                cur.variants_json = next;
+                return answer(ctx, &cur, 201).await;
+            }
+            Err(e) if e.code == ErrorCode::Conflict => {
+                cur = match ctx.store.get_media(m.id).await {
+                    Ok(row) => row,
+                    Err(e) => return Err(gone(e, remove, rid, &key).await),
+                };
+            }
+            Err(e) => return Err(gone(e, remove, rid, &key).await),
+        }
+    }
+    Err(Error::new(
+        ErrorCode::Storage,
+        format!("media {}: variants kept changing", m.id.0),
+    ))
+}
+
+/// A failed row write: the object goes only when the row is gone (nothing can name the key);
+/// on any other failure the row may still come to name it, so it stays and is logged.
+async fn gone<F: Future<Output = ()>>(
+    e: Error,
+    remove: impl FnOnce() -> F,
+    rid: &str,
+    key: &str,
+) -> Error {
+    if e.code == ErrorCode::NotFound {
+        remove().await;
+    } else {
+        worker::console_error!(
+            "[{rid}] media variant: row write failed, R2 object {key} kept: {}",
+            e.detail
+        );
+    }
+    e
+}
+
+/// The item with its usage, as a variant add answers it.
+async fn answer(ctx: &Ctx, m: &Media, status: u16) -> Result<Reply> {
+    let usage = ctx.store.media_usage(m.id).await?;
+    Ok(Reply::json(status, media_json(ctx, m, Some(&usage))))
+}
+
 /// `POST /api/v1/media`: the body is the original image; `mime` must be what its magic bytes
 /// say and `width` x `height` what its header declares.
 ///
@@ -405,53 +702,56 @@ pub async fn update(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
 /// `DELETE /api/v1/media/<id>`: another uploader's (or an orphan's) needs `media.delete_any`;
 /// refused while posts use it (409 with their ids).
 pub async fn delete(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
-    let user = p.require(Permission::UploadMedia)?;
-    let m = ctx.store.get_media(MediaId(input.id())).await?;
-    // Ownership before the in-use check, so a refused caller learns nothing about usage. The
-    // row may change between this read and the delete, but harmlessly: ids are AUTOINCREMENT
-    // (never reused) and `uploaded_by` only ever changes to NULL (user deletion), which
-    // would only have made this check stricter.
-    if m.uploaded_by != Some(user.id) {
-        p.require(Permission::DeleteAnyMedia)?;
-    }
-    if let Err(e) = ctx.store.delete_media(m.id).await {
-        if e.code != ErrorCode::Conflict {
-            return Err(e);
+    // Ownership before the in-use check, so a refused caller learns nothing about usage.
+    let m = owned(ctx, p, MediaId(input.id())).await?;
+    let variants = match ctx.store.delete_media(m.id).await {
+        Ok(text) => text,
+        Err(e) if e.code != ErrorCode::Conflict => return Err(e),
+        Err(_) => {
+            let usage = ctx.store.media_usage(m.id).await?;
+            worker::console_warn!(
+                "[{}] media {} in use by {} posts",
+                ctx.request_id.as_str(),
+                m.id.0,
+                usage.len()
+            );
+            return Ok(Reply::json(
+                409,
+                object(&[
+                    ("error", Out::Str(ErrorCode::Conflict.as_str().to_owned())),
+                    ("posts", ids_json(&usage)),
+                ]),
+            ));
         }
-        let usage = ctx.store.media_usage(m.id).await?;
-        worker::console_warn!(
-            "[{}] media {} in use by {} posts",
-            ctx.request_id.as_str(),
-            m.id.0,
-            usage.len()
-        );
-        return Ok(Reply::json(
-            409,
-            object(&[
-                ("error", Out::Str(ErrorCode::Conflict.as_str().to_owned())),
-                ("posts", ids_json(&usage)),
-            ]),
-        ));
-    }
-    let left = match bucket(ctx) {
-        Ok(r2) => r2
-            .delete(m.r2_key.clone())
-            .await
-            .err()
-            .map(|e| e.to_string()),
-        Err(e) => Some(e.to_string()),
     };
-    let action = if let Some(why) = left {
-        // The row is gone, so the object is unreachable: log the key for a cleanup.
+    // The sizes as the delete found them, so one added after the read above goes too.
+    let mut keys = vec![m.r2_key.clone()];
+    let mut left = Vec::new();
+    match variant_list(&variants) {
+        Ok(list) => keys.extend(list.into_iter().map(|(_, _, _, key)| key)),
+        Err(why) => left.push(format!("its sizes ({why}): {variants}")),
+    }
+    match bucket(ctx) {
+        Ok(r2) => {
+            for key in keys {
+                if let Err(e) = r2.delete(key.clone()).await {
+                    left.push(format!("{key}: {e}"));
+                }
+            }
+        }
+        Err(e) => left.push(format!("{}: {e}", keys.join(", "))),
+    }
+    let action = if left.is_empty() {
+        "media.delete"
+    } else {
+        // The row is gone, so the objects are unreachable: log the keys for a cleanup.
         worker::console_error!(
-            "[{}] media {} deleted but R2 object {} is left behind: {why}",
+            "[{}] media {} deleted but R2 objects are left behind: {}",
             ctx.request_id.as_str(),
             m.id.0,
-            m.r2_key
+            left.join("; ")
         );
         "media.delete_r2_left"
-    } else {
-        "media.delete"
     };
     changed(ctx, p, action, &m.id.0.to_string()).await;
     Ok(Reply::empty())
@@ -459,7 +759,7 @@ pub async fn delete(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_cursor, key_name};
+    use super::{Slot, decode_cursor, key_name, slot, variant_key};
 
     #[test]
     fn key_names() {
@@ -470,6 +770,54 @@ mod tests {
         assert!(key_name("...").is_err());
         assert!(key_name("").is_err());
         assert_eq!(key_name(&"x".repeat(300)).unwrap().len(), 100);
+    }
+
+    #[test]
+    fn variant_keys() {
+        let h = "0123456789abcdef";
+        assert_eq!(
+            variant_key("media/abc/heron.jpg", 480, h, "avif"),
+            "media/abc/heron-480-01234567.avif"
+        );
+        assert_eq!(
+            variant_key("media/abc/a.b.png", 960, h, "webp"),
+            "media/abc/a.b-960-01234567.webp"
+        );
+        assert_eq!(
+            variant_key("media/abc/raw", 480, h, "avif"),
+            "media/abc/raw-480-01234567.avif"
+        );
+        assert_eq!(variant_key("o/1.jpg", 2, h, "avif"), "o/1-2-01234567.avif");
+    }
+
+    #[test]
+    fn slots() {
+        let e = r#"{"key":"k","mime":"image/avif","width":480,"sha256":"aa"}"#;
+        let one = format!("[{e}]");
+        assert_eq!(
+            slot("[]", "image/avif", 480, "aa", e).unwrap(),
+            Slot::Free(one.clone())
+        );
+        assert_eq!(
+            slot("{}", "image/avif", 480, "aa", e).unwrap(),
+            Slot::Free(one.clone())
+        );
+        assert_eq!(slot(&one, "image/avif", 480, "aa", e).unwrap(), Slot::Same);
+        assert_eq!(slot(&one, "image/avif", 480, "bb", e).unwrap(), Slot::Taken);
+        let w = r#"{"key":"w","mime":"image/webp","width":480,"x":[1]}"#;
+        assert_eq!(
+            slot(&format!("[ {w} ]"), "image/avif", 480, "aa", e).unwrap(),
+            Slot::Free(format!("[ {w} ,{e}]"))
+        );
+        let eight: Vec<String> = (1..=8)
+            .map(|i| format!(r#"{{"key":"k{i}","mime":"image/avif","width":{i}}}"#))
+            .collect();
+        let full = format!("[{}]", eight.join(","));
+        assert_eq!(slot(&full, "image/avif", 480, "aa", e).unwrap(), Slot::Full);
+        assert_eq!(slot(&full, "image/avif", 3, "", e).unwrap(), Slot::Same);
+        for bad in ["", "3", r#"["x"]"#, r#"[{"key":"k"}]"#] {
+            assert!(slot(bad, "image/avif", 480, "aa", e).is_err(), "{bad}");
+        }
     }
 
     #[test]
