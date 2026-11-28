@@ -10,6 +10,7 @@ import { icon } from "./icons";
 import { t } from "./i18n";
 import { pagesList, postsList } from "./lists";
 import { HREF, type Screen } from "./router";
+import { syslogScreen } from "./syslog/load";
 import { empty, failed, head, loadingRows } from "./ui";
 
 /** In the header the label folds away on phones (`.new-label`); in an empty state it stays. */
@@ -77,6 +78,8 @@ export function screen(name: Screen, me: Me, api: Api, section?: string): Child[
       return [head(t("admin.nav.pages")), pagesList(api)];
     case "media":
       return [head(t("admin.nav.media")), mediaBox(me, api)];
+    case "syslog":
+      return syslogScreen(me, api);
     case "settings":
       if (!PERMISSION_ROLES["settings.manage"].includes(me.role)) {
         return [

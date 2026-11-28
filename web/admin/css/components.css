@@ -84,6 +84,7 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 .input:hover, .select:hover, .textarea:hover, .input.is-hover, .select.is-hover { --ov: transparent; border-color: color-mix(in srgb, var(--line-ctl) 60%, var(--text)); }
 .input:focus, .select:focus, .textarea:focus, .input.is-focus, .select.is-focus { --focus: var(--focus-ring); border-color: var(--signal); background-color: var(--surface); }
 .input::placeholder, .textarea::placeholder { color: var(--faint); }
+.select.auto { width: auto; max-width: 100%; }
 .select { appearance: none; padding-right: calc(var(--sp-12) + var(--icon) + var(--sp-4)); background-image: linear-gradient(var(--ov), var(--ov)), var(--chevron); background-repeat: no-repeat; background-position: 0 0, right var(--sp-12) center; background-size: auto, var(--icon); }
 .opt { display: flex; align-items: center; gap: var(--sp-12); min-height: var(--ctl); font: var(--type-body); cursor: pointer; }
 .opt.between { justify-content: space-between; }
@@ -150,9 +151,12 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 .lamp { display: inline-block; width: var(--lamp); height: var(--lamp); border-radius: var(--r-round); background: var(--signal); box-shadow: var(--sh-lamp); flex: none; }
 .st { display: inline-flex; align-items: center; gap: var(--sp-6); height: var(--sw-h); padding: 0 var(--sp-8); border-radius: var(--r-pill); font: var(--type-micro); white-space: nowrap; color: var(--st-draft); background: var(--st-draft-bg); }
 .st::before { content: ""; width: var(--lamp); height: var(--lamp); border-radius: var(--r-round); background: currentColor; }
-.st.scheduled { color: var(--st-sched); background: var(--st-sched-bg); }
+.st.scheduled, .st.warning { color: var(--st-sched); background: var(--st-sched-bg); }
 .st.published { color: var(--st-pub); background: var(--st-pub-bg); }
 .st.error { color: var(--st-err); background: var(--st-err-bg); }
+/* An icon in place of the lamp, so the state never reads by color alone. */
+.st.ic::before { content: none; }
+.st.ic svg.i { width: var(--icon-sm); height: var(--icon-sm); }
 .lang { font: var(--type-mono); color: var(--muted); }
 .lang.missing { color: var(--faint); text-decoration: line-through; text-decoration-color: var(--line-strong); }
 .chips { display: flex; flex-wrap: wrap; gap: var(--sp-8); align-items: center; }
@@ -223,11 +227,14 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 /* ===== Page header: title left, actions right, search always the rightmost control ===== */
 .head { position: sticky; top: 0; z-index: var(--z-sticky); display: flex; align-items: center; gap: var(--sp-8); height: var(--head-h); padding-left: max(var(--gutter), env(safe-area-inset-left, 0px)); padding-right: max(var(--gutter), env(safe-area-inset-right, 0px)); background: var(--surface); }
 .head h1 { font: var(--type-page); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.head .find { flex: 1; display: flex; align-items: center; gap: var(--sp-8); min-width: 0; }
+.head .find { flex: 1; display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-8); min-width: 0; }
 .head .find .input { max-width: var(--find-w); }
 /* Filters under the header: same place on every page that has them. */
 .filters { display: flex; align-items: center; gap: var(--sp-12); padding: 0 max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-16) max(var(--gutter), env(safe-area-inset-left, 0px)); overflow-x: auto; scrollbar-width: none; }
 @media (min-width: 1100px) { .filters.rail-only { display: none; } }
+/* Inside a column that already has the page gutter (Settings sections): no gutter of its own; on phones it bleeds to the screen edge so the row scrolls within the gutter. */
+.filters.inset { padding-inline: 0; }
+@media (max-width: 767px) { .filters.inset { margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); scroll-padding-inline: var(--gutter); } }
 .body { padding: var(--stack) max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-48) max(var(--gutter), env(safe-area-inset-left, 0px)); }
 .body.flush-top { padding-top: 0; }
 
