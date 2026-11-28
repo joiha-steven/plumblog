@@ -1,0 +1,7 @@
+title: Bai viet dau tien
+date: 2025-05-30
+lang: vi
+translation_of: first-post
+tags: life
+
+Day la noi toi se viet ve cac cong cu toi dung, nhung thu toi doc, va doi khi mot chuong trinh nho.

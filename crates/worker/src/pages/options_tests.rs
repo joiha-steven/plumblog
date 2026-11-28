@@ -2,7 +2,7 @@
 //! tools/worker-test/options.test.mjs).
 
 use super::db::{Db, ExtSource};
-use super::source::SampleSource;
+use super::sample::SampleSource;
 use super::tests_support::run;
 use super::{Outcome, render};
 use plumblog_store::memory::MemoryStore;
@@ -85,7 +85,7 @@ impl ExtSource for Flaky {
     }
     fn comments(
         &self,
-        _: &str,
+        _: &super::source::StoredPost,
         _: &str,
     ) -> impl Future<Output = Result<Option<plumblog_render::Comments>, String>> {
         std::future::ready(Err("d1 timeout".to_owned()))
@@ -136,6 +136,7 @@ fn a_preview_is_the_post_page_with_the_site_theme_and_options() {
         "B\u{e0}i <th\u{1ed1}ng>",
         md,
         "vi",
+        0,
     ))
     .unwrap();
     assert!(html.contains("<html lang=\"vi\""), "the draft's language");

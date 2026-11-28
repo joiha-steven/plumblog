@@ -218,6 +218,12 @@ export function makeStateDir() {
  * that something answers on the port. `port` pins the port; only the harness's own test uses it.
  * `assets` replaces the static assets directory (default: the build's, see `ASSETS_DIR`).
  */
+/** Empties the database and saves the sample site (settings, posts, tags, one translated pair). */
+export async function seedSample(worker) {
+  const res = await fetch(`${worker.url}/__seed`, { method: "POST" });
+  if (res.status !== 200) throw new Error(`/__seed: ${res.status} ${await res.text()}`);
+}
+
 export async function startWorker({ seedSql = null, vars = {}, port: pinned = null, assets = ASSETS_DIR } = {}) {
   const entry = { state: mkdtempSync(join(RUN_DIR, "plumblog-wrangler-")), pgid: null, pgidFile: null, portLock: null };
   live.add(entry);
