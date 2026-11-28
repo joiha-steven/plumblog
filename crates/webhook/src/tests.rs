@@ -183,11 +183,8 @@ fn deliveries(db: &MemoryStore, webhook: i64) -> Vec<Delivery> {
 fn log(db: &MemoryStore, kind: EventKind) -> Vec<Event> {
     let mut v: Vec<Event> = run(db.query_log(LogQuery {
         kind: Some(kind),
-        actor: None,
-        from_ms: None,
-        to_ms: None,
-        before: None,
         limit: 100,
+        ..LogQuery::default()
     }))
     .unwrap()
     .into_iter()
