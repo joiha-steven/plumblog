@@ -72,6 +72,14 @@ pub trait CommentStore {
         after: Option<(i64, CommentId)>,
         limit: u32,
     ) -> Result<Vec<Comment>>;
+    /// Every comment, any status, by id ascending, strictly after `after` (the export
+    /// listing; the primary key alone, so a spam flood costs only the rows of the page).
+    /// At most `limit` (capped at [`crate::MAX_PAGE`]) rows, and whether more follow.
+    async fn comments_by_id(
+        &self,
+        after: Option<CommentId>,
+        limit: u32,
+    ) -> Result<(Vec<Comment>, bool)>;
     /// `NotFound`. Bumps if the old or new status is approved.
     async fn set_comment_status(&self, id: CommentId, status: CommentStatus) -> Result<()>;
     /// `NotFound`. Replies (at any depth) go too; bumps if any deleted comment was approved.

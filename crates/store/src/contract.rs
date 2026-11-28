@@ -5,6 +5,7 @@
 
 mod accounts;
 mod deliveries;
+mod export;
 mod find;
 mod kit;
 mod library;
@@ -121,6 +122,9 @@ cases! {
     site::comment_versions,
     site::comment_moderation,
     site::comment_submit_and_latest,
+    export::comments_by_id_pages_every_status,
+    export::users_by_id_pages,
+    export::export_pages_past_max_page,
     site::reader_metadata_versions,
     site::settings_round_trip,
     site::options_round_trip,
