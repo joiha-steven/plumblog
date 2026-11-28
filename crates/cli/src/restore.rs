@@ -484,6 +484,98 @@ pub fn credential_reset_statements(present: &[&str], now: &str) -> Vec<(String, 
         .collect()
 }
 
+/// Subject of the log row the import's own reset writes; its fields are the rows each delete
+/// removed, which [`check_counts`] subtracts from the dump's counts.
+const IMPORT_RESET_SUBJECT: &str = "restore: credentials reset in the import";
+
+/// The reset log row's request id for a run started at `now_ms`.
+fn import_reset_id(now_ms: i64) -> String {
+    request_id("restore-reset", now_ms).as_str().to_string()
+}
+
+/// A reset parameter as an SQL literal: the time as a number, a settings key quoted.
+fn literal(v: &str) -> String {
+    if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) {
+        v.to_string()
+    } else {
+        format!("'{}'", v.replace('\'', "''"))
+    }
+}
+
+/// The credential reset as SQL text, appended to the import file after the whole dump (every
+/// row, long rows' appended pieces included), so it commits with the import or not at all: no
+/// moment exists when the backup's sessions and tokens work. Only the tables the dump creates
+/// (`present`); step 8 repeats it for tables later migrations add. First a `system_log` row
+/// counting what each delete removes, then the statements of
+/// [`credential_reset_statements`] with their parameters inlined.
+#[must_use]
+pub fn import_reset_sql(present: &[&str], now_ms: i64) -> String {
+    let stmts: Vec<String> = credential_reset_statements(present, &now_ms.to_string())
+        .into_iter()
+        .map(|(sql, params)| {
+            let mut params = params.iter();
+            sql.split('?')
+                .enumerate()
+                .map(|(i, part)| {
+                    let p = if i == 0 {
+                        String::new()
+                    } else {
+                        params.next().map(|v| literal(v)).unwrap_or_default()
+                    };
+                    p + part
+                })
+                .collect()
+        })
+        .collect();
+    let mut out = String::from("\n-- plumblog restore: credential reset\n");
+    if present.contains(&"system_log") {
+        let mut detail = literal(IMPORT_RESET_SUBJECT);
+        for sql in &stmts {
+            let Some(rest) = sql.strip_prefix("DELETE FROM ") else {
+                continue;
+            };
+            let table = rest.split(' ').next().unwrap_or_default();
+            let _ = write!(
+                detail,
+                " || char(10) || {} || char(9) || (SELECT count(*) FROM {rest})",
+                literal(table)
+            );
+        }
+        let _ = writeln!(
+            out,
+            "INSERT INTO system_log (at_ms, request_id, kind, actor_id, error_code, detail) \
+             VALUES ({now_ms}, {}, {}, NULL, NULL, {detail});",
+            literal(&import_reset_id(now_ms)),
+            literal(EventKind::Migration.as_str()),
+        );
+    }
+    for sql in stmts {
+        let _ = writeln!(out, "{sql};");
+    }
+    out
+}
+
+/// Rows the import's own reset removed per table, from its log row; `None` when it cannot be
+/// read (no `system_log` in the dump, or the read failed).
+fn import_reset_counts(db: &Database, now_ms: i64) -> Option<Vec<(String, u64)>> {
+    let rows = db
+        .rows(
+            // The newest: a backup taken after an earlier restore holds that one's row.
+            "SELECT detail FROM system_log WHERE request_id = ? ORDER BY id DESC LIMIT 1",
+            &[&import_reset_id(now_ms)],
+        )
+        .ok()?;
+    let detail = rows.first()?.get("detail")?.as_str()?.to_string();
+    let mut lines = detail.split('\n');
+    (lines.next()? == IMPORT_RESET_SUBJECT).then_some(())?;
+    lines
+        .map(|l| {
+            let (t, n) = l.split_once('\t')?;
+            Some((t.to_string(), n.parse().ok()?))
+        })
+        .collect()
+}
+
 /// Makes every credential from the backup unusable, in one D1 request after reading which
 /// tables exist (an old backup whose migrations failed may lack one). Every statement only
 /// removes or revokes, so running it twice changes nothing more.
@@ -903,8 +995,19 @@ fn check_counts(
     run: &mut Run,
     db: &Database,
     counts: &[(String, u64)],
+    deleted: Option<&[(String, u64)]>,
     undo: &str,
 ) -> Result<(), Stopped> {
+    // The import's own reset deleted rows the dump wrote: subtract them, or, when its log row
+    // cannot be read, only warn for the tables it touches.
+    let expected = |t: &str, want: u64| match deleted {
+        Some(d) => want.saturating_sub(d.iter().find(|(x, _)| x == t).map_or(0, |(_, n)| *n)),
+        None => want,
+    };
+    let lenient = |t: &str| {
+        SELF_PRUNING.contains(&t)
+            || (deleted.is_none() && CREDENTIAL_RESET.iter().any(|(x, _)| *x == t))
+    };
     let mut pruned = Vec::new();
     for chunk in counts.chunks(50) {
         let cols: Vec<String> = chunk
@@ -919,14 +1022,15 @@ fn check_counts(
         let mut wrong = Vec::new();
         for (i, (t, want)) in chunk.iter().enumerate() {
             let got = row.get(&format!("c{i}")).and_then(Value::as_u64);
-            if got.is_some_and(|g| g >= *want) {
+            let want = expected(t, *want);
+            if got.is_some_and(|g| g >= want) {
                 continue;
             }
             let shown = format!(
                 "{t} {want} -> {}",
                 got.map_or_else(|| "?".into(), |g| g.to_string())
             );
-            if got.is_some() && SELF_PRUNING.contains(&t.as_str()) {
+            if got.is_some() && lenient(t) {
                 pruned.push(shown);
             } else {
                 wrong.push(shown);
@@ -1138,17 +1242,49 @@ fn replace(
         .max(now)
         .unwrap_or(0)
         .saturating_add(VERSION_MARGIN);
+    let present: Vec<&str> = dump.counts.iter().map(|(t, _)| t.as_str()).collect();
     let mut sql = drops.into_bytes();
     sql.extend_from_slice(bytes);
-    let reply = import(run, site, clock, &sql, undo)?;
+    sql.extend_from_slice(import_reset_sql(&present, run.cx.now_ms).as_bytes());
+    let reply = match import(run, site, clock, &sql, undo) {
+        Ok(r) => r,
+        // The import may have run: reset anyway, which is safe if it did not (everyone
+        // signs in again).
+        Err(s) if s.outcome == "import_uncertain" => {
+            if let Err(r) = final_reset(run, db, date, undo) {
+                let f = &r.failure;
+                let _ = writeln!(run.out, "{}", run.cx.text.error_line(f.code, &f.message));
+            }
+            return Err(s);
+        }
+        Err(s) => return Err(s),
+    };
     // Migrations and the version run even when rows are missing, so the database matches
     // the code and no stale page is served until the owner undoes the restore.
-    let counted = check_counts(run, db, &dump.counts, undo);
+    let deleted = import_reset_counts(db, run.cx.now_ms);
+    let counted = check_counts(run, db, &dump.counts, deleted.as_deref(), undo);
     raise_sequences(run, db, &sequences, &dump.sequences);
     let after = after_import(run, db, &reply, floor, mark);
-    // Whatever failed above, the backup's credentials are live now: always reset them, last,
-    // so every table the migrations create exists.
-    let reset = match reset_credentials_in(db, run.cx.now_ms) {
+    // The import already reset the tables the dump has; again, last, for those the migrations
+    // created and for anything signed in since.
+    let reset = final_reset(run, db, date, undo);
+    // The first failure is the answer; the others are printed.
+    let mut first = None;
+    for r in [counted, after, reset] {
+        let Err(s) = r else { continue };
+        if first.is_none() {
+            first = Some(s);
+        } else {
+            let f = &s.failure;
+            let _ = writeln!(run.out, "{}", run.cx.text.error_line(f.code, &f.message));
+        }
+    }
+    first.map_or(Ok(()), Err)
+}
+
+/// Step 8: the credential reset as its own request, then the advice.
+fn final_reset(run: &mut Run, db: &Database, date: &str, undo: &str) -> Result<(), Stopped> {
+    match reset_credentials_in(db, run.cx.now_ms) {
         Ok(()) => {
             after_reset(run, db, date);
             Ok(())
@@ -1166,19 +1302,7 @@ fn replace(
                 ],
             ),
         )),
-    };
-    // The first failure is the answer; the others are printed.
-    let mut first = None;
-    for r in [counted, after, reset] {
-        let Err(s) = r else { continue };
-        if first.is_none() {
-            first = Some(s);
-        } else {
-            let f = &s.failure;
-            let _ = writeln!(run.out, "{}", run.cx.text.error_line(f.code, &f.message));
-        }
     }
-    first.map_or(Ok(()), Err)
 }
 
 /// `blog restore --reset-credentials --yes`: only the last step of a restore, for one whose
@@ -1205,14 +1329,18 @@ pub fn reset_credentials(
     remind_reset(&mut run);
     let db = Database::new(client, site.db_id.clone());
     migrations::check_ours(&db).map_err(|e| setup::migration_error(&run, e))?;
-    let last = run
-        .state
-        .rollbacks
-        .iter()
-        .rev()
-        .find(|r| r.kind == KIND)
-        .cloned();
-    let date = last.as_ref().map_or_else(
+    // Only a restore still waiting for its reset is cleared; a newer Time Travel rollback
+    // supersedes it. The date shown is that restore's, else the newest restore's.
+    let pending = unreset(&run.state);
+    let shown = pending.clone().or_else(|| {
+        run.state
+            .rollbacks
+            .iter()
+            .rev()
+            .find(|r| r.kind == KIND)
+            .cloned()
+    });
+    let date = shown.as_ref().map_or_else(
         || run.t(key!("cli.restore.date_unknown"), &[]),
         |r| backup_date(&run, std::path::Path::new(&r.to)),
     );
@@ -1228,9 +1356,7 @@ pub fn reset_credentials(
         )
     })?;
     after_reset(&mut run, &db, &date);
-    if let Some(mut rec) =
-        last.filter(|r| r.outcome.as_deref().is_some_and(|o| UNRESET.contains(&o)))
-    {
+    if let Some(mut rec) = pending {
         rec.outcome = Some("restored".into());
         put_record(&mut run, &rec)?;
     }

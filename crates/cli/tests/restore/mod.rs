@@ -730,17 +730,17 @@ fn a_migration_failing_after_the_restore_points_back_to_before_the_restore() {
 #[test]
 fn rows_the_site_prunes_itself_only_warn_but_other_tables_still_stop() {
     let (fake, dir, bundle) = set_up(&migrations::bundled());
+    // Not auth_challenges: the import's own credential reset empties that one.
     fake.exec(
         DB,
-        "INSERT INTO auth_challenges (challenge_hash, purpose, expires_at) \
-           VALUES ('h1', 'login', 1);",
+        "INSERT INTO login_failures (key_hash, count, window_start) VALUES ('h1', 1, 1);",
     );
     save_backup(&fake, &dir);
-    // The cron removes the expired challenge between the import and the count.
-    fake.state().after_import = Some("DELETE FROM auth_challenges".into());
+    // The site drops the stale window between the import and the count.
+    fake.state().after_import = Some("DELETE FROM login_failures".into());
     let r = restore_with(&fake, &dir, &opts(&bundle, true));
     ok(&r);
-    assert!(r.out.contains("auth_challenges 1 -> 0"), "{}", r.out);
+    assert!(r.out.contains("login_failures 1 -> 0"), "{}", r.out);
     // A row lost from a table the site never prunes is still a mismatch.
     fake.state().after_import = Some("DELETE FROM settings WHERE key = 'site_id'".into());
     let r = restore_with(&fake, &dir, &opts(&bundle, true));
@@ -866,7 +866,10 @@ fn a_failed_credential_reset_is_an_error_with_the_rerun() {
     assert!(m.contains("blog rollback --db "), "{m}");
     assert!(!r.out.contains("Restore from"), "{}", r.out);
     assert!(!r.out.contains("sign in again"), "{}", r.out);
-    assert_eq!(count(&fake, "api_tokens WHERE revoked_at IS NULL"), 1);
+    // The import itself already reset what the backup held: no window where it works.
+    assert_eq!(count(&fake, "api_tokens WHERE revoked_at IS NULL"), 0);
+    assert_eq!(count(&fake, "sessions"), 0);
+    assert_eq!(count(&fake, "invites WHERE used_at IS NULL"), 0);
     assert_eq!(
         load(&dir).rollbacks.last().unwrap().outcome.as_deref(),
         Some("credentials_not_reset")
@@ -1117,4 +1120,89 @@ fn a_failed_migration_still_resets_and_a_failed_reset_is_only_printed() {
     let r = restore_with(&fake, &dir, &opts(&bundle, true));
     assert_eq!(code(&r), Code::MigrationFailed, "{}", r.out);
     assert!(r.out.contains("restore.credentials_not_reset"), "{}", r.out);
+}
+
+#[test]
+fn the_import_file_ends_with_the_credential_reset() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    add_credentials(&fake);
+    let text = save_backup(&fake, &dir);
+    // The step-8 request fails: only the import's own reset can have run.
+    fake.fail_body(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN",
+        Failure::Status(400),
+    );
+    let before = fake.requests().len();
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::RestoreCredentialsNotReset, "{}", r.out);
+    assert_credentials_reset(&fake);
+    // Counts saw the deletes as the reset's, not as lost rows.
+    assert!(r.out.contains("Checked: all "), "{}", r.out);
+    let reqs = fake.requests()[before..].to_vec();
+    let put = reqs
+        .iter()
+        .find(|r| r.method == "PUT" && r.path.starts_with("/__upload/"))
+        .expect("an upload");
+    let end = put.body.find(dump::END).expect("the dump's end");
+    let reset = put.body.find("DELETE FROM sessions;").expect("the reset");
+    assert!(end < reset, "the reset comes after every row of the dump");
+    assert!(put.body.contains(&text));
+    let log = fake.sql(
+        DB,
+        "SELECT detail FROM system_log WHERE detail LIKE 'restore: credentials reset%'",
+    );
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!(
+        log[0]["detail"].as_str().unwrap().contains("sessions\t1"),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn an_uncertain_import_still_resets_the_credentials() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    save_backup(&fake, &dir);
+    add_credentials(&fake);
+    // The ingest is lost on the way: the import never ran, the reply never came.
+    fake.fail_body("\"ingest\"", Failure::Drop);
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::RestoreImportUncertain, "{}", r.out);
+    // The import never ran, so this is step 8 on the live database.
+    assert_credentials_reset(&fake);
+    assert!(r.out.contains("Signed everyone out"), "{}", r.out);
+    assert!(
+        message(&r).contains("blog restore --reset-credentials --yes"),
+        "{}",
+        message(&r)
+    );
+}
+
+#[test]
+fn reset_credentials_does_not_clear_a_restore_a_rollback_superseded() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    save_backup(&fake, &dir);
+    ok(&restore_with(&fake, &dir, &opts(&bundle, true)));
+    // An older restore left at credentials_not_reset, then a Time Travel rollback after it.
+    state::update(&dir.0, &[], |s| {
+        let rec = s.rollbacks.last_mut().unwrap();
+        rec.outcome = Some("credentials_not_reset".into());
+        s.rollbacks.push(state::RollbackRecord {
+            at: "2026-11-02T00:00:00Z".into(),
+            kind: "database".into(),
+            to: "bm-x".into(),
+            ..state::RollbackRecord::default()
+        });
+    })
+    .unwrap();
+    let b = backup_with(&fake, &dir, "b1");
+    assert!(!b.out.contains(REMINDER), "{}", b.out);
+    ok(&reset_with(&fake, &dir));
+    let st = load(&dir);
+    let file = st
+        .rollbacks
+        .iter()
+        .rev()
+        .find(|r| r.kind == "file")
+        .unwrap();
+    assert_eq!(file.outcome.as_deref(), Some("credentials_not_reset"));
 }
