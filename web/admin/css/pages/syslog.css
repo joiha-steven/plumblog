@@ -1,5 +1,6 @@
 /* System log: entries under day headings; each is a button that opens its detail in place. */
-.log-days { display: grid; gap: var(--sp-16); padding: 0 max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-16) max(var(--gutter), env(safe-area-inset-left, 0px)); }
+/* The log sits in Settings' content column, which already has the page gutter. */
+.log-days { display: grid; gap: var(--sp-16); padding: 0 0 var(--sp-16); }
 .log-day-h { padding-bottom: var(--sp-6); color: var(--muted); }
 .log-rows { display: grid; gap: var(--sp-2); margin: 0; padding: 0; list-style: none; }
 /* The row's surface reaches 12 px past the text so hover and open read as a key, while the button itself (and so the text) sits on the page gutter. */

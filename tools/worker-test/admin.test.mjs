@@ -283,7 +283,7 @@ test("the owner reads the System log and opens an entry; a writer sees the lock 
     const o = await logPage(browser);
     await signUp(o.page, owner, `/admin/setup?code=${SETUP_CODE}`, { login: "Hana", slug: "hana", name: "Hana Owner", password: "correct horse battery" });
     await o.page.goto(at(owner, "/admin/settings/log"), { waitUntil: "networkidle" });
-    assert.equal(await o.page.locator("h1").innerText(), tx("admin.syslog.title"));
+    assert.equal(await o.page.locator("h1").innerText(), tx("admin.nav.settings"), "the log wears the Settings header");
     await o.page.locator(".log-btn").first().waitFor();
     assert.ok((await o.page.locator(".log-btn").count()) >= 1);
     const smoke = o.page.locator(".log-btn", { hasText: "Smoke test entry" });
@@ -294,6 +294,10 @@ test("the owner reads the System log and opens an entry; a writer sees the lock 
     await detail.getByText("req-smoke-1", { exact: true }).waitFor();
     await detail.getByRole("button", { name: tx("admin.syslog.copy_ai") }).waitFor();
     assert.equal(await o.page.locator('.nav a[aria-current="page"]').count(), 1, "Settings is the current item");
+    // The Settings section list: System log is the current section and General links back.
+    const subnav = o.page.locator(".settings-main").locator("xpath=preceding-sibling::nav[contains(@class,'subnav')]");
+    assert.equal(await subnav.locator('a[aria-current="page"]').innerText(), tx("admin.syslog.title"));
+    assert.equal(await subnav.getByRole("link", { name: tx("admin.settings.general") }).getAttribute("href"), "/admin/settings");
     // A filter with no match says so, and Clear brings the entry back.
     await o.page.getByRole("searchbox", { name: tx("admin.syslog.search") }).fill("no such text");
     await o.page.getByText(tx("admin.syslog.none_title")).waitFor();

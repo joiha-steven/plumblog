@@ -192,7 +192,7 @@ describe("mcp tools", () => {
     const ref = await fetch(`${w.url}/api/v1/reference`, { headers: { authorization: `Bearer ${TOK.owner}` } }).then((r) => r.json());
     const want = ref.routes
       .map((r) => `${r.method} ${r.path}`)
-      .filter((k) => !["GET /api/v1/reference", "POST /api/v1/media", "GET /api/v1/media/{id}/original"].includes(k))
+      .filter((k) => !["GET /api/v1/reference", "POST /api/v1/media", "GET /api/v1/media/{id}/original", "POST /api/v1/media/{id}/variants"].includes(k))
       .sort();
     const r = await rpc("tools/list");
     const tools = r.json.result.tools;

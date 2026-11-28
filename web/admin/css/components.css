@@ -30,16 +30,16 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 /* ===== One state system for every control (Braun: each control is a physical key) =====
    rest = raised key; hover = lifts; pressed = sinks; selected = latched down with a lit lamp; focus = ring; disabled = faded.
    Flat things (nav, menu, rows) tint on hover and become a raised key when selected. Every interactive class is listed once. */
-:where(.c, .btn, .ib, .seg button, .nav a, .nav button, .me, .row, .menu-item, .tile, .theme, .subnav button, .linkbtn, .sw, .cb, .rd, .input, .select, .textarea, .covers button, .pot, .chip) {
+:where(.c, .btn, .ib, .seg button, .nav a, .nav button, .me, .row, .menu-item, .tile, .theme, .subnav a, .linkbtn, .sw, .cb, .rd, .input, .select, .textarea, .covers button, .pot, .chip) {
   --tc: var(--tint); --ov: transparent; --raise: var(--sh-none); --focus: var(--sh-none);
   position: relative; background-image: linear-gradient(var(--ov), var(--ov)); box-shadow: var(--focus), var(--raise);
   transition: background-color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease), color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
   outline: none; -webkit-tap-highlight-color: transparent; }
-:where(.c, .btn, .ib, .seg button, .nav a, .nav button, .me, .row, .menu-item, .tile, .theme, .subnav button, .linkbtn, .sw, .cb, .rd, .input, .select, .textarea, .covers button, .pot, .chip):is(:hover, .is-hover) { --ov: rgb(var(--tc) / var(--a-hover)); }
-:where(.c, .nav a, .nav button, .me, .row, .menu-item, .subnav button):is([aria-pressed="true"], [aria-current="page"], [aria-current="true"], [aria-selected="true"], .is-sel) { --ov: transparent; background-color: var(--key); --raise: var(--sh-sel); color: var(--text); }
-:where(.c, .btn, .ib, .seg button, .nav a, .nav button, .me, .row, .menu-item, .tile, .theme, .subnav button, .linkbtn, .covers button, .chip):is(:active, .is-press) { --ov: rgb(var(--tc) / var(--a-press)); --raise: var(--sh-press); transform: translateY(var(--sink)); }
-:where(.c, .btn, .ib, .seg button, .nav a, .nav button, .me, .row, .menu-item, .tile, .theme, .subnav button, .linkbtn, .sw, .cb, .rd, .input, .select, .textarea, .covers button, .pot, .chip):is(:focus-visible, .is-focus) { --focus: var(--focus-ring); }
-:where(.c, .btn, .ib, .seg button, .nav a, .nav button, .me, .row, .menu-item, .tile, .theme, .subnav button, .linkbtn, .sw, .cb, .rd, .input, .select, .textarea, .covers button, .pot, .chip):is(:disabled, .is-dis, [aria-disabled="true"]) { opacity: var(--a-off); cursor: default; --ov: transparent !important; --raise: var(--sh-none) !important; transform: none !important; }
+:where(.c, .btn, .ib, .seg button, .nav a, .nav button, .me, .row, .menu-item, .tile, .theme, .subnav a, .linkbtn, .sw, .cb, .rd, .input, .select, .textarea, .covers button, .pot, .chip):is(:hover, .is-hover) { --ov: rgb(var(--tc) / var(--a-hover)); }
+:where(.c, .nav a, .nav button, .me, .row, .menu-item, .subnav a):is([aria-pressed="true"], [aria-current="page"], [aria-current="true"], [aria-selected="true"], .is-sel) { --ov: transparent; background-color: var(--key); --raise: var(--sh-sel); color: var(--text); }
+:where(.c, .btn, .ib, .seg button, .nav a, .nav button, .me, .row, .menu-item, .tile, .theme, .subnav a, .linkbtn, .covers button, .chip):is(:active, .is-press) { --ov: rgb(var(--tc) / var(--a-press)); --raise: var(--sh-press); transform: translateY(var(--sink)); }
+:where(.c, .btn, .ib, .seg button, .nav a, .nav button, .me, .row, .menu-item, .tile, .theme, .subnav a, .linkbtn, .sw, .cb, .rd, .input, .select, .textarea, .covers button, .pot, .chip):is(:focus-visible, .is-focus) { --focus: var(--focus-ring); }
+:where(.c, .btn, .ib, .seg button, .nav a, .nav button, .me, .row, .menu-item, .tile, .theme, .subnav a, .linkbtn, .sw, .cb, .rd, .input, .select, .textarea, .covers button, .pot, .chip):is(:disabled, .is-dis, [aria-disabled="true"]) { opacity: var(--a-off); cursor: default; --ov: transparent !important; --raise: var(--sh-none) !important; transform: none !important; }
 
 /* ===== Buttons: pill keys ===== */
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-6); height: var(--ctl); padding: 0 var(--sp-16); border-radius: var(--r-pill); border: 1px solid var(--line-ctl); background-color: var(--key); color: var(--text); font: var(--type-ctl); white-space: nowrap; text-decoration: none; --raise: var(--sh-rest); }
@@ -183,20 +183,20 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 .side .spacer { flex: 1; min-height: var(--sp-16); }
 .main { min-width: 0; height: 100%; overflow: auto; overscroll-behavior: contain; background: var(--surface); }
 /* Navigation item: one component for the sidebar, settings sections, menus and the account entry. */
-.nav a, .nav button, .subnav button, .menu-item, .me { display: flex; align-items: center; gap: var(--sp-12); width: 100%; min-width: 0; height: var(--ctl); padding: 0 var(--sp-12); border: 0; border-radius: var(--r-10); background-color: transparent; color: var(--muted); font: var(--type-item); text-align: left; text-decoration: none; white-space: nowrap; }
+.nav a, .nav button, .subnav a, .menu-item, .me { display: flex; align-items: center; gap: var(--sp-12); width: 100%; min-width: 0; height: var(--ctl); padding: 0 var(--sp-12); border: 0; border-radius: var(--r-10); background-color: transparent; color: var(--muted); font: var(--type-item); text-align: left; text-decoration: none; white-space: nowrap; }
 .menu-item { color: var(--text); }
 .menu-item svg { color: var(--muted); }
 .menu-item .k { margin-left: auto; font: var(--type-meta); color: var(--faint); }
-.nav a[aria-current="page"], .nav a.is-sel, .nav button[aria-current="true"], .subnav button[aria-current="true"] { color: var(--text); }
-.nav .lbl, .subnav button span { overflow: hidden; text-overflow: ellipsis; }
+.nav a[aria-current="page"], .nav a.is-sel, .nav button[aria-current="true"], .subnav a[aria-current="page"] { color: var(--text); }
+.nav .lbl, .subnav a span { overflow: hidden; text-overflow: ellipsis; }
 .nav .count { margin-left: auto; }
-.nav .sub, .subnav button.sub { height: var(--ctl-sub); padding-left: calc(var(--sp-12) + var(--icon) + var(--sp-12)); font: var(--type-small); }
+.nav .sub, .subnav a.sub { height: var(--ctl-sub); padding-left: calc(var(--sp-12) + var(--icon) + var(--sp-12)); font: var(--type-small); }
 .nav .sub .dot { width: var(--lamp); height: var(--lamp); border-radius: var(--r-round); background: var(--st-draft); flex: none; margin-left: calc(-1 * (var(--icon) + var(--lamp)) / 2 - var(--sp-12)); margin-right: calc((var(--icon) - var(--lamp)) / 2); }
 .nav .sub .dot.scheduled { background: var(--st-sched); }
 .nav .sub .dot.published { background: var(--st-pub); }
-.subnav button.sub svg { width: var(--icon-md); height: var(--icon-md); }
+.subnav a.sub svg { width: var(--icon-md); height: var(--icon-md); }
 /* Narrow screens turn the settings list into one scrolling strip: nesting has no meaning there, so every tab is a full key. */
-@media (max-width: 767px) { .subnav button, .subnav button.sub { flex: none; width: auto; height: var(--ctl); padding: 0 var(--sp-12); font: var(--type-item); } }
+@media (max-width: 767px) { .subnav a, .subnav a.sub { flex: none; width: auto; height: var(--ctl); padding: 0 var(--sp-12); font: var(--type-item); } }
 .me { height: var(--ctl-tall); }
 .me > .i { color: var(--muted); }
 .me .who { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-2); min-width: 0; }
@@ -232,6 +232,9 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 /* Filters under the header: same place on every page that has them. */
 .filters { display: flex; align-items: center; gap: var(--sp-12); padding: 0 max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-16) max(var(--gutter), env(safe-area-inset-left, 0px)); overflow-x: auto; scrollbar-width: none; }
 @media (min-width: 1100px) { .filters.rail-only { display: none; } }
+/* Inside a column that already has the page gutter (Settings sections): no gutter of its own; on phones it bleeds to the screen edge so the row scrolls within the gutter. */
+.filters.inset { padding-inline: 0; }
+@media (max-width: 767px) { .filters.inset { margin-inline: calc(-1 * var(--gutter)); padding-inline: var(--gutter); scroll-padding-inline: var(--gutter); } }
 .body { padding: var(--stack) max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-48) max(var(--gutter), env(safe-area-inset-left, 0px)); }
 .body.flush-top { padding-top: 0; }
 

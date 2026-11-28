@@ -194,7 +194,7 @@ function mount(a, url = "/admin/settings/log") {
   const find = document.createElement("div");
   const body = document.createElement("div");
   document.body.append(find, body);
-  screen.mountSyslog({ find, body, api: a });
+  screen.mountSyslog({ find, body, api: a, role: "owner" });
   return { find, body };
 }
 const button = (el, text) => [...el.querySelectorAll("button")].find((b) => b.textContent === text);
@@ -326,4 +326,15 @@ test("screen: a filter change takes the typed text with it and cancels the pendi
   assert.equal(history.length, entries, "the late timer adds and replaces nothing");
   assert.equal(a.queries.length, 2);
   assert.equal(a.queries.at(-1).q, "lan");
+});
+
+test("screen: the log sits in the Settings frame with System log as the current section", async () => {
+  const { body } = mount(fakeApi([{ entries: [entry(1, Date.now())], next_cursor: null }]));
+  await wait();
+  const nav = body.querySelector(".settings > .subnav");
+  assert.ok(nav, "the Settings section list");
+  assert.equal(nav.querySelector('a[aria-current="page"]').getAttribute("href"), "/admin/settings/log");
+  assert.ok([...nav.querySelectorAll("a")].some((a) => a.getAttribute("href") === "/admin/settings"), "General links back");
+  assert.ok(body.querySelector(".settings-main > .filters"), "filters inside the content column");
+  assert.ok(body.querySelector(".settings-main .log-btn"), "entries inside the content column");
 });

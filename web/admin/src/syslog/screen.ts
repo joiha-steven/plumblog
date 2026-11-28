@@ -5,10 +5,11 @@
  */
 
 import type { Api, ApiError } from "../api/client";
-import { LOG_KINDS, type LogEntry } from "../api/model.gen";
+import { LOG_KINDS, type LogEntry, type Role } from "../api/model.gen";
 import { type Child, h } from "../dom";
 import { lang, t } from "../i18n";
 import { seg } from "../seg";
+import { settingsNav } from "../settings";
 import { empty, failed, loadingRows, toast } from "../ui";
 import { errorMessage, kindLabel } from "./labels";
 import { levelMark } from "./mark";
@@ -17,9 +18,10 @@ import { type Filters, KIND_GROUPS, LEVELS, type LevelFilter, NO_FILTERS, Q_MAX,
 export interface Mount {
   /** The header slot the search field goes in (rightmost control). */
   find: HTMLElement;
-  /** Everything under the header. */
+  /** The `.settings-box` under the header: the section list and the log go inside it. */
   body: HTMLElement;
   api: Api;
+  role: Role;
 }
 
 /** Typing waits this long before it asks again. */
@@ -229,7 +231,7 @@ function entryList(api: Api, f: Filters, clear: () => void): HTMLElement {
   return box;
 }
 
-export function mountSyslog({ find, body, api }: Mount): void {
+export function mountSyslog({ find, body, api, role }: Mount): void {
   let filters = filtersOf(location.search);
   const input = h("input", {
     class: "input",
@@ -310,6 +312,6 @@ export function mountSyslog({ find, body, api }: Mount): void {
   });
 
   sync();
-  body.replaceChildren(h("div", { class: "filters" }, level, kind, range), results);
+  body.replaceChildren(h("div", { class: "settings" }, settingsNav(role, "log"), h("div", { class: "settings-main" }, h("div", { class: "filters inset" }, level, kind, range), results)));
   results.replaceChildren(entryList(api, filters, clear));
 }
