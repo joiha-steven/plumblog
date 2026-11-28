@@ -199,13 +199,13 @@ describe("pushed theme", () => {
 
   test("a store error with a pushed theme takes the plain error path, not the theme fallback", async () => {
     const w = workers.fragile;
-    w.query("ALTER TABLE tags RENAME TO tags_gone");
+    w.exec("ALTER TABLE tags RENAME TO tags_gone");
     try {
       const res = await fetch(`${w.url}/tag/anything`);
       await res.text();
       assert.equal(res.status, 500);
     } finally {
-      w.query("ALTER TABLE tags_gone RENAME TO tags");
+      w.exec("ALTER TABLE tags_gone RENAME TO tags");
     }
     assert.doesNotMatch(w.log(), /theme\.pushed_render_failed/, "a D1 error is not a theme failure");
   });

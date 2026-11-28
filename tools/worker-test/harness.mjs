@@ -3,12 +3,20 @@
 // (node --test runs files in parallel processes) and sets WORKER_TEST_RUN_DIR.
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach } from "node:test";
 import { fileURLToPath } from "node:url";
+
+// node:sqlite is unflagged from Node 22.13 (tools/package.json engines). Say so, not "ERR_UNKNOWN_BUILTIN_MODULE".
+let DatabaseSync;
+try {
+  ({ DatabaseSync } = await import("node:sqlite"));
+} catch (e) {
+  throw new Error(`worker-test needs node:sqlite (Node >= 22.13); this is Node ${process.versions.node}: ${e.message}`, { cause: e });
+}
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const CONFIG = join(ROOT, "tools/wrangler.dev.toml");
@@ -24,8 +32,14 @@ export const ASSETS_DIR = join(OUT, "assets");
 // Readiness and helper-process bounds. A start is wrangler migrations + seed + build of the
 // worker: about 5 s idle, 17 s under a loaded 16-core run (measured); 60 s leaves 3x on a slow CI box.
 const READY_TIMEOUT_MS = 60_000;
-// One `wrangler d1 execute` / `r2 object get`: about 1 s; a hang here must fail, not stall the file.
+// One wrangler helper run (`d1 migrations apply`): about 1 s; a hang here must fail, not stall the file.
 const HELPER_TIMEOUT_MS = 60_000;
+// How long SQLite itself waits for a lock held by workerd or another connection before it gives
+// up (SQLITE_BUSY). The Worker's own writes are single statements or short batches, so waits are
+// expected to be milliseconds (harness.test.mjs checks both directions with a lock held for
+// 1.5 s); 10 s is far below the per-test timeout. It is the database's own lock wait, not a
+// test-level retry: a lock held longer still fails the test.
+const SQLITE_BUSY_MS = 10_000;
 
 // Keep wrangler quiet and non-interactive; never phone home from tests.
 const ENV = { ...process.env, WRANGLER_SEND_METRICS: "false", CI: "1", NO_COLOR: "1" };
@@ -194,6 +208,138 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   });
 }
 
+/**
+ * The one database file of a local D1 / R2 object under a `--persist-to` dir. miniflare names it by a hash of
+ * the binding, so it is found by listing, never guessed. Returns null when the directory does not exist yet
+ * (R2 has none until the first object is written); several files is an error.
+ */
+function sqliteFileIn(state, sub) {
+  const dir = join(state, "v3", sub);
+  let files;
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".sqlite") && f !== "metadata.sqlite"); // metadata.sqlite is miniflare's own bookkeeping
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  }
+  if (files.length > 1) throw new Error(`expected one .sqlite file in ${dir}, found ${files.length}: ${files.join(", ")}`);
+  return files.length ? join(dir, files[0]) : null;
+}
+export function d1File(state) {
+  const f = sqliteFileIn(state, "d1/miniflare-D1DatabaseObject");
+  if (!f) throw new Error(`no local D1 database under ${state}; \`wrangler d1 migrations apply\` creates it`);
+  return f;
+}
+export const r2File = (state) => sqliteFileIn(state, "r2/miniflare-R2BucketObject");
+
+/**
+ * Runs `fn(db)` on a fresh connection to a local SQLite file, then closes it. Fresh each call: a
+ * long-lived connection returned stale rows while workerd wrote through its own.
+ */
+function withDb(file, fn) {
+  const db = new DatabaseSync(file);
+  try {
+    db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_MS}`);
+    return fn(db);
+  } finally {
+    db.close();
+  }
+}
+
+const plain = (rows) => rows.map((r) => ({ ...r }));
+// What may follow a statement without being another one: whitespace, `;`, comments.
+const nothingLeft = (text) => text.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, "").replace(/[\s;]/g, "") === "";
+
+/**
+ * Runs `sql` one statement at a time (SQLite's own parser finds the end of each: `prepare` alone
+ * silently drops everything after the first statement). Returns the rows of each statement that
+ * returns columns, null for the others. Statements are prepared one by one, so a later one may use
+ * what an earlier one created.
+ */
+function eachStatement(db, sql) {
+  const out = [];
+  for (let rest = sql; !nothingLeft(rest); ) {
+    const st = db.prepare(rest);
+    out.push(st.columns().length > 0 ? plain(st.all()) : (st.run(), null));
+    rest = rest.slice(st.sourceSQL.length);
+  }
+  return out;
+}
+
+/** The same, in one transaction that takes the write lock first: the Worker never sees half a batch. */
+function inTransaction(db, fn) {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const r = fn();
+    db.exec("COMMIT");
+    return r;
+  } catch (e) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // The failed statement already ended the transaction; the original error matters.
+    }
+    throw e;
+  }
+}
+
+/**
+ * Rows of exactly ONE statement that returns rows (SELECT, WITH, RETURNING, PRAGMA) on the local
+ * D1 in `state`, which a running Worker has open. A statement that returns no rows (use d1Exec)
+ * or a second statement is an error, never silently dropped. Not read-only on purpose: SQLite
+ * refuses a read-only open of a WAL database whose -shm is gone.
+ */
+export function d1Query(state, sql) {
+  return withDb(d1File(state), (db) => {
+    const res = eachStatement(db, sql);
+    if (res.length !== 1 || res[0] === null) throw new Error(`d1Query needs exactly one statement that returns rows (use d1Exec for writes); got ${res.length}: ${sql}`);
+    return res[0];
+  });
+}
+
+/** Rows of each single-statement query, in order, on one connection (migrations.test.mjs). */
+export function d1QueryEach(state, sqls) {
+  return withDb(d1File(state), (db) =>
+    sqls.map((sql) => {
+      const res = eachStatement(db, sql);
+      if (res.length !== 1 || res[0] === null) throw new Error(`d1QueryEach needs one statement that returns rows per entry; got ${res.length}: ${sql}`);
+      return res[0];
+    }),
+  );
+}
+
+/**
+ * Runs write SQL (one or many statements, in one transaction) on the local D1 in `state`; SQLite
+ * waits for workerd's lock. A statement that returns rows is an error: use d1Query for those.
+ */
+export function d1Exec(state, sql) {
+  withDb(d1File(state), (db) =>
+    inTransaction(db, () => {
+      const res = eachStatement(db, sql);
+      if (res.some((r) => r !== null)) throw new Error(`d1Exec statements must not return rows (use d1Query): ${sql}`);
+    }),
+  );
+}
+
+/**
+ * For test helpers that take either: SQL whose first statement returns rows is a query (exactly
+ * one statement, as d1Query); anything else is a write batch (d1Exec) and returns [].
+ */
+export function d1Sql(state, sql) {
+  const first = withDb(d1File(state), (db) => db.prepare(sql).columns().length > 0);
+  if (first) return d1Query(state, sql);
+  d1Exec(state, sql);
+  return [];
+}
+
+/** Size of an object in the Worker's local R2 bucket (from its metadata table), or null when absent. */
+export function r2SizeIn(state, key) {
+  const file = r2File(state);
+  if (file === null) return null; // no object was ever written
+  const rows = withDb(file, (db) => db.prepare("SELECT size FROM _mf_objects WHERE key = ?").all(key));
+  return rows.length ? Number(rows[0].size) : null;
+}
+
 /** Runs wrangler with the dev config; throws with its output on failure. */
 export function wrangler(args) {
   return run(WRANGLER, [...args, "--config", CONFIG]);
@@ -244,9 +390,8 @@ export async function startWorker({ seedSql = null, vars = {}, port: pinned = nu
     run(WRANGLER, ["d1", "migrations", "apply", "DB", "--local", ...common]);
     const sql = typeof seedSql === "function" ? seedSql(url) : seedSql;
     if (sql) {
-      const file = join(entry.state, "seed.sql");
-      writeFileSync(file, sql);
-      run(WRANGLER, ["d1", "execute", "DB", "--local", ...common, "--file", file]);
+      // No Worker runs yet and the file was just created by migrations apply: nothing to lock against.
+      d1Exec(entry.state, sql);
     }
   } catch (e) {
     cleanupSync(entry);
@@ -316,16 +461,11 @@ export async function startWorker({ seedSql = null, vars = {}, port: pinned = nu
       const body = await res.text();
       last = `HTTP ${res.status} ${JSON.stringify(body.slice(0, 80))}`;
       if (res.status === 200 && body === token && exited === null) {
-        // Reads the running Worker's local D1 (test assertions only).
-        const query = (sql) =>
-          JSON.parse(run(WRANGLER, ["d1", "execute", "DB", "--local", ...common, "--json", "--command", sql]))[0].results;
-        // Size of an object in the running Worker's local R2 bucket, or null when it is absent.
-        const r2Size = (key) => {
-          const r = spawnSync(WRANGLER, ["r2", "object", "get", `plumblog-dev/${key}`, "--local", ...common, "--pipe"], { cwd: ROOT, env: ENV, maxBuffer: 64 << 20, timeout: HELPER_TIMEOUT_MS });
-          return r.status === 0 ? r.stdout.length : null;
-        };
-        // state: the --persist-to dir, for reading the local D1 with `wrangler d1 execute`.
-        return { url, instance: token, stop, state: entry.state, log: () => log, query, r2Size };
+        // Read the running Worker's local D1 / R2 (test assertions only), straight from the files.
+        const query = (sql) => d1Query(entry.state, sql);
+        const exec = (sql) => d1Exec(entry.state, sql);
+        const r2Size = (key) => r2SizeIn(entry.state, key);
+        return { url, instance: token, stop, state: entry.state, log: () => log, query, exec, r2Size };
       }
       if (res.status === 200 && body !== "") foreign = body;
     } catch (e) {
