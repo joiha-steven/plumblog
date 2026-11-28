@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::ops::Bound;
 
 use plumblog_model::{CommentId, PostId, Result};
 
@@ -64,6 +65,25 @@ impl CommentStore for MemoryStore {
         let keep = page_len(limit);
         let more = rows.len() > keep;
         rows.drain(..rows.len().saturating_sub(keep));
+        Ok((rows, more))
+    }
+
+    async fn comments_by_id(
+        &self,
+        after: Option<CommentId>,
+        limit: u32,
+    ) -> Result<(Vec<Comment>, bool)> {
+        let keep = page_len(limit);
+        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut rows: Vec<Comment> = self.read(|s| {
+            s.comments
+                .range((from, Bound::Unbounded))
+                .take(keep + 1)
+                .map(|(_, c)| c.clone())
+                .collect()
+        });
+        let more = rows.len() > keep;
+        rows.truncate(keep);
         Ok((rows, more))
     }
 
