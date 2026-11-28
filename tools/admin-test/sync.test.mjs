@@ -54,6 +54,8 @@ const DELAY = 5;
 const settle = async (ms = 40) => {
   for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, ms / 4));
 };
+/** The keys holding drafts; a created post's new key keeps only a note of where it went (drafts.ts moveDraft). */
+const draftKeys = () => [...rows].filter(([, v]) => typeof v.movedTo !== "string").map(([k]) => k);
 const draft = (title, body, rev, extra = {}) => ({ title, body, base: null, rev, savedAt: 1, ...extra });
 const post = (id, title, markdown, version = 1, warnings = []) => ({
   id, kind: "post", translation_group: id, lang: "en", slug: "s", status: "draft", trashed_from: null, published_at: null, author_id: 1,
@@ -91,6 +93,7 @@ function editor(api, o = {}) {
     said: [],
     chosen: [],
     lived: [],
+    made: [],
     online: true,
     alive: true,
     note: document.createElement("div"),
@@ -122,9 +125,10 @@ function editor(api, o = {}) {
     {
       api, user: 1, lang: "vi", st: e.st, id: o.post?.id, draft: (o.post?.status ?? "draft") === "draft",
       offline: () => !e.online, alive: () => e.alive, text: () => [e.title, e.body],
-      say: (s) => e.said.push(s), choose: (p) => e.chosen.push(p), live: (p) => e.lived.push(p), note: e.note,
+      say: (s) => e.said.push(s), choose: (p) => e.chosen.push(p), live: (p) => e.lived.push(p), made: (p) => e.made.push(p), note: e.note,
     },
     DELAY,
+    o.slow,
   );
   return e;
 }
@@ -178,6 +182,30 @@ test("a new post is created once, even with edits during a slow create; then upd
   assert.equal(e.st.version, 2);
 });
 
+test("a create with no answer for a while says so, keeps saying so over local saves, and stops once it settles", async () => {
+  reset();
+  let release;
+  const api = fakeApi({ create: (input) => new Promise((r) => (release = () => r({ ok: true, value: post(7, input.title, input.markdown, 1) }))) });
+  const e = editor(api, { slow: 150 });
+  const warn = console.warn;
+  console.warn = () => undefined;
+  try {
+    await e.save("Hello", "first");
+    await settle();
+    assert.ok(!e.said.includes("admin.editor.sync.slow"), "not before the bound");
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(e.said.at(-1), "admin.editor.sync.slow");
+    await e.save("Hello", "second");
+    assert.equal(e.said.at(-1), "admin.editor.sync.slow", "a local save meanwhile does not hide it");
+    release();
+    await settle();
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(e.said.at(-1), "admin.editor.saved");
+  assert.ok(e.said.lastIndexOf("admin.editor.sync.slow") < e.said.lastIndexOf("admin.editor.saved"));
+});
+
 test("on create the URL and the draft key move to the post; the draft stays while the text differs", async () => {
   reset();
   let release;
@@ -190,7 +218,10 @@ test("on create the URL and the draft key move to the post; the draft stays whil
   await settle();
   assert.equal(location.pathname + location.search, "/admin/posts/7");
   assert.equal(e.st.key, "1:post-7");
-  assert.deepEqual([...rows.keys()], ["1:post-7"]);
+  assert.deepEqual(draftKeys(), ["1:post-7"]);
+  const note = [...rows].find(([k]) => k.startsWith("1:new-"))?.[1];
+  assert.equal(note?.movedTo, "1:post-7", "the new key says where it went");
+  assert.ok(Math.abs(note.at - Date.now()) < 5000, "and when, so it can be swept");
   assert.equal(rows.get("1:post-7").body, "sent");
   assert.equal(rows.get("1:post-7").version, 1);
   assert.equal(rows.get("1:post-7").base, 101);
@@ -247,6 +278,45 @@ test("every update sends expected_version; a 409 asks, sends nothing until the w
   assert.equal(api.calls.length, 2, "nothing sent while the choice is open");
   assert.equal(rows.get("1:post-3").body, "mine, more", "the local draft keeps every change");
   // The writer's pick goes through index.ts serverChoice: tools/worker-test/editor-sync.test.mjs.
+});
+
+test("typing while a save is out: its answer does not say Saved, even when the next send cannot go", async () => {
+  reset("/admin/posts/3");
+  let release;
+  const api = fakeApi({
+    update: (id, input) => new Promise((r) => (release = () => r({ ok: true, value: post(id, input.title, input.markdown, input.expected_version + 1) }))),
+  });
+  const e = editor(api, { key: "1:post-3", post: post(3, "T", "base", 4), title: "T", body: "base" });
+  await e.save("T", "sent");
+  await settle();
+  assert.equal(api.calls.length, 1);
+  await e.save("T", "sent, then more");
+  e.online = false; // the follow-up send exits quietly
+  release();
+  await settle();
+  assert.equal(api.calls.length, 1);
+  assert.equal(e.said.at(-1), "admin.editor.saved_here", "the newer text is only on this device");
+});
+
+test("a 409 whose server copy is still a draft: after Keep mine the draft autosaves again", async () => {
+  reset("/admin/posts/3");
+  const theirs = post(3, "T", "theirs", 6);
+  let stale = true;
+  const api = fakeApi({
+    update: (id, input) => (stale ? conflict("expected_version", 6) : { ok: true, value: post(id, input.title, input.markdown, input.expected_version + 1) }),
+    get: () => ({ ok: true, value: theirs }),
+  });
+  const e = editor(api, { key: "1:post-3", post: post(3, "T", "base", 4), title: "T", body: "base" });
+  await e.save("T", "mine");
+  await settle();
+  assert.equal(e.chosen.length, 1);
+  assert.deepEqual(e.lived, [], "a draft copy does not stop the sync");
+  // Keep mine, as index.ts serverChoice does it.
+  stale = false;
+  Object.assign(e.st, { hold: false, base: theirs.updated_at, version: theirs.version, server: [theirs.title, theirs.markdown] });
+  await e.save("T", "mine, kept");
+  await settle();
+  assert.deepEqual(api.calls.at(-1), ["update", 3, { expected_version: 6, title: "T", markdown: "mine, kept" }]);
 });
 
 test("a 409 whose server copy is published, scheduled or trashed stops sending for good", async () => {
@@ -420,7 +490,7 @@ test("a failed save keeps the local draft, says so once, and retries on the next
   await settle();
   assert.equal(api.calls.length, 3);
   assert.equal(e.said.at(-1), "admin.editor.saved");
-  assert.equal(rows.size, 0);
+  assert.equal(draftKeys().length, 0);
 });
 
 test("warnings show under the title, then clear on a save without them", async () => {
@@ -494,7 +564,7 @@ test("a remount during a slow create waits for it: one create, then an update", 
   assert.deepEqual(api.calls.map((c) => c[0]), ["create", "update"]);
   assert.deepEqual(api.calls[1].slice(1), [7, { expected_version: 1, title: "T", markdown: "two" }]);
   assert.equal(b.st.key, "1:post-7");
-  assert.equal(rows.size, 0, "server holds the text: no draft left");
+  assert.equal(draftKeys().length, 0, "server holds the text: no draft left");
 });
 
 test("what the server confirmed is its answer: a normalised text keeps the draft", async () => {
@@ -546,6 +616,6 @@ test("a create that settles within the bound: the mount gets the post and its dr
   release();
   const p = await wait;
   assert.equal(p?.id, 8);
-  assert.deepEqual([...rows.keys()], ["1:post-8"]);
+  assert.deepEqual(draftKeys(), ["1:post-8"]);
   assert.equal(rows.get("1:post-8").version, 1);
 });
