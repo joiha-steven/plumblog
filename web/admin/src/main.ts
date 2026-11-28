@@ -140,6 +140,11 @@ if (isAuth(first)) {
     // one after another. A chunk failure is reported by the screen's own import (screens.ts).
     startEarly(api, ["/api/auth/passkey", "/api/auth/tokens"]);
     void import("./auth/account").catch(() => undefined);
+  } else if (first === "settings" && current().section === "users") {
+    // People, the same way: its two lists and both chunks alongside `me`.
+    startEarly(api, ["/api/v1/users", "/api/v1/invites"]);
+    void import("./settings").catch(() => undefined);
+    void import("./users").catch(() => undefined);
   }
   void load();
 }

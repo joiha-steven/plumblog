@@ -8,6 +8,7 @@
 import type { Api, ApiError, Result } from "./api/client";
 import type { Invite, InviteCreated, InviteList, User, UserPage } from "./api/model.gen";
 import { h } from "./dom";
+import { getOnce } from "./early";
 import { t } from "./i18n";
 import { icon } from "./icons";
 import { seg } from "./seg";
@@ -82,7 +83,7 @@ export function mountUsers(box: HTMLElement, api: Api, o: UsersOptions): void {
   async function loadUsers(): Promise<void> {
     list.replaceChildren(loadingRows(3));
     tail.replaceChildren();
-    const r = await api.call<UserPage>("GET", "/api/v1/users");
+    const r = await getOnce<UserPage>(api, "/api/v1/users");
     if (!r.ok) {
       list.replaceChildren(failed(r.error, () => void loadUsers()));
       return;
@@ -252,7 +253,7 @@ export function mountUsers(box: HTMLElement, api: Api, o: UsersOptions): void {
 
   async function loadInvites(): Promise<void> {
     invList.replaceChildren(loadingRows(2));
-    const r = await api.call<InviteList>("GET", "/api/v1/invites");
+    const r = await getOnce<InviteList>(api, "/api/v1/invites");
     if (!r.ok) {
       invList.replaceChildren(failed(r.error, () => void loadInvites()));
       return;
