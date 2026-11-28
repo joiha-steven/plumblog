@@ -96,12 +96,22 @@ impl<S: ReaderSource> Pages<'_, S> {
         let posts = self.src.sitemap_posts(SITEMAP_LIMIT).await.map_err(err)?;
         let more = posts.len() >= SITEMAP_LIMIT;
         let url = |p: &SitemapPost| routes::post_in(&p.lang, &s.lang, &p.slug);
+        let homes = lang_homes(&posts, s);
+        let names: Vec<String> = homes.iter().map(|(l, _)| l.clone()).collect();
+        let home_alternates = |lang: &str| super::home_alternates(s, lang, &names);
         let mut urls = vec![SitemapUrl {
             path: self.site.home_url.clone(),
             // None on a site with no posts: no 1970 date.
             lastmod: posts.iter().map(|p| p.updated_at).max(),
-            alternates: Vec::new(),
+            alternates: home_alternates(&s.lang),
         }];
+        for (lang, lastmod) in &homes {
+            urls.push(SitemapUrl {
+                path: routes::lang_home(lang, 1),
+                lastmod: Some(*lastmod),
+                alternates: home_alternates(lang),
+            });
+        }
         let alternates = sitemap_alternates(&posts, &s.lang);
         for (p, alternates) in posts.iter().zip(alternates) {
             urls.push(SitemapUrl {
@@ -148,6 +158,24 @@ impl<S: ReaderSource> Pages<'_, S> {
             &refs,
         ))
     }
+}
+
+/// The site's non-default languages that have a published post (a static page makes no home),
+/// in the order of `Settings::languages`, each with its newest change. Read off the rows the
+/// sitemap already has, so a language home costs no query.
+fn lang_homes(posts: &[SitemapPost], s: &Settings) -> Vec<(String, i64)> {
+    s.languages
+        .iter()
+        .filter(|l| **l != s.lang)
+        .filter_map(|l| {
+            posts
+                .iter()
+                .filter(|p| !p.is_page && p.lang == *l)
+                .map(|p| p.updated_at)
+                .max()
+                .map(|t| (l.clone(), t))
+        })
+        .collect()
 }
 
 /// The hreflang set of each post (empty when it has no translation): its group's versions,
@@ -215,6 +243,7 @@ mod tests {
             slug: slug.into(),
             updated_at: 0,
             group,
+            is_page: false,
         }
     }
 
