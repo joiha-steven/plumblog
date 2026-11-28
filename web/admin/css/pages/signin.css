@@ -12,6 +12,8 @@
 .auth form { display: grid; gap: var(--sp-16); }
 .or { display: flex; align-items: center; gap: var(--sp-12); color: var(--faint); font: var(--type-meta); }
 .or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.auth-lang { display: flex; justify-content: flex-end; }
+.auth-lang .seg button { height: var(--ctl-tall); min-width: var(--ctl-tall); }
 .auth-foot { display: flex; justify-content: space-between; align-items: center; gap: var(--sp-12); flex-wrap: wrap; }
 .forgot { font: var(--type-small); color: var(--muted); }
 @media (min-width: 960px) {

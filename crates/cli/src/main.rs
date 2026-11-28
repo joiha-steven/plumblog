@@ -71,6 +71,17 @@ fn api_reference() -> String {
         if let Some(v) = r.variants {
             let _ = writeln!(o, "variants: {}", v.as_str());
         }
+        if let Some(d) = r.dedupe {
+            let _ = writeln!(
+                o,
+                "dedupe: {} on `{}` (optional, verified by R2 against the body): the \
+                 caller's existing item, answer {} {}, unchanged",
+                d.as_str(),
+                d.field(),
+                d.status(),
+                r.response
+            );
+        }
         for f in r.fields {
             let need = if f.required { "required" } else { "optional" };
             let _ = writeln!(
@@ -1007,7 +1018,9 @@ mod tests {
             plumblog_model::api::ROUTES.len()
         );
         assert!(text.contains(
-            "body: original, limit 20971520 bytes\nanswer: 201 media\nvariants: admin_encoder\n"
+            "body: original, limit 20971520 bytes\nanswer: 201 media\nvariants: admin_encoder\n\
+             dedupe: uploader_sha256 on `sha256` (optional, verified by R2 against the body): \
+             the caller's existing item, answer 200 media, unchanged\n"
         ));
         assert_eq!(
             text.matches(

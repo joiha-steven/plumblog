@@ -247,3 +247,32 @@ test("api_tokens after every migration: scopes, unique hash, user cascade, index
     db.remove();
   }
 });
+
+// 0007 (media dedupe): sha256 is unique per uploader; NULL hashes and NULL uploaders never collide.
+test("media after every migration: sha256 unique per uploader, NULLs distinct, lookup on the index", () => {
+  const db = makeStateDir();
+  try {
+    wrangler(["d1", "migrations", "apply", "DB", "--local", "--persist-to", db.dir]);
+    const run = (sql) => d1Exec(db.dir, sql);
+    const h = "a".repeat(64);
+    run(`INSERT INTO users (id, login, slug, display_name, role, created_at, updated_at) VALUES
+      (1, 'a', 'a', 'A', 'owner', 1, 1), (2, 'b', 'b', 'B', 'writer', 1, 1)`);
+    const media = (key, user, hash) =>
+      `INSERT INTO media (r2_key, mime, bytes, width, height, uploaded_by, created_at, sha256) VALUES ('${key}', 'image/png', 1, 1, 1, ${user}, 1, ${hash === null ? "NULL" : `'${hash}'`})`;
+    run(media("k1", 1, h));
+    run(media("k2", 2, h));
+    run(media("k3", 1, null));
+    run(media("k4", 1, null));
+    run(media("k5", "NULL", h));
+    run(media("k6", "NULL", h));
+    assert.throws(() => run(media("k7", 1, h)), /UNIQUE/i, "same uploader, same sha256");
+    // Deleting an uploader clears uploaded_by; their hashed rows then collide with nothing.
+    run("DELETE FROM users WHERE id = 2");
+    run(media("k8", 1, "b".repeat(64)));
+    assert.equal(query(db.dir, "SELECT COUNT(*) AS n FROM media")[0].n, 7);
+    const plan = query(db.dir, `EXPLAIN QUERY PLAN SELECT id FROM media WHERE uploaded_by = 1 AND sha256 = '${h}'`);
+    assert.ok(plan.some((r) => /media_uploader_sha256/.test(r.detail)), JSON.stringify(plan));
+  } finally {
+    db.remove();
+  }
+});

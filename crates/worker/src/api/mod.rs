@@ -26,7 +26,7 @@ use worker::{Env, Method, Request, Response};
 use crate::d1::D1Store;
 use crate::webcrypto::WebCrypto;
 pub use mcp::PATH as MCP_PATH;
-pub use principal::Principal;
+pub use principal::{Principal, resolve_read_only};
 
 pub const PREFIX: &str = "/api/";
 

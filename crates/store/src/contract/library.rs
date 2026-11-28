@@ -6,7 +6,7 @@ use super::kit::{
     Check, Got, T0, asc, eq, fails, media, ok, post, save, that, update, user, version, version_is,
 };
 use crate::{
-    MAX_PAGE, MediaQuery, NewSeries, PostOrder, PostQuery, PostStatus, Series, Store, Tag,
+    MAX_PAGE, MediaQuery, NewSeries, PostKind, PostOrder, PostQuery, PostStatus, Series, Store, Tag,
 };
 
 fn page(before: Option<(i64, MediaId)>, missing_alt_only: bool, limit: u32) -> MediaQuery {
@@ -202,6 +202,88 @@ pub async fn media_round_trip<S: Store>(db: &S) -> Check {
         "get deleted media",
         db.get_media(id).await,
         ErrorCode::NotFound,
+    )
+}
+
+/// `sha256` is unique per uploader and found again by (uploader, sha256); NULL never matches
+/// or collides, and another uploader's equal hash is their own item.
+pub async fn media_sha256_per_uploader<S: Store>(db: &S) -> Check {
+    let a = user(db, "alice").await?;
+    let b = user(db, "bob").await?;
+    let h = "ab".repeat(32);
+    let with = |key: &str, u, hash: Option<&str>| {
+        let mut m = media(key, T0);
+        m.uploaded_by = Some(u);
+        m.sha256 = hash.map(str::to_owned);
+        m
+    };
+    eq!(
+        "find before any upload",
+        ok("find", db.find_media_by_sha256(a, &h).await)?,
+        None,
+    )?;
+    // Rows without a hash (old rows, clients that send none) neither match nor collide.
+    ok("no hash", db.create_media(with("n1.png", a, None)).await)?;
+    ok(
+        "no hash again",
+        db.create_media(with("n2.png", a, None)).await,
+    )?;
+    eq!(
+        "a NULL sha256 is not found",
+        ok("find", db.find_media_by_sha256(a, &h).await)?,
+        None,
+    )?;
+    let first = ok(
+        "create a",
+        db.create_media(with("a.png", a, Some(&h))).await,
+    )?;
+    let got = ok("find a", db.find_media_by_sha256(a, &h).await)?;
+    eq!(
+        "found a",
+        got.as_ref().map(|m| (m.id, m.sha256.clone())),
+        Some((first, Some(h.clone()))),
+    )?;
+    eq!(
+        "get_media returns sha256",
+        ok("get_media", db.get_media(first).await)?.sha256,
+        Some(h.clone()),
+    )?;
+    match db.create_media(with("a2.png", a, Some(&h))).await {
+        Err(e) if e.code == ErrorCode::Conflict && e.field.as_deref() == Some("sha256") => {}
+        other => {
+            return Err(format!(
+                "duplicate sha256: expected Conflict on sha256, got {other:?}"
+            ));
+        }
+    }
+    // The duplicate r2_key stays a Conflict without the sha256 field.
+    match db.create_media(with("a.png", b, None)).await {
+        Err(e) if e.code == ErrorCode::Conflict && e.field.is_none() => {}
+        other => {
+            return Err(format!(
+                "duplicate r2_key: expected Conflict, no field, got {other:?}"
+            ));
+        }
+    }
+    let theirs = ok(
+        "create b",
+        db.create_media(with("b.png", b, Some(&h))).await,
+    )?;
+    that("another uploader gets their own item", theirs != first)?;
+    eq!(
+        "find b",
+        ok("find b", db.find_media_by_sha256(b, &h).await)?.map(|m| m.id),
+        Some(theirs),
+    )?;
+    eq!(
+        "find a still",
+        ok("find a", db.find_media_by_sha256(a, &h).await)?.map(|m| m.id),
+        Some(first),
+    )?;
+    eq!(
+        "another hash",
+        ok("find", db.find_media_by_sha256(a, &"cd".repeat(32)).await)?,
+        None,
     )
 }
 
@@ -774,4 +856,72 @@ pub async fn tag_delete_stales_editors<S: Store>(db: &S) -> Check {
         db.save_post(stale).await,
         ErrorCode::Conflict,
     )
+}
+
+/// `public_media`: only media a `published` post or page uses (body or cover) comes back;
+/// drafts, scheduled, trashed, unused and unknown all give `None`, and trashing or
+/// unpublishing takes it away again.
+pub async fn public_media_follows_live_posts<S: Store>(db: &S) -> Check {
+    let alice = user(db, "alice").await?;
+    let mut ids = Vec::new();
+    for i in 0..8 {
+        let key = format!("p{i}.png");
+        ids.push(ok("create_media", db.create_media(media(&key, i)).await)?);
+    }
+    let [body, cover, page, draft, scheduled, trashed, unused, later] = ids[..] else {
+        return Err("eight media".into());
+    };
+    let public = |id: MediaId| async move {
+        ok("public_media", db.public_media(id).await).map(|m| m.map(|m| m.id))
+    };
+    let mut live = post(alice, "en", "live", PostStatus::Published);
+    live.media_ids = vec![body];
+    live.cover_media_id = Some(cover);
+    let live_id = save(db, live.clone()).await?;
+    let mut about = post(alice, "en", "about", PostStatus::Published);
+    about.kind = PostKind::Page;
+    about.media_ids = vec![page];
+    save(db, about).await?;
+    let mut drafted = post(alice, "en", "draft", PostStatus::Draft);
+    drafted.media_ids = vec![draft, later];
+    save(db, drafted).await?;
+    let mut soon = post(alice, "en", "soon", PostStatus::Scheduled);
+    soon.cover_media_id = Some(scheduled);
+    save(db, soon).await?;
+    let mut gone = post(alice, "en", "gone", PostStatus::Published);
+    gone.media_ids = vec![trashed];
+    let t_id = save(db, gone).await?;
+    ok("trash_post", db.trash_post(t_id, T0 + 1).await)?;
+
+    let row = ok("public_media body", db.public_media(body).await)?;
+    let want = ok("get_media", db.get_media(body).await)?;
+    eq!("body image: the whole row", row, Some(want))?;
+    eq!("cover", public(cover).await?, Some(cover))?;
+    eq!("published page", public(page).await?, Some(page))?;
+    for (what, id) in [
+        ("draft only", draft),
+        ("scheduled only", scheduled),
+        ("trashed only", trashed),
+        ("unused", unused),
+        ("unknown", MediaId(later.0 + 1000)),
+    ] {
+        eq!(what, public(id).await?, None)?;
+    }
+
+    // Also used by a live post: public; that post unpublished: not any more.
+    let mut edit = update(db, live_id, live).await?;
+    edit.media_ids = vec![body, later];
+    save(db, edit.clone()).await?;
+    eq!(
+        "draft media now also live",
+        public(later).await?,
+        Some(later)
+    )?;
+    let mut off = update(db, live_id, edit).await?;
+    off.status = PostStatus::Draft;
+    off.published_at = None;
+    save(db, off).await?;
+    eq!("unpublished: body", public(body).await?, None)?;
+    eq!("unpublished: cover", public(cover).await?, None)?;
+    eq!("unpublished: shared", public(later).await?, None)
 }

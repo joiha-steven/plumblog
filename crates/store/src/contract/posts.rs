@@ -4,11 +4,11 @@
 use plumblog_model::{ErrorCode, MediaId, PostId, RevisionId, SeriesId, TagId, UserId};
 
 use super::kit::{
-    Check, T0, asc, desc, eq, fails, ok, post, save, that, update, user, version, version_is,
+    Check, T0, asc, both, desc, eq, fails, ok, post, save, that, update, user, version, version_is,
 };
 use crate::{
     CommentStatus, NewComment, NewRevision, PostKind, PostOrder, PostQuery, PostStatus,
-    PostSummary, SavePost, Store,
+    PostSummary, SavePost, Saved, Store,
 };
 
 pub async fn post_insert_and_update<S: Store>(db: &S) -> Check {
@@ -834,7 +834,9 @@ pub async fn post_version_status_changes<S: Store>(db: &S) -> Check {
     let u = user(db, "alice").await?;
     let d = post(u, "vi", "d", PostStatus::Draft);
     let id = save(db, d.clone()).await?;
-    let stale = update(db, id, d.clone()).await?;
+    let mut stale = update(db, id, d.clone()).await?;
+    // An edit of its own: a stale save equal to the stored row is a no-op, not a conflict.
+    stale.title = "Edited before the trash".into();
     ok("trash_post", db.trash_post(id, T0).await)?;
     eq!("trash adds 1", row_version(db, id).await?, 2)?;
     // Trashed first, whatever the version: the editor must restore, not retry.
@@ -877,4 +879,208 @@ pub async fn post_version_status_changes<S: Store>(db: &S) -> Check {
         ok("get_post", db.get_post(sid).await)?.status,
         PostStatus::Published,
     )
+}
+
+fn keyed(author: UserId, slug: &str, key: &str) -> SavePost {
+    SavePost {
+        client_id: Some(key.to_owned()),
+        ..post(author, "vi", slug, PostStatus::Draft)
+    }
+}
+
+async fn post_count<S: Store>(db: &S) -> super::kit::Got<usize> {
+    let all = PostQuery::new(PostOrder::UpdatedDesc, 100);
+    Ok(ok("list_posts", db.list_posts(&all).await)?.len())
+}
+
+/// A create retried with its client id (its answer was lost) returns the post the first one
+/// made and writes nothing; the id is per author.
+pub async fn post_client_id_replays<S: Store>(db: &S) -> Check {
+    let a = user(db, "alice").await?;
+    let b = user(db, "bob").await?;
+    let saved = ok(
+        "first keyed create",
+        db.save_post_outcome(keyed(a, "hello", "k-1")).await,
+    )?;
+    that("the first create writes", saved.wrote)?;
+    let first = saved.id;
+    let made = ok("get_post", db.get_post(first).await)?;
+    eq!(
+        "find_client_post",
+        ok("find_client_post", db.find_client_post(a, "k-1").await)?,
+        Some(first),
+    )?;
+    let v = version(db).await?;
+    // The same body (same slug): a replay, not a taken slug.
+    eq!(
+        "same body again",
+        ok(
+            "replay",
+            db.save_post_outcome(keyed(a, "hello", "k-1")).await
+        )?,
+        Saved {
+            id: first,
+            wrote: false
+        },
+    )?;
+    // A different body, typed while the first answer was lost: still that post, unchanged.
+    let mut later = keyed(a, "hello-2", "k-1");
+    later.title = "Later".into();
+    later.status = PostStatus::Published;
+    later.published_at = Some(T0);
+    eq!(
+        "other body, same key",
+        ok("replay", db.save_post_outcome(later).await)?,
+        Saved {
+            id: first,
+            wrote: false
+        },
+    )?;
+    eq!("one post", post_count(db).await?, 1)?;
+    eq!(
+        "replay leaves the post",
+        ok("get_post", db.get_post(first).await)?,
+        made
+    )?;
+    eq!(
+        "replay takes no slug",
+        ok("find_post", db.find_post("vi", "hello-2").await)?,
+        None,
+    )?;
+    version_is(db, "replays", v).await?;
+    // Another author's same key is another request.
+    let theirs = save(db, keyed(b, "theirs", "k-1")).await?;
+    that("another author gets a new post", theirs != first)?;
+    eq!(
+        "find_client_post is per author",
+        ok("find_client_post", db.find_client_post(b, "k-1").await)?,
+        Some(theirs),
+    )?;
+    eq!(
+        "unknown key",
+        ok("find_client_post", db.find_client_post(a, "k-2").await)?,
+        None,
+    )?;
+    // Without a key every create is new.
+    save(db, post(a, "vi", "plain", PostStatus::Draft)).await?;
+    save(db, post(a, "vi", "plain-2", PostStatus::Draft)).await?;
+    eq!("keyless creates", post_count(db).await?, 4)?;
+    // Deleted for good: the key is free again.
+    ok("trash_post", db.trash_post(first, T0).await)?;
+    ok("delete_post", db.delete_post(first).await)?;
+    let again = save(db, keyed(a, "hello", "k-1")).await?;
+    that("a deleted post's key makes a new post", again != first)
+}
+
+/// Two creates with one client id at the same moment make one post; both get its id.
+pub async fn post_client_id_concurrent<S: Store>(db: &S) -> Check {
+    let a = user(db, "alice").await?;
+    // Same body (both race for the slug too) and different bodies (only the key collides).
+    for (x, y, key) in [("same", "same", "race-1"), ("left", "right", "race-2")] {
+        let (r1, r2) = both(
+            db.save_post_outcome(keyed(a, x, key)),
+            db.save_post_outcome(keyed(a, y, key)),
+        )
+        .await;
+        let (s1, s2) = (ok("first racer", r1)?, ok("second racer", r2)?);
+        eq!(&format!("{key}: one id for both"), s1.id, s2.id)?;
+        that(
+            &format!("{key}: exactly one wrote ({s1:?}, {s2:?})"),
+            s1.wrote != s2.wrote,
+        )?;
+        let r1 = s1.id;
+        eq!(
+            &format!("{key}: find_client_post"),
+            ok("find_client_post", db.find_client_post(a, key).await)?,
+            Some(r1),
+        )?;
+    }
+    eq!("one post per key", post_count(db).await?, 2)
+}
+
+/// A save from a stale version whose content the row already holds (the same save, its answer
+/// lost) succeeds and writes nothing; any difference is still a `Conflict`.
+pub async fn post_stale_equal_save<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let t1 = ok("ensure_tag", db.ensure_tag("one", "One").await)?;
+    let t2 = ok("ensure_tag", db.ensure_tag("two", "Two").await)?;
+    let id = save(db, post(u, "vi", "p", PostStatus::Published)).await?;
+    let mut edit = update(db, id, post(u, "vi", "p", PostStatus::Published)).await?;
+    edit.title = "Edited".into();
+    edit.markdown = "# edited".into();
+    edit.tag_ids = vec![t2, t1];
+    edit.revision = Some(NewRevision {
+        author_id: Some(u),
+        created_at: T0,
+    });
+    that(
+        "a current update writes",
+        ok("update", db.save_post_outcome(edit.clone()).await)?.wrote,
+    )?;
+    let stored = ok("get_post", db.get_post(id).await)?;
+    eq!("edited to version 2", stored.version, 2)?;
+    let v = version(db).await?;
+    // The retry: version 1 again, same content (tags in another order, repeated).
+    let mut retry = edit.clone();
+    retry.tag_ids = vec![t1, t2, t1];
+    retry.now = T0 + 5;
+    eq!(
+        "stale equal save",
+        ok("stale equal save", db.save_post_outcome(retry).await)?,
+        Saved { id, wrote: false },
+    )?;
+    eq!(
+        "nothing written",
+        ok("get_post", db.get_post(id).await)?,
+        stored
+    )?;
+    eq!(
+        "no second revision",
+        ok("list_revisions", db.list_revisions(id).await)?.len(),
+        1,
+    )?;
+    version_is(db, "stale equal save", v).await?;
+    // Another writer's different change from the same stale version.
+    let mut other = edit.clone();
+    other.markdown = "# someone else".into();
+    fails(
+        "stale, other markdown",
+        db.save_post(other).await,
+        ErrorCode::Conflict,
+    )?;
+    let mut other = edit.clone();
+    other.title = "Someone else".into();
+    fails(
+        "stale, other title",
+        db.save_post(other).await,
+        ErrorCode::Conflict,
+    )?;
+    let mut other = edit.clone();
+    other.pinned = true;
+    fails(
+        "stale, other flag",
+        db.save_post(other).await,
+        ErrorCode::Conflict,
+    )?;
+    let mut other = edit.clone();
+    other.tag_ids = vec![t1];
+    fails(
+        "stale, other tags",
+        db.save_post(other).await,
+        ErrorCode::Conflict,
+    )?;
+    let mut other = edit;
+    other.status = PostStatus::Draft;
+    other.published_at = None;
+    fails(
+        "stale, other status",
+        db.save_post(other).await,
+        ErrorCode::Conflict,
+    )?;
+    eq!(
+        "conflicts wrote nothing",
+        ok("get_post", db.get_post(id).await)?,
+        stored
+    )?;
+    version_is(db, "conflicts", v).await
 }

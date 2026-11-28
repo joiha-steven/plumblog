@@ -6,8 +6,9 @@
 
 import type { Api, ApiError, Result } from "../api/client";
 import { h } from "../dom";
-import { t } from "../i18n";
 import { icon } from "../icons";
+import { langs, t } from "../i18n";
+import { langSwitch } from "../seg";
 import { type NewAccount, acceptInvite, params, redeemReset, setup, signIn, signInPasskey } from "./flows";
 import { safeNext } from "./next";
 
@@ -340,6 +341,7 @@ export function mountAuth(o: AuthOptions): void {
         h(
           "div",
           { class: "auth-card" },
+          langs().length > 1 ? h("div", { class: "auth-lang" }, langSwitch()) : null,
           h(
             "div",
             { class: "auth-brand" },
@@ -351,4 +353,11 @@ export function mountAuth(o: AuthOptions): void {
       ),
     ),
   );
+  // A fresh site has no account to sign in to: hand the visitor to setup, where the code the
+  // install printed creates the owner. The params answer is cached, so signing in reuses it.
+  if (signin) {
+    void params(api).then((p) => {
+      if (p.ok && p.value.setup_required === true) location.replace("/admin/setup");
+    });
+  }
 }

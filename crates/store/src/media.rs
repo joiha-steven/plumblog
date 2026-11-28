@@ -18,6 +18,9 @@ pub struct Media {
     /// `None` once the uploader is deleted.
     pub uploaded_by: Option<UserId>,
     pub created_at: i64,
+    /// Lowercase hex SHA-256 of the original, when the upload sent one; `None` is never
+    /// matched by [`MediaStore::find_media_by_sha256`].
+    pub sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +37,8 @@ pub struct NewMedia {
     pub variants_json: String,
     pub uploaded_by: Option<UserId>,
     pub created_at: i64,
+    /// Unique per uploader (see [`MediaStore::create_media`]).
+    pub sha256: Option<String>,
 }
 
 /// One page of the media library, newest first (`created_at` DESC, id DESC).
@@ -53,10 +58,20 @@ pub struct MediaQuery {
 // Workers are single-threaded, so futures need not be `Send` (see plumblog_auth::Crypto).
 #[allow(async_fn_in_trait)]
 pub trait MediaStore {
-    /// `Conflict` on a duplicate `r2_key`; `InvalidInput` on bad sizes or a missing uploader.
+    /// `Conflict` on a duplicate `r2_key`; `Conflict` on field `sha256` when the uploader
+    /// already has an item with that `sha256` (two identical uploads at once: the loser reads
+    /// the winner with [`Self::find_media_by_sha256`]); `InvalidInput` on bad sizes or a
+    /// missing uploader.
     async fn create_media(&self, media: NewMedia) -> Result<MediaId>;
+    /// The uploader's item whose `sha256` is this, if any. 1 query.
+    async fn find_media_by_sha256(&self, uploader: UserId, sha256: &str) -> Result<Option<Media>>;
     /// `NotFound`.
     async fn get_media(&self, id: MediaId) -> Result<Media>;
+    /// The item when a reader can see it: a `published` post or page uses it in its body
+    /// (`SavePost::media_ids`) or as cover. `None` for unknown or unused media and for media
+    /// used only by drafts, scheduled or trashed posts, alike, so a caller cannot tell them
+    /// apart. "Published" is the reader's own test (status alone). One read.
+    async fn public_media(&self, id: MediaId) -> Result<Option<Media>>;
     async fn list_media(&self, query: MediaQuery) -> Result<Vec<Media>>;
     /// `NotFound`. Bumps the content version (alt text shows on reader pages).
     async fn set_media_alt(&self, id: MediaId, alt: &str) -> Result<()>;

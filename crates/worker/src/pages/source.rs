@@ -39,6 +39,9 @@ pub struct Settings {
     pub description: String,
     pub footer: String,
     pub lang: String,
+    /// Whether `lang` was stored (and valid) rather than the default; the admin's sign-in
+    /// pages trust it over the browser's language only then.
+    pub lang_set: bool,
     pub per_page: usize,
     /// Languages the site offers, the default first. Stored and parsed for the language
     /// switcher (a theme feature, not built yet); no route is gated on it.

@@ -8,7 +8,12 @@ import { startWorker } from "./harness.mjs";
 
 let worker;
 before(async () => {
-  worker = await startWorker();
+  // An owner exists, so a signed-out visit means "sign in": with no user row the sign-in page
+  // sends the visitor to /admin/setup instead (`setup_required`, tested in auth.test.mjs).
+  const T = Date.now();
+  worker = await startWorker({
+    seedSql: `INSERT INTO users (id, login, slug, display_name, role, password_hash, disabled_at, created_at, updated_at) VALUES (1, 'olga', 'olga', 'Olga', 'owner', NULL, NULL, ${T}, ${T});`,
+  });
 });
 after(async () => {
   await worker?.stop();

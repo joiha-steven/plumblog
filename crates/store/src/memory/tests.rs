@@ -64,6 +64,7 @@ fn post(author: UserId, slug: &str, status: PostStatus) -> SavePost {
             author_id: Some(author),
             created_at: 5,
         }),
+        client_id: None,
         now: 5,
     }
 }
