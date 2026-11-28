@@ -236,6 +236,9 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 .rows { display: grid; gap: var(--sp-2); padding: 0 calc(max(var(--gutter), env(safe-area-inset-right, 0px)) - var(--sp-12)) var(--sp-32) calc(max(var(--gutter), env(safe-area-inset-left, 0px)) - var(--sp-12)); }
 .row, .colhead { display: grid; grid-template-columns: minmax(0, 1fr) var(--col-status) var(--col-date) var(--col-lang); gap: var(--sp-16); }
 .row { align-items: center; padding: var(--sp-12); min-height: var(--row-h); border-radius: var(--r-12); color: inherit; text-decoration: none; background-color: var(--surface); }
+/* Trashed rows: the row link plus a Restore button beside it (never inside the link), on one surface. */
+.row-act { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-8); align-items: center; padding-right: var(--sp-12); border-radius: var(--r-12); background-color: var(--surface); }
+.row-act .row { background-color: transparent; }
 .colhead { padding: var(--sp-12) max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-6) max(var(--gutter), env(safe-area-inset-left, 0px)); }
 .colhead span { white-space: nowrap; }
 .colhead span:last-child { text-align: right; }
@@ -262,6 +265,8 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 @media (max-width: 599px) {
   .rows { padding-inline: 0; gap: 0; }
   .row { border-radius: 0; padding-inline: max(var(--gutter), env(safe-area-inset-left, 0px)) max(var(--gutter), env(safe-area-inset-right, 0px)); }
+  .row-act { border-radius: 0; padding-right: max(var(--gutter), env(safe-area-inset-right, 0px)); }
+  .row-act .row { padding-right: 0; }
 }
 /* Line items: settings lists (devices, keys, users, plugins) and small key/value rows. */
 .item, .plug { display: flex; align-items: center; gap: var(--sp-12); min-height: var(--row-h); padding: var(--sp-8) 0; border-top: 1px solid var(--line); flex-wrap: wrap; }

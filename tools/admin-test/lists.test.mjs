@@ -245,3 +245,71 @@ test("a boot prefetch serves the list's first request once, and only when it ask
   assert.equal(api.queries.length, 4);
   assert.equal(api.queries[3].status, "draft");
 });
+
+/** A fake Api for the Trashed filter: `restore` answers each POST (and can be held), requests are recorded. */
+const trashApi = (rows, restore) => {
+  const api = fakeApi(() => page(rows));
+  api.calls = [];
+  api.call = async (method, path) => {
+    api.calls.push(`${method} ${path}`);
+    return restore(path);
+  };
+  return api;
+};
+const restoreButtons = (el) => [...el.querySelectorAll(".rows button")].filter((b) => b.textContent === "admin.list.restore");
+
+test("Trashed rows have Restore; one click sends one request, removes the row and confirms", async () => {
+  let release;
+  const held = new Promise((r) => (release = r));
+  const api = trashApi([post(1, "trashed"), post(2, "trashed")], async () => (await held, { ok: true, value: post(1, "draft") }));
+  const el = mount(api, { url: "/admin/?status=trashed" });
+  await wait();
+  assert.equal(restoreButtons(el).length, 2);
+  assert.ok(!el.querySelector(".row button"), "the button is beside the row link, not inside it");
+  const [first] = restoreButtons(el);
+  first.click();
+  first.click();
+  await wait();
+  assert.equal(first.disabled, true, "off while the request runs");
+  release();
+  await wait();
+  assert.deepEqual(api.calls, ["POST /api/v1/posts/1/restore"]);
+  assert.deepEqual(titles(el), ["Post 2"]);
+  assert.ok(document.querySelector(".toast")?.textContent.includes("admin.editor.pub.restored"));
+  restoreButtons(el)[0].click();
+  await wait();
+  assert.ok(el.textContent.includes("admin.list.empty_status"), "the last restore leaves the empty state");
+});
+
+test("a failed Restore keeps the row, enables the button again and says so", async () => {
+  document.querySelector(".toast")?.remove();
+  const errors = [];
+  const orig = console.error;
+  console.error = (...a) => errors.push(a.join(" "));
+  try {
+    const api = trashApi([post(1, "trashed")], async () => ({ ok: false, error: { code: "post.not_found", status: 404 } }));
+    const el = mount(api, { url: "/admin/?status=trashed" });
+    await wait();
+    const b = restoreButtons(el)[0];
+    b.click();
+    await wait();
+    assert.deepEqual(titles(el), ["Post 1"]);
+    assert.equal(b.disabled, false);
+    assert.ok(document.querySelector(".toast")?.textContent.includes("admin.editor.pub.failed"));
+    assert.ok(errors.some((e) => e.includes("post.not_found") && e.includes("404")), "status and code are logged");
+    document.querySelector(".toast")?.remove();
+    api.call = async () => ({ ok: false, error: { code: "network", status: 0 } });
+    b.click();
+    await wait();
+    assert.ok(document.querySelector(".toast")?.textContent.includes("admin.state.network_title"), "offline reads as elsewhere in the list");
+    assert.deepEqual(titles(el), ["Post 1"]);
+  } finally {
+    console.error = orig;
+  }
+});
+
+test("other filters have no Restore", async () => {
+  const el = mount(fakeApi(() => page([post(1, "draft")])), { url: "/admin/?status=draft" });
+  await wait();
+  assert.equal(restoreButtons(el).length, 0);
+});
