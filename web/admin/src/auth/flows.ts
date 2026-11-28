@@ -14,7 +14,7 @@ export interface Params {
   site_id: string;
   stretch_iterations: number;
   turnstile_site_key: string | null;
-  /** True while the site has no owner, so only setup can let anyone in. Missing (an older Worker) reads as false. */
+  /** True while the site has no account at all (setup codes work only then). Missing (an older Worker) reads as false. */
   setup_required?: boolean;
 }
 
