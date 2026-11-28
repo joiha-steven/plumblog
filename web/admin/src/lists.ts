@@ -9,7 +9,7 @@ import { h } from "./dom";
 import { type DraftEntry, listDrafts } from "./editor/drafts";
 import { lang, t } from "./i18n";
 import { HREF, editHref } from "./router";
-import { empty, failed, loadingRows } from "./ui";
+import { empty, failed, loadingRows, toast } from "./ui";
 
 export const FILTERS = ["all", "draft", "scheduled", "published", "trashed"] as const;
 export type Filter = (typeof FILTERS)[number];
@@ -98,6 +98,41 @@ function row(p: PostSummary): HTMLElement {
   );
 }
 
+/** A trashed row: the link to its editor, and beside it (not inside the link) a Restore button. */
+function trashedRow(api: Api, p: PostSummary, gone: (el: HTMLElement) => void): HTMLElement {
+  const wrap = h("div", { class: "row-act" });
+  const btn = h(
+    "button",
+    {
+      class: "btn",
+      type: "button",
+      "aria-label": t("admin.list.restore_named", { title: p.title || t("admin.posts.untitled") }),
+      onclick: () => {
+        // One request per row: a second click while it runs does nothing.
+        if (btn.disabled) return;
+        btn.disabled = true;
+        btn.setAttribute("aria-busy", "true");
+        void api.call<PostSummary>("POST", `/api/v1/posts/${p.id}/restore`).then((r) => {
+          if (r.ok) {
+            gone(wrap);
+            toast(t("admin.editor.pub.restored"), 5000);
+            return;
+          }
+          btn.disabled = false;
+          btn.removeAttribute("aria-busy");
+          // The client sends the writer to sign in on a 401; nothing else to say then.
+          if (r.error.code === "auth.unauthenticated") return;
+          console.error(`admin list: restoring post ${p.id} failed: ${r.error.code} (${r.error.status})`);
+          toast(r.error.code === "network" ? t("admin.state.network_title") : t("admin.editor.pub.failed"), 6000);
+        });
+      },
+    },
+    t("admin.list.restore"),
+  );
+  wrap.append(row(p), btn);
+  return wrap;
+}
+
 const colhead = (): HTMLElement =>
   h(
     "div",
@@ -128,13 +163,23 @@ function pager(api: Api, kind: PostKind, filter: Filter, emptyState: () => HTMLE
       return;
     }
     if (!box.contains(rowsEl)) box.replaceChildren(head, rowsEl, tail);
-    rowsEl.append(...rows.slice(rowsEl.childElementCount).map(row));
+    rowsEl.append(...rows.slice(rowsEl.childElementCount).map((p) => (filter === "trashed" ? trashedRow(api, p, gone) : row(p))));
     more.disabled = false;
     more.removeAttribute("aria-busy");
     more.textContent = t("admin.list.more");
     tail.replaceChildren(...(err ? [failed(err, () => void load(true))] : cursor !== null ? [more] : []));
     if (first !== undefined && first < rows.length) (rowsEl.children[first] as HTMLElement).focus();
     else if (err) tail.querySelector("button")?.focus();
+  };
+
+  /** A restored row leaves the list; focus moves to a neighbour's Restore so the keyboard keeps its place. */
+  const gone = (el: HTMLElement): void => {
+    const i = [...rowsEl.children].indexOf(el);
+    if (i < 0) return;
+    rows.splice(i, 1);
+    el.remove();
+    if (!rows.length) return show(undefined);
+    (rowsEl.children[Math.min(i, rows.length - 1)]?.querySelector("button") as HTMLElement | null)?.focus();
   };
 
   const load = async (append: boolean): Promise<void> => {

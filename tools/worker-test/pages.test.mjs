@@ -18,8 +18,8 @@ const get = (path, init = {}) => fetch(`${worker.url}${path}`, { redirect: "manu
 async function eventuallyHit(path) {
   for (let i = 0; i < 20; i++) {
     const res = await get(path);
-    await res.arrayBuffer();
-    if (res.headers.get("x-plumblog-cache") === "hit") return res;
+    const body = await res.text();
+    if (res.headers.get("x-plumblog-cache") === "hit") return { res, body };
     await new Promise((r) => setTimeout(r, 100));
   }
   assert.fail(`${path} never came from cache`);
@@ -37,8 +37,12 @@ test("home renders, then comes from the versioned cache", async () => {
   assert.ok(html.indexOf("Why I keep my tools small") < html.indexOf("Reading on screens"), "pinned first");
   assert.match(html, /href="\/page\/2" rel="next"/);
 
-  const hit = await eventuallyHit("/");
+  // A hit streams the stored body through untouched: same bytes, same headers.
+  const { res: hit, body } = await eventuallyHit("/");
+  assert.equal(body, html, "a hit serves the stored bytes");
   assert.equal(hit.status, 200);
+  assert.equal(hit.headers.get("content-type"), res.headers.get("content-type"));
+  assert.equal(hit.headers.get("cache-control"), res.headers.get("cache-control"));
   assert.equal(hit.headers.get("server-timing"), null, "a hit reports no render");
   assert.equal(hit.headers.get("etag"), res.headers.get("etag"));
 });
