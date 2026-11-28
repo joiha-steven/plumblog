@@ -61,6 +61,17 @@ export function loadingRows(n = 5): HTMLElement {
   );
 }
 
+/**
+ * A network change. The account page holds what a redraw would lose (an API token shown once), so
+ * there only the offline banner (the main's first child) follows; any other screen redraws.
+ */
+export function followNetwork(main: HTMLElement | null, screen: string, offline: boolean, render: () => void): void {
+  if (screen !== "account" || !main) return render();
+  const banner = main.firstElementChild?.classList.contains("banner") ? main.firstElementChild : null;
+  if (offline && !banner) main.prepend(offlineBanner());
+  if (!offline) banner?.remove();
+}
+
 export function offlineBanner(): HTMLElement {
   return h(
     "div",
