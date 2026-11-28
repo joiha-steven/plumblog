@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Machine-wide lock for scripts/check (issue #119). Sourced, not run.
+# Why: several sessions run the full check at once, the load flakes timing-sensitive tests,
+# so full runs queue. The path is fixed, not $TMPDIR (per-user on macOS, so not shared).
+# mkdir is atomic: exactly one process creates the directory. Skipped on CI and when an
+# ancestor already holds it (PLUMBLOG_CHECK_LOCK_HELD), so nested runs cannot deadlock.
+
+PLUMBLOG_CHECK_LOCK_POLL="${PLUMBLOG_CHECK_LOCK_POLL:-3}"
+PLUMBLOG_CHECK_LOCK_GRACE="${PLUMBLOG_CHECK_LOCK_GRACE:-3}"
+check_lock_owned=""
+
+check_lock_release() {
+  if [ -n "$check_lock_owned" ]; then
+    check_lock_owned=""
+    # Only remove what is ours: a takeover by someone else must survive our exit.
+    if [ "$(cat "$check_lock_dir/pid" 2> /dev/null || true)" = "$$" ]; then
+      rm -rf "$check_lock_dir"
+    fi
+  fi
+}
+
+check_lock_try() {
+  mkdir "$check_lock_dir" 2> /dev/null || return 1
+  echo "$$" > "$check_lock_dir/pid"
+  check_lock_owned=1
+}
+
+# Remove the lock only if it still shows the pid we judged stale ("" = no pid file). Without
+# the guard, a waiter that read the old pid could delete the lock another waiter just took.
+check_lock_break() {
+  if ! mkdir "$check_lock_dir.break" 2> /dev/null; then
+    # A breaker killed inside this window would block everyone; its guard lives for milliseconds.
+    if [ -n "$(find "$check_lock_dir.break" -maxdepth 0 -mmin +1 2> /dev/null)" ]; then
+      rmdir "$check_lock_dir.break" 2> /dev/null || true
+    fi
+    return 0
+  fi
+  if [ -d "$check_lock_dir" ] && [ "$(cat "$check_lock_dir/pid" 2> /dev/null || true)" = "$1" ]; then
+    rm -rf "$check_lock_dir"
+  fi
+  rmdir "$check_lock_dir.break"
+}
+
+check_lock_acquire() {
+  [ -z "${CI:-}" ] || return 0
+  [ -z "${PLUMBLOG_CHECK_LOCK_HELD:-}" ] || return 0
+  check_lock_dir="${PLUMBLOG_CHECK_LOCK:-/tmp/plumblog-check.lock}"
+  trap 'check_lock_release' EXIT # scripts/check re-sets its EXIT trap later and calls release too
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  local told="" pid waited=0
+  while ! check_lock_try; do
+    pid=$(cat "$check_lock_dir/pid" 2> /dev/null || true)
+    if [ -z "$pid" ]; then
+      # Holder may sit between mkdir and the pid write; only a lasting gap is stale.
+      waited=$((waited + 1))
+      if [ "$waited" -gt "$PLUMBLOG_CHECK_LOCK_GRACE" ]; then
+        echo "check: taking over a lock with no pid" >&2
+        check_lock_break ""
+        waited=0
+      else
+        sleep 1
+      fi
+      continue
+    fi
+    waited=0
+    if ! kill -0 "$pid" 2> /dev/null; then
+      echo "check: taking over a stale lock (pid $pid is gone)" >&2
+      # Break then mkdir: of several waiters, only one mkdir wins; the rest wait again.
+      check_lock_break "$pid"
+      continue
+    fi
+    if [ -z "$told" ]; then
+      echo "check: waiting for another scripts/check (pid $pid)" >&2
+      told=1
+    fi
+    sleep "$PLUMBLOG_CHECK_LOCK_POLL"
+  done
+  export PLUMBLOG_CHECK_LOCK_HELD=1
+}

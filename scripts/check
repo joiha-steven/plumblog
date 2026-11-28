@@ -3,6 +3,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Queue behind other full runs on this machine (issue #119); released by the EXIT trap below.
+# shellcheck source=scripts/check-lock
+source scripts/check-lock
+check_lock_acquire
+
 ENTRY_GZIP_BUDGET_BYTES=3072 # 2048 until the R2 page read path (docs/ARCHITECTURE.md budgets)
 # Not a platform limit (Workers allow 64 MiB uncompressed, no compressed limit): growth
 # discipline and startup cost. Why these numbers: docs/ARCHITECTURE.md, Budgets.
@@ -17,6 +22,9 @@ if [ "$(git config core.hooksPath || true)" != "scripts/hooks" ]; then
   git config core.hooksPath scripts/hooks
   step "set core.hooksPath=scripts/hooks"
 fi
+
+step "check lock"
+scripts/check-lock-test || fail "check lock tests (above)"
 
 step "fmt"
 cargo fmt --all --check || fail "rustfmt: run 'cargo fmt --all'"
@@ -160,7 +168,7 @@ node --test "tools/theme-test/*.test.mjs" || fail "theme script tests (run: node
 # Files git would track: tracked + untracked, minus ignored, minus deleted.
 # Written to a file first so a git failure fails the check instead of vanishing in a pipe.
 list_file=$(mktemp)
-trap 'rm -f "$list_file"' EXIT
+trap 'rm -f "$list_file"; check_lock_release' EXIT
 git -c core.quotePath=false ls-files -z --cached --others --exclude-standard > "$list_file" \
   || fail "git ls-files failed"
 files=()
