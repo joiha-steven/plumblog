@@ -19,6 +19,8 @@ pub struct StoredPost {
     /// The post's own comment switch; the site switch is read separately.
     pub comments_enabled: bool,
     pub excerpt: Option<String>,
+    /// The post page only; sized for a social card (see `pages/cover.rs`).
+    pub cover: Option<plumblog_render::Image>,
     pub body: Rendered,
     pub tags: Vec<Tag>,
     /// Other published language versions: `(lang, slug)`.

@@ -1,7 +1,7 @@
 //! Search and social data for a page: Open Graph facts, hreflang alternates and JSON-LD
 //! (schema.org). Templates decide which tags to print; this builds the values.
 
-use crate::data::{Alternate, Body, PageInfo, Post, Site};
+use crate::data::{Alternate, Body, PageInfo, Post, Site, UNSET_ORIGIN};
 use crate::feeds::{abs, alternates, rfc3339};
 use crate::json::J;
 use serde::Serialize;
@@ -12,8 +12,14 @@ pub struct Seo {
     pub title: String,
     /// `og:type`: `article` for posts, `website` otherwise.
     pub og_type: &'static str,
-    /// Absolute URL: the post cover, else the site default image.
+    /// Absolute URL: the post cover, else the site default image. `None` when the site has no
+    /// origin (a relative URL is invalid in a social card).
     pub image: Option<String>,
+    /// Real size of the post cover; `None` for the site default image, whose size is unknown.
+    pub image_width: Option<u32>,
+    pub image_height: Option<u32>,
+    /// The cover's description; `None` when it has none.
+    pub image_alt: Option<String>,
     /// RFC 3339, posts only.
     pub published: Option<String>,
     /// Every language version, this page included, plus `x-default`; empty when there is
@@ -147,11 +153,20 @@ pub fn build(
         home: abs(o, &site.home_url),
         description,
     };
-    let site_image = site.image_url.as_deref().map(|i| abs(o, i));
+    // Without a configured origin every URL is on a placeholder host: no image at all.
+    let has_origin = o != UNSET_ORIGIN;
+    let site_image = site
+        .image_url
+        .as_deref()
+        .filter(|_| has_origin)
+        .map(|i| abs(o, i));
     let mut seo = Seo {
         title: site.title.clone(),
         og_type: "website",
         image: site_image,
+        image_width: None,
+        image_height: None,
+        image_alt: None,
         published: None,
         alternates: Vec::new(),
         locale: og_locale(&page.lang),
@@ -159,8 +174,11 @@ pub fn build(
     };
     let graph = match body {
         Body::Post { post, .. } => {
-            if let Some(cover) = &post.cover {
+            if let Some(cover) = post.cover.as_ref().filter(|_| has_origin) {
                 seo.image = Some(abs(o, &cover.src));
+                seo.image_width = Some(cover.width);
+                seo.image_height = Some(cover.height);
+                seo.image_alt = (!cover.alt.is_empty()).then(|| cover.alt.clone());
             }
             let date = rfc3339(post.published_at);
             seo.title.clone_from(&post.title);

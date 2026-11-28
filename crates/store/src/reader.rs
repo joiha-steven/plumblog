@@ -5,7 +5,7 @@
 //! Admin and API lists stay keyset. The guards that keep OFFSET cheap are in
 //! [`ReaderStore::reader_posts`].
 
-use plumblog_model::{PostId, Result, TagId};
+use plumblog_model::{MediaId, PostId, Result, TagId};
 
 use crate::{Post, PostSummary, Tag};
 
@@ -55,11 +55,27 @@ pub struct ReaderPage {
     pub rows: Vec<ReaderRow>,
 }
 
+/// The cover media of a post page: what the head and the cover figure need, read in the
+/// post's own query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReaderCover {
+    pub id: MediaId,
+    pub r2_key: String,
+    pub width: i64,
+    pub height: i64,
+    /// `""` = no description.
+    pub alt: String,
+    /// JSON the store never parses.
+    pub variants_json: String,
+}
+
 /// A published post or page with its tags.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReaderPost {
     pub post: Post,
     pub tags: Vec<ReaderTag>,
+    /// `None` without a cover, and in feeds (they do not read it).
+    pub cover: Option<ReaderCover>,
 }
 
 /// Enough of a post to link to it.

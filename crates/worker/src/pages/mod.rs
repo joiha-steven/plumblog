@@ -2,6 +2,7 @@
 //! kept in the Cache API under a key that includes the site content version.
 
 mod cache;
+mod cover;
 mod db;
 mod docs;
 pub(crate) mod reader_db;
@@ -574,7 +575,7 @@ fn doc(content_type: &'static str, body: String) -> Outcome {
 
 /// Public URLs when the site has no configured origin: fixed, so every host serves the same
 /// ids, and plainly not the real site, so the warning below gets noticed.
-pub const UNSET_ORIGIN: &str = "http://localhost";
+pub const UNSET_ORIGIN: &str = plumblog_render::UNSET_ORIGIN;
 
 /// A post's public URL for webhook payloads, by the same origin and language rules as reader
 /// pages. 1 query.
@@ -977,7 +978,7 @@ fn to_render(p: &StoredPost, default_lang: &str) -> Post {
                 url: routes::tag_page(&t.slug, 1),
             })
             .collect(),
-        cover: None,
+        cover: p.cover.clone(),
         thumb: None,
         translations: p
             .translations
