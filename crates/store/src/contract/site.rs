@@ -1,7 +1,7 @@
 //! Comments, settings, extension options, plugins, webhooks and the system log.
 
-use plumblog_model::{CommentId, ErrorCode, PostId};
-use plumblog_syslog::EventKind;
+use plumblog_model::{CommentId, ErrorCode, PostId, RequestId};
+use plumblog_syslog::{Event, EventKind, Severity};
 
 use super::kit::{
     Check, Got, T0, desc, eq, event, fails, ok, post, save, user, version, version_is,
@@ -471,18 +471,14 @@ pub async fn webhooks_round_trip<S: Store>(db: &S) -> Check {
     )
 }
 
-fn log_query() -> LogQuery {
+fn log_query() -> LogQuery<'static> {
     LogQuery {
-        kind: None,
-        actor: None,
-        from_ms: None,
-        to_ms: None,
-        before: None,
         limit: 100,
+        ..LogQuery::default()
     }
 }
 
-async fn log_ids<S: Store>(db: &S, q: LogQuery) -> Got<Vec<i64>> {
+async fn log_ids<S: Store>(db: &S, q: LogQuery<'_>) -> Got<Vec<i64>> {
     Ok(ok("query_log", db.query_log(q).await)?
         .iter()
         .map(|e| e.id)
@@ -572,6 +568,216 @@ pub async fn log_query_and_cursor<S: Store>(db: &S) -> Check {
     let mut q = log_query();
     q.limit = 0;
     eq!("limit 0", log_ids(db, q).await?, Vec::new())
+}
+
+type Seeded = (
+    plumblog_model::UserId,
+    plumblog_model::UserId,
+    Vec<(&'static str, u64, i64)>,
+);
+
+/// Seven entries over two users. Ids do not follow `at_ms`; three rows share 200, three 300.
+async fn seed_filter_log<S: Store>(db: &S) -> Got<Seeded> {
+    let a = user(db, "alice").await?;
+    let b = user(db, "bob").await?;
+    let rid = |s: &str| RequestId::parse(s).ok_or("request id rejected");
+    // (name, event): ids do not follow at_ms; three rows share at_ms 200, three share 300.
+    let spec: Vec<(&str, Event)> = vec![
+        (
+            "in",
+            Event::new(EventKind::SignIn, rid("req-in")?, 100)
+                .actor(Some(a))
+                .subject("ann"),
+        ),
+        (
+            "fail",
+            Event::new(EventKind::SignInFailed, rid("req-fail")?, 200).subject("100%_done"),
+        ),
+        (
+            "err",
+            Event::new(EventKind::Error, rid("req-err")?, 200)
+                .error(ErrorCode::Storage)
+                .subject("Disk FULL"),
+        ),
+        (
+            "conf",
+            Event::new(EventKind::ContentChanged, rid("req-conf")?, 300)
+                .actor(Some(b))
+                .error(ErrorCode::Conflict)
+                .subject("post")
+                .field("note", "Hello World"),
+        ),
+        (
+            "dep",
+            Event::new(EventKind::Deploy, rid("req-dep")?, 200).subject("100x done"),
+        ),
+        (
+            "us",
+            Event::new(EventKind::SignIn, rid("req-us")?, 300).subject("a_c"),
+        ),
+        (
+            "abc",
+            Event::new(EventKind::SignIn, rid("req-abc")?, 300)
+                .actor(Some(a))
+                .subject(r"a\c abc"),
+        ),
+    ];
+    let mut ids = Vec::new();
+    for (name, e) in &spec {
+        let at = e.at_ms();
+        ids.push((*name, at, ok("append", db.append(e.clone()).await)?));
+    }
+    Ok((a, b, ids))
+}
+
+/// `ids` rows as ids, newest first, of the named entries.
+fn want(ids: &[(&str, u64, i64)], names: &[&str]) -> Vec<i64> {
+    let mut v: Vec<(u64, i64)> = ids
+        .iter()
+        .filter(|r| names.contains(&r.0))
+        .map(|r| (r.1, r.2))
+        .collect();
+    v.sort_unstable_by(|x, y| y.cmp(x));
+    v.into_iter().map(|r| r.1).collect()
+}
+
+const ALL_NAMES: [&str; 7] = ["in", "fail", "err", "conf", "dep", "us", "abc"];
+
+/// Every filter of `query_log` alone, and text search.
+pub async fn log_filters<S: Store>(db: &S) -> Check {
+    let (_, b, ids) = seed_filter_log(db).await?;
+    let want = |names: &[&str]| want(&ids, names);
+    let base = LogQuery {
+        limit: 100,
+        ..LogQuery::default()
+    };
+
+    let mut q = base;
+    q.min_severity = Some(Severity::Info);
+    eq!("info is no filter", log_ids(db, q).await?, want(&ALL_NAMES))?;
+    q.min_severity = Some(Severity::Warning);
+    // fail: kind warns; err: kind is an error; conf: the error code raises it.
+    eq!(
+        "level warning",
+        log_ids(db, q).await?,
+        want(&["fail", "err", "conf"])
+    )?;
+    q.min_severity = Some(Severity::Error);
+    eq!("level error", log_ids(db, q).await?, want(&["err"]))?;
+    q = base;
+    q.error_code = Some(ErrorCode::Conflict);
+    eq!("error code", log_ids(db, q).await?, want(&["conf"]))?;
+    q = base;
+    q.actor = Some(b);
+    eq!("actor", log_ids(db, q).await?, want(&["conf"]))?;
+    q = base;
+    q.text = Some("req-fail");
+    eq!("text: request id", log_ids(db, q).await?, want(&["fail"]))?;
+    q.text = Some("req-fai");
+    eq!(
+        "text: request id is exact",
+        log_ids(db, q).await?,
+        Vec::new()
+    )?;
+    q.text = Some("disk full");
+    eq!(
+        "text: subject, any case",
+        log_ids(db, q).await?,
+        want(&["err"])
+    )?;
+    q.text = Some("hello wor");
+    eq!("text: field value", log_ids(db, q).await?, want(&["conf"]))?;
+    q.text = Some("note");
+    eq!("text: field key", log_ids(db, q).await?, want(&["conf"]))?;
+    q.text = Some("100%");
+    eq!("text: % is literal", log_ids(db, q).await?, want(&["fail"]))?;
+    q.text = Some("a_c");
+    eq!("text: _ is literal", log_ids(db, q).await?, want(&["us"]))?;
+    q.text = Some(r"a\c");
+    eq!(
+        "text: backslash is literal",
+        log_ids(db, q).await?,
+        want(&["abc"])
+    )?;
+    q.text = Some("nothing like this");
+    eq!("text: no match", log_ids(db, q).await?, Vec::new())?;
+
+    Ok(())
+}
+
+/// Filters together, and pages that end inside a run of equal `at_ms`.
+pub async fn log_filters_combined_and_paged<S: Store>(db: &S) -> Check {
+    let (a, _, ids) = seed_filter_log(db).await?;
+    let want = |names: &[&str]| want(&ids, names);
+    let base = LogQuery {
+        limit: 100,
+        ..LogQuery::default()
+    };
+    let mut q;
+    q = base;
+    q.min_severity = Some(Severity::Warning);
+    q.from_ms = Some(200);
+    q.to_ms = Some(300);
+    eq!(
+        "level and range",
+        log_ids(db, q).await?,
+        want(&["fail", "err"])
+    )?;
+    q.kind = Some(EventKind::Error);
+    q.error_code = Some(ErrorCode::Storage);
+    q.text = Some("disk");
+    eq!(
+        "kind, level, code, range, text",
+        log_ids(db, q).await?,
+        want(&["err"])
+    )?;
+    q.actor = Some(a);
+    eq!(
+        "one more filter excludes it",
+        log_ids(db, q).await?,
+        Vec::new()
+    )?;
+    q = base;
+    q.kind = Some(EventKind::SignIn);
+    q.actor = Some(a);
+    eq!(
+        "kind and actor",
+        log_ids(db, q).await?,
+        want(&["in", "abc"])
+    )?;
+
+    // Pages of 2 across the equal-at_ms runs: each row once, in order.
+    for filter in [None, Some(Severity::Warning)] {
+        let mut q = LogQuery {
+            limit: 2,
+            min_severity: filter,
+            ..LogQuery::default()
+        };
+        let mut seen = Vec::new();
+        for _ in 0..10 {
+            let page = ok("query_log", db.query_log(q).await)?;
+            let Some(last) = page.last() else { break };
+            q.before = Some((last.event.at_ms(), last.id));
+            seen.extend(page.iter().map(|e| e.id));
+        }
+        let all = if filter.is_some() {
+            want(&["fail", "err", "conf"])
+        } else {
+            want(&["in", "fail", "err", "conf", "dep", "us", "abc"])
+        };
+        eq!("paging over equal at_ms", seen, all)?;
+    }
+
+    // The actor's name rides along; a system event has none.
+    let page = ok("query_log", db.query_log(base).await)?;
+    let name_of = |n: &str| {
+        let id = ids.iter().find(|r| r.0 == n).map(|r| r.2);
+        page.iter()
+            .find(|e| Some(e.id) == id)
+            .map(|e| e.actor_name.clone())
+    };
+    eq!("actor name", name_of("conf"), Some(Some("bob".to_owned())))?;
+    eq!("system event has no name", name_of("dep"), Some(None))
 }
 
 pub async fn log_prune<S: Store>(db: &S) -> Check {
@@ -904,11 +1110,8 @@ async fn moderation_log<S: Store>(
         "query_log",
         db.query_log(LogQuery {
             kind: Some(EventKind::CommentModerated),
-            actor: None,
-            from_ms: None,
-            to_ms: None,
-            before: None,
             limit: 10,
+            ..LogQuery::default()
         })
         .await,
     )?;

@@ -149,6 +149,8 @@ cases! {
     deliveries::deliveries_finish,
     deliveries::deliveries_cascade_and_prune,
     site::log_query_and_cursor,
+    site::log_filters,
+    site::log_filters_combined_and_paged,
     site::log_prune,
     site::log_detail_redacted,
     site::log_retention_job,
