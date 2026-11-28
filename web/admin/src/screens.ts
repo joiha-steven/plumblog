@@ -57,7 +57,7 @@ function settingsBox(me: Me, api: Api, section: string | undefined): HTMLElement
   const load = (): void => {
     box.replaceChildren(loadingRows(3));
     import("./settings").then(
-      (m) => m.mountSettings(box, api, { role: me.role, section, offline: () => !navigator.onLine }),
+      (m) => m.mountSettings(box, api, { role: me.role, userId: me.id, section, offline: () => !navigator.onLine }),
       (e: unknown) => {
         // A chunk that failed to load (offline, new deploy): say so instead of a blank screen.
         console.error("admin: settings failed to load", e);
