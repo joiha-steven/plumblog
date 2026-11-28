@@ -6,6 +6,7 @@
  */
 
 import { type Api, type ApiError, type Me, type Result, fail } from "../api/client";
+import { getOnce } from "../early";
 import { clearDrafts } from "../editor/drafts";
 import { ITERATIONS, stretch } from "./stretch";
 import { assertion, attestation, createOptions, getOptions, supported } from "./webauthn";
@@ -222,7 +223,7 @@ export function removePasskey(api: Api, id: number, how: Reauth, token?: string)
 
 export function listPasskeys(api: Api): Promise<Result<Passkey[]>> {
   return guard("passkey list", async () => {
-    const r = await api.call<{ passkeys: Passkey[] }>("GET", "/api/auth/passkey");
+    const r = await getOnce<{ passkeys: Passkey[] }>(api, "/api/auth/passkey");
     return r.ok ? ok(r.value.passkeys) : failed(r.error);
   });
 }
