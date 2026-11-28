@@ -12,6 +12,9 @@ unavailable = "Giao diện đã đẩy lên của trang không tải được, n
 [error.input]
 too_complex = "Yêu cầu này chứa quá nhiều mục. Bạn gửi ít hơn mỗi lần nhé."
 
+[error.user]
+last_owner = "Trang cần ít nhất một chủ đang hoạt động. Hãy cho một người khác làm chủ trước."
+
 [error.post]
 published_in_future = "Bài đã đăng không thể có ngày ở tương lai. Hãy hẹn giờ đăng, hoặc đăng ngay."
 
@@ -1309,6 +1312,7 @@ auth_passkey_removed = "Xóa khóa truy cập"
 auth_token_created = "Tạo mã truy cập API"
 auth_token_revoked = "Thu hồi mã truy cập API"
 user_created = "Thêm người dùng"
+user_changed = "Thay đổi người dùng"
 content_changed = "Nội dung thay đổi"
 settings_changed = "Cài đặt thay đổi"
 theme_changed = "Giao diện thay đổi"
@@ -1361,3 +1365,5 @@ comments_rate_limited = "Quá nhiều bình luận trong thời gian ngắn"
 theme_unavailable = "Giao diện không tải được"
 auth_reset_expired = "Liên kết đặt lại đã hết hạn"
 pages_store_failed = "Trang vẫn hiện bình thường nhưng chưa lưu được bản sao cho các vùng khác; lần xem sau sẽ lưu lại"
+user_last_owner = "Giữ lại chủ blog cuối cùng"
+

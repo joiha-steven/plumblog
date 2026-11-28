@@ -18,6 +18,10 @@ unavailable = "The site's pushed theme did not load, so its settings cannot be c
 # A JSON body with more values in all than the API takes (4096).
 too_complex = "This request holds too many items. Send less at a time."
 
+[error.user]
+# Demoting, disabling or deleting the only active owner is refused.
+last_owner = "The site needs at least one active owner. Make another user owner first."
+
 [syslog]
 # Shown in the system log wherever a secret or personal value was removed.
 redacted = "[hidden]"
@@ -1325,6 +1329,7 @@ auth_passkey_removed = "Passkey removed"
 auth_token_created = "API token created"
 auth_token_revoked = "API token revoked"
 user_created = "User added"
+user_changed = "User changed"
 content_changed = "Content changed"
 settings_changed = "Settings changed"
 theme_changed = "Theme changed"
@@ -1377,3 +1382,5 @@ comments_rate_limited = "Too many comments in a short time"
 theme_unavailable = "The theme did not load"
 auth_reset_expired = "The reset link expired"
 pages_store_failed = "A page was shown but could not be saved for other regions; it will be saved on a later visit"
+user_last_owner = "The last active owner was kept"
+

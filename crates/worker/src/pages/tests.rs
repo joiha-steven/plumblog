@@ -157,6 +157,21 @@ fn language_home_routes() {
 }
 
 #[test]
+fn search_routes() {
+    assert_eq!(parse("/search"), Route::Search { lang: None });
+    assert_eq!(
+        parse("/vi/search"),
+        Route::Search {
+            lang: Some("vi".into())
+        }
+    );
+    assert_eq!(parse("/vi/search/"), Route::Redirect("/vi/search".into()));
+    // Reserved first segments are not languages.
+    assert_eq!(parse("/api/search"), Route::NotFound);
+    assert_eq!(parse("/vi/search/x"), Route::NotFound);
+}
+
+#[test]
 fn routes_parse_to_one_canonical_url() {
     assert_eq!(parse("/"), Route::Home { page: 1 });
     assert_eq!(parse("/page/2"), Route::Home { page: 2 });

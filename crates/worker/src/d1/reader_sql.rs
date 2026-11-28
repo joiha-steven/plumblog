@@ -152,6 +152,19 @@ pub(super) fn sitemap() -> String {
     format!("{} UNION ALL {}", arm("post"), arm("page"))
 }
 
+/// Reader search: FTS5 `MATCH` first, then each hit's post by its integer primary key, with
+/// the status and language filter on that row. CROSS JOIN fixes the order: without it the
+/// planner (no ANALYZE on D1) drives from `posts_admin` and runs one MATCH per published post.
+/// The only TEMP B-TREE is the sort of the hits
+/// (a wide query is cut to `LIMIT` after it); there is no index on `published_at` to avoid it.
+pub(super) fn search() -> String {
+    format!(
+        "SELECT {SUMMARY_COLS} FROM posts_fts CROSS JOIN posts p ON p.id = posts_fts.rowid \
+         WHERE posts_fts MATCH ? AND p.status = 'published' AND p.lang = ? \
+         ORDER BY p.published_at DESC, p.id DESC LIMIT ?"
+    )
+}
+
 /// A published post or page at `(lang, slug)`: the unique `posts_lang_slug` lookup, no columns.
 pub(super) fn post_exists() -> String {
     "SELECT 1 FROM posts p WHERE p.lang = ? AND p.slug = ? AND p.status = 'published' LIMIT 1"
@@ -344,6 +357,31 @@ mod plans {
     }
 
     /// The language-home helpers: a point lookup, and one covering `EXISTS` per language.
+    /// Search reads the FTS5 hits, then their posts by primary key: no scan of `posts`.
+    #[test]
+    fn search_matches_first_then_reads_posts_by_primary_key() {
+        let c = db();
+        let lines = plan(&c, &search());
+        let all = lines.join("\n");
+        assert_eq!(
+            lines[0], "SCAN posts_fts VIRTUAL TABLE INDEX 0:M2",
+            "MATCH first:\n{all}"
+        );
+        assert!(
+            all.contains("SEARCH p USING INTEGER PRIMARY KEY (rowid=?)"),
+            "posts by rowid:\n{all}"
+        );
+        assert!(
+            !lines.iter().any(|l| l == "SCAN p"),
+            "no scan of posts:\n{all}"
+        );
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("TEMP B-TREE")).count(),
+            1,
+            "one sort of the hits:\n{all}"
+        );
+    }
+
     #[test]
     fn language_home_helpers_use_their_indexes() {
         let c = db();

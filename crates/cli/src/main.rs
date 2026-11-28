@@ -54,6 +54,9 @@ fn api_reference() -> String {
             let also: Vec<&str> = r.also.iter().map(|p| p.as_str()).collect();
             let _ = writeln!(o, "also, when the input calls for it: {}", also.join(", "));
         }
+        if r.session_only {
+            let _ = writeln!(o, "session only (API tokens get 403)");
+        }
         if !r.session_only_keys.is_empty() {
             let _ = writeln!(
                 o,
