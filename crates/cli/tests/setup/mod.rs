@@ -262,9 +262,9 @@ fn fresh_setup_writes_what_the_worker_reads_and_keeps_secrets_out_of_files() {
         setting(&fake, "setup_code_expires_at").unwrap(),
         (NOW + 24 * 3600 * 1000).to_string()
     );
-    // put_setting bumps the content version: origin and Turnstile key.
+    // put_setting bumps the content version: origin, Turnstile key and site language.
     let v = fake.sql("db-1", "SELECT content_version FROM site WHERE id = 1");
-    assert_eq!(v[0]["content_version"], 3);
+    assert_eq!(v[0]["content_version"], 4);
     // The Worker's create_first_owner guard accepts this code now, and not after expiry.
     let guard = |now: i64| {
         fake.sql(
@@ -1230,4 +1230,134 @@ fn a_migration_whose_record_fails_is_unrecorded_and_blocks_the_next_run() {
         Code::MigrationRestorePending
     );
     assert_eq!(changes(&fake.requests()[n..]), Vec::<String>::new());
+}
+
+#[test]
+fn setup_tells_the_owner_the_exact_setup_page() {
+    let (_, _, r) = fresh();
+    assert!(
+        r.out.contains(&format!("{ORIGIN}/admin/setup")),
+        "{}",
+        r.out
+    );
+    let vi = Text::new("vi");
+    let fake = Fake::start(site(ALL));
+    let dir = TempDir::new();
+    let r = run_with(
+        &fake,
+        &dir,
+        &Options::default(),
+        &migrations::bundled(),
+        &vi,
+    );
+    ok(&r);
+    assert!(
+        r.out.contains(&format!("{ORIGIN}/admin/setup")),
+        "{}",
+        r.out
+    );
+}
+
+fn fresh_in(lang: &str) -> (Fake, TempDir, Ran) {
+    let fake = Fake::start(site(ALL));
+    let dir = TempDir::new();
+    let r = run_with(
+        &fake,
+        &dir,
+        &Options::default(),
+        &migrations::bundled(),
+        &Text::new(lang),
+    );
+    ok(&r);
+    (fake, dir, r)
+}
+
+#[test]
+fn setup_writes_the_site_language_once_and_a_rerun_keeps_it() {
+    let (fake, dir, _) = fresh_in("vi");
+    assert_eq!(setting(&fake, "site_lang").unwrap(), "\"vi\"");
+    // A later choice (here set directly) is never overridden by another run.
+    fake.sql(
+        "db-1",
+        "UPDATE settings SET value_json = '\"fr\"' WHERE key = 'site_lang'",
+    );
+    ok(&run_with(
+        &fake,
+        &dir,
+        &Options::default(),
+        &migrations::bundled(),
+        &en(),
+    ));
+    assert_eq!(setting(&fake, "site_lang").unwrap(), "\"fr\"");
+    // Same without a manual edit: vi first, then en.
+    let (fake, dir, _) = fresh_in("vi");
+    ok(&run(&fake, &dir, &Options::default()));
+    assert_eq!(setting(&fake, "site_lang").unwrap(), "\"vi\"");
+}
+
+/// The binary resolves the language in the documented order and setup stores that one.
+#[test]
+fn the_site_language_follows_flag_then_env_then_os_locale_then_english() {
+    // (arguments, environment, expected language)
+    type Case = (
+        &'static [&'static str],
+        &'static [(&'static str, &'static str)],
+        &'static str,
+    );
+    let cases: [Case; 5] = [
+        (&["--lang", "vi", "setup"], &[("PLUMBLOG_LANG", "en")], "vi"),
+        (
+            &["setup"],
+            &[("PLUMBLOG_LANG", "vi"), ("LANG", "en_US.UTF-8")],
+            "vi",
+        ),
+        (&["setup"], &[("LANG", "vi_VN.UTF-8")], "vi"),
+        (&["setup"], &[("LANG", "fr_FR.UTF-8")], "en"),
+        (&["setup"], &[], "en"),
+    ];
+    for (args, env, want) in cases {
+        let fake = Fake::start(site(ALL));
+        let dir = TempDir::new();
+        dir.write_env(GOOD);
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_blog"))
+            .args(args)
+            .current_dir(&dir.0)
+            .env_remove("CLOUDFLARE_API_TOKEN")
+            .env_remove("CLOUDFLARE_ACCOUNT_ID")
+            .env_remove("PLUMBLOG_LANG")
+            .env_remove("LC_ALL")
+            .env_remove("LC_MESSAGES")
+            .env_remove("LANG")
+            .env("PLUMBLOG_CF_API_BASE", &fake.base)
+            .envs(env.iter().copied())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?} {env:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            setting(&fake, "site_lang").unwrap(),
+            format!("\"{want}\""),
+            "{args:?} {env:?}"
+        );
+    }
+}
+
+/// `site_lang` decides post URLs, so a site that already has users (an older one with no stored
+/// value) is never given one by a re-run.
+#[test]
+fn a_rerun_on_a_site_with_users_does_not_set_the_site_language() {
+    let (fake, dir, _) = fresh_in("en");
+    fake.sql("db-1", "DELETE FROM settings WHERE key = 'site_lang'");
+    add_owner(&fake);
+    ok(&run_with(
+        &fake,
+        &dir,
+        &Options::default(),
+        &migrations::bundled(),
+        &Text::new("vi"),
+    ));
+    assert_eq!(setting(&fake, "site_lang"), None);
 }
