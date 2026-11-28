@@ -175,7 +175,7 @@ fn single_etag(header: Option<&str>) -> Option<String> {
     (!tag.is_empty() && !tag.contains('"')).then(|| tag.to_owned())
 }
 
-fn random_id() -> String {
+pub(crate) fn random_id() -> String {
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,

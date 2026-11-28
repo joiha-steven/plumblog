@@ -1,0 +1,32 @@
+[
+  {
+    "params": [],
+    "sql": "DELETE FROM sessions"
+  },
+  {
+    "params": [
+      "$now"
+    ],
+    "sql": "UPDATE api_tokens SET revoked_at = ? WHERE revoked_at IS NULL"
+  },
+  {
+    "params": [],
+    "sql": "DELETE FROM invites WHERE used_at IS NULL"
+  },
+  {
+    "params": [],
+    "sql": "DELETE FROM auth_challenges"
+  },
+  {
+    "params": [
+      "owner_reset_hash",
+      "owner_reset_user",
+      "owner_reset_expires_at",
+      "owner_reset_at",
+      "owner_reset_keep_tokens",
+      "setup_code_hash",
+      "setup_code_expires_at"
+    ],
+    "sql": "DELETE FROM settings WHERE key IN (?, ?, ?, ?, ?, ?, ?)"
+  }
+]

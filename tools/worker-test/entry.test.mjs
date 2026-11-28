@@ -11,7 +11,9 @@ import { dirname, join, relative, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { ASSETS_DIR, seedSample, startWorker } from "./harness.mjs";
+import { DatabaseSync } from "node:sqlite";
+
+import { ASSETS_DIR, cacheFile, r2File, seedSample, startWorker } from "./harness.mjs";
 
 const MARK = "x-plumblog-entry";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -31,6 +33,25 @@ async function hit(w, path) {
     await sleep(100);
   }
   assert.fail(`${path} never came from cache`);
+}
+
+/** The running version's id (wrangler dev: a new one per start, as per deploy). */
+async function versionId(w) {
+  const res = await get(w, "/healthz");
+  await res.text();
+  return res.headers.get("x-plumblog-version");
+}
+
+/** Renames Cache API entries from one version id to another, as if they were stored by `to`. */
+function moveCacheEntries(w, from, to) {
+  const db = new DatabaseSync(cacheFile(w.state));
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    const n = db.prepare("UPDATE _mf_entries SET key = replace(key, ?, ?) WHERE key LIKE ?").run(`/__page/${from}/`, `/__page/${to}/`, `%/__page/${from}/%`).changes;
+    assert.ok(n > 0, `no Cache API entry under ${from}`);
+  } finally {
+    db.close();
+  }
 }
 
 /** The first request is a wasm miss; a later one is a hit from the JS entry with the same bytes. */
@@ -83,6 +104,21 @@ describe("embedded theme", () => {
       await assertMissThenJsHit(w, path);
     });
   }
+
+  test("the Cache API key is <origin>/__page/<version id>/v<content version><path>", async () => {
+    const path = "/archive/2025";
+    await hit(w, path);
+    const id = await versionId(w);
+    assert.match(id ?? "", /^[0-9a-f-]{8,}$/i);
+    const v = w.query("SELECT content_version FROM site WHERE id = 1")[0].content_version;
+    const db = new DatabaseSync(cacheFile(w.state));
+    try {
+      const keys = db.prepare("SELECT key FROM _mf_entries WHERE key LIKE ?").all(`%${path}`).map((r) => r.key);
+      assert.deepEqual(keys, [`${w.url}/__page/${id}/v${v}${path}`]);
+    } finally {
+      db.close();
+    }
+  });
 
   test("the query string is not part of the key", async () => {
     await hit(w, "/reading-on-screens");
@@ -173,9 +209,13 @@ describe("embedded theme", () => {
   test("a new isolate answers /healthz and cached pages without loading wasm", async () => {
     const paths = ["/", "/reading-on-screens", "/feed.xml"];
     for (const p of paths) await hit(w, p);
+    const oldId = await versionId(w);
     await w.stop({ keepState: true });
     // Same port: the cache key carries the origin.
     w = await startWorker({ state: w.state, port: Number(new URL(w.url).port) });
+    // The key carries the version id and a restart is a new version (r2pages.test.mjs proves
+    // old entries are then never served); moving them stands in for a new isolate of one version.
+    moveCacheEntries(w, oldId, await versionId(w));
     const health = await get(w, "/healthz");
     assert.equal(health.headers.get(MARK), "js");
     assert.equal(health.headers.get("x-plumblog-wasm"), null, "healthz loaded wasm");
@@ -183,6 +223,7 @@ describe("embedded theme", () => {
     for (const p of paths) {
       const r = await read(w, p);
       assert.equal(r.res.headers.get(MARK), "js", `${p}: cache survived the restart`);
+      assert.equal(r.res.headers.get("x-plumblog-cache"), "hit", p);
       assert.equal(r.res.headers.get("x-plumblog-wasm"), null, `${p} loaded wasm`);
     }
     const miss = await read(w, "/no-such-post");
@@ -206,8 +247,8 @@ describe("embedded theme", () => {
       w.exec("ALTER TABLE site_gone RENAME TO site");
     }
     // wrangler's log arrives a moment after the response, longer when the machine is busy.
-    for (let i = 0; i < 50 && !/entry: cache fast path failed, wasm takes over/.test(w.log()); i++) await sleep(100);
-    assert.match(w.log(), /entry: cache fast path failed, wasm takes over/);
+    for (let i = 0; i < 50 && !/entry: cache or R2 fast path failed, wasm takes over/.test(w.log()); i++) await sleep(100);
+    assert.match(w.log(), /entry: cache or R2 fast path failed, wasm takes over/);
     assert.equal((await hit(w, path)).res.headers.get(MARK), "js", "recovers once D1 is back");
   });
 });
@@ -286,6 +327,40 @@ describe("pushed theme", () => {
     assert.equal(res.headers.get(MARK), "js");
   });
 
+  test("with the tag binding, a miss is stored in R2 under the tagged key and served from it with the theme header", async () => {
+    const w = workers.tagged;
+    const path = "/tag/tools";
+    const miss = await read(w, path);
+    assert.equal(miss.res.headers.get("x-plumblog-cache"), "miss");
+    const v = w.query("SELECT content_version FROM site WHERE id = 1")[0].content_version;
+    const key = `pages/${await versionId(w)}/v${v}-t${hash.slice(0, 16)}${path}`;
+    const sql = (file, q, ...args) => {
+      const db = new DatabaseSync(file);
+      try {
+        db.exec("PRAGMA busy_timeout = 5000");
+        return db.prepare(q).all(...args);
+      } finally {
+        db.close();
+      }
+    };
+    let row;
+    for (let i = 0; i < 50 && !row; i++) {
+      const f = r2File(w.state);
+      row = f && sql(f, "SELECT custom_metadata FROM _mf_objects WHERE key = ?", key)[0];
+      if (!row) await sleep(100);
+    }
+    assert.ok(row, `${key} never reached R2`);
+    assert.equal(JSON.parse(row.custom_metadata)["x-plumblog-theme"], hash.slice(0, 16));
+    // Emptied, as in a data centre that never served it: the entry serves the R2 copy.
+    sql(cacheFile(w.state), "DELETE FROM _mf_entries RETURNING key");
+    const r = await read(w, path);
+    assert.equal(r.res.headers.get("x-plumblog-cache"), "store");
+    assert.equal(r.res.headers.get(MARK), "js");
+    assert.equal(r.res.headers.get("x-plumblog-theme"), hash.slice(0, 16));
+    assert.equal(r.res.headers.get("etag"), miss.res.headers.get("etag"));
+    assert.equal(r.body, miss.body);
+  });
+
   for (const k of ["untagged", "badtag"]) {
     test(`${k}: hits still happen, from wasm`, async () => {
       const w = workers[k];
@@ -309,11 +384,13 @@ describe("pushed theme", () => {
     assert.equal(next.res.headers.get(MARK), null);
   });
 
-  // Documented behaviour (ARCHITECTURE, `PLUMBLOG_THEME_TAG`): deploy refuses a broken theme.json, so
-  // a theme that stops loading is a transient asset failure inside one version. A warm tagged hit
-  // is still served by the entry, with the pushed theme's header: the cached page is that theme's
-  // correct page, which beats the default-theme fallback wasm would render.
-  test("a warm tagged hit is still served when theme.json stops loading", async () => {
+  // Documented behaviour (ARCHITECTURE, `PLUMBLOG_THEME_TAG`): page keys (Cache API and R2) carry the
+  // Worker version id and the theme tag, so a version only reads pages it rendered itself. A new
+  // version (here: a restart, which gets a new id) whose theme.json fails to load never serves the
+  // earlier version's warm tagged page: wasm renders the default theme, logs it, and the control
+  // shows a version with a good theme warming its own keys. (A fresh isolate of the SAME version
+  // would find its own warm key and serve it; local runs cannot keep an id across a restart.)
+  test("a new version whose theme.json fails to load never reads the earlier version's tagged pages", async () => {
     const t = pushedThemeJson("paper");
     const vars = { PLUMBLOG_THEME: "paper", PLUMBLOG_THEME_TAG: t.hash.slice(0, 16) };
     let w = await startWorker({ vars, assets: assetsWith("paper", t.json) });
@@ -325,12 +402,15 @@ describe("pushed theme", () => {
       const port = Number(new URL(w.url).port);
       w = await startWorker({ state: w.state, port, vars, assets: assetsWith("paper", "{not json") });
       const res = await get(w, "/reading-on-screens");
-      assert.equal(res.headers.get(MARK), "js", "warm tagged key served by the entry");
-      assert.equal(res.headers.get("x-plumblog-theme"), t.hash.slice(0, 16));
-      // Control: the tagged entry was still warm, so the good theme brings the JS hit back.
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get(MARK), null, "wasm answered");
+      assert.equal(res.headers.get("x-plumblog-cache"), "miss");
+      assert.equal(res.headers.get("x-plumblog-theme"), null, "the default theme, not the pushed one");
       await w.stop({ keepState: true });
+      // Control: a version with the good theme starts cold and warms its own tagged keys.
       w = await startWorker({ state: w.state, port, vars, assets: assetsWith("paper", t.json) });
-      assert.equal((await get(w, "/reading-on-screens")).headers.get(MARK), "js", "control: warm tagged key");
+      const h = await assertMissThenJsHit(w, "/reading-on-screens");
+      assert.equal(h.res.headers.get("x-plumblog-theme"), t.hash.slice(0, 16));
     } finally {
       await w.stop();
     }
