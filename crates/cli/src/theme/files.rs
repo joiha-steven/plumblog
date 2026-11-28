@@ -1,8 +1,10 @@
 //! A theme or plugin folder read from disk as the render crate's [`ThemeFiles`]. Text files
 //! carry their text; every other file is listed with empty text, so the loader sees that it
-//! exists (the Worker does the same for fonts and images).
+//! exists (the Worker does the same for fonts and images). The loader sees TOML files the way
+//! the Worker does, as JSON under `<path>.json` (`plumblog_render::convert`).
 
 use plumblog_render::ThemeFiles;
+use plumblog_render::convert;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -27,6 +29,10 @@ pub struct DirFiles {
     /// Files outside `assets/` that are not UTF-8 text (a push cannot carry them as text).
     pub not_text: Vec<String>,
     pub too_many: bool,
+    /// TOML files outside `assets/` as JSON, by [`convert::json_name`].
+    converted: BTreeMap<String, String>,
+    /// `(path, message)` of each TOML file that does not convert; the loader never sees it.
+    pub convert_errors: Vec<(String, String)>,
 }
 
 impl DirFiles {
@@ -38,7 +44,35 @@ impl DirFiles {
         let mut out = Self::default();
         out.walk(dir, "")?;
         out.entries.sort();
+        out.convert();
         Ok(out)
+    }
+
+    fn convert(&mut self) {
+        for (path, text) in &self.entries {
+            let Some(name) = convert::json_name(path).filter(|_| !path.starts_with("assets/"))
+            else {
+                continue;
+            };
+            match convert::file(path, text) {
+                Ok(json) => {
+                    self.converted.insert(name, json);
+                }
+                Err(e) => self.convert_errors.push((path.clone(), e)),
+            }
+        }
+    }
+
+    /// The text files outside `assets/` as a push carries them: TOML as its JSON form.
+    #[must_use]
+    pub fn document(&self) -> BTreeMap<&str, &str> {
+        let own = self
+            .entries
+            .iter()
+            .filter(|(p, _)| !p.starts_with("assets/") && convert::json_name(p).is_none())
+            .map(|(p, t)| (p.as_str(), t.as_str()));
+        let json = self.converted.iter().map(|(p, t)| (p.as_str(), t.as_str()));
+        own.chain(json).collect()
     }
 
     fn walk(&mut self, dir: &Path, prefix: &str) -> std::io::Result<()> {
@@ -118,25 +152,48 @@ impl DirFiles {
 
 impl ThemeFiles for DirFiles {
     fn read(&self, path: &str) -> Option<&str> {
-        self.read_file(path)
+        self.converted
+            .get(path)
+            .map(String::as_str)
+            .or_else(|| self.read_file(path))
     }
+    /// The TOML files are listed as their JSON form only, as the Worker lists them.
     fn paths(&self) -> Vec<&str> {
-        self.entries.iter().map(|(p, _)| p.as_str()).collect()
+        let own = self
+            .entries
+            .iter()
+            .filter(|(p, _)| p.starts_with("assets/") || convert::json_name(p).is_none())
+            .map(|(p, _)| p.as_str());
+        own.chain(self.converted.keys().map(String::as_str))
+            .collect()
     }
 }
 
-/// The default theme the binary carries (`themes/minimal`), text files only for the loader.
+/// The default theme the binary carries (`themes/minimal`), text files only for the loader,
+/// TOML as JSON like everything the loader reads.
 pub struct Embedded {
-    entries: Vec<(&'static str, &'static str)>,
+    entries: Vec<(String, String)>,
 }
 
 impl Embedded {
+    /// # Panics
+    /// The default theme's TOML does not convert; the Worker's build and the tests catch that.
     #[must_use]
     pub fn default_theme() -> Self {
         Self {
             entries: super::embed::THEME_FILES
                 .iter()
-                .map(|(p, b)| (*p, std::str::from_utf8(b).unwrap_or_default()))
+                .map(|(p, b)| {
+                    let text = std::str::from_utf8(b).unwrap_or_default();
+                    match convert::json_name(p) {
+                        Some(name) => (
+                            name,
+                            // The Worker's build converts the same files and fails if it cannot.
+                            convert::file(p, text).expect("the default theme's TOML converts"),
+                        ),
+                        None => ((*p).to_owned(), text.to_owned()),
+                    }
+                })
                 .collect(),
         }
     }
@@ -146,10 +203,10 @@ impl ThemeFiles for Embedded {
     fn read(&self, path: &str) -> Option<&str> {
         self.entries
             .iter()
-            .find(|(p, _)| *p == path)
-            .map(|(_, t)| *t)
+            .find(|(p, _)| p == path)
+            .map(|(_, t)| t.as_str())
     }
     fn paths(&self) -> Vec<&str> {
-        self.entries.iter().map(|(p, _)| *p).collect()
+        self.entries.iter().map(|(p, _)| p.as_str()).collect()
     }
 }

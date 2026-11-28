@@ -15,8 +15,9 @@ path = "src/bin/blog-release.rs"
 
 [dependencies]
 clap.workspace = true
-plumblog-i18n.workspace = true
-plumblog-render.workspace = true
+# The `toml` features convert authored TOML to the JSON the Worker loads (theme check, push).
+plumblog-i18n = { workspace = true, features = ["toml"] }
+plumblog-render = { workspace = true, features = ["toml"] }
 # `blog theme dev` and `theme check` render the sample posts the way saving a post does.
 plumblog-markdown.workspace = true
 ureq.workspace = true

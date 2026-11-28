@@ -11,6 +11,7 @@ use crate::text::Text;
 use plumblog_i18n::{Key, key};
 use plumblog_render::PushedTheme;
 use plumblog_render::THEME_API;
+use plumblog_render::convert;
 use plumblog_render::pushed::{
     ASSETS_DIR, MAX_DOCUMENT, asset_path, asset_url, document_path, valid_name,
 };
@@ -149,18 +150,24 @@ pub fn build(dir: &Path) -> Result<Built, (String, Why)> {
             files.insert(rel.clone(), text);
         }
     }
-    let manifest: toml::Table = files
-        .get("theme.toml")
-        .map(|t| toml::from_str(t))
-        .transpose()
-        .map_err(|e| {
-            (
-                dir.join("theme.toml").display().to_string(),
-                Why::Data(e.to_string()),
-            )
-        })?
+    // The Worker reads TOML as JSON (`plumblog_render::convert`): the document carries that
+    // form only, so the same text is hashed, stored and served.
+    let toml_paths: Vec<String> = files
+        .keys()
+        .filter(|p| convert::json_name(p).is_some())
+        .cloned()
+        .collect();
+    for path in toml_paths {
+        let text = files.remove(&path).unwrap_or_default();
+        let json = convert::file(&path, &text)
+            .map_err(|e| (dir.join(&path).display().to_string(), Why::Data(e)))?;
+        files.insert(convert::json_name(&path).unwrap_or_default(), json);
+    }
+    let manifest: serde_json::Value = files
+        .get("theme.toml.json")
+        .and_then(|t| serde_json::from_str(t).ok())
         .unwrap_or_default();
-    let field = |k: &str| manifest.get(k).and_then(toml::Value::as_str).unwrap_or("");
+    let field = |k: &str| manifest.get(k).and_then(|v| v.as_str()).unwrap_or("");
     let name = field("name").to_owned();
     if !valid_name(&name) {
         return Err((

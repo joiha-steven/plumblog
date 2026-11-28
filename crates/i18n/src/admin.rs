@@ -1,85 +1,94 @@
 //! The admin client's UI text, built into its bundle rather than the Worker
 //! (docs/ARCHITECTURE.md, Admin and editor): one ES module per language, written by
-//! `scripts/admin-build` through `examples/admin_locales.rs`.
+//! `scripts/admin-build` through `examples/admin_locales.rs`. Building from the TOML locale
+//! files needs the `toml` feature; the Worker only escapes strings.
 
-use crate::parse;
-use plumblog_model::Result;
-use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 
-/// Locale sections the admin client uses: its own text and the error codes the API answers
-/// with.
-pub const ADMIN_SECTIONS: &[&str] = &["admin.", "error."];
+#[cfg(feature = "toml")]
+pub use build::{ADMIN_SECTIONS, admin_module, admin_text};
 
-/// One language's admin text with English behind it, as a module:
-/// `export default {"messages":{...},"fallback":{...}};`. `fallback` holds the English keys
-/// the language lacks; a plural message the language has in any form takes no English forms.
-///
-/// # Errors
-///
-/// A locale file that does not parse.
-pub fn admin_module(own_src: &str, en_src: &str, is_en: bool) -> Result<String> {
-    let (own, fallback) = admin_text(own_src, en_src, is_en)?;
-    let map = |m: &BTreeMap<String, String>| {
-        let items: Vec<String> = m
-            .iter()
-            .map(|(k, v)| format!("{}:{}", json_string(k), json_string(v)))
-            .collect();
-        format!("{{{}}}", items.join(","))
-    };
-    Ok(format!(
-        "export default {{\"messages\":{},\"fallback\":{}}};\n",
-        map(&own),
-        map(&fallback)
-    ))
-}
+#[cfg(feature = "toml")]
+mod build {
+    use super::json_string;
+    use crate::parse_toml;
+    use plumblog_model::Result;
+    use std::collections::{BTreeMap, HashMap};
 
-/// The messages and English fallback [`admin_module`] writes.
-///
-/// # Errors
-///
-/// A locale file that does not parse.
-pub fn admin_text(
-    own_src: &str,
-    en_src: &str,
-    is_en: bool,
-) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
-    let own = sections(parse(own_src)?);
-    let fallback = if is_en {
-        BTreeMap::new()
-    } else {
-        sections(parse(en_src)?)
-            .into_iter()
-            .filter(|(k, _)| !has_base(&own, k))
+    /// Locale sections the admin client uses: its own text and the error codes the API answers
+    /// with.
+    pub const ADMIN_SECTIONS: &[&str] = &["admin.", "error."];
+
+    /// One language's admin text with English behind it, as a module:
+    /// `export default {"messages":{...},"fallback":{...}};`. `fallback` holds the English keys
+    /// the language lacks; a plural message the language has in any form takes no English forms.
+    ///
+    /// # Errors
+    ///
+    /// A locale file that does not parse.
+    pub fn admin_module(own_src: &str, en_src: &str, is_en: bool) -> Result<String> {
+        let (own, fallback) = admin_text(own_src, en_src, is_en)?;
+        let map = |m: &BTreeMap<String, String>| {
+            let items: Vec<String> = m
+                .iter()
+                .map(|(k, v)| format!("{}:{}", json_string(k), json_string(v)))
+                .collect();
+            format!("{{{}}}", items.join(","))
+        };
+        Ok(format!(
+            "export default {{\"messages\":{},\"fallback\":{}}};\n",
+            map(&own),
+            map(&fallback)
+        ))
+    }
+
+    /// The messages and English fallback [`admin_module`] writes.
+    ///
+    /// # Errors
+    ///
+    /// A locale file that does not parse.
+    pub fn admin_text(
+        own_src: &str,
+        en_src: &str,
+        is_en: bool,
+    ) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
+        let own = sections(parse_toml(own_src)?);
+        let fallback = if is_en {
+            BTreeMap::new()
+        } else {
+            sections(parse_toml(en_src)?)
+                .into_iter()
+                .filter(|(k, _)| !has_base(&own, k))
+                .collect()
+        };
+        Ok((own, fallback))
+    }
+
+    fn sections(all: HashMap<String, String>) -> BTreeMap<String, String> {
+        all.into_iter()
+            .filter(|(k, _)| ADMIN_SECTIONS.iter().any(|s| k.starts_with(s)))
             .collect()
-    };
-    Ok((own, fallback))
-}
-
-fn sections(all: HashMap<String, String>) -> BTreeMap<String, String> {
-    all.into_iter()
-        .filter(|(k, _)| ADMIN_SECTIONS.iter().any(|s| k.starts_with(s)))
-        .collect()
-}
-
-/// Whether `own` has `key`, counting a plural message in any of its forms (`a.n.one` vs
-/// `a.n.other`), so a language with fewer forms does not get English forms mixed in.
-fn has_base(own: &BTreeMap<String, String>, key: &str) -> bool {
-    if own.contains_key(key) {
-        return true;
     }
-    match key.rsplit_once('.') {
-        Some((base, form)) if is_plural_form(form) => own.keys().any(|k| {
-            k.strip_prefix(base)
-                .and_then(|r| r.strip_prefix('.'))
-                .is_some_and(is_plural_form)
-        }),
-        _ => false,
-    }
-}
 
-fn is_plural_form(s: &str) -> bool {
-    matches!(s, "zero" | "one" | "two" | "few" | "many" | "other")
+    /// Whether `own` has `key`, counting a plural message in any of its forms (`a.n.one` vs
+    /// `a.n.other`), so a language with fewer forms does not get English forms mixed in.
+    fn has_base(own: &BTreeMap<String, String>, key: &str) -> bool {
+        if own.contains_key(key) {
+            return true;
+        }
+        match key.rsplit_once('.') {
+            Some((base, form)) if is_plural_form(form) => own.keys().any(|k| {
+                k.strip_prefix(base)
+                    .and_then(|r| r.strip_prefix('.'))
+                    .is_some_and(is_plural_form)
+            }),
+            _ => false,
+        }
+    }
+
+    fn is_plural_form(s: &str) -> bool {
+        matches!(s, "zero" | "one" | "two" | "few" | "many" | "other")
+    }
 }
 
 /// A JSON string literal, also safe as a JS string (line and paragraph separators escaped).
@@ -107,7 +116,7 @@ pub fn json_string(s: &str) -> String {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "toml"))]
 mod tests {
     use super::{admin_module, admin_text, json_string};
 

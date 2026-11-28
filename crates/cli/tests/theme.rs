@@ -614,7 +614,8 @@ fn check_and_push_refuse_a_theme_over_the_document_cap() {
     let (_t, dir) = fresh_theme("t");
     let max = plumblog_render::pushed::MAX_DOCUMENT;
     edit(&dir, "locales/en.toml", |s| {
-        format!("{s}\n# {}\n", "x".repeat(max))
+        // Text, not a comment: only values reach the document (a push carries TOML as JSON).
+        format!("{s}\n[pad]\nx = \"{}\"\n", "x".repeat(max))
     });
     let f = findings(&dir);
     assert!(
@@ -734,4 +735,64 @@ fn plugin_check_flags_a_bad_plugin() {
             .any(|x| x.kind == Kind::PluginLoad && x.file == "partials/footer.html"),
         "{f:?}"
     );
+}
+
+/// The Worker loads JSON only; `blog` converts, so a TOML mistake must reach the author here,
+/// naming the file and the line, not as a failure on the site.
+#[test]
+fn check_names_the_toml_file_and_line_that_does_not_convert() {
+    let detail = |f: &[Finding], file: &str| {
+        f.iter()
+            .find(|x| x.file == file && x.level == Level::Error)
+            .map(|x| format!("{x:?}"))
+            .unwrap_or_default()
+    };
+    for (file, bad) in [
+        ("theme.toml", "name = \"t\"\nbroken = =\n"),
+        ("locales/en.toml", "[a]\nbroken = =\n"),
+    ] {
+        let (_t, dir) = fresh_theme("t");
+        edit(&dir, file, |s| format!("{s}\n{bad}"));
+        let f = findings(&dir);
+        assert!(
+            f.iter()
+                .any(|x| x.kind == Kind::ThemeLoad && x.file == file && x.line.is_some()),
+            "{file}: {f:#?}"
+        );
+        assert!(detail(&f, file).contains("TOML parse error"), "{file}");
+    }
+    // A mistyped manifest value is a type error: the TOML position, not a JSON one.
+    let (_t, dir) = fresh_theme("t");
+    edit(&dir, "theme.toml", |s| {
+        s.replacen("slots = [", "slots = 5\n#[", 1)
+    });
+    let f = findings(&dir);
+    assert!(has(&f, Kind::ThemeLoad, "theme.toml", Some(7)), "{f:#?}");
+    // Plugins too.
+    let (_t, dir) = hello();
+    edit(&dir, "plugin.toml", |s| format!("{s}\nbroken = =\n"));
+    let f = plugin_findings(&dir);
+    assert!(
+        f.iter()
+            .any(|x| x.kind == Kind::PluginLoad && x.file == "plugin.toml" && x.line.is_some()),
+        "{f:#?}"
+    );
+}
+
+/// A push carries TOML as JSON under `<path>.json`, never as TOML text.
+#[test]
+fn push_builds_the_api_2_document_without_toml_text() {
+    let (_t, dir) = fresh_theme("t");
+    let built = theme::store::build(&dir).unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(built.doc.api, plumblog_render::THEME_API);
+    assert_eq!(built.doc.api, 2);
+    let files = &built.doc.files;
+    assert!(files.contains_key("theme.toml.json") && files.contains_key("locales/en.toml.json"));
+    assert!(
+        !files
+            .keys()
+            .any(|p| plumblog_render::convert::json_name(p).is_some()),
+        "{files:?}"
+    );
+    assert!(files["locales/en.toml.json"].starts_with('{'));
 }

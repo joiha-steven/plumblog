@@ -8,6 +8,9 @@
 //! assets/              served at <assets_url>/<path in assets/>
 //! locales/<lang>.toml  the plugin's own text; partials call t("section.key")
 //! ```
+//!
+//! The loader reads the TOML files as JSON under `<name>.json` (`plugin.toml.json`, ...):
+//! see [`crate::convert`].
 
 use crate::SLOTS;
 use crate::css;
@@ -16,9 +19,12 @@ use crate::theme::{Catalogs, ThemeError, ThemeFiles, catalogs, locale_strings};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
+/// The manifest as the loader reads it (`plugin.toml` converted to JSON).
+pub(crate) const MANIFEST: &str = "plugin.toml.json";
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Manifest {
+pub(crate) struct Manifest {
     name: String,
     version: String,
     #[serde(default)]
@@ -79,9 +85,9 @@ impl Plugin {
             ));
         }
         let src = files
-            .read("plugin.toml")
-            .ok_or_else(|| err("plugin.toml is missing".into()))?;
-        let m: Manifest = toml::from_str(src).map_err(|e| err(format!("plugin.toml: {e}")))?;
+            .read(MANIFEST)
+            .ok_or_else(|| err(format!("{MANIFEST} is missing")))?;
+        let m: Manifest = serde_json::from_str(src).map_err(|e| err(format!("{MANIFEST}: {e}")))?;
         if m.name != folder {
             return Err(err(format!(
                 "plugin.toml: name {:?} must match the folder name",
@@ -98,7 +104,7 @@ impl Plugin {
         }
         for path in files.paths() {
             let top = path.split('/').next().unwrap_or_default();
-            if !(path == "plugin.toml" || matches!(top, "partials" | "assets" | "locales")) {
+            if !(path == MANIFEST || matches!(top, "partials" | "assets" | "locales")) {
                 return Err(err(format!(
                     "{path}: not part of a plugin (plugin.toml, partials/, assets/, locales/)"
                 )));
