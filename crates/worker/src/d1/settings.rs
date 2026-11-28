@@ -19,6 +19,19 @@ impl SettingsStore for D1Store {
     }
 
     // 1 query.
+    async fn settings_updated_at(&self) -> Result<Option<i64>> {
+        let s = self.stmt(
+            "settings_updated_at",
+            "SELECT MAX(updated_at) FROM settings",
+            &[],
+        )?;
+        match self.row(s).await? {
+            Some(mut r) => r.opt_int(),
+            None => Ok(None),
+        }
+    }
+
+    // 1 query.
     async fn get_setting(&self, key: &str) -> Result<Option<String>> {
         let s = self.stmt(
             "get_setting",

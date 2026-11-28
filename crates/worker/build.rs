@@ -43,11 +43,29 @@ fn main() {
 
     embed_locales(&root.join("locales"), &mut out);
 
+    let sample_out = embed_sample(&sample);
+
+    fs::write(
+        PathBuf::from(env::var("OUT_DIR").unwrap()).join("embedded.rs"),
+        out,
+    )
+    .unwrap();
+    fs::write(
+        PathBuf::from(env::var("OUT_DIR").unwrap()).join("sample.rs"),
+        sample_out,
+    )
+    .unwrap();
+}
+
+/// The sample posts and site as Rust statics (`pages/sample.rs` includes them; test builds
+/// only).
+fn embed_sample(sample: &Path) -> String {
+    let mut sample_out = String::new();
     let mut posts = Vec::new();
-    walk(&sample, &mut posts);
+    walk(sample, &mut posts);
     posts.retain(|p| p.extension().is_some_and(|e| e == "txt") && !p.ends_with("site.txt"));
     posts.sort();
-    out.push_str("pub static SAMPLE_POSTS: &[SamplePost] = &[\n");
+    sample_out.push_str("pub static SAMPLE_POSTS: &[SamplePost] = &[\n");
     for p in &posts {
         let text = fs::read_to_string(p).unwrap();
         let (head, body) = text
@@ -67,16 +85,18 @@ fn main() {
             .map(str::to_owned)
             .collect();
         writeln!(
-            out,
-            "    SamplePost {{ slug: {slug:?}, title: {:?}, date: {:?}, pinned: {}, excerpt: {:?}, tags: &{tags:?}, markdown: {body:?} }},",
+            sample_out,
+            "    SamplePost {{ slug: {slug:?}, title: {:?}, date: {:?}, pinned: {}, excerpt: {:?}, tags: &{tags:?}, lang: {:?}, translation_of: {:?}, markdown: {body:?} }},",
             field("title"),
             field("date"),
             field("pinned") == "yes",
             field("excerpt"),
+            field("lang"),
+            field("translation_of"),
         )
         .unwrap();
     }
-    out.push_str("];\n");
+    sample_out.push_str("];\n");
 
     let site = fs::read_to_string(sample.join("site.txt")).unwrap();
     let get = |name: &str| -> String {
@@ -85,9 +105,15 @@ fn main() {
             .map(|v| v.trim().to_owned())
             .unwrap_or_default()
     };
+    let languages: Vec<String> = get("languages")
+        .split(',')
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
     writeln!(
-        out,
-        "pub static SAMPLE_SITE: SampleSite = SampleSite {{ title: {:?}, description: {:?}, footer: {:?}, lang: {:?}, per_page: {}, origin: {:?}, updated: {:?} }};",
+        sample_out,
+        "pub static SAMPLE_SITE: SampleSite = SampleSite {{ title: {:?}, description: {:?}, footer: {:?}, lang: {:?}, languages: &{languages:?}, per_page: {}, origin: {:?}, updated: {:?} }};",
         get("title"),
         get("description"),
         get("footer"),
@@ -99,12 +125,7 @@ fn main() {
             .expect("sample/site.txt: updated must be a YYYY-MM-DD date"),
     )
     .unwrap();
-
-    fs::write(
-        PathBuf::from(env::var("OUT_DIR").unwrap()).join("embedded.rs"),
-        out,
-    )
-    .unwrap();
+    sample_out
 }
 
 /// Bundled plugins (docs/ARCHITECTURE.md, Plugins and options). Text files are embedded;

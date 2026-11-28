@@ -44,7 +44,7 @@ before(async () => {
     const res = await fetch(`${w.url}/__seed`, { method: "POST" });
     assert.equal(res.status, 200, await res.text());
     sql(
-      "INSERT INTO settings (key, value_json, updated_at) VALUES ('comments.enabled', 'true', 0), " +
+      "INSERT OR REPLACE INTO settings (key, value_json, updated_at) VALUES ('comments.enabled', 'true', 0), " +
         `('origin', '"${w.url}"', 0), ('turnstile_site_key', '"${SITE_KEY}"', 0); ` +
         "UPDATE posts SET comments_enabled = 1 WHERE slug = 'first-post'; UPDATE site SET content_version = content_version + 1",
       w,
@@ -394,7 +394,11 @@ test("closed comments are refused: post off, draft, site off", async () => {
   };
   await closed("/slow-mornings");
   assert.match(commentsOf(await (await get("/slow-mornings")).text()), /Comments are closed\./);
-  await closed("/why-small-tools");
+  // A draft has no public page, so its form is a 404 like a missing post (it was "closed"
+  // while the reader site served only the sample).
+  const draft = snapshot();
+  assert.equal((await send({ name: "A", body: "hi" }, opts("/why-small-tools"))).status, 404);
+  assert.deepEqual(snapshot(), draft);
   const before = snapshot();
   assert.equal((await send({ name: "A", body: "hi" }, opts("/no-such-post"))).status, 404);
   assert.deepEqual(snapshot(), before);
