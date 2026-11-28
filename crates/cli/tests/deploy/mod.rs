@@ -322,6 +322,8 @@ fn happy_deploy_runs_the_steps_in_order_with_the_documented_shapes() {
             format!("POST {w}/deployments"),
             format!("GET {HOST}/healthz"),
             format!("GET {HOST}/"),
+            // The second `/` checks the cache-hit theme.
+            format!("GET {HOST}/"),
             format!("PUT {w}/schedules"),
         ]
     );
@@ -593,8 +595,9 @@ fn a_slow_site_within_the_budget_passes() {
     fake.state().site.ready_after = 4;
     let r = deploy(&fake, &dir, &bundle);
     ok(&r);
-    // Waited 1 + 2 + 4 + 8 s of virtual time (plus the real milliseconds of the calls).
-    assert!(r.clock >= Duration::from_secs(15) && r.clock < Duration::from_secs(16));
+    // Waited 1 + 2 + 4 + 8 s of virtual time, plus 1 s before the JS-hit probe (and the real
+    // milliseconds of the calls).
+    assert!(r.clock >= Duration::from_secs(16) && r.clock < Duration::from_secs(17));
     assert_eq!(
         fake.requests()
             .iter()
@@ -1281,6 +1284,7 @@ fn a_new_custom_domain_is_checked_on_workers_dev_and_only_warned_about() {
     assert_eq!(
         smoke_hosts(&fake, 0),
         [
+            "plumblog.steven.workers.dev",
             "plumblog.steven.workers.dev",
             "plumblog.steven.workers.dev",
             "blog.example.com"

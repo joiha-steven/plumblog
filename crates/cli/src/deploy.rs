@@ -35,6 +35,8 @@ pub const VERSION_HEADER: &str = "x-plumblog-version";
 pub const VERSION_BINDING: &str = "CF_VERSION_METADATA";
 /// Plain-text binding naming the active pushed theme (crates/worker `theme_runtime`).
 pub const THEME_BINDING: &str = "PLUMBLOG_THEME";
+/// `x-plumblog-theme` of the pushed theme, for the Worker's JS cache fast path.
+pub const THEME_TAG_BINDING: &str = "PLUMBLOG_THEME_TAG";
 /// Test-only smoke target instead of the site's origin; loopback only, like the API base.
 /// Requests go to `<base>/<host><path>`, so a test server tells the hosts apart.
 pub const SMOKE_BASE_ENV: &str = "PLUMBLOG_SMOKE_BASE";
@@ -46,6 +48,10 @@ pub const BUILD_SCRIPT: &str = "scripts/build-bundle";
 pub const BACKUP_DIR: &str = "backups";
 /// The whole smoke check, retries included: a fresh workers.dev route can take a moment.
 pub const SMOKE_BUDGET: Duration = Duration::from_secs(60);
+/// Set by the Worker's JS entry (`crates/worker/js/entry.mjs`) on what it serves itself.
+const ENTRY_HEADER: &str = "x-plumblog-entry";
+/// Extra `/` requests looking for a JS cache hit after the main check passed.
+const HIT_PROBES: usize = 4;
 const SMOKE_FIRST_WAIT: Duration = Duration::from_secs(1);
 const SMOKE_MAX_WAIT: Duration = Duration::from_secs(15);
 const SMOKE_CALL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -526,6 +532,18 @@ fn upload_version(
         // The Worker renders this pushed theme (its files are among this version's assets).
         if let Some(t) = theme {
             list.push(json!({"type": "plain_text", "name": THEME_BINDING, "text": t.name}));
+            // From the theme.json bytes this version uploads, never from a record: a stale
+            // tag would make the JS fast path serve another theme's cached pages.
+            let tag =
+                uploaded_theme_tag(&b.assets, &t.name, run.cx.text).map_err(|(path, reason)| {
+                    Failure::new(
+                        Code::BundleInvalid,
+                        run.cx.text,
+                        key!("cli.error.bundle_invalid"),
+                        &[("path", path), ("reason", reason)],
+                    )
+                })?;
+            list.push(json!({"type": "plain_text", "name": THEME_TAG_BINDING, "text": tag}));
         }
         for name in secrets {
             list.push(json!({"type": "inherit", "name": name}));
@@ -562,6 +580,34 @@ fn upload_version(
         .ok_or_else(|| run.api(&malformed(Endpoint::VersionUpload, "no id")))?;
     run.line(key!("cli.deploy.version"), &[("version", id.clone())]);
     Ok(id)
+}
+
+/// [`plumblog_render::pushed::theme_tag`] of the `hash` in the `theme.json` among `assets`,
+/// read from the file the upload sends and checked against its listed hash: what the Worker
+/// derives from the document it fetches.
+///
+/// # Errors
+/// `(path, reason)`: no such asset, unreadable, changed since listed, or not a theme document.
+fn uploaded_theme_tag(
+    assets: &[bundle::Asset],
+    name: &str,
+    text: &Text,
+) -> Result<String, (String, String)> {
+    let path = plumblog_render::pushed::document_path(name);
+    let a = assets.iter().find(|a| a.path == path).ok_or_else(|| {
+        (
+            path.clone(),
+            text.t(key!("cli.deploy.tag_doc_missing"), &[]),
+        )
+    })?;
+    let here = |e: String| (a.file.display().to_string(), e);
+    let bytes = fs::read(&a.file).map_err(|e| here(e.to_string()))?;
+    if bundle::asset_hash(&bytes, &a.path) != a.hash {
+        return Err(here(text.t(key!("cli.deploy.tag_doc_changed"), &[])));
+    }
+    let text = String::from_utf8(bytes).map_err(|e| here(e.to_string()))?;
+    let doc = plumblog_render::PushedTheme::parse(&text, name).map_err(here)?;
+    Ok(plumblog_render::pushed::theme_tag(&doc.hash).to_string())
 }
 
 /// The version serving most traffic now: first deployment (wrangler
@@ -695,7 +741,9 @@ fn smoke_once(
     version: &str,
     theme: ThemeWant,
     left: &dyn Fn() -> Duration,
-) -> Result<(), Seen> {
+    pause: &dyn Fn(Duration),
+    probes: usize,
+) -> Result<bool, Seen> {
     let get = |path: &'static str| -> Result<ureq::http::Response<ureq::Body>, Seen> {
         let time = left().min(SMOKE_CALL_TIMEOUT);
         if time.is_zero() {
@@ -737,7 +785,26 @@ fn smoke_once(
         .map(printable);
     theme
         .check(got.as_deref())
-        .map_err(|want| Seen::Theme(got, want))
+        .map_err(|want| Seen::Theme(got, want))?;
+    // The Worker's JS entry serves cache hits from a key built from `PLUMBLOG_THEME_TAG`; the
+    // cache put runs after the first response, so ask a few times. Only a JS hit proves the
+    // binding matches the Rust key (a wrong one just misses into wasm, which still sends the
+    // right header), so seeing none is a warning for the caller, never a failure here.
+    let mut wait = SMOKE_FIRST_WAIT;
+    for _ in 0..probes {
+        if left() <= wait {
+            break;
+        }
+        pause(wait);
+        wait = (wait * 2).min(SMOKE_MAX_WAIT);
+        let Ok(r) = get("/") else { continue };
+        let is =
+            |name: &str, v: &str| r.headers().get(name).and_then(|h| h.to_str().ok()) == Some(v);
+        if is(ENTRY_HEADER, "js") && is("x-plumblog-cache", "hit") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// `GET <base>/healthz` until it answers 200 with `x-plumblog-version: <version>`, then
@@ -764,12 +831,28 @@ fn smoke(
     let left = || rt.smoke_budget.saturating_sub(spent());
     let mut wait = SMOKE_FIRST_WAIT;
     loop {
-        let seen = match smoke_once(&agent, base, version, theme, &left) {
-            Ok(()) => {
+        let probes = if matches!(theme, ThemeWant::Any) {
+            0
+        } else {
+            HIT_PROBES
+        };
+        let seen = match smoke_once(
+            &agent,
+            base,
+            version,
+            theme,
+            &left,
+            &|d| rt.clock.sleep(d),
+            probes,
+        ) {
+            Ok(hit) => {
                 run.line(
                     key!("cli.deploy.smoke_ok"),
                     &[("version", version.to_string())],
                 );
+                if probes > 0 && !hit {
+                    run.line(key!("cli.deploy.fast_path_unseen"), &[]);
+                }
                 return Ok(());
             }
             Err(s) => s,
@@ -865,8 +948,8 @@ fn check_domain(
         Some((url, shown)) => {
             let agent = plain_agent(rt.smoke_base.is_some(), SMOKE_CALL_TIMEOUT, 3);
             let left = || SMOKE_CALL_TIMEOUT;
-            match smoke_once(&agent, url, version, theme, &left) {
-                Ok(()) => {
+            match smoke_once(&agent, url, version, theme, &left, &|_| {}, 0) {
+                Ok(_) => {
                     run.line(key!("cli.deploy.domain_ok"), &[("origin", shown.clone())]);
                     true
                 }
@@ -1838,6 +1921,42 @@ fn restore_db(run: &mut Run, site: &Site, bookmark: &str, clear: bool) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tag follows the uploaded `theme.json`, whatever a record says; a file changed after
+    /// listing, or a missing one, is refused.
+    #[test]
+    fn theme_tag_comes_from_the_uploaded_bytes() {
+        let dir = std::env::temp_dir().join(format!("plumblog-tag-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let text = Text::new("en");
+        let hash = "ab".repeat(32);
+        let doc = format!(
+            r#"{{"api":{},"name":"paper","version":"1","hash":"{hash}","files":{{}},"assets":{{}}}}"#,
+            plumblog_render::THEME_API
+        );
+        let file = dir.join("theme.json");
+        fs::write(&file, &doc).unwrap();
+        let path = plumblog_render::pushed::document_path("paper");
+        let asset = bundle::Asset {
+            hash: bundle::asset_hash(doc.as_bytes(), &path),
+            size: doc.len() as u64,
+            path,
+            file: file.clone(),
+        };
+        // A stale record would hold another hash; the tag is the uploaded document's.
+        let stale = ThemeRecord {
+            name: "paper".into(),
+            version: "1".into(),
+            hash: "cd".repeat(32),
+        };
+        let got = uploaded_theme_tag(std::slice::from_ref(&asset), &stale.name, &text).unwrap();
+        assert_eq!(got, hash[..16]);
+        assert_ne!(got, stale.hash[..16]);
+        assert!(uploaded_theme_tag(&[], "paper", &text).is_err());
+        fs::write(&file, doc.replace("\"1\"", "\"2\"")).unwrap();
+        assert!(uploaded_theme_tag(&[asset], "paper", &text).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn utc_formats() {

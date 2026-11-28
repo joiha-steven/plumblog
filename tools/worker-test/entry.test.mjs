@@ -385,4 +385,36 @@ describe("pushed theme", () => {
     assert.equal(next.res.headers.get("x-plumblog-cache"), "miss");
     assert.equal(next.res.headers.get(MARK), null);
   });
+
+  // Documented behaviour (ARCHITECTURE, `PLUMBLOG_THEME_TAG`): page keys (Cache API and R2) carry the
+  // Worker version id and the theme tag, so a version only reads pages it rendered itself. A new
+  // version (here: a restart, which gets a new id) whose theme.json fails to load never serves the
+  // earlier version's warm tagged page: wasm renders the default theme, logs it, and the control
+  // shows a version with a good theme warming its own keys. (A fresh isolate of the SAME version
+  // would find its own warm key and serve it; local runs cannot keep an id across a restart.)
+  test("a new version whose theme.json fails to load never reads the earlier version's tagged pages", async () => {
+    const t = pushedThemeJson("paper");
+    const vars = { PLUMBLOG_THEME: "paper", PLUMBLOG_THEME_TAG: t.hash.slice(0, 16) };
+    let w = await startWorker({ vars, assets: assetsWith("paper", t.json) });
+    try {
+      await seedSample(w);
+      await assertMissThenJsHit(w, "/reading-on-screens");
+      await w.stop({ keepState: true });
+      // Same port: the cache key carries the origin.
+      const port = Number(new URL(w.url).port);
+      w = await startWorker({ state: w.state, port, vars, assets: assetsWith("paper", "{not json") });
+      const res = await get(w, "/reading-on-screens");
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get(MARK), null, "wasm answered");
+      assert.equal(res.headers.get("x-plumblog-cache"), "miss");
+      assert.equal(res.headers.get("x-plumblog-theme"), null, "the default theme, not the pushed one");
+      await w.stop({ keepState: true });
+      // Control: a version with the good theme starts cold and warms its own tagged keys.
+      w = await startWorker({ state: w.state, port, vars, assets: assetsWith("paper", t.json) });
+      const h = await assertMissThenJsHit(w, "/reading-on-screens");
+      assert.equal(h.res.headers.get("x-plumblog-theme"), t.hash.slice(0, 16));
+    } finally {
+      await w.stop();
+    }
+  });
 });
