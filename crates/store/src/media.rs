@@ -46,6 +46,7 @@ pub struct MediaQuery {
     pub missing_alt_only: bool,
     /// Only items no post uses, in its body or as cover (see `MediaStore::media_usage`).
     pub unused_only: bool,
+    /// Capped at [`crate::MAX_PAGE`] + 1: a page plus the probe row for "is there more".
     pub limit: u32,
 }
 

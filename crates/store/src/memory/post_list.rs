@@ -5,7 +5,9 @@ use std::cmp::{Ordering, Reverse};
 use plumblog_model::{PostId, Result};
 
 use super::{State, invalid};
-use crate::{Post, PostCursor, PostOrder, PostQuery, PostStatus, PostSummary, page_len, search};
+use crate::{
+    Post, PostCursor, PostOrder, PostQuery, PostStatus, PostSummary, page_len, probe_len, search,
+};
 
 /// Sort key of a row under `order`, comparable with a cursor's.
 fn key_of(order: PostOrder, p: &Post) -> Option<i64> {
@@ -61,7 +63,7 @@ impl State {
         });
         Ok(rows
             .into_iter()
-            .take(page_len(q.limit))
+            .take(probe_len(q.limit))
             .map(PostSummary::from)
             .collect())
     }

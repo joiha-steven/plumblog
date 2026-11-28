@@ -3,7 +3,7 @@ use std::cmp::Reverse;
 use plumblog_model::{MediaId, PostId, Result};
 
 use super::{MemoryStore, State, conflict, invalid, next_seq, not_found};
-use crate::{Media, MediaQuery, MediaStore, NewMedia, page_len};
+use crate::{Media, MediaQuery, MediaStore, NewMedia, probe_len};
 
 #[expect(
     clippy::unused_async_trait_impl,
@@ -66,7 +66,7 @@ impl MediaStore for MemoryStore {
                 .collect();
             rows.sort_by_key(|m| Reverse((m.created_at, m.id)));
             rows.into_iter()
-                .take(page_len(query.limit))
+                .take(probe_len(query.limit))
                 .cloned()
                 .collect()
         }))
