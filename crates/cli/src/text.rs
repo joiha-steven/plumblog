@@ -130,6 +130,7 @@ codes! {
     TokenUserChanged => "token.user_changed",
     TokenNotFound => "token.not_found",
     TokenUnconfirmed => "token.unconfirmed",
+    TokenNotShown => "token.not_shown",
     RestoreUnconfirmed => "restore.unconfirmed",
     RestoreUnreadable => "restore.unreadable",
     RestoreNotABackup => "restore.not_a_backup",
