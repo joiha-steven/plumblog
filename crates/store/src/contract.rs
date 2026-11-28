@@ -12,6 +12,7 @@ mod library;
 mod listing;
 mod posts;
 mod reader;
+mod reset;
 mod signin;
 mod site;
 mod user_writes;
@@ -72,11 +73,18 @@ cases! {
     signin::setup_refuses_bad_codes,
     signin::setup_creates_first_owner_once,
     signin::site_id_is_set_once,
+    signin::owner_reset_is_single_use,
+    reset::proof_is_for_its_own_user,
+    reset::stale_proof_creates_nothing,
+    reset::owner_reset_redeem_replaces_credentials,
+    reset::owner_reset_redeem_revokes_all_tokens,
+    reset::owner_reset_needs_an_active_owner,
     signin::session_renewal,
     library::media_round_trip,
     library::media_paging,
     library::media_usage_tracks_saves,
     library::media_in_use_cannot_be_deleted,
+    library::taxonomy_paging,
     library::tags_round_trip,
     library::tag_links_and_versions,
     library::tag_delete_stales_editors,

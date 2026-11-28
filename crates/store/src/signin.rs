@@ -5,7 +5,7 @@
 
 use plumblog_model::{Result, UserId, stable_codes};
 
-use crate::NewUser;
+use crate::{NewSession, NewUser, ProfileUpdate};
 
 stable_codes! {
     /// Stored in `auth_challenges.purpose`.
@@ -24,6 +24,32 @@ pub const SETUP_CODE_HASH_KEY: &str = "setup_code_hash";
 /// Settings key holding when the setup code expires (ms), as a JSON integer.
 pub const SETUP_CODE_EXPIRES_KEY: &str = "setup_code_expires_at";
 
+/// Settings keys of the owner reset code `blog admin reset` stores: its hash (a JSON string,
+/// as [`setup_hash_json`]), the owner it is bound to (JSON integer id) and when it expires
+/// (ms, JSON integer). Internal, like the setup code.
+pub const OWNER_RESET_HASH_KEY: &str = "owner_reset_hash";
+pub const OWNER_RESET_USER_KEY: &str = "owner_reset_user";
+pub const OWNER_RESET_EXPIRES_KEY: &str = "owner_reset_expires_at";
+/// When the reset ran (ms, JSON integer) and whether it kept the owner's API tokens (JSON
+/// boolean): the redeem revokes tokens and owner invites created since, which a request in
+/// flight across the reset may have left. Absent (a code from an older `blog`): the redeem
+/// revokes every token and owner invite of the user.
+pub const OWNER_RESET_AT_KEY: &str = "owner_reset_at";
+/// How far before the recorded reset time the redeem still treats tokens and owner invites as
+/// made since the reset: a request that began before the reset stamps `created_at` with its own
+/// start, and the CLI's clock may run ahead of the Worker's, so a strict comparison could keep a
+/// token an attacker minted during the reset.
+pub const OWNER_RESET_SINCE_MARGIN_MS: i64 = 10 * 60 * 1000;
+pub const OWNER_RESET_KEEP_TOKENS_KEY: &str = "owner_reset_keep_tokens";
+/// Every owner reset key, deleted together when the code is taken.
+pub const OWNER_RESET_KEYS: &[&str] = &[
+    OWNER_RESET_HASH_KEY,
+    OWNER_RESET_USER_KEY,
+    OWNER_RESET_EXPIRES_KEY,
+    OWNER_RESET_AT_KEY,
+    OWNER_RESET_KEEP_TOKENS_KEY,
+];
+
 /// Settings key holding the site's random id (a JSON string), part of the browser's password
 /// stretch salt. Public: the sign-in page needs it before anyone is signed in.
 pub const SITE_ID_KEY: &str = "site_id";
@@ -40,8 +66,16 @@ pub const TURNSTILE_SITE_KEY: &str = "turnstile_site_key";
 pub const ORIGIN_KEY: &str = "origin";
 
 /// Settings that must never leave the Worker (API responses, theme data, exports).
-pub const INTERNAL_SETTING_KEYS: &[&str] =
-    &[SETUP_CODE_HASH_KEY, SETUP_CODE_EXPIRES_KEY, LAST_BACKUP_KEY];
+pub const INTERNAL_SETTING_KEYS: &[&str] = &[
+    SETUP_CODE_HASH_KEY,
+    SETUP_CODE_EXPIRES_KEY,
+    LAST_BACKUP_KEY,
+    OWNER_RESET_HASH_KEY,
+    OWNER_RESET_USER_KEY,
+    OWNER_RESET_EXPIRES_KEY,
+    OWNER_RESET_AT_KEY,
+    OWNER_RESET_KEEP_TOKENS_KEY,
+];
 
 /// Whether `key` is in [`INTERNAL_SETTING_KEYS`].
 #[must_use]
@@ -176,6 +210,41 @@ pub trait SetupStore {
     /// `SetupInvalid` and nothing changes. Two setups racing: at most one succeeds.
     /// Comparing in constant time is the caller's job. No version bump.
     async fn create_first_owner(&self, code_hash: &str, user: NewUser, now: i64) -> Result<UserId>;
+    /// Writes the owner reset code (`blog admin reset` writes the same rows over D1's REST
+    /// API): hash first, then user, expiry, reset time (`now`) and `keep_tokens`, replacing
+    /// any earlier code. No version bump.
+    async fn put_owner_reset(
+        &self,
+        code_hash: &str,
+        user: UserId,
+        expires_at: i64,
+        keep_tokens: bool,
+        now: i64,
+    ) -> Result<()>;
+    /// Single use: if the stored hash equals `code_hash` exactly, deletes every reset key
+    /// ([`OWNER_RESET_KEYS`]) in one atomic write and returns the bound user when the code
+    /// has not expired (`expires_at > now`, both values exactly JSON integers). An expired
+    /// code is deleted too and gives `None`; a wrong code changes nothing and gives `None`; of
+    /// two takes racing, at most one gets the user. Comparing in constant time is the caller's
+    /// job.
+    async fn take_owner_reset(&self, code_hash: &str, now: i64) -> Result<Option<UserId>>;
+    /// Redeems the owner reset code in one atomic write, only if `session.proof` is
+    /// [`crate::Proof::ResetCode`] and holds for `id` (else `SetupInvalid`) and `id` is still
+    /// an active owner (else `SetupInvalid`; [`Self::take_owner_reset`] then spends the code).
+    /// Sets `password_hash = hash` and `profile` if given (bumping the content version),
+    /// deletes every session and passkey of `id`, revokes its API tokens (with
+    /// [`OWNER_RESET_KEEP_TOKENS_KEY`] true, only those created at or after
+    /// [`OWNER_RESET_AT_KEY`]), deletes its unused invites (any role) created since, deletes the
+    /// reset keys and creates `session`. Returns the new session id. `Conflict` on a login or
+    /// slug another user holds; then nothing changed and the code still works.
+    async fn redeem_owner_reset(
+        &self,
+        id: UserId,
+        hash: String,
+        profile: Option<ProfileUpdate>,
+        session: NewSession,
+        now: i64,
+    ) -> Result<i64>;
 }
 
 #[cfg(test)]
@@ -193,5 +262,10 @@ mod tests {
         let shown: Vec<String> = public_settings(all).into_iter().map(|(k, _)| k).collect();
         assert_eq!(shown, [SITE_ID_KEY, "title"]);
         assert!(is_internal_setting(LAST_BACKUP_KEY));
+        for &k in OWNER_RESET_KEYS {
+            assert!(is_internal_setting(k), "{k}");
+            let shown = public_settings(vec![(k.to_string(), "1".to_string())]);
+            assert!(shown.is_empty(), "{k}");
+        }
     }
 }

@@ -1,7 +1,8 @@
 use plumblog_model::{Result, SeriesId, TagId};
-use plumblog_store::{NewSeries, Series, Tag, TaxonomyStore};
+use plumblog_store::{MAX_PAGE, NewSeries, Series, Tag, TaxonomyStore};
+use worker::wasm_bindgen::JsValue;
 
-use super::{D1Store, Row, bound, bump_if, not_found, storage, text};
+use super::{D1Store, Row, bound, bump_if, not_found, reader_sql, storage, text};
 
 const TAG_COLS: &str = "id, slug, name";
 const SERIES_COLS: &str = "id, slug, title, description";
@@ -82,6 +83,38 @@ impl TaxonomyStore for D1Store {
         self.rows(s).await?.iter_mut().map(read_tag).collect()
     }
 
+    // 1 query.
+    async fn get_tag(&self, id: TagId) -> Result<Tag> {
+        let s = self.stmt(
+            "get_tag",
+            &format!("SELECT {TAG_COLS} FROM tags WHERE id = ?"),
+            &[bound(id.0)],
+        )?;
+        match self.row(s).await? {
+            Some(mut r) => read_tag(&mut r),
+            None => Err(not_found("tag", id.0)),
+        }
+    }
+
+    // 1 query: one row past the page tells whether more follow.
+    async fn tags_page(&self, after: Option<&str>, limit_n: u32) -> Result<(Vec<Tag>, bool)> {
+        let n = limit_n.min(MAX_PAGE);
+        let s = self.stmt(
+            "tags_page",
+            &reader_sql::taxonomy_page("tags", TAG_COLS),
+            &[text(after.unwrap_or_default()), JsValue::from(n + 1)],
+        )?;
+        let mut rows: Vec<Tag> = self
+            .rows(s)
+            .await?
+            .iter_mut()
+            .map(read_tag)
+            .collect::<Result<_>>()?;
+        let more = rows.len() > n as usize;
+        rows.truncate(n as usize);
+        Ok((rows, more))
+    }
+
     async fn delete_tag(&self, id: TagId) -> Result<()> {
         // Bump the site and post versions while the links still exist; the FK cascade then
         // removes them. The post version makes an editor holding the old post reload.
@@ -158,6 +191,38 @@ impl TaxonomyStore for D1Store {
             &[],
         )?;
         self.rows(s).await?.iter_mut().map(read_series).collect()
+    }
+
+    // 1 query.
+    async fn get_series(&self, id: SeriesId) -> Result<Series> {
+        let s = self.stmt(
+            "get_series",
+            &format!("SELECT {SERIES_COLS} FROM series WHERE id = ?"),
+            &[bound(id.0)],
+        )?;
+        match self.row(s).await? {
+            Some(mut r) => read_series(&mut r),
+            None => Err(not_found("series", id.0)),
+        }
+    }
+
+    // 1 query: one row past the page tells whether more follow.
+    async fn series_page(&self, after: Option<&str>, limit_n: u32) -> Result<(Vec<Series>, bool)> {
+        let n = limit_n.min(MAX_PAGE);
+        let s = self.stmt(
+            "series_page",
+            &reader_sql::taxonomy_page("series", SERIES_COLS),
+            &[text(after.unwrap_or_default()), JsValue::from(n + 1)],
+        )?;
+        let mut rows: Vec<Series> = self
+            .rows(s)
+            .await?
+            .iter_mut()
+            .map(read_series)
+            .collect::<Result<_>>()?;
+        let more = rows.len() > n as usize;
+        rows.truncate(n as usize);
+        Ok((rows, more))
     }
 
     async fn delete_series(&self, id: SeriesId) -> Result<()> {

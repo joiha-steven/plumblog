@@ -1,5 +1,5 @@
 /**
- * Sign-in, setup, invites, sign-out and passkeys over the Worker's auth API
+ * Sign-in, setup, owner reset, invites, sign-out and passkeys over the Worker's auth API
  * (crates/worker/src/api/auth.rs, passkey.rs). Screens call these and show the Result: every
  * function resolves, never throws, and logs what failed. Passwords leave the browser only
  * stretched (stretch.ts), salted with the login they are for.
@@ -158,6 +158,15 @@ export const setup = (api: Api, f: NewAccount, token?: string): Promise<Result<{
 
 export const acceptInvite = (api: Api, f: NewAccount, token?: string): Promise<Result<{ user: Me }>> =>
   newAccount("invite", "/api/auth/invite/accept", api, f, token);
+
+/** An owner's new password (and maybe a new login), with the code `blog admin reset` printed. */
+export function redeemReset(api: Api, f: { code: string; login: string; password: string }, token?: string): Promise<Result<{ user: Me }>> {
+  return guard("owner reset", async () => {
+    const pw = await stretched(api, f.login, f.password);
+    if (!pw.ok) return failed(pw.error);
+    return api.call<{ user: Me }>("POST", "/api/auth/reset", withToken({ code: f.code, login: f.login, password: pw.value }, token));
+  });
+}
 
 /**
  * Ends the session, then deletes `user`'s drafts in this browser (a shared computer keeps

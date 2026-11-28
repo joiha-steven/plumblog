@@ -33,7 +33,7 @@ The answer shows the token once; keep it in an environment variable, never in a 
 - Edit: `GET /api/v1/posts/{id}` for the full post and its `version`, then
   `PATCH /api/v1/posts/{id}` with only the changed fields and `expected_version`. A 409
   `store.conflict` means someone else saved: read again, merge, never overwrite.
-- Tags and series are ids: find or create them first (`/api/v1/tags`, `/api/v1/series`).
+- Tags and series are ids: find or create them first (`/api/v1/tags`, `/api/v1/series`; lists are paged, follow `next_cursor`).
 - Delete: `POST /api/v1/posts/{id}/trash` (undo with `/restore`); `DELETE` only from the trash
   and only when the owner asked.
 - The answer may carry `warnings` (for example `markdown.math_invalid`): fix and save again.
@@ -51,8 +51,8 @@ the body at `##`.
 Upload the original bytes: `POST /api/v1/media?name=heron.jpg&mime=image/jpeg&width=1600&height=1067&alt=...`
 with `curl --data-binary @heron.jpg`. `width` and `height` must be the file's own (read them,
 never guess); AVIF, WebP, JPEG, PNG or GIF, at most 20 MiB. Use the answer's `src` in Markdown.
-Always write `alt` (set it later with `PATCH /api/v1/media/{id}`). Media used by a post cannot
-be deleted; the 409 lists the posts.
+Always write `alt` (set it later with `PATCH /api/v1/media/{id}`). A writer deletes only their
+own uploads (the owner any); media used by a post cannot be deleted, the 409 lists the posts.
 
 ## Not built yet
 

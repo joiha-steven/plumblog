@@ -321,6 +321,15 @@ export function d1Exec(state, sql) {
   );
 }
 
+/** Runs `[{sql, params}]` (one statement each, params bound in order) in one transaction. */
+export function d1Batch(state, stmts) {
+  withDb(d1File(state), (db) =>
+    inTransaction(db, () => {
+      for (const { sql, params } of stmts) db.prepare(sql).run(...params);
+    }),
+  );
+}
+
 /**
  * For test helpers that take either: SQL whose first statement returns rows is a query (exactly
  * one statement, as d1Query); anything else is a write batch (d1Exec) and returns [].

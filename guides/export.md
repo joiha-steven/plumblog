@@ -18,7 +18,7 @@ blog guide api
    is null). Without `status` every post comes back, drafts and trash included: skip
    `status: trashed` unless the owner wants the trash. Read each in full with
    `GET /api/v1/posts/{id}`.
-2. Taxonomy and links: `GET /api/v1/tags`, `GET /api/v1/series`, `GET /api/v1/redirects`.
+2. Taxonomy and links: `GET /api/v1/tags` and `GET /api/v1/series` (page both like posts: `limit=100`, follow `next_cursor` until it is null), `GET /api/v1/redirects`.
 3. Media: page through `GET /api/v1/media`, then save each original from
    `GET /api/v1/media/{id}/original` as `media/<id>/<file name of src>`: the bytes as
    uploaded, `Content-Type` its `mime`. A 404 there means the stored file is gone: list it

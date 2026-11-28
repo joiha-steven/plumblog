@@ -347,6 +347,13 @@ test("setup and acceptInvite stretch with the new login", async () => {
   }
 });
 
+test("redeemReset stretches with the login typed and sends only code, login, password, token", async () => {
+  const api = fakeApi({ "GET /api/auth/params": PARAMS, "POST /api/auth/reset": { ok: true, value: { user: ME } } });
+  assert.equal((await flows.redeemReset(api, { code: "c0de", login: "Back", password: "secret pw" }, "tok")).ok, true);
+  const call = api.calls.find((c) => c.path === "/api/auth/reset");
+  assert.deepEqual(call.body, { code: "c0de", login: "Back", password: expected("back", "secret pw"), turnstile_token: "tok" });
+});
+
 test("signInPasskey: options, browser prompt, verify with the assertion fields", async () => {
   const seen = fakeCredentials({ get: fakeAssertion("u1") });
   const api = fakeApi({ "POST /api/auth/passkey/login/options": LOGIN_OPTS, "POST /api/auth/passkey/login/verify": { ok: true, value: { user: ME } } });
@@ -530,4 +537,11 @@ test("session.expired runs on a 401 outside /api/auth/ only", async () => {
   };
   fakeFetch(401, '{"error":"auth.unauthenticated"}');
   assert.equal((await api.posts({})).error.code, "auth.unauthenticated");
+});
+
+test("the reset page tells an expired code from a wrong one", async () => {
+  const { message } = await bundle("web/admin/src/auth/screens.ts");
+  // Without loaded text, t() answers the key itself.
+  assert.equal(message({ code: "auth.reset_expired" }, false, "reset"), "admin.auth.err_reset_expired");
+  assert.equal(message({ code: "setup.invalid" }, false, "reset"), "admin.auth.err_reset_invalid");
 });

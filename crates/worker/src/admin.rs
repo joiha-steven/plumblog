@@ -10,7 +10,7 @@
 use crate::d1::D1Store;
 use crate::keys;
 use crate::pages::core_text;
-use crate::pages::source::{CORE_LOCALES, ReaderSource};
+use crate::pages::source::{ADMIN_PRELOAD, CORE_LOCALES, ReaderSource};
 use plumblog_i18n::{Catalog, Key};
 use worker::{Env, Headers, Request, Response, Result};
 
@@ -53,7 +53,10 @@ const TURNSTILE_ORIGIN: &str = "https://challenges.cloudflare.com";
 /// an ordinary page, and keep it as the offline shell.
 fn is_auth_page(path: &str) -> bool {
     let p = path.strip_suffix('/').unwrap_or(path);
-    matches!(p, "/admin/signin" | "/admin/setup" | "/admin/invite")
+    matches!(
+        p,
+        "/admin/signin" | "/admin/setup" | "/admin/invite" | "/admin/reset"
+    )
 }
 
 /// 16 bytes from the platform's cryptographic RNG, hex. A nonce must not be guessable, so
@@ -138,7 +141,7 @@ pub async fn serve(req: &Request, env: &Env) -> Result<Response> {
         ),
         "/admin/icon.svg" => (icon(&site.title), "image/svg+xml; charset=utf-8"),
         _ => (
-            shell(&lang, &site.title, &nonce),
+            shell(&lang, &site.title, &nonce, ADMIN_PRELOAD, uses_faces(&path)),
             "text/html; charset=utf-8",
         ),
     };
@@ -230,8 +233,11 @@ fn text(lang: &str, key: Key, site: &str) -> String {
         .t(key, &[("site", site.to_owned())])
 }
 
-/// The page every client route loads. Nothing in it depends on the route.
-fn shell(lang: &str, site: &str, nonce: &str) -> String {
+/// The page every client route loads. Only the CSP and `faces` (the editor and the sign-in
+/// screens, the pages that use the reading face) depend on the route. `chunks` are the
+/// entry's static imports (scripts/admin-build): named here, the browser fetches them beside
+/// app.js instead of after it. Every page needs them all, signed in or not.
+fn shell(lang: &str, site: &str, nonce: &str, chunks: &[&str], faces: bool) -> String {
     // `<` escaped so the JSON cannot close its script element.
     let boot = boot_json(lang, site, nonce).replace('<', "\\u003c");
     format!(
@@ -246,12 +252,34 @@ fn shell(lang: &str, site: &str, nonce: &str) -> String {
 <link rel=\"stylesheet\" href=\"/admin/app.css\">\n\
 <script type=\"module\" src=\"/admin/app.js\"></script>\n\
 <link rel=\"modulepreload\" href=\"/admin/i18n/{lang}.js\">\n\
-{fonts}<script id=\"boot\" type=\"application/json\">{boot}</script>\n\
+{chunks}{fonts}<script id=\"boot\" type=\"application/json\">{boot}</script>\n\
 </head>\n<body>\n<div id=\"app\"></div>\n<noscript>{noscript}</noscript>\n</body>\n</html>\n",
-        fonts = font_preloads(lang),
+        chunks = chunk_preloads(chunks),
+        fonts = if faces {
+            font_preloads(lang)
+        } else {
+            String::new()
+        },
         title = escape(&text(lang, keys::ADMIN_TITLE, site)),
         noscript = escape(&text(lang, keys::ADMIN_NOSCRIPT, site)),
     )
+}
+
+fn chunk_preloads(chunks: &[&str]) -> String {
+    let mut out = String::new();
+    for c in chunks {
+        out.push_str("<link rel=\"modulepreload\" href=\"");
+        out.push_str(c);
+        out.push_str("\">\n");
+    }
+    out
+}
+
+/// Whether a page sets text in the writing faces: the editor and the sign-in story. Other
+/// pages use system fonts, and preloading 50 KB of faces there only competes with the
+/// scripts and data the first paint waits for (Lighthouse mobile LCP, 1.8 s against 1.2 s).
+fn uses_faces(path: &str) -> bool {
+    path.starts_with("/admin/posts/") || is_auth_page(path)
 }
 
 /// The writing column's faces use `font-display: optional` (scripts/admin-build), so a face
@@ -315,7 +343,9 @@ fn escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{boot_json, csp, icon, is_auth_page, is_file, manifest, pick_lang, shell};
+    use super::{
+        boot_json, csp, icon, is_auth_page, is_file, manifest, pick_lang, shell, uses_faces,
+    };
 
     #[test]
     fn files_are_told_apart_from_client_routes() {
@@ -354,7 +384,7 @@ mod tests {
 
     #[test]
     fn the_shell_is_one_page_whose_json_cannot_break_out() {
-        let html = shell("vi", "</script><b>\"x\"", "n0");
+        let html = shell("vi", "</script><b>\"x\"", "n0", &[], true);
         assert!(html.starts_with("<!doctype html>\n<html lang=\"vi\""));
         assert!(
             !html.contains("</script><b>"),
@@ -368,20 +398,61 @@ mod tests {
     }
 
     #[test]
+    fn the_shell_preloads_the_chunks_it_is_given() {
+        let html = shell(
+            "en",
+            "S",
+            "n0",
+            &["/admin/chunks/a-1.js", "/admin/chunks/b-2.js"],
+            false,
+        );
+        assert!(html.contains("<link rel=\"modulepreload\" href=\"/admin/chunks/a-1.js\">\n"));
+        assert!(html.contains("<link rel=\"modulepreload\" href=\"/admin/chunks/b-2.js\">\n"));
+        assert_eq!(
+            html.matches("modulepreload").count(),
+            3,
+            "two chunks and the text"
+        );
+        assert_eq!(html.matches("<script").count(), 2, "preloads add no script");
+    }
+
+    #[test]
     fn the_shell_preloads_the_faces_its_language_needs() {
         let link = |f: &str| {
             format!(
                 "<link rel=\"preload\" href=\"/admin/fonts/{f}.woff2\" as=\"font\" type=\"font/woff2\" crossorigin>"
             )
         };
-        let en = shell("en", "S", "n0");
+        let en = shell("en", "S", "n0", &[], true);
         assert!(en.contains(&link("inter-latin")) && en.contains(&link("inter-display-latin")));
         assert!(!en.contains("vietnamese"));
-        let vi = shell("vi", "S", "n0");
+        let vi = shell("vi", "S", "n0", &[], true);
         assert!(
             vi.contains(&link("inter-vietnamese"))
                 && vi.contains(&link("inter-display-vietnamese"))
         );
+        assert!(!shell("en", "S", "n0", &[], false).contains("fonts/"));
+    }
+
+    #[test]
+    fn only_the_editor_and_sign_in_pages_preload_faces() {
+        for p in [
+            "/admin/posts/12",
+            "/admin/posts/new",
+            "/admin/signin",
+            "/admin/setup/",
+        ] {
+            assert!(uses_faces(p), "{p}");
+        }
+        for p in [
+            "/admin/",
+            "/admin/pages",
+            "/admin/media",
+            "/admin/settings",
+            "/admin/posts",
+        ] {
+            assert!(!uses_faces(p), "{p}");
+        }
     }
 
     #[test]
@@ -393,7 +464,12 @@ mod tests {
         assert!(open.contains("script-src 'self' https://challenges.cloudflare.com;"));
         assert!(open.contains("frame-src https://challenges.cloudflare.com;"));
         assert!(open.contains("frame-ancestors 'none'"));
-        for p in ["/admin/signin", "/admin/setup", "/admin/invite"] {
+        for p in [
+            "/admin/signin",
+            "/admin/setup",
+            "/admin/invite",
+            "/admin/reset",
+        ] {
             assert!(is_auth_page(p), "{p}");
         }
         assert!(is_auth_page("/admin/signin/"));
@@ -418,7 +494,7 @@ mod tests {
             "{\"lang\":\"vi\",\"langs\":[\"en\",\"vi\"],\"site\":\"S\",\"nonce\":\"n0\"}"
         );
         assert!(
-            shell("vi", "S", "n0")
+            shell("vi", "S", "n0", &[], true)
                 .contains("<link rel=\"modulepreload\" href=\"/admin/i18n/vi.js\">")
         );
     }

@@ -60,6 +60,27 @@ impl TaxonomyStore for MemoryStore {
         }))
     }
 
+    async fn get_tag(&self, id: TagId) -> Result<Tag> {
+        self.read(|s| s.tags.get(&id).cloned())
+            .ok_or_else(|| not_found("tag", id.0))
+    }
+
+    async fn tags_page(&self, after: Option<&str>, limit: u32) -> Result<(Vec<Tag>, bool)> {
+        Ok(self.read(|s| {
+            let mut all: Vec<Tag> = s
+                .tags
+                .values()
+                .filter(|t| after.is_none_or(|a| t.slug.as_str() > a))
+                .cloned()
+                .collect();
+            all.sort_by(|a, b| a.slug.cmp(&b.slug));
+            let n = crate::page_len(limit);
+            let more = all.len() > n;
+            all.truncate(n);
+            (all, more)
+        }))
+    }
+
     async fn delete_tag(&self, id: TagId) -> Result<()> {
         self.write(|s| {
             s.tags.remove(&id).ok_or_else(|| not_found("tag", id.0))?;
@@ -127,6 +148,27 @@ impl TaxonomyStore for MemoryStore {
             let mut all: Vec<Series> = s.series.values().cloned().collect();
             all.sort_by(|a, b| (&a.title, a.id).cmp(&(&b.title, b.id)));
             all
+        }))
+    }
+
+    async fn get_series(&self, id: SeriesId) -> Result<Series> {
+        self.read(|s| s.series.get(&id).cloned())
+            .ok_or_else(|| not_found("series", id.0))
+    }
+
+    async fn series_page(&self, after: Option<&str>, limit: u32) -> Result<(Vec<Series>, bool)> {
+        Ok(self.read(|s| {
+            let mut all: Vec<Series> = s
+                .series
+                .values()
+                .filter(|x| after.is_none_or(|a| x.slug.as_str() > a))
+                .cloned()
+                .collect();
+            all.sort_by(|a, b| a.slug.cmp(&b.slug));
+            let n = crate::page_len(limit);
+            let more = all.len() > n;
+            all.truncate(n);
+            (all, more)
         }))
     }
 

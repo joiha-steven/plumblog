@@ -74,6 +74,8 @@ pub async fn create(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
         scope,
         created_at: ctx.now,
         expires_at,
+        // A request authenticated before `blog admin reset` mints nothing after it.
+        proof: p.session_proof()?,
     };
     let id = ctx.store.create_token(new).await?;
     let made = ApiToken {

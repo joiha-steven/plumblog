@@ -105,8 +105,8 @@ async function load(): Promise<void> {
   render();
 }
 
-/** Sign-in, setup and invite load their own chunk and never ask `me()` first. */
-async function signedOut(kind: "signin" | "setup" | "invite"): Promise<void> {
+/** Sign-in, setup, invite and owner reset load their own chunk and never ask `me()` first. */
+async function signedOut(kind: "signin" | "setup" | "invite" | "reset"): Promise<void> {
   try {
     const { mountAuth } = await import("./auth/screens");
     mountAuth({ root, api, kind, site: boot.site, query: params });

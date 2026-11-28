@@ -3,7 +3,7 @@ use plumblog_cli::cloudflare::{Client, Credentials, TokenError, TokenKind, endpo
 use plumblog_cli::help;
 use plumblog_cli::release::{self, Version, fetch::Source};
 use plumblog_cli::text::{Code, Text, pick_lang};
-use plumblog_cli::{backup, deploy, migrations, restore, setup, theme};
+use plumblog_cli::{admin, backup, deploy, migrations, restore, setup, theme};
 use plumblog_i18n::{Key, key};
 use std::{fmt::Write, path::Path, process::ExitCode};
 
@@ -185,6 +185,22 @@ enum Command {
         #[command(subcommand)]
         action: PluginAction,
     },
+    Admin {
+        #[command(subcommand)]
+        action: AdminAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdminAction {
+    Reset {
+        #[arg(long)]
+        login: Option<String>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        keep_tokens: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -230,6 +246,23 @@ enum PluginAction {
 /// once per run.
 fn leak(s: String) -> &'static str {
     s.leak()
+}
+
+/// `blog admin`'s help texts.
+fn admin_help(c: clap::Command, text: &Text) -> clap::Command {
+    let t = |k: Key| text.t(k, &[]);
+    c.about(t(key!("cli.admin.about")))
+        .mut_subcommand("reset", |c| {
+            c.about(t(key!("cli.admin.reset_about")))
+                .mut_arg("login", |a| {
+                    a.help(t(key!("cli.admin.login_help")))
+                        .value_name(leak(t(key!("cli.admin.login_value"))))
+                })
+                .mut_arg("yes", |a| a.help(t(key!("cli.admin.yes_help"))))
+                .mut_arg("keep_tokens", |a| {
+                    a.help(t(key!("cli.admin.keep_tokens_help")))
+                })
+        })
 }
 
 /// `blog restore`'s help texts.
@@ -407,6 +440,7 @@ fn command(text: &Text) -> clap::Command {
         })
         .mut_subcommand("theme", |c| theme_help(c, text))
         .mut_subcommand("plugin", |c| plugin_help(c, text))
+        .mut_subcommand("admin", |c| admin_help(c, text))
         .mut_subcommand("rollback", |c| {
             c.about(t(key!("cli.rollback.about")))
                 .mut_arg("to", |a| {
@@ -616,6 +650,39 @@ fn restore(text: &Text, mut opts: restore::Options) -> Result<String, (Code, Str
         &opts,
         &cx,
         &clock,
+        &mut out,
+    )
+    .map_err(|f| (f.code, f.message))?;
+    Ok(String::new())
+}
+
+/// `blog admin reset`: the plan, then the code, to stdout.
+fn admin_reset(text: &Text, action: AdminAction) -> Result<String, (Code, String)> {
+    let AdminAction::Reset {
+        login,
+        yes,
+        keep_tokens,
+    } = action;
+    let opts = &admin::Options {
+        login,
+        yes,
+        keep_tokens,
+    };
+    let creds = Credentials::load(Path::new(".")).map_err(|e| (e.code(), e.message(text)))?;
+    let mut client = Client::from_env(creds.token).map_err(|e| (e.code(), e.message(text)))?;
+    let migrations = migrations::bundled();
+    let cx = setup::Context {
+        dir: Path::new("."),
+        migrations: &migrations,
+        now_ms: now_ms(),
+        text,
+    };
+    let mut out = std::io::stdout().lock();
+    admin::run(
+        &mut client,
+        creds.account_id.as_deref(),
+        opts,
+        &cx,
         &mut out,
     )
     .map_err(|f| (f.code, f.message))?;
@@ -865,6 +932,7 @@ fn run(text: &Text, args: &[String]) -> Outcome {
             }),
         ),
         Some(c @ (Command::Theme { .. } | Command::Plugin { .. })) => theme_command(text, c),
+        Some(Command::Admin { action }) => admin_reset(text, action),
         None => return Outcome::Help(help::render(&cmd, &[], text)),
     };
     match result {

@@ -44,7 +44,7 @@ async function fresh(req: Request, path: string): Promise<Response> {
   // The sign-in pages are not kept: their CSP admits Turnstile, and an offline fallback must
   // never hand that looser policy to another page. Offline they get the strict shell, which
   // says the admin is offline.
-  const signin = /^\/admin\/(signin|setup|invite)\/?$/.test(path);
+  const signin = /^\/admin\/(signin|setup|invite|reset)\/?$/.test(path);
   const key = req.mode === "navigate" ? "/admin/" : KEEP.has(path) ? path : undefined;
   try {
     const res = await fetch(req);
