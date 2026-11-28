@@ -308,4 +308,31 @@ describe("pushed theme", () => {
     assert.equal(next.res.headers.get("x-plumblog-cache"), "miss");
     assert.equal(next.res.headers.get(MARK), null);
   });
+
+  // Documented behaviour (ARCHITECTURE, `PLUMBLOG_THEME_TAG`): deploy refuses a broken theme.json, so
+  // a theme that stops loading is a transient asset failure inside one version. A warm tagged hit
+  // is still served by the entry, with the pushed theme's header: the cached page is that theme's
+  // correct page, which beats the default-theme fallback wasm would render.
+  test("a warm tagged hit is still served when theme.json stops loading", async () => {
+    const t = pushedThemeJson("paper");
+    const vars = { PLUMBLOG_THEME: "paper", PLUMBLOG_THEME_TAG: t.hash.slice(0, 16) };
+    let w = await startWorker({ vars, assets: assetsWith("paper", t.json) });
+    try {
+      await seedSample(w);
+      await assertMissThenJsHit(w, "/reading-on-screens");
+      await w.stop({ keepState: true });
+      // Same port: the cache key carries the origin.
+      const port = Number(new URL(w.url).port);
+      w = await startWorker({ state: w.state, port, vars, assets: assetsWith("paper", "{not json") });
+      const res = await get(w, "/reading-on-screens");
+      assert.equal(res.headers.get(MARK), "js", "warm tagged key served by the entry");
+      assert.equal(res.headers.get("x-plumblog-theme"), t.hash.slice(0, 16));
+      // Control: the tagged entry was still warm, so the good theme brings the JS hit back.
+      await w.stop({ keepState: true });
+      w = await startWorker({ state: w.state, port, vars, assets: assetsWith("paper", t.json) });
+      assert.equal((await get(w, "/reading-on-screens")).headers.get(MARK), "js", "control: warm tagged key");
+    } finally {
+      await w.stop();
+    }
+  });
 });
