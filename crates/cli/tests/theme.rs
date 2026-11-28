@@ -583,6 +583,55 @@ fn dev_never_follows_a_symlinked_folder_out_of_assets() {
     server.join().unwrap();
 }
 
+const GHP: &str = "ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ";
+
+#[test]
+fn check_finds_a_token_in_an_asset_that_is_not_utf8() {
+    let (_t, dir) = fresh_theme("t");
+    let mut js = b"var s = '\xe9';\n".to_vec();
+    js.extend_from_slice(format!("const t = \"{GHP}\";\n").as_bytes());
+    std::fs::write(dir.join("assets/app.js"), js).unwrap();
+    let f = findings(&dir);
+    assert!(has_id(&f, "file.secret_content", "assets/app.js"), "{f:#?}");
+}
+
+#[test]
+fn check_refuses_an_oversize_text_file_and_still_scans_it() {
+    let (_t, dir) = fresh_theme("t");
+    edit(&dir, "locales/en.toml", |s| {
+        format!("{s}\n# {}\npad = \"{GHP}\"\n", "x".repeat(5 * 1024 * 1024))
+    });
+    let f = findings(&dir);
+    assert!(has_id(&f, "file.too_large", "locales/en.toml"), "{f:#?}");
+    assert!(
+        has_id(&f, "file.secret_content", "locales/en.toml"),
+        "{f:#?}"
+    );
+}
+
+#[test]
+fn check_and_push_refuse_a_theme_over_the_document_cap() {
+    let (_t, dir) = fresh_theme("t");
+    let max = plumblog_render::pushed::MAX_DOCUMENT;
+    edit(&dir, "locales/en.toml", |s| {
+        format!("{s}\n# {}\n", "x".repeat(max))
+    });
+    let f = findings(&dir);
+    assert!(
+        f.iter()
+            .any(|x| x.kind.id() == "theme.too_large" && x.level == Level::Error),
+        "{f:#?}"
+    );
+    let Err((_, why)) = theme::store::build(&dir) else {
+        panic!("built a theme over the cap");
+    };
+    assert!(
+        why.words(&en()).contains(&max.to_string()),
+        "{}",
+        why.words(&en())
+    );
+}
+
 fn plugin_findings(dir: &Path) -> Vec<Finding> {
     let name = dir.file_name().unwrap().to_string_lossy().into_owned();
     check_plugin(&DirFiles::read(dir).unwrap(), &name)

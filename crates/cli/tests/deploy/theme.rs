@@ -1,7 +1,7 @@
 //! `blog theme push | rollback | list` and the theme a later `blog deploy` carries, against
 //! the fake Cloudflare.
 
-use super::{FakeClock, NOW, P, V2, V3, active, en, load, metadata, set_up};
+use super::{FakeClock, NOW, P, V2, V3, active, en, load, metadata, set_up, set_up_domain};
 use crate::fake_cf::Fake;
 use crate::{GOOD, TempDir, client};
 use plumblog_cli::deploy::{self, Options, Runtime};
@@ -650,7 +650,7 @@ fn assets_whose_names_need_encoding_are_fetched_back() {
         .public_override
         .insert(DOC.into(), serde_json::to_vec(&doc).unwrap());
     let agent = ureq::Agent::new_with_defaults();
-    let b = store::fetch(&agent, &format!("{}/site.example", fake.base), "paper")
+    let b = store::fetch(&agent, &format!("{}/site.example", fake.base), "paper", "1")
         .unwrap_or_else(|e| panic!("{e:?}"));
     for n in names {
         assert_eq!(b.assets[n], n.as_bytes(), "{n}");
@@ -695,4 +695,45 @@ fn theme_recovery_reasons_are_translated() {
         !msg.contains("the deploy record says"),
         "English reason in a Vietnamese message: {msg}"
     );
+}
+
+#[test]
+fn a_theme_is_fetched_back_from_workers_dev_uncached() {
+    // A custom domain may sit behind a "Cache Everything" rule serving an old theme.json
+    // that matches its own hash: fetch from workers.dev, past any cache.
+    let (fake, dir, bundle) = set_up_domain(true);
+    let theme = paper(&dir);
+    ok(&run(&fake, &dir, &bundle, 1, Cmd::Push(Some(&theme))));
+    std::fs::remove_dir_all(dir.0.join(".blog")).unwrap();
+    let skip = fake.requests().len();
+    let deploy = Cmd::Deploy {
+        theme_default: false,
+    };
+    ok(&run(&fake, &dir, &bundle, 2, deploy));
+    let theme_calls: Vec<_> = fake.requests()[skip..]
+        .iter()
+        .filter(|r| r.method == "GET" && r.path.contains("/_theme/"))
+        .cloned()
+        .collect();
+    assert!(
+        theme_calls.iter().any(|r| r.path.ends_with(DOC)),
+        "{theme_calls:?}"
+    );
+    assert!(
+        theme_calls.iter().any(|r| r.path.ends_with(JS)),
+        "{theme_calls:?}"
+    );
+    for r in &theme_calls {
+        assert!(
+            r.path.starts_with("/plumblog.steven.workers.dev/"),
+            "not from workers.dev: {}",
+            r.path
+        );
+        assert_eq!(r.header("cache-control"), Some("no-cache"), "{}", r.path);
+        assert!(
+            r.query.starts_with("fresh="),
+            "no cache-busting query: {:?}",
+            r.query
+        );
+    }
 }

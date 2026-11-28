@@ -11,7 +11,9 @@ use crate::text::Text;
 use plumblog_i18n::{Key, key};
 use plumblog_render::PushedTheme;
 use plumblog_render::THEME_API;
-use plumblog_render::pushed::{ASSETS_DIR, asset_path, asset_url, document_path, valid_name};
+use plumblog_render::pushed::{
+    ASSETS_DIR, MAX_DOCUMENT, asset_path, asset_url, document_path, valid_name,
+};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -175,6 +177,19 @@ pub fn build(dir: &Path) -> Result<Built, (String, Why)> {
         assets: hashes,
     };
     doc.hash = sha256_hex(&doc.hash_input());
+    let size = doc.to_json().len();
+    if size > MAX_DOCUMENT {
+        return Err((
+            dir.display().to_string(),
+            Why::said(
+                key!("cli.theme.why.document_too_large"),
+                &[
+                    ("size", size.to_string()),
+                    ("max", MAX_DOCUMENT.to_string()),
+                ],
+            ),
+        ));
+    }
     Ok(Built { doc, assets })
 }
 
@@ -270,14 +285,20 @@ pub fn load(site: &Path, name: &str, hash: &str) -> Result<Built, Why> {
 
 /// The theme as the site serves it: `theme.json`, then each asset, from `base` (the site's
 /// origin, public, no token). Asset paths are percent-encoded per segment: a theme pushed
-/// before names were checked may hold a space, `#`, `%` or `?`.
+/// before names were checked may hold a space, `#`, `%` or `?`. Every request asks past any
+/// cache (`Cache-Control: no-cache` and a `fresh=<fresh>` query no cache has seen), so a
+/// stale copy that matches its own hash cannot pass for the served theme.
 ///
 /// # Errors
 /// A request that fails or answers other than 200, or content that does not verify.
-pub fn fetch(agent: &ureq::Agent, base: &str, name: &str) -> Result<Built, Why> {
+pub fn fetch(agent: &ureq::Agent, base: &str, name: &str, fresh: &str) -> Result<Built, Why> {
     let get = |path: &str| -> Result<Vec<u8>, String> {
-        let url = format!("{base}{path}");
-        let r = agent.get(&url).call().map_err(|e| format!("{path}: {e}"))?;
+        let url = format!("{base}{path}?fresh={fresh}");
+        let r = agent
+            .get(&url)
+            .header("cache-control", "no-cache")
+            .call()
+            .map_err(|e| format!("{path}: {e}"))?;
         let status = r.status().as_u16();
         if status != 200 {
             return Err(format!("{path}: HTTP {status}"));

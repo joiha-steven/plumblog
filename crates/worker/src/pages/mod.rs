@@ -46,6 +46,24 @@ pub enum Outcome {
     Redirect(String),
 }
 
+/// Why a page could not be rendered: the theme's templates failed (a pushed theme may then
+/// fall back to the default), or anything else (storage, the theme failing to load), which
+/// takes the plain error path.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderError {
+    Theme(String),
+    Other(String),
+}
+
+impl RenderError {
+    #[must_use]
+    pub fn detail(&self) -> &str {
+        match self {
+            Self::Theme(d) | Self::Other(d) => d,
+        }
+    }
+}
+
 /// The theme pages render with (pushed or embedded default; see `crate::theme_runtime`).
 fn theme() -> std::result::Result<&'static Theme, &'static ThemeError> {
     crate::theme_runtime::current()
@@ -152,7 +170,7 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
     let started = worker::Date::now().as_millis();
     let (outcome, tag) = match render_or_default(src, &db, &path, "").await {
         Ok(o) => o,
-        Err(detail) => return Ok(failure(&detail)),
+        Err(e) => return Ok(failure(e.detail())),
     };
     let render_ms = worker::Date::now().as_millis().saturating_sub(started);
 
@@ -208,7 +226,7 @@ async fn live<S: ExtSource + SearchSource>(
 ) -> Result<Response> {
     let (outcome, tag) = match render_or_default(src, db, path, query).await {
         Ok(o) => o,
-        Err(detail) => return Ok(failure(&detail)),
+        Err(e) => return Ok(failure(e.detail())),
     };
     let Outcome::Page {
         status,
@@ -229,21 +247,23 @@ async fn live<S: ExtSource + SearchSource>(
     Ok(Response::ok(body)?.with_status(status).with_headers(h))
 }
 
-/// [`render`], and when a pushed theme fails at render time, [`render_with`] the embedded
-/// default (`crate::theme_runtime::fallback`), never cached. `.1` is the `x-plumblog-theme`
-/// value: the pushed theme's tag when it rendered the page, else `None`.
+/// [`render`], and when a pushed theme's templates fail, [`render_with`] the embedded
+/// default (`crate::theme_runtime::fallback`), never cached; any other error is returned as
+/// it is. `.1` is the `x-plumblog-theme` value: the pushed theme's tag when it rendered the
+/// page, else `None`.
 async fn render_or_default<S: ExtSource + SearchSource>(
     src: &impl ReaderSource,
     db: &S,
     path: &str,
     query: &str,
-) -> std::result::Result<(Outcome, Option<&'static str>), String> {
+) -> std::result::Result<(Outcome, Option<&'static str>), RenderError> {
     let detail = match render(src, db, db, path, query).await {
         Ok(o) => return Ok((o, crate::theme_runtime::served_tag())),
-        Err(d) => d,
+        Err(RenderError::Theme(d)) => d,
+        Err(e) => return Err(e),
     };
     let Some(base) = crate::theme_runtime::fallback(path, &detail) else {
-        return Err(detail);
+        return Err(RenderError::Theme(detail));
     };
     let mut out = render_with(base, src, db, db, path, query).await?;
     if let Outcome::Page { cacheable, .. } = &mut out {
@@ -288,8 +308,8 @@ pub async fn render(
     search: &impl SearchSource,
     path: &str,
     query: &str,
-) -> std::result::Result<Outcome, String> {
-    let base = theme().map_err(|e| format!("theme: {e}"))?;
+) -> std::result::Result<Outcome, RenderError> {
+    let base = theme().map_err(|e| RenderError::Other(format!("theme: {e}")))?;
     render_with(base, src, ext, search, path, query).await
 }
 
@@ -304,9 +324,18 @@ pub async fn render_with(
     search: &impl SearchSource,
     path: &str,
     query: &str,
-) -> std::result::Result<Outcome, String> {
-    let (theme, complete) = configured(base, ext).await?;
-    let mut out = route(src, theme, ext, search, path, query).await?;
+) -> std::result::Result<Outcome, RenderError> {
+    let (theme, complete) = configured(base, ext).await.map_err(RenderError::Other)?;
+    let failed = Cell::new(false);
+    let mut out = route(src, theme, ext, search, path, query, &failed)
+        .await
+        .map_err(|d| {
+            if failed.get() {
+                RenderError::Theme(d)
+            } else {
+                RenderError::Other(d)
+            }
+        })?;
     if let Outcome::Page { cacheable, .. } = &mut out {
         *cacheable &= complete;
     }
@@ -336,6 +365,7 @@ pub async fn preview(
     let base = theme().map_err(|e| format!("theme: {e}"))?;
     let (theme, _) = configured(base, ext).await?;
     let settings = src.settings().await.map_err(err)?;
+    let failed = Cell::new(false);
     let origin = public_origin(&settings);
     let p = Pages {
         src,
@@ -349,6 +379,7 @@ pub async fn preview(
         per: settings.per_page.max(1),
         settings: &settings,
         complete: Cell::new(true),
+        theme_failed: &failed,
     };
     let post = Post {
         url: "/".to_owned(),
@@ -403,6 +434,7 @@ async fn route(
     search: &impl SearchSource,
     path: &str,
     query: &str,
+    failed: &Cell<bool>,
 ) -> std::result::Result<Outcome, String> {
     let settings = src.settings().await.map_err(err)?;
     let origin = public_origin(&settings);
@@ -418,6 +450,7 @@ async fn route(
         per: settings.per_page.max(1),
         settings: &settings,
         complete: Cell::new(true),
+        theme_failed: failed,
     };
     let page = match routes::parse(path) {
         Route::Redirect(to) => return Ok(Outcome::Redirect(to)),
@@ -526,6 +559,8 @@ struct Pages<'a, S> {
     settings: &'a Settings,
     /// Cleared when part of the page fell back after a failed store read (comments).
     complete: Cell<bool>,
+    /// Set when the theme's templates failed, so the error is told apart from a store one.
+    theme_failed: &'a Cell<bool>,
 }
 
 type PageResult = std::result::Result<Option<String>, String>;
@@ -552,7 +587,10 @@ impl<S: ReaderSource> Pages<'_, S> {
         let (site, info) = other
             .as_ref()
             .map_or((&self.site, &self.info), |(s, i)| (s, i));
-        let report = self.theme.render_reporting(site, info, body).map_err(err)?;
+        let report = self.theme.render_reporting(site, info, body).map_err(|e| {
+            self.theme_failed.set(true);
+            err(e)
+        })?;
         for (lang, key) in report.missing {
             warn(&format!("i18n.missing_key lang={lang} key={key}"));
         }

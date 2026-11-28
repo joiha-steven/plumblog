@@ -3,11 +3,12 @@
 //! size, rendering every page kind, files that must not be public.
 
 use super::contrast;
-use super::files::{DirFiles, Embedded};
+use super::files::{DirFiles, Embedded, MAX_FILE, MAX_TEXT};
 use super::finding::{Finding, Kind, Level};
 use super::hardtext;
 use super::sample::Sample;
 use super::secrets;
+use plumblog_render::pushed::MAX_DOCUMENT;
 use plumblog_render::{Plugin, Theme, ThemeError, ThemeFiles};
 use std::collections::BTreeMap;
 
@@ -69,7 +70,19 @@ pub fn files_findings(files: &DirFiles, layout: &[&str]) -> (Vec<Finding>, Vec<S
     if files.too_many {
         out.push(err(Kind::FileTooMany, "", None));
     }
-    for (path, text) in files.iter() {
+    for (path, size) in &files.sizes {
+        let text_file = !path.starts_with("assets/");
+        let max = if text_file { MAX_TEXT } else { MAX_FILE };
+        if *size > max {
+            out.push(err(Kind::FileTooLarge, path, None).arg("max", max.to_string()));
+            skip.push(path.clone());
+        }
+    }
+    for path in &files.not_text {
+        out.push(err(Kind::FileNotText, path, None));
+        skip.push(path.clone());
+    }
+    for (path, text) in files.scanned() {
         let top = path.split('/').next().unwrap_or_default();
         // Folders hold files; `theme.toml` and the like are files at the top only.
         let allowed = if path.contains('/') {
@@ -383,6 +396,7 @@ pub fn check_theme(files: &DirFiles) -> Vec<Finding> {
     }
     out.extend(size_findings(&theme, &view, manifest.as_ref()));
     out.extend(asset_name_findings(files));
+    out.extend(document_size_finding(files));
     out.extend(missing_asset_findings(files, src, manifest.as_ref()));
     out.extend(render_findings(&theme, files));
     for (path, text) in files.iter() {
@@ -414,6 +428,26 @@ fn asset_name_findings(files: &DirFiles) -> Vec<Finding> {
         })
         .map(|p| Finding::new(Level::Error, Kind::FileAssetName, p, None))
         .collect()
+}
+
+/// `theme.json` over [`MAX_DOCUMENT`]: the Worker would not load it. Measured as a push
+/// writes it (the text files as JSON, plus about a line per asset), so check and push agree.
+fn document_size_finding(files: &DirFiles) -> Option<Finding> {
+    let text: BTreeMap<&str, &str> = files
+        .iter()
+        .filter(|(p, _)| !p.starts_with("assets/"))
+        .collect();
+    let assets = files
+        .sizes
+        .keys()
+        .filter(|p| p.starts_with("assets/"))
+        .count();
+    let size = serde_json::to_string(&text).map_or(0, |j| j.len()) + assets * 96;
+    (size > MAX_DOCUMENT).then(|| {
+        Finding::new(Level::Error, Kind::ThemeTooLarge, "", None)
+            .arg("size", kb(size))
+            .arg("max", (MAX_DOCUMENT / 1024).to_string())
+    })
 }
 
 /// Line (1-based) of byte offset `at` in `src`.

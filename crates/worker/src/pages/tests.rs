@@ -420,6 +420,9 @@ fn a_theme_that_fails_on_a_real_post_falls_back_to_the_default() {
     let home = run(render_with(&fragile, src, &Db(&db), &Db(&db), "/", ""));
     assert!(matches!(home, Ok(Outcome::Page { status: 200, .. })));
     let err = run(render_with(&fragile, src, &Db(&db), &Db(&db), &path, "")).unwrap_err();
+    let super::RenderError::Theme(err) = err else {
+        panic!("a template error is a theme error: {err:?}");
+    };
     let base = crate::theme_runtime::fallback_from("x", &path, &err).expect("the default");
     match run(render_with(base, src, &Db(&db), &Db(&db), &path, "")).unwrap() {
         Outcome::Page { status, body, .. } => {

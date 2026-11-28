@@ -8,8 +8,11 @@ use std::path::Path;
 
 /// More files than this is not a theme: stop reading instead of walking a wrong folder.
 const MAX_FILES: usize = 2_000;
-/// Text files larger than this are listed but not read (nothing in a theme is that big).
-const MAX_TEXT: u64 = 4 * 1024 * 1024;
+/// Text files larger than this are not given to the loader (nothing in a theme is that big;
+/// `blog theme check` refuses them).
+pub const MAX_TEXT: u64 = 4 * 1024 * 1024;
+/// Largest file a push uploads (Workers static assets); bigger files are not read at all.
+pub const MAX_FILE: u64 = 25 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct DirFiles {
@@ -18,6 +21,11 @@ pub struct DirFiles {
     pub sizes: BTreeMap<String, u64>,
     /// Paths (relative, `/`-separated) of symbolic links, which are never followed.
     pub symlinks: Vec<String>,
+    /// What the secret scan reads for files whose bytes are not their loader text (not UTF-8,
+    /// or over [`MAX_TEXT`]): the bytes as lossy UTF-8, since a push ships the real bytes.
+    pub lossy: BTreeMap<String, String>,
+    /// Files outside `assets/` that are not UTF-8 text (a push cannot carry them as text).
+    pub not_text: Vec<String>,
     pub too_many: bool,
 }
 
@@ -54,10 +62,25 @@ impl DirFiles {
                 self.too_many = true;
                 return Ok(());
             } else {
-                let text = if meta.len() <= MAX_TEXT {
-                    String::from_utf8(std::fs::read(&path)?).unwrap_or_default()
+                let bytes = if meta.len() <= MAX_FILE {
+                    std::fs::read(&path)?
                 } else {
-                    String::new()
+                    Vec::new()
+                };
+                let text = match String::from_utf8(bytes) {
+                    Ok(t) if meta.len() <= MAX_TEXT => t,
+                    Ok(t) => {
+                        self.lossy.insert(rel.clone(), t);
+                        String::new()
+                    }
+                    Err(e) => {
+                        if !rel.starts_with("assets/") {
+                            self.not_text.push(rel.clone());
+                        }
+                        let lossy = String::from_utf8_lossy(e.as_bytes()).into_owned();
+                        self.lossy.insert(rel.clone(), lossy);
+                        String::new()
+                    }
                 };
                 self.sizes.insert(rel.clone(), meta.len());
                 self.entries.push((rel, text));
@@ -81,6 +104,15 @@ impl DirFiles {
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         self.entries.iter().map(|(p, t)| (p.as_str(), t.as_str()))
+    }
+
+    /// Every file as the secret scan reads it: its text, or its bytes as lossy UTF-8. Never
+    /// empty for a file that has content, whatever its encoding or size up to [`MAX_FILE`].
+    pub fn scanned(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.entries.iter().map(|(p, t)| {
+            let t = self.lossy.get(p).map_or(t.as_str(), String::as_str);
+            (p.as_str(), t)
+        })
     }
 }
 

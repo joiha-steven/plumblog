@@ -1399,8 +1399,23 @@ fn carry_theme(
             ),
         }
     }
+    // From workers.dev when the site has a custom domain: a cache rule there ("Cache
+    // Everything") may serve an older theme.json that still matches its own hash.
+    let sub = match &site.domain {
+        Some(_) => setup::workers_subdomain(run.client).map_err(|e| run.api(&e))?,
+        None => None,
+    };
+    let base = match sub {
+        Some(sub) => smoke_url(
+            &format!("https://{}.{sub}.workers.dev", site.worker),
+            rt,
+            run.cx.text,
+        )?,
+        None => base.to_owned(),
+    };
     let agent = plain_agent(rt.smoke_base.is_some(), THEME_FETCH_TIMEOUT, 3);
-    let fetched = store::fetch(&agent, base, &name).and_then(|b| match &expected {
+    let fresh = run.cx.now_ms.to_string();
+    let fetched = store::fetch(&agent, &base, &name, &fresh).and_then(|b| match &expected {
         Some(h) if *h != b.doc.hash => Err(store::Why::Said(
             key!("cli.theme.why.served_other"),
             vec![

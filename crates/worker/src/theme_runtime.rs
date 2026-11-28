@@ -8,8 +8,10 @@
 
 use crate::pages::source;
 use crate::pages::{PLUGIN_ASSETS_URL, THEME_ASSETS_URL};
+use plumblog_render::pushed::MAX_DOCUMENT;
 use plumblog_render::{Plugin, PushedTheme, Theme, ThemeError};
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicU8;
 use worker::Env;
 
 /// Plain-text binding: the active pushed theme's name. Absent or empty: the embedded default.
@@ -65,15 +67,51 @@ pub fn cache_tag() -> &'static str {
     }
 }
 
+/// The binding names `name` as the pushed theme, but it did not load (missing, invalid, too
+/// large, or not fetched yet): its option declarations are unknown. Call after [`prepare`].
+pub fn unavailable(env: &Env, name: &str) -> bool {
+    let bound = env
+        .var(THEME_VAR)
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    bound.trim() == name && !matches!(PUSHED.get(), Some(Some(p)) if p.theme.name() == name)
+}
+
 /// `x-plumblog-theme` for a page the pushed theme rendered (`None` for the default).
 pub fn served_tag() -> Option<&'static str> {
     cache_tag().strip_prefix("-t")
 }
 
-/// The theme to render with after the active theme failed on `path`: the embedded default
-/// when a pushed theme is active (a template error that only real data shows), so readers
-/// get a page instead of a 500. Logged once per isolate; the caller must not cache the page.
-/// `None` when the default itself failed: nothing to fall back to.
+/// What a pushed-theme log line is about. Each kind is logged once per isolate, so a page
+/// view never writes a log line per request, yet one kind never hides another.
+#[derive(Clone, Copy)]
+pub(crate) enum LogKind {
+    Missing,
+    Invalid,
+    TooLarge,
+    FetchFailed,
+    RenderFailed,
+}
+
+/// Logs `line` unless a line of `kind` was logged in this isolate; true when it logged.
+pub(crate) fn log_once(kind: LogKind, line: &str) -> bool {
+    static LOGGED: AtomicU8 = AtomicU8::new(0);
+    log_once_in(&LOGGED, kind, line)
+}
+
+fn log_once_in(logged: &AtomicU8, kind: LogKind, line: &str) -> bool {
+    let bit = 1u8 << (kind as u8);
+    if logged.fetch_or(bit, std::sync::atomic::Ordering::Relaxed) & bit != 0 {
+        return false;
+    }
+    log(line);
+    true
+}
+
+/// The theme to render with after the active theme's templates failed on `path` (an error
+/// that only real data shows; storage errors never come here): the embedded default when a
+/// pushed theme is active, so readers get a page instead of a 500. The caller must not cache
+/// the page. `None` when no pushed theme is active: nothing to fall back to.
 pub fn fallback(path: &str, detail: &str) -> Option<&'static Theme> {
     let Some(Some(p)) = PUSHED.get() else {
         return None;
@@ -82,13 +120,13 @@ pub fn fallback(path: &str, detail: &str) -> Option<&'static Theme> {
 }
 
 pub(crate) fn fallback_from(name: &str, path: &str, detail: &str) -> Option<&'static Theme> {
-    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        log(&format!(
+    log_once(
+        LogKind::RenderFailed,
+        &format!(
             "theme.pushed_render_failed name={name} path={path} detail={detail}; \
              served with the default theme, not cached"
-        ));
-    }
+        ),
+    );
     embedded().ok()
 }
 
@@ -97,6 +135,8 @@ enum Fetched {
     Body(String),
     /// 404: the binding names a theme that was never pushed (or was removed).
     Missing,
+    /// Over [`MAX_DOCUMENT`] (declared or read): never parsed.
+    TooLarge(usize),
     /// Anything else: worth trying again on a later request.
     Failed(String),
 }
@@ -107,10 +147,23 @@ fn decide(name: &str, fetched: Fetched) -> Result<Option<Pushed>, String> {
     let json = match fetched {
         Fetched::Body(b) => b,
         Fetched::Missing => {
-            log(&format!(
-                "theme.pushed_missing name={name} detail=/_theme/{name}/theme.json not found; \
-                 using the default theme"
-            ));
+            log_once(
+                LogKind::Missing,
+                &format!(
+                    "theme.pushed_missing name={name} detail=/_theme/{name}/theme.json not \
+                     found; using the default theme"
+                ),
+            );
+            return Ok(None);
+        }
+        Fetched::TooLarge(n) => {
+            log_once(
+                LogKind::TooLarge,
+                &format!(
+                    "theme.pushed_invalid name={name} detail=theme.json is {n} bytes, over \
+                     {MAX_DOCUMENT}; using the default theme"
+                ),
+            );
             return Ok(None);
         }
         Fetched::Failed(e) => return Err(e),
@@ -118,9 +171,10 @@ fn decide(name: &str, fetched: Fetched) -> Result<Option<Pushed>, String> {
     match load(name, &json) {
         Ok(p) => Ok(Some(p)),
         Err(e) => {
-            log(&format!(
-                "theme.pushed_invalid name={name} detail={e}; using the default theme"
-            ));
+            log_once(
+                LogKind::Invalid,
+                &format!("theme.pushed_invalid name={name} detail={e}; using the default theme"),
+            );
             Ok(None)
         }
     }
@@ -178,9 +232,13 @@ pub async fn prepare(env: &Env) {
         return;
     }
     if !plain_name(name) {
-        log(&format!(
-            "theme.pushed_invalid name={name:?} detail={THEME_VAR} is not a theme name; using the default theme"
-        ));
+        log_once(
+            LogKind::Invalid,
+            &format!(
+                "theme.pushed_invalid name={name:?} detail={THEME_VAR} is not a theme name; \
+                 using the default theme"
+            ),
+        );
         let _ = PUSHED.set(None);
         return;
     }
@@ -200,9 +258,15 @@ pub async fn prepare(env: &Env) {
             // Two requests may race through the await; the first choice stands.
             let _ = PUSHED.set(choice);
         }
-        Err(e) => log(&format!(
-            "theme.pushed_fetch_failed name={name} detail={e}; default theme for this request"
-        )),
+        Err(e) => {
+            log_once(
+                LogKind::FetchFailed,
+                &format!(
+                    "theme.pushed_fetch_failed name={name} detail={e}; default theme for this \
+                     request"
+                ),
+            );
+        }
     }
 }
 
@@ -218,13 +282,46 @@ async fn fetch(env: &Env, name: &str) -> Fetched {
         Err(e) => return Fetched::Failed(format!("fetch: {e}")),
     };
     match resp.status_code() {
-        200 => match resp.text().await {
-            Ok(t) => Fetched::Body(t),
-            Err(e) => Fetched::Failed(format!("read: {e}")),
-        },
+        200 => read_capped(&mut resp).await,
         404 => Fetched::Missing,
         s => Fetched::Failed(format!("HTTP {s}")),
     }
+}
+
+/// The body, refused unread when `Content-Length` is over [`MAX_DOCUMENT`] and refused as
+/// soon as the bytes read pass it (a missing or wrong length cannot get a bigger document
+/// parsed): a document too big to load within the request's CPU and memory limits would
+/// otherwise end the isolate before it ever falls back.
+async fn read_capped(resp: &mut worker::Response) -> Fetched {
+    use futures_core::Stream;
+    let declared = resp
+        .headers()
+        .get("content-length")
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse::<usize>().ok());
+    if let Some(n) = declared.filter(|n| *n > MAX_DOCUMENT) {
+        return Fetched::TooLarge(n);
+    }
+    let stream = match resp.stream() {
+        Ok(s) => s,
+        Err(e) => return Fetched::Failed(format!("read: {e}")),
+    };
+    let mut stream = std::pin::pin!(stream);
+    let mut buf = Vec::new();
+    while let Some(chunk) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
+        match chunk {
+            Ok(c) => buf.extend_from_slice(&c),
+            Err(e) => return Fetched::Failed(format!("read: {e}")),
+        }
+        if buf.len() > MAX_DOCUMENT {
+            return Fetched::TooLarge(buf.len());
+        }
+    }
+    String::from_utf8(buf).map_or_else(
+        |_| Fetched::Failed("read: theme.json is not UTF-8".to_owned()),
+        Fetched::Body,
+    )
 }
 
 /// A Worker log warning, as `plugin.broken` always was (`console_warn!` only exists in wasm;
@@ -239,7 +336,8 @@ fn log(line: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Fetched, decide, embedded, fallback, fallback_from, load, load_parsed, plain_name,
+        AtomicU8, Fetched, LogKind, decide, embedded, fallback, fallback_from, load, load_parsed,
+        log_once_in, plain_name,
     };
     use crate::pages::source;
     use plumblog_render::{PushedTheme, THEME_API};
@@ -263,6 +361,63 @@ mod tests {
         t.files.insert("theme.toml".into(), toml);
         edit(&mut t);
         t
+    }
+
+    /// The default renamed `paper`, grown to about `total` bytes of `theme.json`: a third
+    /// each in CSS rules, template markup and locale keys, the three costs of a load.
+    pub(crate) fn padded(total: usize) -> String {
+        use std::fmt::Write as _;
+        let mut t = pushed(|_| {});
+        let base = t.to_json().len();
+        let third = total.saturating_sub(base) / 3;
+        let mut css = t.files["style.css"].clone();
+        let mut html = t.files["templates/tag.html"].clone();
+        let mut toml = t.files["locales/en.toml"].clone();
+        toml.push_str("\n[pad]\n");
+        let (c0, h0, l0) = (css.len(), html.len(), toml.len());
+        let mut n = 0;
+        while css.len() - c0 < third {
+            let _ = writeln!(
+                css,
+                ".pad-{n} > a:hover {{ margin: 0 {n}px; color: var(--c-text); }}"
+            );
+            n += 1;
+        }
+        while html.len() - h0 < third {
+            let _ = writeln!(
+                html,
+                "{{% if page.title %}}<p class=\"pad-{n}\">{{{{ page.title }}}}</p>{{% endif %}}"
+            );
+            n += 1;
+        }
+        while toml.len() - l0 < third {
+            let _ = writeln!(toml, "k{n} = \"Text number {n} for padding\"");
+            n += 1;
+        }
+        t.files.insert("style.css".into(), css);
+        t.files.insert("templates/tag.html".into(), html);
+        t.files.insert("locales/en.toml".into(), toml);
+        t.to_json()
+    }
+
+    /// Cold load cost by `theme.json` size, natively (`cargo test --release -p
+    /// plumblog-worker -- --ignored --nocapture theme_load_cost`); wasm is 1.5-3x slower.
+    #[test]
+    #[ignore = "timing table, run by hand"]
+    fn theme_load_cost() {
+        for kb in [77, 256, 512, 1024, 2048] {
+            let json = padded(kb * 1024);
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t0 = std::time::Instant::now();
+                load("paper", &json).unwrap();
+                best = best.min(t0.elapsed().as_secs_f64() * 1000.0);
+            }
+            println!(
+                "theme.json {:>5} KB: parse+load {best:.1} ms",
+                json.len() / 1024
+            );
+        }
     }
 
     #[test]
@@ -338,6 +493,28 @@ mod tests {
         assert!(fallback("/x", "boom").is_none());
         let t = fallback_from("paper", "/x", "boom").expect("the default");
         assert_eq!(t.name(), "minimal");
+    }
+
+    #[test]
+    fn a_document_over_the_cap_is_never_parsed() {
+        assert!(matches!(
+            decide("paper", Fetched::TooLarge(super::MAX_DOCUMENT + 1)),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn each_log_kind_is_logged_once_without_hiding_the_others() {
+        let logged = AtomicU8::new(0);
+        let once = |k| log_once_in(&logged, k, "theme.pushed_test");
+        assert!(once(LogKind::FetchFailed));
+        assert!(!once(LogKind::FetchFailed));
+        // A later render failure still logs, once.
+        assert!(once(LogKind::RenderFailed));
+        assert!(!once(LogKind::RenderFailed));
+        for k in [LogKind::Missing, LogKind::Invalid, LogKind::TooLarge] {
+            assert!(once(k));
+        }
     }
 
     #[test]

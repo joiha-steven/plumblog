@@ -31,6 +31,11 @@ pub struct PushedTheme {
     pub assets: BTreeMap<String, String>,
 }
 
+/// Largest `theme.json` a Worker parses (docs/ARCHITECTURE.md, Budgets): about 3x the
+/// default theme's 77 KB, and a cold load of about 2.5 ms natively, so it stays within one
+/// request's CPU budget in wasm. `blog theme check` and `push` refuse bigger themes.
+pub const MAX_DOCUMENT: usize = 256 * 1024;
+
 /// Prefix of the theme folder whose files ship as separate static assets.
 pub const ASSETS_DIR: &str = "assets/";
 
@@ -108,6 +113,12 @@ impl PushedTheme {
             out.extend_from_slice(format!("a {} {p} {h}\n", p.len()).as_bytes());
         }
         out
+    }
+
+    /// `theme.json` as `blog theme push` writes it.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
     }
 
     /// Parses `theme.json` for the theme the Worker was told to use.

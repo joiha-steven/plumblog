@@ -11,6 +11,9 @@ page_not_found = "This page does not exist."
 [error.post]
 published_in_future = "A published post cannot have a future date. Schedule it instead, or publish it now."
 
+[error.theme]
+unavailable = "The site's pushed theme did not load, so its settings cannot be checked. Push the theme again, then change them."
+
 [error.input]
 # A JSON body with more values in all than the API takes (4096).
 too_complex = "This request holds too many items. Send less at a time."
@@ -619,6 +622,7 @@ bad_name = "name \"{name}\" in theme.toml is not a theme name (lowercase letters
 copy_holds_other = "{path} holds another theme ({hash})"
 served_not_utf8 = "{path} on the site is not UTF-8 text"
 served_other = "the site serves theme {served}, but the deploy record names {recorded}"
+document_too_large = "theme.json would be {size} bytes; the limit is {max} (the Worker would not load it)"
 
 [cli.plugin]
 about = "Check plugins (check)"
@@ -699,6 +703,18 @@ fix = "Delete it, and do not name files admin*."
 [cli.finding.file_too_many]
 what = "More files than a theme or plugin has; the rest were not read."
 fix = "Check that this is the right folder, and remove files that do not belong."
+
+[cli.finding.theme_too_large]
+what = "The theme's text files make a theme.json of {size} KB; the limit is {max} KB, and the site would show the default theme."
+fix = "Move large text out of templates, styles and locales (images and fonts belong in assets/, which do not count), or trim it."
+
+[cli.finding.file_too_large]
+what = "Larger than {max} bytes, the most a theme file may be."
+fix = "Make it smaller, or remove it from the folder."
+
+[cli.finding.file_not_text]
+what = "Not UTF-8 text. Outside assets/, a theme holds only text files."
+fix = "Save it as UTF-8, or move it into assets/ if it is not text."
 
 [cli.finding.file_asset_name]
 what = "Asset file names may use only A-Z, a-z, 0-9, dot, _ and - in each part of the path."

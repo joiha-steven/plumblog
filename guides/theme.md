@@ -56,3 +56,4 @@ one says it cannot (`deploy.theme_unrecoverable`), push the folder again, or dep
 Rules a theme must keep: colors only through tokens with light and dark values, no text outside
 its `locales/`, PageSpeed 100 and no layout shift. Every file it uses (`asset()`, fonts, scripts,
 also from default templates it borrows) is in its `assets/`, named with `A-Z a-z 0-9 . _ -` only.
+Text files (all but `assets/`) stay under 256 KB in all, or the site shows the default theme.

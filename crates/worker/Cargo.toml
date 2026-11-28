@@ -16,6 +16,7 @@ contract-tests = ["plumblog-store/contract", "plumblog-webhook/test-receiver"]
 
 [dependencies]
 worker.workspace = true
+futures-core.workspace = true
 idna_adapter.workspace = true
 plumblog-model.workspace = true
 plumblog-auth.workspace = true

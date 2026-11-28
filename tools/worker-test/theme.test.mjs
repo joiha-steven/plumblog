@@ -61,6 +61,22 @@ function themeJson(name, edit = (f) => f) {
 
 const tagOf = (json) => JSON.parse(json).hash.slice(0, 16);
 
+// plumblog_render::pushed::MAX_DOCUMENT: the largest theme.json a Worker parses.
+const MAX_DOCUMENT = 256 * 1024;
+
+/** The pushed theme grown with CSS rules (minified at load, the costliest part) to `bytes` of theme.json. */
+function grown(bytes) {
+  let n = 0;
+  let rules = "";
+  const at = (r) => themeJson("paper", (f) => ({ ...f, "style.css": f["style.css"] + r })).length;
+  const base = at("");
+  // Each "\n" is two characters in the JSON.
+  while (base + rules.length + n < bytes - 64) rules += `.pad-${n++} > a:hover { margin: 0 ${n}px; }\n`;
+  return themeJson("paper", (f) => ({ ...f, "style.css": f["style.css"] + rules }));
+}
+const AT_CAP = grown(MAX_DOCUMENT - 1024);
+const OVER_CAP = grown(MAX_DOCUMENT + 64 * 1024);
+
 /** A post template that loads but fails on a real post: `nope` is not a post field. */
 const FRAGILE = themeJson("paper", (f) => ({
   ...f,
@@ -105,7 +121,9 @@ describe("pushed theme", () => {
   before(async () => {
     const setups = {
       pushed: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", themeJson("paper")), seedSql: seed },
-      broken: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", "{not json") },
+      broken: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", "{not json"), seedSql: seed },
+      atcap: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", AT_CAP) },
+      overcap: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", OVER_CAP) },
       missing: { vars: { PLUMBLOG_THEME: "ghost" }, assets: assetsWith("other", null) },
       embedded: {},
       fragile: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", FRAGILE), seedSql: postSeed },
@@ -162,6 +180,43 @@ describe("pushed theme", () => {
     assert.doesNotMatch(first.broken.res.headers.get("etag"), /-t[0-9a-f]{16}-/);
     assert.equal(first.broken.res.headers.get("x-plumblog-theme"), null, "no theme tag on the default");
     assert.equal(first.embedded.res.headers.get("x-plumblog-theme"), null);
+  });
+
+  test("theme.json at the cap loads; over it the default renders and it is logged (cold wall time printed)", async () => {
+    assert.ok(AT_CAP.length <= MAX_DOCUMENT && OVER_CAP.length > MAX_DOCUMENT);
+    assert.equal(first.atcap.res.headers.get("x-plumblog-theme"), tagOf(AT_CAP));
+    assert.equal(first.overcap.res.status, 200);
+    assert.match(first.overcap.html, new RegExp(`--c-accent:light-dark\\(${DEFAULT_ACCENT},`));
+    assert.equal(first.overcap.res.headers.get("x-plumblog-theme"), null);
+    const log = workers.overcap.log();
+    assert.match(log, /theme\.pushed_invalid name=paper detail=theme\.json is \d+ bytes, over 262144/, log);
+    const loaded = workers.atcap.log().match(/theme\.pushed_loaded .*fetch_ms=(\d+) load_ms=(\d+)/);
+    console.log(
+      `cold first GET / with theme.json at the cap (${(AT_CAP.length / 1024).toFixed(0)} KB): wall ${first.atcap.wall.toFixed(1)} ms, ` +
+        `${first.atcap.render}; in the Worker fetch ${loaded?.[1]} ms, parse+load ${loaded?.[2]} ms`,
+    );
+  });
+
+  test("a store error with a pushed theme takes the plain error path, not the theme fallback", async () => {
+    const w = workers.fragile;
+    w.query("ALTER TABLE tags RENAME TO tags_gone");
+    try {
+      const res = await fetch(`${w.url}/tag/anything`);
+      await res.text();
+      assert.equal(res.status, 500);
+    } finally {
+      w.query("ALTER TABLE tags_gone RENAME TO tags");
+    }
+    assert.doesNotMatch(w.log(), /theme\.pushed_render_failed/, "a D1 error is not a theme failure");
+  });
+
+  test("option writes for a pushed theme that failed to load are refused", async () => {
+    const w = workers.broken;
+    const r = await put(w, "/api/v1/themes/paper/options/excerpt_words", 41);
+    assert.equal(r.status, 409);
+    assert.deepEqual(await r.json(), { error: "theme.unavailable" });
+    // The embedded default is still checked under its own name.
+    assert.equal((await put(w, "/api/v1/themes/minimal/options/accent", "#336699")).status, 400);
   });
 
   test("a page the pushed theme fails to render is served with the default, uncached, logged once", async () => {

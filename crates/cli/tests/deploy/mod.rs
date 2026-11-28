@@ -1234,7 +1234,7 @@ fn an_unrecorded_migration_in_a_deploy_blocks_the_next_one() {
 
 /// A site set up with `--domain blog.example.com`; `workers_dev`: the account has a
 /// workers.dev subdomain.
-fn set_up_domain(workers_dev: bool) -> (Fake, TempDir, PathBuf) {
+pub(super) fn set_up_domain(workers_dev: bool) -> (Fake, TempDir, PathBuf) {
     let mut st = site(ALL);
     if !workers_dev {
         st.subdomain = None;

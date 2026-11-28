@@ -644,6 +644,7 @@ dependencies = [
 name = "plumblog-worker"
 version = "0.1.0"
 dependencies = [
+ "futures-core",
  "idna_adapter",
  "plumblog-auth",
  "plumblog-i18n",

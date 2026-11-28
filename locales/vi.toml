@@ -6,6 +6,9 @@ title_fallback = "Trang chưa đặt tên"
 page_failed = "Trang này tạm thời chưa hiện được. Bạn thử lại sau một phút nhé."
 page_not_found = "Trang này không tồn tại."
 
+[error.theme]
+unavailable = "Giao diện đã đẩy lên của trang không tải được, nên chưa kiểm được các thiết lập của nó. Hãy đẩy lại giao diện rồi đổi thiết lập."
+
 [error.input]
 too_complex = "Yêu cầu này chứa quá nhiều mục. Bạn gửi ít hơn mỗi lần nhé."
 
@@ -605,6 +608,7 @@ bad_name = "tên \"{name}\" trong theme.toml không phải tên giao diện hợ
 copy_holds_other = "{path} đang chứa một giao diện khác ({hash})"
 served_not_utf8 = "{path} trên trang không phải văn bản UTF-8"
 served_other = "trang đang phục vụ giao diện {served}, nhưng bản ghi đưa lên ghi {recorded}"
+document_too_large = "theme.json sẽ nặng {size} byte; giới hạn là {max} (Worker sẽ không tải nó)"
 
 [cli.plugin]
 about = "Kiểm tra plugin (check)"
@@ -685,6 +689,18 @@ fix = "Xoá nó, và đừng đặt tên tệp bắt đầu bằng admin."
 [cli.finding.file_too_many]
 what = "Nhiều tệp hơn mức một giao diện hay plugin có; phần còn lại chưa được đọc."
 fix = "Kiểm tra đúng thư mục chưa, và bỏ các tệp không thuộc về nó."
+
+[cli.finding.theme_too_large]
+what = "Các tệp văn bản của giao diện tạo ra theme.json nặng {size} KB; giới hạn là {max} KB, vượt quá thì trang sẽ hiện giao diện mặc định."
+fix = "Bớt chữ lớn trong mẫu, tệp kiểu và tệp ngôn ngữ (ảnh và phông chữ để trong assets/, không tính vào giới hạn), hoặc rút gọn chúng."
+
+[cli.finding.file_too_large]
+what = "Lớn hơn {max} byte, mức tối đa cho một tệp của giao diện."
+fix = "Làm tệp nhỏ lại, hoặc bỏ nó khỏi thư mục."
+
+[cli.finding.file_not_text]
+what = "Không phải văn bản UTF-8. Ngoài assets/, giao diện chỉ chứa tệp văn bản."
+fix = "Lưu lại dưới dạng UTF-8, hoặc chuyển vào assets/ nếu nó không phải văn bản."
 
 [cli.finding.file_asset_name]
 what = "Tên tệp trong assets/ chỉ được dùng A-Z, a-z, 0-9, dấu chấm, _ và - ở mỗi phần của đường dẫn."

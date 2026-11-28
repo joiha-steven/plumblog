@@ -217,6 +217,12 @@ async fn check_option(
     value: &str,
 ) -> Result<()> {
     crate::theme_runtime::prepare(&ctx.env).await;
+    if owner == OptionOwner::Theme && crate::theme_runtime::unavailable(&ctx.env, name) {
+        return Err(Error::new(
+            ErrorCode::ThemeUnavailable,
+            format!("theme {name} is the pushed theme but did not load; push it again"),
+        ));
+    }
     let themes = [
         crate::theme_runtime::current(),
         crate::theme_runtime::embedded(),

@@ -74,6 +74,7 @@ order=$(awk '/^## Code layout/{s=1} s&&/^```/{n++; next} s&&n==1&&/^crates\//{sp
 external_allowlist='
 worker   worker                 # the Cloudflare runtime; the only crate that does I/O
 worker   idna_adapter           # pins the IDNA back end of url, for size (see Cargo.toml)
+worker   futures-core           # Stream trait to read theme.json in bounded chunks; already in the wasm via worker
 worker   roxmltree              # tests only: feeds and sitemap parse as real XML
 worker   rusqlite               # tests only: EXPLAIN QUERY PLAN of every reader query
 cli      clap                   # argument parsing for the `blog` binary

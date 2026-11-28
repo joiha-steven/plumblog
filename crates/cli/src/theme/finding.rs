@@ -23,6 +23,7 @@ pub enum Kind {
     ThemeLocaleKey,
     ThemePageProblem,
     ThemeAssetMissing,
+    ThemeTooLarge,
     FileSecretName,
     FileSecretContent,
     FileStray,
@@ -30,6 +31,8 @@ pub enum Kind {
     FileAdmin,
     FileTooMany,
     FileAssetName,
+    FileTooLarge,
+    FileNotText,
     TextHard,
     PluginLoad,
     PluginBroken,
@@ -50,6 +53,7 @@ impl Kind {
             Self::ThemeLocaleKey => "theme.locale_key",
             Self::ThemePageProblem => "theme.page_problem",
             Self::ThemeAssetMissing => "theme.asset_missing",
+            Self::ThemeTooLarge => "theme.too_large",
             Self::FileSecretName => "file.secret_name",
             Self::FileSecretContent => "file.secret_content",
             Self::FileStray => "file.stray",
@@ -57,6 +61,8 @@ impl Kind {
             Self::FileAdmin => "file.admin",
             Self::FileTooMany => "file.too_many",
             Self::FileAssetName => "file.asset_name",
+            Self::FileTooLarge => "file.too_large",
+            Self::FileNotText => "file.not_text",
             Self::TextHard => "text.hard_coded",
             Self::PluginLoad => "plugin.load",
             Self::PluginBroken => "plugin.broken",
@@ -106,6 +112,18 @@ impl Kind {
             Self::ThemeAssetMissing => (
                 key!("cli.finding.theme_asset_missing.what"),
                 key!("cli.finding.theme_asset_missing.fix"),
+            ),
+            Self::ThemeTooLarge => (
+                key!("cli.finding.theme_too_large.what"),
+                key!("cli.finding.theme_too_large.fix"),
+            ),
+            Self::FileTooLarge => (
+                key!("cli.finding.file_too_large.what"),
+                key!("cli.finding.file_too_large.fix"),
+            ),
+            Self::FileNotText => (
+                key!("cli.finding.file_not_text.what"),
+                key!("cli.finding.file_not_text.fix"),
             ),
             Self::FileAssetName => (
                 key!("cli.finding.file_asset_name.what"),
