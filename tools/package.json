@@ -11,6 +11,7 @@
     "test:worker": "node --test \"worker-test/*.test.mjs\""
   },
   "devDependencies": {
+    "@jsquash/avif": "2.1.1",
     "@codemirror/commands": "6.11.2",
     "@codemirror/lang-markdown": "6.5.2",
     "@codemirror/language": "6.13.1",
@@ -31,6 +32,7 @@
     "happy-dom": "DOM for theme and admin script tests",
     "wrangler": "runs the Worker locally (workerd, local D1/R2)",
     "@codemirror/*": "the admin editor: CodeMirror 6 (state, view, commands, language, lang-markdown); one version each, pinned together, because CM breaks when packages resolve different @codemirror/view copies",
+    "@jsquash/avif": "the admin's AVIF encoder (libavif + libaom compiled to wasm; the package is Apache-2.0, libavif and libaom are BSD-2-Clause and libaom has the AOM patent licence; notices in web/admin/src/encode/notices.txt ship beside the wasm), loaded on the first upload in its own file; canvas cannot write AVIF in most browsers. Only the single-threaded codec is used (the threaded one needs cross-origin isolation); budget in docs/ARCHITECTURE.md",
     "@lezer/markdown, @lezer/highlight": "the Markdown parser and style tags CodeMirror's live styling reads (GFM tables, task lists, strikethrough)"
   }
 }
