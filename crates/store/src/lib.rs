@@ -42,8 +42,8 @@ pub mod comment {
 pub use log::{LogEntry, LogQuery, LogStore, RETENTION_JOB, retention_job};
 pub use media::{Media, MediaQuery, MediaStore, NewMedia};
 pub use posts::{
-    NewRevision, Post, PostCursor, PostKind, PostOrder, PostQuery, PostStatus, PostStore,
-    PostSummary, Revision, SavePost,
+    NewRevision, Post, PostCounts, PostCursor, PostKind, PostOrder, PostQuery, PostStatus,
+    PostStore, PostSummary, Revision, SavePost,
 };
 pub use reader::{
     READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage,

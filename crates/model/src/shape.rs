@@ -134,6 +134,15 @@ const FULL: &[Prop] = &[
 const PAGE: &[Prop] = &[
     list("posts", Ty::Shape("post_summary")),
     nullable("next_cursor", Ty::Str),
+    nullable("counts", Ty::Shape("post_counts")),
+];
+
+/// Posts per status; every key is always there.
+const COUNTS: &[Prop] = &[
+    p("draft", Ty::Int),
+    p("scheduled", Ty::Int),
+    p("published", Ty::Int),
+    p("trashed", Ty::Int),
 ];
 
 const CONFLICT: &[Prop] = &[
@@ -162,6 +171,11 @@ pub const SHAPES: &[Shape] = &[
         name: "post_page",
         extends: None,
         props: PAGE,
+    },
+    Shape {
+        name: "post_counts",
+        extends: None,
+        props: COUNTS,
     },
     Shape {
         name: "conflict",

@@ -261,6 +261,12 @@ fn decode_cursor(order: PostOrder, text: &str) -> Result<PostCursor> {
 
 /// `GET /api/v1/posts`: one page, any status (drafts and trash included: every caller here
 /// is signed in), keyset-paged. `next_cursor` is `null` on the last page.
+///
+/// `counts` (posts per status, for the admin's filter pills) is sent on the first page only
+/// (no `cursor`), `null` after. It follows `kind` and `lang` like the list, and nothing
+/// else: `status`, `tag`, `series` and `author` do not narrow it, because the pills show
+/// every status. It needs no filter of its own: the list already shows every status to any
+/// caller this route admits.
 pub async fn list(ctx: &Ctx, input: &Input) -> Result<Reply> {
     let order = match input.str("order").unwrap_or("updated") {
         "updated" => PostOrder::UpdatedDesc,
@@ -291,6 +297,20 @@ pub async fn list(ctx: &Ctx, input: &Input) -> Result<Reply> {
         .str("cursor")
         .map(|c| decode_cursor(order, c))
         .transpose()?;
+    let counts = if q.after.is_none() {
+        let c = ctx
+            .store
+            .count_posts_by_status(q.kind, q.lang.as_deref())
+            .await?;
+        Out::Raw(object(&[
+            ("draft", Out::Int(c.draft)),
+            ("scheduled", Out::Int(c.scheduled)),
+            ("published", Out::Int(c.published)),
+            ("trashed", Out::Int(c.trashed)),
+        ]))
+    } else {
+        Out::Null
+    };
     let mut rows = ctx.store.list_posts(&q).await?;
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
@@ -304,6 +324,7 @@ pub async fn list(ctx: &Ctx, input: &Input) -> Result<Reply> {
         object(&[
             ("posts", Out::Raw(format!("[{}]", items.join(",")))),
             ("next_cursor", next),
+            ("counts", counts),
         ]),
     ))
 }

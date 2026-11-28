@@ -19,6 +19,7 @@ The answer shows the token once; keep it in an environment variable, never in a 
 
 - Send `Authorization: Bearer $TOKEN` and JSON bodies (`curl --json`); integers only.
 - Times are UTC milliseconds. Lists: `limit` <= 100, then `cursor=<next_cursor>` until null.
+- `GET /api/v1/posts` also returns `counts` (posts per status) on the first page; `null` when `cursor` is set.
 - Errors are `{"error": "<code>", "field": "<name>"}`: fix the named field, never retry blindly.
 
 ## Posts

@@ -38,6 +38,26 @@ pub(super) fn count(from: &str) -> String {
     format!("SELECT COUNT(*) FROM {from}")
 }
 
+/// Posts per status (admin list pills), any status. A covering scan of `posts_listing`
+/// (status, kind, lang): grouped by its first column, so no sort and no table read. Named
+/// explicitly: without it the planner takes `posts_admin` (no filter) or `posts_lang_slug`
+/// (lang, then a TEMP B-TREE for the GROUP BY).
+pub(super) fn post_counts(kind: bool, lang: bool) -> String {
+    let mut wh = Vec::new();
+    if kind {
+        wh.push("kind = ?");
+    }
+    if lang {
+        wh.push("lang = ?");
+    }
+    let wh = if wh.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", wh.join(" AND "))
+    };
+    format!("SELECT status, COUNT(*) FROM posts INDEXED BY posts_listing{wh} GROUP BY status")
+}
+
 /// One page of a listing. The inner query pages over the index alone (ids and sort keys);
 /// only the page's rows are then read in full, with their tags.
 pub(super) fn rows(from: &str, all: bool) -> String {
@@ -253,6 +273,17 @@ mod plans {
             &["COVERING INDEX posts_"],
             false,
         );
+
+        // The admin's status counts: an index alone, grouped without a sort.
+        for (kind, lang) in [(false, false), (true, false), (false, true), (true, true)] {
+            check(
+                &c,
+                &format!("post counts kind={kind} lang={lang}"),
+                &post_counts(kind, lang),
+                &["COVERING INDEX posts_listing"],
+                false,
+            );
+        }
 
         // Pages walk the index in order: no sort.
         check(&c, "rows home", &rows(&home, true), &["posts_home"], false);

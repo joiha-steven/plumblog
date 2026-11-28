@@ -286,3 +286,54 @@ pub async fn limits_cap_at_max_page<S: Store>(db: &S) -> Check {
     )?;
     eq!("query_log capped", l.len(), crate::page_len(MAX_PAGE))
 }
+
+/// `count_posts_by_status`: zeros, kind and lang filters, trash moves a post's count.
+pub async fn post_counts_by_status<S: Store>(db: &S) -> Check {
+    let counts = async |kind, lang| {
+        let c = ok(
+            "count_posts_by_status",
+            db.count_posts_by_status(kind, lang).await,
+        )?;
+        Ok::<_, String>((c.draft, c.scheduled, c.published, c.trashed))
+    };
+    eq!("empty store", counts(None, None).await?, (0, 0, 0, 0))?;
+
+    let u = user(db, "alice").await?;
+    let mut ids = Vec::new();
+    for (slug, status, kind, lang) in [
+        ("d1", PostStatus::Draft, PostKind::Post, "vi"),
+        ("d2", PostStatus::Draft, PostKind::Post, "en"),
+        ("p1", PostStatus::Published, PostKind::Post, "vi"),
+        ("p2", PostStatus::Published, PostKind::Page, "vi"),
+        ("s1", PostStatus::Scheduled, PostKind::Post, "en"),
+    ] {
+        let mut p = post(u, lang, slug, status);
+        p.kind = kind;
+        ids.push(save(db, p).await?);
+    }
+    eq!("no filter", counts(None, None).await?, (2, 1, 2, 0))?;
+    eq!(
+        "kind",
+        counts(Some(PostKind::Post), None).await?,
+        (2, 1, 1, 0)
+    )?;
+    eq!("lang", counts(None, Some("vi")).await?, (1, 0, 2, 0))?;
+    eq!(
+        "kind and lang, none match",
+        counts(Some(PostKind::Page), Some("en")).await?,
+        (0, 0, 0, 0)
+    )?;
+
+    ok("trash_post", db.trash_post(ids[2], T0 + 1).await)?;
+    eq!(
+        "trash moves the count",
+        counts(None, None).await?,
+        (2, 1, 1, 1)
+    )?;
+    eq!(
+        "trash with filters",
+        counts(Some(PostKind::Post), Some("vi")).await?,
+        (1, 0, 0, 1)
+    )?;
+    Ok(())
+}
