@@ -27,21 +27,24 @@ async function bundle(file) {
 
 // --- the checker ---
 
-const toy = { inner: { n: "integer" }, outer: { s: "string|null", l: "integer[]", c: "code:COLORS", i: "shape:inner", is: "shape:inner[]", b: "boolean" } };
+const toy = { inner: { n: "integer" }, outer: { s: "string|null", l: "integer[]", c: "code:COLORS", i: "shape:inner", is: "shape:inner[]", b: "boolean", f: "number", j: "json" } };
 const codes = { COLORS: ["red", "blue"] };
-const good = () => ({ s: null, l: [1, 2], c: "red", i: { n: 1 }, is: [{ n: 2 }], b: true });
+const good = () => ({ s: null, l: [1, 2], c: "red", i: { n: 1 }, is: [{ n: 2 }], b: true, f: 0.25, j: { light: "#fff" } });
 const toyCheck = (v) => checkShape(toy, codes, "outer", v);
 
 test("shape checker: a valid value passes", () => {
   assert.deepEqual(toyCheck(good()), []);
   assert.deepEqual(toyCheck({ ...good(), s: "x", l: [] , is: [] }), []);
+  assert.deepEqual(toyCheck({ ...good(), f: 3, j: false }), []);
 });
 
 test("shape checker: each kind of problem is found", () => {
   const cases = [
     ["missing key", (v) => (delete v.b, v), /b: missing key/],
     ["extra key", (v) => ({ ...v, z: 1 }), /z: extra key/],
-    ["key order", (v) => ({ b: v.b, s: v.s, l: v.l, c: v.c, i: v.i, is: v.is }), /key order differs/],
+    ["key order", (v) => ({ b: v.b, s: v.s, l: v.l, c: v.c, i: v.i, is: v.is, f: v.f, j: v.j }), /key order differs/],
+    ["number expected", (v) => ({ ...v, f: "1" }), /f: expected number/],
+    ["json is not null", (v) => ({ ...v, j: null }), /j: expected a value, got null/],
     ["wrong type", (v) => ({ ...v, b: "yes" }), /b: expected boolean/],
     ["float is not integer", (v) => ({ ...v, l: [1.5] }), /l\[0\]: expected integer/],
     ["null where not allowed", (v) => ({ ...v, b: null }), /b: expected boolean, got null/],
