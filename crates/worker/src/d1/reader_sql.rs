@@ -158,6 +158,13 @@ pub(super) fn tags() -> String {
     )
 }
 
+/// A page of tags or series by slug: `slug > ?` then `LIMIT ?` walk the slug's unique
+/// autoindex in order, with no sort and no scan. The first page binds `''`, which sorts
+/// before every slug (a slug is never empty).
+pub(super) fn taxonomy_page(table: &str, cols: &str) -> String {
+    format!("SELECT {cols} FROM {table} WHERE slug > ? ORDER BY slug LIMIT ?")
+}
+
 /// Every comment by id after a cursor id (0 = from the start), for export: a range of the
 /// primary key, so a page reads its own rows plus one, however many are spam. No status
 /// filter: `status` leads no index that also orders by id.
@@ -340,6 +347,24 @@ mod plans {
         check_scans(&c, "tags", &tags(), &["post_tags_tag"], true, &["t"]);
         check(&c, "feed", &feed(), &["posts_listing"], false);
         check(&c, "sitemap", &sitemap(), &["posts_by_date"], false);
+
+        // API pages of tags and series: a SEARCH on the slug's unique autoindex, no sort.
+        for (table, cols, index) in [
+            ("tags", "id, slug, name", "sqlite_autoindex_tags_1"),
+            (
+                "series",
+                "id, slug, title, description",
+                "sqlite_autoindex_series_1",
+            ),
+        ] {
+            check(
+                &c,
+                &format!("{table} page"),
+                &taxonomy_page(table, cols),
+                &[&format!("SEARCH {table} USING INDEX {index} (slug>?)")],
+                false,
+            );
+        }
     }
 
     /// The export listings: a primary-key range read in key order, nothing else.

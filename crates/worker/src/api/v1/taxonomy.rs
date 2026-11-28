@@ -1,6 +1,8 @@
-//! `/api/v1/tags` and `/api/v1/series`. Lists are whole (a blog has tens of tags, and the
-//! store returns them in one query); items are addressed by id.
+//! `/api/v1/tags` and `/api/v1/series`. Lists page by slug (a keyset cursor, like the post
+//! list); items are addressed by id.
 
+use plumblog_auth::base64url;
+use plumblog_model::api::{DEFAULT_LIMIT, MAX_LIMIT};
 use plumblog_model::{Error, ErrorCode, Permission, Result, SeriesId, TagId};
 use plumblog_store::{NewSeries, Series, Tag, TaxonomyStore};
 use plumblog_syslog::EventKind;
@@ -44,10 +46,6 @@ fn slug_conflict(e: Error) -> Error {
     }
 }
 
-fn not_found(what: &str, id: i64) -> Error {
-    Error::new(ErrorCode::NotFound, format!("{what} {id}"))
-}
-
 async fn log(ctx: &Ctx, p: &Principal, action: &str, subject: &str, id: i64) {
     ctx.syslog(
         p.event(ctx, EventKind::ContentChanged)
@@ -75,31 +73,49 @@ fn series_json(s: &Series) -> String {
     ])
 }
 
-fn list_json(key: &str, items: &[String]) -> String {
-    object(&[(key, Out::Raw(format!("[{}]", items.join(","))))])
+/// `limit` and `cursor` of a list: the cursor is the base64url of the last slug returned.
+fn page_args(input: &Input) -> Result<(u32, Option<String>)> {
+    let limit = input.int("limit").unwrap_or(i64::from(DEFAULT_LIMIT));
+    let limit = u32::try_from(limit)
+        .ok()
+        .filter(|l| (1..=MAX_LIMIT).contains(l))
+        .ok_or_else(|| invalid("limit", "1-100"))?;
+    let after = input
+        .str("cursor")
+        .map(|c| {
+            let bad = || invalid("cursor", "not a cursor of this listing");
+            let raw = base64url::decode(c).ok_or_else(bad)?;
+            let slug = String::from_utf8(raw).map_err(|_| bad())?;
+            // Only a slug a row can hold is a cursor.
+            fields::slug(&slug).map_err(|_| bad())?;
+            Ok(slug)
+        })
+        .transpose()?;
+    Ok((limit, after))
+}
+
+fn list_json(key: &str, items: &[String], last_slug: Option<&str>) -> String {
+    let next = last_slug.map_or(Out::Null, |s| Out::Str(base64url::encode(s.as_bytes())));
+    object(&[
+        (key, Out::Raw(format!("[{}]", items.join(",")))),
+        ("next_cursor", next),
+    ])
 }
 
 async fn tag(ctx: &Ctx, id: i64) -> Result<Tag> {
-    ctx.store
-        .list_tags()
-        .await?
-        .into_iter()
-        .find(|t| t.id.0 == id)
-        .ok_or_else(|| not_found("tag", id))
+    ctx.store.get_tag(TagId(id)).await
 }
 
 async fn series(ctx: &Ctx, id: i64) -> Result<Series> {
-    ctx.store
-        .list_series()
-        .await?
-        .into_iter()
-        .find(|s| s.id.0 == id)
-        .ok_or_else(|| not_found("series", id))
+    ctx.store.get_series(SeriesId(id)).await
 }
 
-pub async fn tag_list(ctx: &Ctx) -> Result<Reply> {
-    let items: Vec<String> = ctx.store.list_tags().await?.iter().map(tag_json).collect();
-    Ok(Reply::json(200, list_json("tags", &items)))
+pub async fn tag_list(ctx: &Ctx, input: &Input) -> Result<Reply> {
+    let (limit, after) = page_args(input)?;
+    let (rows, more) = ctx.store.tags_page(after.as_deref(), limit).await?;
+    let items: Vec<String> = rows.iter().map(tag_json).collect();
+    let last = rows.last().filter(|_| more).map(|t| t.slug.as_str());
+    Ok(Reply::json(200, list_json("tags", &items, last)))
 }
 
 pub async fn tag_get(ctx: &Ctx, input: &Input) -> Result<Reply> {
@@ -148,15 +164,12 @@ pub async fn tag_delete(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply
     Ok(Reply::empty())
 }
 
-pub async fn series_list(ctx: &Ctx) -> Result<Reply> {
-    let items: Vec<String> = ctx
-        .store
-        .list_series()
-        .await?
-        .iter()
-        .map(series_json)
-        .collect();
-    Ok(Reply::json(200, list_json("series", &items)))
+pub async fn series_list(ctx: &Ctx, input: &Input) -> Result<Reply> {
+    let (limit, after) = page_args(input)?;
+    let (rows, more) = ctx.store.series_page(after.as_deref(), limit).await?;
+    let items: Vec<String> = rows.iter().map(series_json).collect();
+    let last = rows.last().filter(|_| more).map(|s| s.slug.as_str());
+    Ok(Reply::json(200, list_json("series", &items, last)))
 }
 
 pub async fn series_get(ctx: &Ctx, input: &Input) -> Result<Reply> {
