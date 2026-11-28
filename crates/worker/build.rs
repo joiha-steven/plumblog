@@ -45,6 +45,8 @@ fn main() {
 
     let sample_out = embed_sample(&sample);
 
+    embed_admin_preload(&root, &mut out);
+
     fs::write(
         PathBuf::from(env::var("OUT_DIR").unwrap()).join("embedded.rs"),
         out,
@@ -218,4 +220,27 @@ fn embed_locales(dir: &Path, out: &mut String) {
         writeln!(out, "    ({lang:?}, {text:?}),").unwrap();
     }
     out.push_str("];\n");
+}
+
+/// The admin shell's static chunks (scripts/admin-build writes `<build>.preload`, one URL per
+/// line), named by `PLUMBLOG_ADMIN_PRELOAD`. Unset (plain `cargo test`) means an empty list:
+/// the shell then just loads them the slow way. Scripts that build the Worker for shipping or
+/// serving build the admin first and set it, so a set but unreadable file fails the build
+/// instead of shipping a shell that silently lost its preloads.
+fn embed_admin_preload(root: &Path, out: &mut String) {
+    println!("cargo:rerun-if-env-changed=PLUMBLOG_ADMIN_PRELOAD");
+    let text = env::var_os("PLUMBLOG_ADMIN_PRELOAD")
+        .map(|p| {
+            let p = root.join(p);
+            println!("cargo:rerun-if-changed={}", p.display());
+            fs::read_to_string(&p).unwrap_or_else(|e| {
+                panic!(
+                    "PLUMBLOG_ADMIN_PRELOAD={}: {e} (run scripts/admin-build first)",
+                    p.display()
+                )
+            })
+        })
+        .unwrap_or_default();
+    let urls: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    writeln!(out, "pub static ADMIN_PRELOAD: &[&str] = &{urls:?};").unwrap();
 }
