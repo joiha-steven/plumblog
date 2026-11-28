@@ -1,7 +1,9 @@
+use std::ops::Bound;
+
 use plumblog_model::{Result, Role, UserId};
 
 use super::{MemoryStore, State, conflict, invalid, next_rowid, next_seq, user_not_found};
-use crate::{NewSession, NewUser, ProfileUpdate, Session, SiteStore, User, UserStore};
+use crate::{NewSession, NewUser, ProfileUpdate, Session, SiteStore, User, UserStore, page_len};
 
 impl State {
     /// `users.login` is `NOCASE` (ASCII only) and `users.slug` is unique.
@@ -113,6 +115,21 @@ impl UserStore for MemoryStore {
 
     async fn list_users(&self) -> Result<Vec<User>> {
         Ok(self.read(|s| s.users.values().cloned().collect()))
+    }
+
+    async fn users_by_id(&self, after: Option<UserId>, limit: u32) -> Result<(Vec<User>, bool)> {
+        let keep = page_len(limit);
+        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut rows: Vec<User> = self.read(|s| {
+            s.users
+                .range((from, Bound::Unbounded))
+                .take(keep + 1)
+                .map(|(_, u)| u.clone())
+                .collect()
+        });
+        let more = rows.len() > keep;
+        rows.truncate(keep);
+        Ok((rows, more))
     }
 
     async fn update_profile(&self, id: UserId, profile: ProfileUpdate, now: i64) -> Result<()> {

@@ -189,6 +189,28 @@ impl UserStore for D1Store {
         self.rows(s).await?.iter_mut().map(read_user).collect()
     }
 
+    // 1 query: a primary-key range (`reader_sql::users_by_id`), one row past the page.
+    async fn users_by_id(&self, after: Option<UserId>, limit_n: u32) -> Result<(Vec<User>, bool)> {
+        let keep = plumblog_store::page_len(limit_n);
+        let s = self.stmt(
+            "users_by_id",
+            &super::reader_sql::users_by_id(),
+            &[
+                bound(after.map_or(0, |u| u.0)),
+                bound(i64::try_from(keep).unwrap_or(0) + 1),
+            ],
+        )?;
+        let mut rows = self
+            .rows(s)
+            .await?
+            .iter_mut()
+            .map(read_user)
+            .collect::<Result<Vec<_>>>()?;
+        let more = rows.len() > keep;
+        rows.truncate(keep);
+        Ok((rows, more))
+    }
+
     async fn update_profile(&self, id: UserId, profile: ProfileUpdate, now: i64) -> Result<()> {
         let s = self.stmt(
             "update_profile",

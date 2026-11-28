@@ -3,6 +3,7 @@
 //! route, checks its access and input against the table, then calls the handler. Session
 //! cookie or API token alike.
 
+mod export;
 mod input;
 mod media;
 mod post_body;
@@ -148,6 +149,9 @@ pub async fn dispatch(
         RouteId::MediaUpload => media::upload(ctx, p, &input, body).await,
         RouteId::MediaUpdate => media::update(ctx, p, &input).await,
         RouteId::MediaDelete => media::delete(ctx, p, &input).await,
+        RouteId::MediaOriginal => media::original(ctx, &input).await,
+        RouteId::CommentList => export::comments(ctx, &input).await,
+        RouteId::UserList => export::users(ctx, &input).await,
         RouteId::RedirectList => settings::redirects(ctx).await,
         RouteId::RedirectPut => settings::redirect_put(ctx, p, &input).await,
         RouteId::RedirectDelete => settings::redirect_delete(ctx, p, &input).await,
