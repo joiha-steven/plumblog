@@ -163,6 +163,22 @@ pub fn build(dir: &Path) -> Result<Built, (String, Why)> {
             .map_err(|e| (dir.join(&path).display().to_string(), Why::Data(e)))?;
         files.insert(convert::json_name(&path).unwrap_or_default(), json);
     }
+    // Files below assets/ that the loader reads travel in the document too (and still ship as
+    // assets, which is where the browser fetches them).
+    if let Some(manifest) = files.get("theme.toml.json") {
+        for path in plumblog_render::pushed::document_assets(manifest) {
+            let Some(bytes) = path.strip_prefix(ASSETS_DIR).and_then(|a| assets.get(a)) else {
+                continue;
+            };
+            let text = String::from_utf8(bytes.clone()).map_err(|_| {
+                (
+                    dir.join(&path).display().to_string(),
+                    Why::said(key!("cli.theme.why.not_utf8"), &[]),
+                )
+            })?;
+            files.insert(path, text);
+        }
+    }
     let manifest: serde_json::Value = files
         .get("theme.toml.json")
         .and_then(|t| serde_json::from_str(t).ok())

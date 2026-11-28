@@ -817,3 +817,76 @@ fn push_builds_the_api_2_document_without_toml_text() {
     );
     assert!(files["locales/en.toml.json"].starts_with('{'));
 }
+
+/// Issue #110: a theme made by `blog theme new` must load from the push document exactly as
+/// the Worker loads it (the document carries every file the loader reads).
+#[test]
+fn push_document_of_a_new_theme_loads_like_the_worker_loads_it() {
+    let (_t, dir) = fresh_theme("demo-theme");
+    let built = theme::store::build(&dir).unwrap_or_else(|e| panic!("{e:?}"));
+    let parsed = plumblog_render::PushedTheme::parse(&built.doc.to_json(), "demo-theme").unwrap();
+    let default = plumblog_cli::theme::files::Embedded::default_theme();
+    let loaded = plumblog_render::Theme::load(&parsed, Some(&default), Vec::new(), "/_theme");
+    if let Err(e) = &loaded {
+        panic!("Worker loader refused the pushed theme: {}", e.detail);
+    }
+    assert_eq!(plumblog_render::pushed::theme_tag(&parsed.hash).len(), 16);
+}
+
+/// `check` and `push` carry the same files, so check speaks for what the Worker will load.
+#[test]
+fn check_document_and_push_document_carry_the_same_files() {
+    let (_t, dir) = fresh_theme("demo-theme");
+    let built = theme::store::build(&dir).unwrap();
+    let listed = DirFiles::read(&dir).unwrap();
+    let doc = listed.document();
+    assert_eq!(
+        doc.keys().copied().collect::<Vec<_>>(),
+        built
+            .doc
+            .files
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    );
+    assert!(doc.contains_key("assets/fonts/faces.css"));
+    assert!(!doc.keys().any(|p| p.contains("woff2")));
+}
+
+/// A stylesheet the loader reads from assets/ is not carried: the folder loads, the push
+/// document would not, and check must say so.
+#[test]
+fn check_fails_on_a_file_the_push_document_lacks() {
+    let (_t, dir) = fresh_theme("demo-theme");
+    std::fs::write(dir.join("assets/book.css"), "body { margin: 0 }\n").unwrap();
+    edit(&dir, "theme.toml", |s| {
+        s.replace("styles/writer.css", "assets/book.css")
+    });
+    let f = findings(&dir);
+    let hit = f
+        .iter()
+        .find(|x| x.kind.id() == "theme.push_document")
+        .unwrap_or_else(|| panic!("{f:#?}"));
+    assert_eq!(hit.level, Level::Error);
+    for text in [en(), Text::new("vi")] {
+        let words = hit.render(&text);
+        assert!(words.contains("assets/book.css is missing"), "{words}");
+    }
+}
+
+/// Push refuses a carried file that is not UTF-8; check must say so too.
+#[test]
+fn check_fails_on_a_carried_file_that_is_not_utf8() {
+    let (_t, dir) = fresh_theme("demo-theme");
+    std::fs::write(dir.join("assets/fonts/faces.css"), b"a{}\xff").unwrap();
+    assert!(theme::store::build(&dir).is_err());
+    let f = findings(&dir);
+    let hit = f
+        .iter()
+        .find(|x| x.kind.id() == "file.not_text" && x.file == "assets/fonts/faces.css")
+        .unwrap_or_else(|| panic!("{f:#?}"));
+    assert_eq!(hit.level, Level::Error);
+    for text in [en(), Text::new("vi")] {
+        assert!(!hit.render(&text).is_empty());
+    }
+}

@@ -25,6 +25,7 @@ pub enum Kind {
     ThemePageProblem,
     ThemeAssetMissing,
     ThemeTooLarge,
+    ThemePushed,
     FileSecretName,
     FileSecretContent,
     FileStray,
@@ -56,6 +57,7 @@ impl Kind {
             Self::ThemePageProblem => "theme.page_problem",
             Self::ThemeAssetMissing => "theme.asset_missing",
             Self::ThemeTooLarge => "theme.too_large",
+            Self::ThemePushed => "theme.push_document",
             Self::FileSecretName => "file.secret_name",
             Self::FileSecretContent => "file.secret_content",
             Self::FileStray => "file.stray",
@@ -118,6 +120,10 @@ impl Kind {
             Self::ThemeAssetMissing => (
                 key!("cli.finding.theme_asset_missing.what"),
                 key!("cli.finding.theme_asset_missing.fix"),
+            ),
+            Self::ThemePushed => (
+                key!("cli.finding.theme_pushed.what"),
+                key!("cli.finding.theme_pushed.fix"),
             ),
             Self::ThemeTooLarge => (
                 key!("cli.finding.theme_too_large.what"),

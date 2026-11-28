@@ -102,6 +102,14 @@ const NO_SERIES = themeJson("paper", (f) => {
   return rest;
 });
 
+/** The document `blog theme push` builds for a theme made by `blog theme new` (issue #110: a hand-built one hid a missing file). */
+const MADE_DIR = mkdtempSync(join(tmpdir(), "plumblog-theme-new-"));
+const MADE = execFileSync(
+  "cargo",
+  ["run", "-q", "-p", "plumblog-cli", "--example", "theme_document", "--", join(MADE_DIR, "demo-theme"), "demo-theme"],
+  { cwd: ROOT, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+).trim();
+
 const seed = [
   `INSERT INTO users (id, login, slug, display_name, role, password_hash, disabled_at, created_at, updated_at) VALUES
     (1, 'olga', 'olga', 'Olga', 'owner', NULL, NULL, ${T}, ${T});`,
@@ -150,6 +158,7 @@ describe("pushed theme", () => {
       atcap: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", AT_CAP) },
       overcap: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", OVER_CAP) },
       missing: { vars: { PLUMBLOG_THEME: "ghost" }, assets: assetsWith("other", null) },
+      made: { vars: { PLUMBLOG_THEME: "demo-theme" }, assets: assetsWith("demo-theme", MADE), seedSql: seed },
       embedded: {},
       oldtheme: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", NO_SERIES), seedSql: seriesSeed },
       fragile: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", FRAGILE), seedSql: postSeed },
@@ -165,6 +174,18 @@ describe("pushed theme", () => {
   after(async () => {
     await Promise.all(Object.values(workers).map((w) => w.stop()));
     for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    rmSync(MADE_DIR, { recursive: true, force: true });
+  });
+
+  test("a theme made by `blog theme new` and pushed renders with the pushed theme and its font CSS (#110)", () => {
+    const { res, html } = first.made;
+    assert.equal(res.status, 200, html);
+    assert.equal(res.headers.get("x-plumblog-theme"), tagOf(MADE), "the pushed theme served, not the default");
+    assert.ok(html.includes("@font-face"), "faces.css is inlined");
+    assert.match(html, /\/_theme\/demo-theme\/assets\/fonts\/[a-z-]+\.woff2/);
+    const log = workers.made.log();
+    assert.equal(count(log, "theme.pushed_loaded name=demo-theme"), 1, log);
+    assert.ok(!log.includes("theme.pushed_invalid"), log);
   });
 
   test("the page renders with the pushed theme and its assets", async () => {
