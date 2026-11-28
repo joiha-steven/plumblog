@@ -4,7 +4,7 @@
 
 use super::{GOOD, TempDir, client};
 use crate::deploy::{FakeClock, make_bundle, write_migrations};
-use crate::fake_cf::{Fake, Recorded};
+use crate::fake_cf::{Failure, Fake, Recorded};
 use crate::setup::{ALL, ok as setup_ok, run_with as setup_with, site};
 use plumblog_cli::dump;
 use plumblog_cli::migrations::{self, Migration};
@@ -730,19 +730,479 @@ fn a_migration_failing_after_the_restore_points_back_to_before_the_restore() {
 #[test]
 fn rows_the_site_prunes_itself_only_warn_but_other_tables_still_stop() {
     let (fake, dir, bundle) = set_up(&migrations::bundled());
+    // Not auth_challenges: the import's own credential reset empties that one.
     fake.exec(
         DB,
-        "INSERT INTO auth_challenges (challenge_hash, purpose, expires_at) \
-           VALUES ('h1', 'login', 1);",
+        "INSERT INTO login_failures (key_hash, count, window_start) VALUES ('h1', 1, 1);",
     );
     save_backup(&fake, &dir);
-    // The cron removes the expired challenge between the import and the count.
-    fake.state().after_import = Some("DELETE FROM auth_challenges".into());
+    // The site drops the stale window between the import and the count.
+    fake.state().after_import = Some("DELETE FROM login_failures".into());
     let r = restore_with(&fake, &dir, &opts(&bundle, true));
     ok(&r);
-    assert!(r.out.contains("auth_challenges 1 -> 0"), "{}", r.out);
+    assert!(r.out.contains("login_failures 1 -> 0"), "{}", r.out);
     // A row lost from a table the site never prunes is still a mismatch.
     fake.state().after_import = Some("DELETE FROM settings WHERE key = 'site_id'".into());
     let r = restore_with(&fake, &dir, &opts(&bundle, true));
     assert_eq!(code(&r), Code::RestoreCountMismatch, "{}", r.out);
+}
+
+/// Credentials as the backup holds them: an owner with a live and a revoked token, a
+/// session, a pending and a used invite, a `WebAuthn` challenge, an owner reset code and a
+/// setup code, plus a login failure (rate limiting, not a credential).
+fn add_credentials(fake: &Fake) {
+    fake.exec(
+        DB,
+        "INSERT INTO users (id, login, slug, display_name, role, password_hash, created_at, \
+           updated_at) VALUES (1, 'owner', 'owner', 'Owner', 'owner', 'h', 1, 1); \
+         INSERT INTO api_tokens (id, user_id, name, token_hash, scope, created_at, revoked_at) \
+           VALUES (1, 1, 'live', 'th1', 'owner', 1, NULL), (2, 1, 'old', 'th2', 'owner', 1, 5); \
+         INSERT INTO sessions (token_hash, user_id, created_at, expires_at) \
+           VALUES ('sh1', 1, 1, 9999999999999); \
+         INSERT INTO invites (code_hash, role, created_by, created_at, expires_at, used_at, \
+           used_by) VALUES ('ih1', 'writer', 1, 1, 9999999999999, NULL, NULL), \
+           ('ih2', 'writer', 1, 1, 9999999999999, 2, 1); \
+         INSERT INTO auth_challenges (challenge_hash, purpose, user_id, expires_at) \
+           VALUES ('ch1', 'register', 1, 9999999999999); \
+         INSERT INTO login_failures (key_hash, count, window_start) VALUES ('lf1', 3, 1);",
+    );
+    for k in plumblog_store::OWNER_RESET_KEYS.iter().chain(&[
+        plumblog_store::SETUP_CODE_HASH_KEY,
+        plumblog_store::SETUP_CODE_EXPIRES_KEY,
+    ]) {
+        fake.exec(
+            DB,
+            &format!(
+                "INSERT OR REPLACE INTO settings (key, value_json, updated_at) VALUES ('{k}', '1', 1)"
+            ),
+        );
+    }
+}
+
+fn count(fake: &Fake, sql: &str) -> i64 {
+    fake.sql(DB, &format!("SELECT count(*) AS n FROM {sql}"))[0]["n"]
+        .as_i64()
+        .unwrap()
+}
+
+/// Every credential the backup brought back is unusable; passwords, passkeys, used invites
+/// and the rate limiter are left as restored.
+fn assert_credentials_reset(fake: &Fake) {
+    assert_eq!(count(fake, "sessions"), 0);
+    assert_eq!(count(fake, "api_tokens WHERE revoked_at IS NULL"), 0);
+    assert_eq!(
+        count(
+            fake,
+            "api_tokens WHERE id = 1 AND revoked_at = 1790000000000"
+        ),
+        1
+    );
+    assert_eq!(count(fake, "api_tokens WHERE id = 2 AND revoked_at = 5"), 1);
+    assert_eq!(count(fake, "invites WHERE used_at IS NULL"), 0);
+    assert_eq!(count(fake, "invites WHERE code_hash = 'ih2'"), 1);
+    assert_eq!(count(fake, "auth_challenges"), 0);
+    assert_eq!(count(fake, "login_failures"), 1);
+    assert_eq!(count(fake, "users WHERE password_hash = 'h'"), 1);
+    for k in plumblog_store::OWNER_RESET_KEYS.iter().chain(&[
+        plumblog_store::SETUP_CODE_HASH_KEY,
+        plumblog_store::SETUP_CODE_EXPIRES_KEY,
+    ]) {
+        assert_eq!(setting(fake, k), None, "{k}");
+    }
+}
+
+#[test]
+fn credentials_revoked_after_the_backup_stay_revoked() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    add_credentials(&fake);
+    save_backup(&fake, &dir);
+    // Revoked on the live site after the backup.
+    fake.exec(
+        DB,
+        "UPDATE api_tokens SET revoked_at = 7 WHERE id = 1; DELETE FROM sessions; \
+         DELETE FROM invites WHERE used_at IS NULL; DELETE FROM settings WHERE key LIKE 'owner_reset%'",
+    );
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    ok(&r);
+    assert_credentials_reset(&fake);
+    assert!(r.out.contains("sign in again"), "{}", r.out);
+    assert!(r.out.contains("2026-11-01T08:00:00Z"), "{}", r.out);
+    assert!(r.out.contains("Restore from"), "{}", r.out);
+}
+
+#[test]
+fn an_old_backup_gets_its_credentials_reset_after_the_migrations() {
+    let mut old = migrations::bundled();
+    let last = old.pop().unwrap();
+    let (fake, dir, bundle) = set_up(&old);
+    add_credentials(&fake);
+    save_backup(&fake, &dir);
+    write_migrations(&bundle, &migrations::bundled());
+    fake.exec(DB, &last.sql);
+    fake.exec(
+        DB,
+        &format!("INSERT INTO d1_migrations (name) VALUES ('{}')", last.name),
+    );
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    ok(&r);
+    assert_credentials_reset(&fake);
+    let out = &r.out;
+    let migrated = out.find(&last.name).expect("migration line");
+    let reset = out.find("sign in again").expect("reset line");
+    assert!(migrated < reset, "{out}");
+}
+
+#[test]
+fn a_failed_credential_reset_is_an_error_with_the_rerun() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    add_credentials(&fake);
+    save_backup(&fake, &dir);
+    fake.fail_body("UPDATE api_tokens SET revoked_at", Failure::Status(400));
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::RestoreCredentialsNotReset, "{}", r.out);
+    assert_eq!(code(&r).as_str(), "restore.credentials_not_reset");
+    let m = message(&r);
+    assert!(m.contains("blog restore --reset-credentials --yes"), "{m}");
+    assert!(m.contains("blog rollback --db "), "{m}");
+    assert!(!r.out.contains("Restore from"), "{}", r.out);
+    assert!(!r.out.contains("sign in again"), "{}", r.out);
+    // The import itself already reset what the backup held: no window where it works.
+    assert_eq!(count(&fake, "api_tokens WHERE revoked_at IS NULL"), 0);
+    assert_eq!(count(&fake, "sessions"), 0);
+    assert_eq!(count(&fake, "invites WHERE used_at IS NULL"), 0);
+    assert_eq!(
+        load(&dir).rollbacks.last().unwrap().outcome.as_deref(),
+        Some("credentials_not_reset")
+    );
+
+    // The re-run finishes the job, and is safe to repeat.
+    for _ in 0..2 {
+        let r = reset_with(&fake, &dir);
+        ok(&r);
+        assert_credentials_reset(&fake);
+        assert!(r.out.contains("sign in again"), "{}", r.out);
+        assert!(r.out.contains("2026-11-01T08:00:00Z"), "{}", r.out);
+    }
+    assert_eq!(
+        load(&dir).rollbacks.last().unwrap().outcome.as_deref(),
+        Some("restored")
+    );
+}
+
+#[test]
+fn a_table_missing_from_the_backup_does_not_stop_the_reset() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    add_credentials(&fake);
+    fake.exec(DB, "DROP TABLE auth_challenges");
+    save_backup(&fake, &dir);
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    ok(&r);
+    assert!(!tables(&fake).contains(&"auth_challenges".to_string()));
+    assert_eq!(count(&fake, "sessions"), 0);
+    assert_eq!(count(&fake, "api_tokens WHERE revoked_at IS NULL"), 0);
+    let r = reset_with(&fake, &dir);
+    ok(&r);
+}
+
+fn reset_with(fake: &Fake, dir: &TempDir) -> Ran {
+    let mut c = client(fake, GOOD);
+    let migs = migrations::bundled();
+    let text = en();
+    let cx = Context {
+        dir: &dir.0,
+        migrations: &migs,
+        now_ms: NOW,
+        text: &text,
+    };
+    let mut buf = Vec::new();
+    let result = restore::reset_credentials(&mut c, None, &cx, &mut buf);
+    Ran {
+        result,
+        out: String::from_utf8(buf).unwrap(),
+    }
+}
+
+/// tools/worker-test replays the restore's credential reset from this file, every table
+/// present; `$now` stands for the time. `BLESS=1` rewrites it.
+#[test]
+fn the_worker_test_fixture_is_the_credential_reset_sql() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/worker-test/fixtures/restore-reset.json");
+    let all = [
+        "sessions",
+        "api_tokens",
+        "invites",
+        "auth_challenges",
+        "settings",
+    ];
+    let stmts: Vec<Value> = restore::credential_reset_statements(&all, "$now")
+        .into_iter()
+        .map(|(sql, params)| serde_json::json!({"sql": sql, "params": params}))
+        .collect();
+    assert_eq!(stmts.len(), all.len());
+    let want = serde_json::to_string_pretty(&Value::Array(stmts)).unwrap() + "\n";
+    if std::env::var_os("BLESS").is_some() {
+        std::fs::write(&path, &want).unwrap();
+    }
+    let got = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        got == want,
+        "{} is stale: run `BLESS=1 cargo test -p plumblog-cli --test cloudflare restore::` after changing the reset SQL",
+        path.display()
+    );
+}
+
+fn backup_with(fake: &Fake, dir: &TempDir, out: &str) -> Ran {
+    let mut c = client(fake, GOOD);
+    let migs = migrations::bundled();
+    let text = en();
+    let cx = Context {
+        dir: &dir.0,
+        migrations: &migs,
+        now_ms: NOW,
+        text: &text,
+    };
+    let o = plumblog_cli::backup::Options {
+        no_media: true,
+        out: Some(PathBuf::from(out)),
+    };
+    let mut buf = Vec::new();
+    let result = plumblog_cli::backup::run(&mut c, None, &o, &cx, &mut buf);
+    Ran {
+        result,
+        out: String::from_utf8(buf).unwrap(),
+    }
+}
+
+const REMINDER: &str = "did not finish resetting credentials";
+
+#[test]
+fn a_restore_killed_after_the_import_began_is_remembered_until_the_reset() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    add_credentials(&fake);
+    save_backup(&fake, &dir);
+    // The state file as it is while the import runs: what a Ctrl-C or a crash leaves.
+    let path = state::path(&dir.0);
+    let seen = Arc::new(Mutex::new(String::new()));
+    let keep = Arc::clone(&seen);
+    let p = path.clone();
+    fake.on_request("/import", move || {
+        *keep.lock().unwrap() = std::fs::read_to_string(&p).unwrap();
+    });
+    ok(&restore_with(&fake, &dir, &opts(&bundle, true)));
+    let killed = seen.lock().unwrap().clone();
+    std::fs::write(&path, &killed).unwrap();
+    assert_eq!(
+        load(&dir).rollbacks.last().unwrap().outcome.as_deref(),
+        Some("importing")
+    );
+    // The backup's credentials are live again (the import ran, step 8 never did).
+    add_credentials_again(&fake);
+
+    let b = backup_with(&fake, &dir, "b1");
+    ok(&b);
+    assert!(b.out.contains(REMINDER), "{}", b.out);
+    assert!(
+        b.out.contains("blog restore --reset-credentials --yes"),
+        "{}",
+        b.out
+    );
+    let d = deploy_or_rollback(&fake, &dir, &bundle, None);
+    assert!(d.out.contains(REMINDER), "{}", d.out);
+    let plan = restore_with(&fake, &dir, &opts(&bundle, false));
+    assert_eq!(code(&plan), Code::RestoreUnconfirmed);
+    assert!(plan.out.contains(REMINDER), "{}", plan.out);
+
+    let r = reset_with(&fake, &dir);
+    ok(&r);
+    assert_credentials_reset(&fake);
+    assert_eq!(
+        load(&dir).rollbacks.last().unwrap().outcome.as_deref(),
+        Some("restored")
+    );
+    let b = backup_with(&fake, &dir, "b2");
+    ok(&b);
+    assert!(!b.out.contains(REMINDER), "{}", b.out);
+}
+
+/// The live database after a killed restore: the backup's rows came back, unreset.
+fn add_credentials_again(fake: &Fake) {
+    fake.exec(
+        DB,
+        "INSERT OR IGNORE INTO sessions (token_hash, user_id, created_at, expires_at) \
+           VALUES ('sh1', 1, 1, 9999999999999); \
+         UPDATE api_tokens SET revoked_at = NULL WHERE id = 1;",
+    );
+}
+
+#[test]
+fn a_restored_database_without_an_owner_says_to_run_setup() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    save_backup(&fake, &dir);
+    assert_eq!(count(&fake, "users"), 0);
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    ok(&r);
+    assert!(r.out.contains("has no users"), "{}", r.out);
+    assert!(r.out.contains("`blog setup`"), "{}", r.out);
+    assert!(!r.out.contains("sign in again"), "{}", r.out);
+    assert!(r.out.contains("check webhooks"), "{}", r.out);
+    // With an owner: sign in, and `blog admin reset` if that fails.
+    add_credentials(&fake);
+    save_backup(&fake, &dir);
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    ok(&r);
+    assert!(r.out.contains("sign in again"), "{}", r.out);
+    assert!(r.out.contains("`blog admin reset`"), "{}", r.out);
+    assert!(!r.out.contains("no active owner"), "{}", r.out);
+    assert!(!r.out.contains("has no users"), "{}", r.out);
+}
+
+#[test]
+fn a_restored_database_with_writers_but_no_owner_says_to_recover_by_hand() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    fake.exec(
+        DB,
+        "INSERT INTO users (id, login, slug, display_name, role, password_hash, created_at, \
+           updated_at) VALUES (1, 'w', 'w', 'W', 'writer', 'h', 1, 1), \
+           (2, 'o', 'o', 'O', 'owner', 'h', 1, 1); \
+         UPDATE users SET disabled_at = 5 WHERE id = 2;",
+    );
+    save_backup(&fake, &dir);
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    ok(&r);
+    assert!(r.out.contains("sign in again"), "{}", r.out);
+    assert!(r.out.contains("no active owner"), "{}", r.out);
+    assert!(r.out.contains("by hand in the D1 database"), "{}", r.out);
+    assert!(!r.out.contains("`blog setup`"), "{}", r.out);
+}
+
+#[test]
+fn a_row_count_mismatch_still_resets_and_a_failed_reset_is_only_printed() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    add_credentials(&fake);
+    put(&fake, "lost_in_import", "x");
+    save_backup(&fake, &dir);
+    fake.state().after_import = Some("DELETE FROM settings WHERE key = 'lost_in_import'".into());
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::RestoreCountMismatch, "{}", r.out);
+    assert_credentials_reset(&fake);
+
+    add_credentials_again(&fake);
+    fake.state().after_import = Some("DELETE FROM settings WHERE key = 'lost_in_import'".into());
+    fake.fail_body("UPDATE api_tokens SET revoked_at", Failure::Status(400));
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::RestoreCountMismatch, "{}", r.out);
+    assert!(r.out.contains("restore.credentials_not_reset"), "{}", r.out);
+    assert!(
+        r.out.contains("blog restore --reset-credentials --yes"),
+        "{}",
+        r.out
+    );
+}
+
+#[test]
+fn a_failed_migration_still_resets_and_a_failed_reset_is_only_printed() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    add_credentials(&fake);
+    save_backup(&fake, &dir);
+    let mut migs = migrations::bundled();
+    migs.push(Migration {
+        name: "9999_broken.sql".into(),
+        sql: "CREATE TABLE posts (x);".into(),
+    });
+    write_migrations(&bundle, &migs);
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::MigrationFailed, "{}", r.out);
+    assert_credentials_reset(&fake);
+
+    add_credentials_again(&fake);
+    fake.fail_body("UPDATE api_tokens SET revoked_at", Failure::Status(400));
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::MigrationFailed, "{}", r.out);
+    assert!(r.out.contains("restore.credentials_not_reset"), "{}", r.out);
+}
+
+#[test]
+fn the_import_file_ends_with_the_credential_reset() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    add_credentials(&fake);
+    let text = save_backup(&fake, &dir);
+    // The step-8 request fails: only the import's own reset can have run.
+    fake.fail_body(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN",
+        Failure::Status(400),
+    );
+    let before = fake.requests().len();
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::RestoreCredentialsNotReset, "{}", r.out);
+    assert_credentials_reset(&fake);
+    // Counts saw the deletes as the reset's, not as lost rows.
+    assert!(r.out.contains("Checked: all "), "{}", r.out);
+    let reqs = fake.requests()[before..].to_vec();
+    let put = reqs
+        .iter()
+        .find(|r| r.method == "PUT" && r.path.starts_with("/__upload/"))
+        .expect("an upload");
+    let end = put.body.find(dump::END).expect("the dump's end");
+    let reset = put.body.find("DELETE FROM sessions;").expect("the reset");
+    assert!(end < reset, "the reset comes after every row of the dump");
+    assert!(put.body.contains(&text));
+    let log = fake.sql(
+        DB,
+        "SELECT detail FROM system_log WHERE detail LIKE 'restore: credentials reset%'",
+    );
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!(
+        log[0]["detail"].as_str().unwrap().contains("sessions\t1"),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn an_uncertain_import_still_resets_the_credentials() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    save_backup(&fake, &dir);
+    add_credentials(&fake);
+    // The ingest is lost on the way: the import never ran, the reply never came.
+    fake.fail_body("\"ingest\"", Failure::Drop);
+    let r = restore_with(&fake, &dir, &opts(&bundle, true));
+    assert_eq!(code(&r), Code::RestoreImportUncertain, "{}", r.out);
+    // The import never ran, so this is step 8 on the live database.
+    assert_credentials_reset(&fake);
+    assert!(r.out.contains("Signed everyone out"), "{}", r.out);
+    assert!(
+        message(&r).contains("blog restore --reset-credentials --yes"),
+        "{}",
+        message(&r)
+    );
+}
+
+#[test]
+fn reset_credentials_does_not_clear_a_restore_a_rollback_superseded() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    save_backup(&fake, &dir);
+    ok(&restore_with(&fake, &dir, &opts(&bundle, true)));
+    // An older restore left at credentials_not_reset, then a Time Travel rollback after it.
+    state::update(&dir.0, &[], |s| {
+        let rec = s.rollbacks.last_mut().unwrap();
+        rec.outcome = Some("credentials_not_reset".into());
+        s.rollbacks.push(state::RollbackRecord {
+            at: "2026-11-02T00:00:00Z".into(),
+            kind: "database".into(),
+            to: "bm-x".into(),
+            ..state::RollbackRecord::default()
+        });
+    })
+    .unwrap();
+    let b = backup_with(&fake, &dir, "b1");
+    assert!(!b.out.contains(REMINDER), "{}", b.out);
+    ok(&reset_with(&fake, &dir));
+    let st = load(&dir);
+    let file = st
+        .rollbacks
+        .iter()
+        .rev()
+        .find(|r| r.kind == "file")
+        .unwrap();
+    assert_eq!(file.outcome.as_deref(), Some("credentials_not_reset"));
 }

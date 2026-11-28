@@ -219,6 +219,7 @@ pub enum RouteId {
     MediaUpdate,
     MediaDelete,
     MediaOriginal,
+    MediaVariant,
     CommentList,
     UserList,
     LogList,
@@ -411,6 +412,15 @@ const MEDIA_UPLOAD: &[Field] = &[
     query_req("height", Type::Int),
     query("alt", Type::Str),
     query("sha256", Type::Str),
+];
+/// One size the admin encoder made (issue #13). `sha256` is required: R2 verifies it, and a
+/// repeat of the same (mime, width) is told apart from a different encoding by it.
+const MEDIA_VARIANT: &[Field] = &[
+    path("id"),
+    query_req("mime", Type::Str),
+    query_req("width", Type::Int),
+    query_req("height", Type::Int),
+    query_req("sha256", Type::Str),
 ];
 /// An id-ordered listing: `cursor` is the last id of the previous page.
 const BY_ID: &[Field] = &[query("cursor", Type::Str), query("limit", Type::Int)];
@@ -724,6 +734,21 @@ pub const ROUTES: &[Route] = &[
         200,
         ORIGINAL,
     ),
+    // Same ownership rule as delete: the caller's own upload, else `media.delete_any`.
+    Route {
+        also: &[Permission::DeleteAnyMedia],
+        max_body: MAX_MEDIA_BODY,
+        body: Body::Original,
+        ..route(
+            RouteId::MediaVariant,
+            Method::Post,
+            "/api/v1/media/{id}/variants",
+            MEDIA,
+            MEDIA_VARIANT,
+            201,
+            "media",
+        )
+    },
     // Every status, so spam and trash included: moderation data, not for a read token.
     route(
         RouteId::CommentList,
@@ -927,8 +952,12 @@ pub const fn tool_name(id: RouteId) -> Option<&'static str> {
     match id {
         // Reference: `tools/list` already is the schema. MediaUpload: the body is raw image
         // bytes, which a JSON-RPC message cannot carry.
-        // MediaOriginal: the answer is raw image bytes, not JSON.
-        RouteId::Reference | RouteId::MediaUpload | RouteId::MediaOriginal => None,
+        // MediaOriginal: the answer is raw image bytes, not JSON. MediaVariant: raw image
+        // bytes in the body, like MediaUpload.
+        RouteId::Reference
+        | RouteId::MediaUpload
+        | RouteId::MediaOriginal
+        | RouteId::MediaVariant => None,
         RouteId::Me => Some("me"),
         RouteId::CommentList => Some("comment_list"),
         RouteId::UserList => Some("user_list"),
@@ -1063,7 +1092,7 @@ mod tests {
                 // A raw body carries no JSON fields; its metadata is in the query.
                 assert!(r.fields.iter().all(|f| f.at != In::Body), "{}", r.path);
             }
-            // Only the media upload takes more than the post cap, and only as raw bytes.
+            // Only media bytes (upload, variants) take more than the post cap, and only raw.
             assert!(
                 r.max_body <= MAX_POST_BODY || r.body == Body::Original,
                 "{}",
@@ -1116,7 +1145,10 @@ mod tests {
                 assert!(
                     matches!(
                         r.id,
-                        RouteId::Reference | RouteId::MediaUpload | RouteId::MediaOriginal
+                        RouteId::Reference
+                            | RouteId::MediaUpload
+                            | RouteId::MediaOriginal
+                            | RouteId::MediaVariant
                     ),
                     "{:?} is not a tool",
                     r.id
@@ -1141,7 +1173,7 @@ mod tests {
             );
             names.push(name);
         }
-        assert_eq!(names.len(), ROUTES.len() - 3);
+        assert_eq!(names.len(), ROUTES.len() - 4);
         let mut dedup = names.clone();
         dedup.sort_unstable();
         dedup.dedup();

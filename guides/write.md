@@ -10,10 +10,10 @@ blog guide api
 
 ## Token and requests
 
-The owner creates a token while signed in at `<origin>/admin` (no admin screen yet), in the console:
-`await (await fetch('/api/auth/tokens', {method: 'POST', body: JSON.stringify({name: 'agent', scope: 'writer'})})).json()`.
-Scopes: `read` (look only), `writer` (posts, media), `owner` (also settings, themes, plugins).
-The answer shows the token once; keep it in an environment variable, never in a file in git.
+`blog token create --name agent` (site folder, Cloudflare token) prints a token once. `--scope`:
+`read` (look only), `writer` (default; posts, media) or `owner` (also settings, themes, plugins), at most
+the user's role; `--login <user>` with several owners; `--expires <days>`. Keep it in an environment
+variable, never in a file in git. `blog token list` shows tokens; `blog token revoke <id> --yes` ends one.
 
 - Send `Authorization: Bearer $TOKEN` and JSON bodies (`curl --json`); integers only.
 - Times are UTC milliseconds. Lists: `limit` <= 100, then `cursor=<next_cursor>` until null.

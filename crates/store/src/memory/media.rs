@@ -123,7 +123,25 @@ impl MediaStore for MemoryStore {
         Ok(self.read(|s| s.media_usage(id)))
     }
 
-    async fn delete_media(&self, id: MediaId) -> Result<()> {
+    async fn replace_media_variants(&self, id: MediaId, expected: &str, new: &str) -> Result<()> {
+        self.write(|s| {
+            let m = s
+                .media
+                .get_mut(&id)
+                .ok_or_else(|| not_found("media", id.0))?;
+            if m.variants_json != expected {
+                return Err(conflict(format!(
+                    "media {} variants changed since read",
+                    id.0
+                )));
+            }
+            new.clone_into(&mut m.variants_json);
+            s.bump();
+            Ok(())
+        })
+    }
+
+    async fn delete_media(&self, id: MediaId) -> Result<String> {
         self.write(|s| {
             if !s.media.contains_key(&id) {
                 return Err(not_found("media", id.0));
@@ -133,8 +151,10 @@ impl MediaStore for MemoryStore {
             if !users.is_empty() {
                 return Err(media_in_use(id, &users));
             }
-            s.media.remove(&id);
-            Ok(())
+            Ok(s.media
+                .remove(&id)
+                .map(|m| m.variants_json)
+                .unwrap_or_default())
         })
     }
 }
