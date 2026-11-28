@@ -1,7 +1,7 @@
 use plumblog_model::{Error, ErrorCode, Result, Role, TokenScope, UserId};
 use plumblog_store::{
-    ApiToken, Invite, InviteStore, NewInvite, NewPasskey, NewSession, NewToken, NewUser, Passkey,
-    PasskeyStore, Session, SessionStore, TokenStore,
+    Admin, ApiToken, Invite, InviteStore, NewInvite, NewPasskey, NewSession, NewToken, NewUser,
+    Passkey, PasskeyStore, Session, SessionStore, TokenStore,
 };
 
 use super::{D1Store, Failure, Row, Stmt, bound, guard, int, not_found, opt_int, opt_text, text};
@@ -361,14 +361,17 @@ impl InviteStore for D1Store {
                 int(invite.expires_at)?,
             ],
         )?;
-        self.insert_proven(
-            "create_invite",
-            invite.created_by,
-            &invite.proof,
-            invite.created_at,
-            s,
-        )
-        .await
+        // Like `insert_proven`, and the creator must still be an active owner when it runs.
+        let by = Admin {
+            id: invite.created_by,
+            proof: invite.proof,
+        };
+        let g = self.admin_guard(&by, invite.created_at)?;
+        match self.batch_guarded("create_invite", vec![g, s]).await {
+            Ok(r) => Self::last_row_id("create_invite", &r[1]),
+            Err(Failure::Guard) => Err(self.admin_refused(&by, invite.created_at).await?),
+            Err(Failure::Error(e)) => Err(e),
+        }
     }
 
     // 1 query.
@@ -381,15 +384,22 @@ impl InviteStore for D1Store {
         self.rows(s).await?.iter_mut().map(read_invite).collect()
     }
 
-    async fn delete_invite(&self, id: i64) -> Result<()> {
+    async fn delete_invite(&self, by: &Admin, id: i64, now: i64) -> Result<()> {
         let s = self.stmt(
             "delete_invite",
-            "DELETE FROM invites WHERE id = ?",
+            // One statement: a used invite (the record of how its user joined) is never
+            // deleted, even if it is accepted while this runs.
+            "DELETE FROM invites WHERE id = ? AND used_at IS NULL",
             &[bound(id)],
         )?;
-        let r = self.exec(s).await?;
-        if Self::changes("delete_invite", &r)? == 0 {
-            return Err(not_found("invite", id));
+        let g = self.admin_guard(by, now)?;
+        let r = match self.batch_guarded("delete_invite", vec![g, s]).await {
+            Ok(r) => r,
+            Err(Failure::Guard) => return Err(self.admin_refused(by, now).await?),
+            Err(Failure::Error(e)) => return Err(e),
+        };
+        if Self::changes("delete_invite", &r[1])? == 0 {
+            return Err(not_found("unused invite", id));
         }
         Ok(())
     }
@@ -400,7 +410,11 @@ impl InviteStore for D1Store {
         // does not change it), so both happen or neither does. Two requests racing for one
         // invite are serialised by D1: the second finds it used and inserts nothing. A login
         // or slug conflict fails the insert and rolls back the whole batch.
-        let usable = "code_hash = ? AND used_at IS NULL AND expires_at > ?";
+        // Its creator must still be an active owner: an invite outlives no owner's access,
+        // whatever path demoted or disabled them.
+        let usable = "code_hash = ? AND used_at IS NULL AND expires_at > ? AND EXISTS \
+             (SELECT 1 FROM users c WHERE c.id = invites.created_by AND c.role = 'owner' \
+             AND c.disabled_at IS NULL)";
         let insert = self.stmt(
             "accept_invite_user",
             &format!(

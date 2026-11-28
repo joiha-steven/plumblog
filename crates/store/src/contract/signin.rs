@@ -2,7 +2,7 @@
 
 use plumblog_model::{ErrorCode, Role};
 
-use super::kit::{Check, T0, eq, fails, new_user, ok, user, version_is};
+use super::kit::{ADMIN, Check, T0, eq, fails, new_user, ok, user, version_is};
 use crate::{
     ChallengePurpose, MAX_FAILURE_KEYS, OWNER_RESET_EXPIRES_KEY, OWNER_RESET_HASH_KEY,
     OWNER_RESET_USER_KEY, Recorded, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, Store,
@@ -349,7 +349,7 @@ pub async fn challenges_are_single_use<S: Store>(db: &S) -> Check {
         ErrorCode::Conflict,
     )?;
     let ghost = user(db, "ghost").await?;
-    ok("delete_user ghost", db.delete_user(ghost).await)?;
+    ok("delete_user ghost", db.delete_user(&ADMIN, ghost, T0).await)?;
     fails(
         "put for a missing user",
         db.put_challenge("x", ChallengePurpose::Register, Some(ghost), T0 + 100)
@@ -468,7 +468,7 @@ pub async fn challenges_cascade_on_user_delete<S: Store>(db: &S) -> Check {
         db.put_challenge("l", ChallengePurpose::Login, None, T0 + 100)
             .await,
     )?;
-    ok("delete_user", db.delete_user(w).await)?;
+    ok("delete_user", db.delete_user(&ADMIN, w, T0).await)?;
     eq!(
         "the deleted user's challenge is gone",
         ok(

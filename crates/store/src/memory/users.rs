@@ -3,7 +3,9 @@ use std::ops::Bound;
 use plumblog_model::{Result, Role, UserId};
 
 use super::{MemoryStore, State, conflict, invalid, next_rowid, next_seq, user_not_found};
-use crate::{NewSession, NewUser, ProfileUpdate, Session, SiteStore, User, UserStore, page_len};
+use crate::{
+    Admin, NewSession, NewUser, ProfileUpdate, Session, SiteStore, User, UserStore, page_len,
+};
 
 impl State {
     /// `users.login` is `NOCASE` (ASCII only) and `users.slug` is unique.
@@ -33,6 +35,13 @@ impl State {
             return Err(last_owner(id));
         }
         Ok(())
+    }
+
+    /// An owner who is demoted or disabled takes their unused invites with them: a link
+    /// minted with a stolen session must not outlive that owner's access.
+    fn drop_unused_invites(&mut self, id: UserId) {
+        self.invites
+            .retain(|_, i| i.created_by != id || i.used_at.is_some());
     }
 
     /// Exists and is not disabled.
@@ -67,10 +76,13 @@ impl State {
 }
 
 fn last_owner(id: UserId) -> plumblog_model::Error {
-    conflict(format!(
-        "user {} is the last active owner; make another user owner first",
-        id.0
-    ))
+    plumblog_model::Error::new(
+        plumblog_model::ErrorCode::LastOwner,
+        format!(
+            "user {} is the last active owner; make another user owner first",
+            id.0
+        ),
+    )
 }
 
 // `async fn` so nothing is read or written until the future is polled, as with D1.
@@ -218,11 +230,13 @@ impl UserStore for MemoryStore {
         })
     }
 
-    async fn set_role(&self, id: UserId, role: Role, now: i64) -> Result<()> {
+    async fn set_role(&self, by: &Admin, id: UserId, role: Role, now: i64) -> Result<()> {
         self.write(|s| {
+            s.require_admin(by, now)?;
             s.user_mut(id)?;
             if role != Role::Owner {
                 s.check_not_last_owner(id)?;
+                s.drop_unused_invites(id);
             }
             let u = s.user_mut(id)?;
             u.role = role;
@@ -231,13 +245,25 @@ impl UserStore for MemoryStore {
         })
     }
 
-    async fn set_disabled(&self, id: UserId, disabled_at: Option<i64>, now: i64) -> Result<()> {
+    async fn set_disabled(
+        &self,
+        by: &Admin,
+        id: UserId,
+        disabled_at: Option<i64>,
+        now: i64,
+    ) -> Result<()> {
         self.write(|s| {
+            s.require_admin(by, now)?;
             s.user_mut(id)?;
             if disabled_at.is_some() {
                 s.check_not_last_owner(id)?;
-                // sessions.user_id: a disabled account must not stay signed in.
+                // A disabled account must not stay signed in, nor keep tokens that come
+                // back when it is re-enabled.
                 s.sessions.retain(|_, x| x.user_id != id);
+                s.drop_unused_invites(id);
+                for t in s.tokens.values_mut().filter(|t| t.user_id == id) {
+                    t.revoked_at.get_or_insert(now);
+                }
             }
             let u = s.user_mut(id)?;
             u.disabled_at = disabled_at;
@@ -246,8 +272,9 @@ impl UserStore for MemoryStore {
         })
     }
 
-    async fn delete_user(&self, id: UserId) -> Result<()> {
+    async fn delete_user(&self, by: &Admin, id: UserId, now: i64) -> Result<()> {
         self.write(|s| {
+            s.require_admin(by, now)?;
             if !s.user_exists(id) {
                 return Err(user_not_found(id));
             }

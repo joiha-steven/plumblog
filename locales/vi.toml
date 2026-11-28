@@ -12,6 +12,9 @@ unavailable = "Giao diện đã đẩy lên của trang không tải được, n
 [error.input]
 too_complex = "Yêu cầu này chứa quá nhiều mục. Bạn gửi ít hơn mỗi lần nhé."
 
+[error.user]
+last_owner = "Trang cần ít nhất một chủ đang hoạt động. Hãy cho một người khác làm chủ trước."
+
 [error.post]
 published_in_future = "Bài đã đăng không thể có ngày ở tương lai. Hãy hẹn giờ đăng, hoặc đăng ngay."
 

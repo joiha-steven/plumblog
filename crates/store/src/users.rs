@@ -1,8 +1,36 @@
 //! Site counters and user accounts (`site`, `users`).
 
-use plumblog_model::{Result, Role, UserId};
+use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 
-use crate::NewSession;
+use crate::{NewSession, Proof};
+
+/// The owner a user-admin write is made by. The write itself checks, inside its own atomic
+/// step, that `proof` still holds and that `id` is still an active owner: a request
+/// authorized just before its owner was demoted or disabled then writes nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Admin {
+    pub id: UserId,
+    /// What the request authenticated with ([`Proof`]); `Proof::Unchecked` skips both checks.
+    pub proof: Proof,
+}
+
+impl Admin {
+    /// `Forbidden` naming why, unless `user` (the row of `self.id`, if any) is an active
+    /// owner. The reason goes to the log only; the client sees `auth.forbidden`.
+    #[must_use]
+    pub fn refusal(&self, user: Option<&User>) -> Option<Error> {
+        let why = match user {
+            None => "no longer exists",
+            Some(u) if u.disabled_at.is_some() => "is disabled",
+            Some(u) if u.role != Role::Owner => "is no longer an owner",
+            Some(_) => return None,
+        };
+        Some(Error::new(
+            ErrorCode::Forbidden,
+            format!("acting user {} {why}", self.id.0),
+        ))
+    }
+}
 
 /// A row of `users`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,7 +95,9 @@ pub trait UserStore {
     // Each write below touches only its own columns plus `updated_at = now`, so two admins
     // changing different things (or a profile edit racing a password change) never undo
     // each other. An "active owner" is `role = Owner` with `disabled_at = None`; a write
-    // that would leave none fails with `Conflict`, atomically even under concurrent writes.
+    // that would leave none fails with `LastOwner`, atomically even under concurrent writes.
+    // `by` is checked first, in the same atomic step ([`Admin`]): `Unauthenticated` if its
+    // proof is gone, `Forbidden` if it is not an active owner; nothing is written either way.
 
     /// Writes login, slug, display name and bio. `UserNotFound`; `Conflict` on a login
     /// (ASCII case-insensitive) or slug held by another user. Bumps the content version
@@ -93,15 +123,24 @@ pub trait UserStore {
         session: NewSession,
         now: i64,
     ) -> Result<i64>;
-    /// `UserNotFound`; `Conflict` when demoting the last active owner. No version bump.
-    async fn set_role(&self, id: UserId, role: Role, now: i64) -> Result<()>;
+    /// `UserNotFound`; `LastOwner` when demoting the last active owner. Demoting (to a
+    /// non-owner role) also deletes their unused invites in the same write. No version bump.
+    async fn set_role(&self, by: &Admin, id: UserId, role: Role, now: i64) -> Result<()>;
     /// `Some(at)` disables the account and, in the same atomic write, deletes all its
-    /// sessions (a disabled account must not stay signed in); `None` re-enables it.
-    /// `UserNotFound`; `Conflict` when disabling the last active owner. No version bump.
-    async fn set_disabled(&self, id: UserId, disabled_at: Option<i64>, now: i64) -> Result<()>;
-    /// `UserNotFound`; `Conflict` while they author any post (reassign first) or when they
-    /// are the last active owner. Deletes their
+    /// sessions and unused invites and revokes its unrevoked API tokens (`revoked_at = now`),
+    /// so re-enabling
+    /// (`None`) brings back neither. `UserNotFound`; `LastOwner` when disabling the last
+    /// active owner (nothing written). No version bump.
+    async fn set_disabled(
+        &self,
+        by: &Admin,
+        id: UserId,
+        disabled_at: Option<i64>,
+        now: i64,
+    ) -> Result<()>;
+    /// `UserNotFound`; `Conflict` while they author any post (reassign first); `LastOwner`
+    /// when they are the last active owner. Deletes their
     /// sessions, passkeys, tokens and the invites they created; clears `invites.used_by`,
     /// `media.uploaded_by`, `revisions.author_id` and the log actor that pointed at them.
-    async fn delete_user(&self, id: UserId) -> Result<()>;
+    async fn delete_user(&self, by: &Admin, id: UserId, now: i64) -> Result<()>;
 }

@@ -264,7 +264,13 @@ impl TokenStore for MemoryStore {
 impl InviteStore for MemoryStore {
     async fn create_invite(&self, invite: NewInvite) -> Result<i64> {
         self.write(|s| {
-            s.require_proof(invite.created_by, &invite.proof, invite.created_at)?;
+            s.require_admin(
+                &crate::Admin {
+                    id: invite.created_by,
+                    proof: invite.proof.clone(),
+                },
+                invite.created_at,
+            )?;
             if !s.user_exists(invite.created_by) {
                 return Err(invalid(format!(
                     "user {} does not exist",
@@ -300,12 +306,14 @@ impl InviteStore for MemoryStore {
         }))
     }
 
-    async fn delete_invite(&self, id: i64) -> Result<()> {
+    async fn delete_invite(&self, by: &crate::Admin, id: i64, now: i64) -> Result<()> {
         self.write(|s| {
-            s.invites
-                .remove(&id)
-                .map(drop)
-                .ok_or_else(|| not_found("invite", id))
+            s.require_admin(by, now)?;
+            if s.invites.get(&id).is_none_or(|i| i.used_at.is_some()) {
+                return Err(not_found("unused invite", id));
+            }
+            s.invites.remove(&id);
+            Ok(())
         })
     }
 
@@ -314,7 +322,15 @@ impl InviteStore for MemoryStore {
             let (invite_id, role) = s
                 .invites
                 .values()
-                .find(|i| i.code_hash == code_hash && i.used_at.is_none() && i.expires_at > now)
+                .find(|i| {
+                    i.code_hash == code_hash
+                        && i.used_at.is_none()
+                        && i.expires_at > now
+                        // Only while its creator is still an active owner.
+                        && s.users.get(&i.created_by).is_some_and(|u| {
+                            u.role == plumblog_model::Role::Owner && u.disabled_at.is_none()
+                        })
+                })
                 .map(|i| (i.id, i.role))
                 .ok_or_else(|| {
                     Error::new(

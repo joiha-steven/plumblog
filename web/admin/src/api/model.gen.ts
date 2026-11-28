@@ -38,6 +38,7 @@ export const ERROR_CODES = [
   "comments.rate_limited",
   "theme.unavailable",
   "auth.reset_expired",
+  "user.last_owner",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
@@ -140,6 +141,7 @@ export const LOG_KINDS = [
   "auth.token_created",
   "auth.token_revoked",
   "user.created",
+  "user.changed",
   "content.changed",
   "settings.changed",
   "theme.changed",
@@ -258,6 +260,19 @@ export interface LogEntry {
 export interface LogPage {
   entries: LogEntry[];
   next_cursor: string | null;
+}
+export interface Invite {
+  id: number;
+  role: string;
+  created_by: number;
+  created_at: number;
+  expires_at: number;
+}
+export interface InviteCreated extends Invite {
+  code: string;
+}
+export interface InviteList {
+  invites: Invite[];
 }
 export interface Conflict {
   error: string;
@@ -505,6 +520,24 @@ export const SHAPES: Readonly<Record<string, Readonly<Record<string, string>>>> 
   "log_page": {
     "entries": "shape:log_entry[]",
     "next_cursor": "string|null",
+  },
+  "invite": {
+    "id": "integer",
+    "role": "string",
+    "created_by": "integer",
+    "created_at": "integer",
+    "expires_at": "integer",
+  },
+  "invite_created": {
+    "id": "integer",
+    "role": "string",
+    "created_by": "integer",
+    "created_at": "integer",
+    "expires_at": "integer",
+    "code": "string",
+  },
+  "invite_list": {
+    "invites": "shape:invite[]",
   },
   "conflict": {
     "error": "string",

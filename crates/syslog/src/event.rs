@@ -23,6 +23,9 @@ stable_codes! {
         TokenCreated => "auth.token_created",
         TokenRevoked => "auth.token_revoked",
         UserCreated => "user.created",
+        // An owner created or revoked an invite, or changed, disabled, enabled or deleted a
+        // user (`action` says which). Ids and roles only: never the invite code.
+        UserChanged => "user.changed",
         ContentChanged => "content.changed",
         SettingsChanged => "settings.changed",
         ThemeChanged => "theme.changed",
@@ -84,6 +87,7 @@ impl EventKind {
             | Self::TokenCreated
             | Self::TokenRevoked
             | Self::UserCreated
+            | Self::UserChanged
             | Self::ContentChanged
             | Self::SettingsChanged
             | Self::ThemeChanged
@@ -326,6 +330,7 @@ mod tests {
                 (EventKind::TokenCreated, "auth.token_created"),
                 (EventKind::TokenRevoked, "auth.token_revoked"),
                 (EventKind::UserCreated, "user.created"),
+                (EventKind::UserChanged, "user.changed"),
                 (EventKind::ContentChanged, "content.changed"),
                 (EventKind::SettingsChanged, "settings.changed"),
                 (EventKind::ThemeChanged, "theme.changed"),

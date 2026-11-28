@@ -187,7 +187,9 @@ describe("mcp transport", () => {
 describe("mcp tools", () => {
   test("an owner sees every /api/v1 route but the reference and the raw-bytes routes", async () => {
     const ref = await fetch(`${w.url}/api/v1/reference`, { headers: { authorization: `Bearer ${TOK.owner}` } }).then((r) => r.json());
+    // Session-only routes (user admin) are never tools: MCP is token only.
     const want = ref.routes
+      .filter((r) => !r.session_only)
       .map((r) => `${r.method} ${r.path}`)
       .filter((k) => !["GET /api/v1/reference", "POST /api/v1/media", "GET /api/v1/media/{id}/original"].includes(k))
       .sort();
@@ -196,6 +198,10 @@ describe("mcp tools", () => {
     const got = tools.map((t) => t.description.split(";")[0]).sort();
     assert.deepEqual(got, want);
     assert.equal(new Set(tools.map((t) => t.name)).size, tools.length);
+    assert.ok(ref.routes.some((r) => r.session_only && r.path === "/api/v1/invites"));
+    for (const name of ["user_role", "user_disabled", "user_delete", "invite_list", "invite_create", "invite_revoke"]) {
+      assert.ok(!tools.some((t) => t.name === name), name);
+    }
     const update = tools.find((t) => t.name === "post_update");
     assert.equal(update.inputSchema.additionalProperties, false);
     assert.deepEqual(update.inputSchema.required, ["id", "expected_version"]);

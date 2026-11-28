@@ -61,7 +61,7 @@ pub use signin::{
     public_settings, setup_hash_json,
 };
 pub use taxonomy::{NewSeries, Series, Tag, TaxonomyStore};
-pub use users::{NewUser, ProfileUpdate, SiteStore, User, UserStore};
+pub use users::{Admin, NewUser, ProfileUpdate, SiteStore, User, UserStore};
 pub use webhooks::{
     AttemptResult, Delivery, DeliveryStore, NewDelivery, NewWebhook, Webhook, WebhookStore,
 };

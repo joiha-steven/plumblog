@@ -1,7 +1,7 @@
 //! `/api/v1`: the content API for the admin, the CLI and AI clients (docs/ARCHITECTURE.md,
 //! AI surface). Routes come from [`plumblog_model::api::ROUTES`]: this module finds the
 //! route, checks its access and input against the table, then calls the handler. Session
-//! cookie or API token alike.
+//! cookie or API token alike, except routes marked `session_only` (user admin).
 
 mod export;
 mod input;
@@ -11,6 +11,7 @@ mod post_body;
 mod posts;
 mod settings;
 mod taxonomy;
+mod users;
 
 use plumblog_auth::json;
 use plumblog_model::api::{self, Access, Body, Field, Method as M, ROUTES, Route, RouteId};
@@ -57,6 +58,9 @@ pub(super) fn access(p: &Principal, route: &Route) -> Result<()> {
         Access::Read => p.require_read()?,
         Access::Require(perm) => p.require(perm)?,
     };
+    if route.session_only {
+        p.session_user()?;
+    }
     Ok(())
 }
 
@@ -154,6 +158,12 @@ pub async fn dispatch(
         RouteId::CommentList => export::comments(ctx, &input).await,
         RouteId::UserList => export::users(ctx, &input).await,
         RouteId::LogList => log::list(ctx, &input).await,
+        RouteId::UserRole => users::set_role(ctx, p, &input).await,
+        RouteId::UserDisabled => users::set_disabled(ctx, p, &input).await,
+        RouteId::UserDelete => users::delete(ctx, p, &input).await,
+        RouteId::InviteList => users::invite_list(ctx).await,
+        RouteId::InviteCreate => users::invite_create(ctx, p, &input).await,
+        RouteId::InviteRevoke => users::invite_revoke(ctx, p, &input).await,
         RouteId::RedirectList => settings::redirects(ctx).await,
         RouteId::RedirectPut => settings::redirect_put(ctx, p, &input).await,
         RouteId::RedirectDelete => settings::redirect_delete(ctx, p, &input).await,
@@ -204,6 +214,7 @@ fn route_json(r: &Route) -> String {
             "session_only_keys",
             list(r.session_only_keys.iter().map(|k| quote(k)).collect()),
         ),
+        ("session_only", Out::Bool(r.session_only)),
         ("fields", list(r.fields.iter().map(field_json).collect())),
         (
             "max_body",

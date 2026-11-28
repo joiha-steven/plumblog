@@ -165,8 +165,7 @@ pub trait TokenStore {
     /// duplicate hash; `InvalidInput` if the user does not exist.
     async fn create_token(&self, token: NewToken) -> Result<i64>;
     /// `None` if absent, revoked, expired (`expires_at <= now`) or its user is disabled.
-    /// Disabling does not revoke: re-enabling the user makes their unrevoked, unexpired
-    /// tokens resolve again.
+    /// Disabling also revokes them ([`crate::UserStore::set_disabled`]).
     async fn find_token(&self, token_hash: &str, now: i64) -> Result<Option<ApiToken>>;
     /// All of a user's tokens, revoked and expired included, ordered by id.
     async fn list_tokens(&self, user: UserId) -> Result<Vec<ApiToken>>;
@@ -177,14 +176,18 @@ pub trait TokenStore {
 #[allow(async_fn_in_trait)]
 pub trait InviteStore {
     /// `Unauthenticated` if `invite.proof` no longer holds for `created_by` ([`Proof`]);
-    /// `Conflict` on a duplicate hash; `InvalidInput` if the creator does not exist.
+    /// then `Forbidden` unless the creator is still an active owner (both checked inside the
+    /// write, as [`crate::Admin`]; `Proof::Unchecked` skips both); `Conflict` on a duplicate
+    /// hash; `InvalidInput` if the creator does not exist.
     async fn create_invite(&self, invite: NewInvite) -> Result<i64>;
     /// Newest first (`created_at` DESC, id DESC), used ones included.
     async fn list_invites(&self) -> Result<Vec<Invite>>;
-    /// `NotFound`.
-    async fn delete_invite(&self, id: i64) -> Result<()>;
-    /// One atomic write: the invite must exist, be unused and have `expires_at > now`, else
-    /// `InviteInvalid`. Creates the user with the invite's role (`user.role` is ignored) and
+    /// Deletes an unused invite in one conditional write, `by` checked in it as
+    /// [`crate::Admin`]. `NotFound` if absent or used: a used invite is the record of how its
+    /// user joined.
+    async fn delete_invite(&self, by: &crate::Admin, id: i64, now: i64) -> Result<()>;
+    /// One atomic write: the invite must exist, be unused, have `expires_at > now` and a
+    /// creator who is still an active owner, else `InviteInvalid`. Creates the user with the invite's role (`user.role` is ignored) and
     /// marks the invite `used_at = now`, `used_by = <new id>`. A login or slug `Conflict`
     /// leaves the invite unused.
     async fn accept_invite(&self, code_hash: &str, user: NewUser, now: i64) -> Result<UserId>;

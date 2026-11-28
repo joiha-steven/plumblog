@@ -1,9 +1,9 @@
 use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
-use plumblog_store::{NewSession, NewUser, ProfileUpdate, SiteStore, User, UserStore};
+use plumblog_store::{Admin, NewSession, NewUser, ProfileUpdate, SiteStore, User, UserStore};
 
 use super::{
-    D1Store, Failure, Row, Stmt, bound, bump, bump_if, guard, int, invalid, opt_int, opt_text,
-    proof_gone, proof_guard, storage, text,
+    D1Store, Failure, Row, Stmt, bound, bump, bump_if, guard, int, invalid, opt_text,
+    proof_condition, proof_gone, proof_guard, storage, text,
 };
 
 pub(super) const USER_COLS: &str =
@@ -30,7 +30,7 @@ fn user_not_found(id: UserId) -> Error {
 
 fn last_owner(id: UserId) -> Error {
     Error::new(
-        ErrorCode::Conflict,
+        ErrorCode::LastOwner,
         format!(
             "user {} is the last active owner; make another user owner first",
             id.0
@@ -44,36 +44,120 @@ const NOT_LAST_OWNER: &str = "NOT EXISTS (SELECT 1 FROM users WHERE id = ? AND r
      AND disabled_at IS NULL) \
      OR EXISTS (SELECT 1 FROM users WHERE id <> ? AND role = 'owner' AND disabled_at IS NULL)";
 
+/// The acting user is an active owner (with its proof: [`Admin`]).
+const ACTIVE_OWNER: &str =
+    "EXISTS (SELECT 1 FROM users WHERE id = ? AND role = 'owner' AND disabled_at IS NULL)";
+
 impl D1Store {
+    /// A guard that aborts its batch unless `by`'s proof holds and `by` is an active owner,
+    /// so a request authorized before its owner was demoted or disabled writes nothing.
+    pub(super) fn admin_guard(&self, by: &Admin, now: i64) -> Result<Stmt> {
+        #[cfg(feature = "contract-tests")]
+        if by.proof == plumblog_store::Proof::Unchecked {
+            return guard(self, "admin_guard", "1", &[]);
+        }
+        let (proof, mut params) = proof_condition(by.id, &by.proof, now)?;
+        params.push(bound(by.id.0));
+        guard(
+            self,
+            "admin_guard",
+            &format!("({proof}) AND {ACTIVE_OWNER}"),
+            &params,
+        )
+    }
+
+    /// After a guard fired: why [`Self::admin_guard`] refused `by`, or `None` if it holds
+    /// (another guard of the batch fired). A read after the failed write, so only for the
+    /// answer and the log; nothing was written.
+    pub(super) async fn admin_refusal(&self, by: &Admin, now: i64) -> Result<Option<Error>> {
+        #[cfg(feature = "contract-tests")]
+        if by.proof == plumblog_store::Proof::Unchecked {
+            return Ok(None);
+        }
+        if !self.proof_holds(by.id, &by.proof, now).await? {
+            return Ok(Some(proof_gone()));
+        }
+        let user = match self.get_user(by.id).await {
+            Ok(u) => Some(u),
+            Err(e) if e.code == ErrorCode::UserNotFound => None,
+            Err(e) => return Err(e),
+        };
+        Ok(by.refusal(user.as_ref()))
+    }
+
+    /// For a batch whose only guard is [`Self::admin_guard`]: the refusal, always an error.
+    pub(super) async fn admin_refused(&self, by: &Admin, now: i64) -> Result<Error> {
+        Ok(self.admin_refusal(by, now).await?.unwrap_or_else(|| {
+            Error::new(
+                ErrorCode::Forbidden,
+                format!(
+                    "acting user {} failed the check in the write, passed it after",
+                    by.id.0
+                ),
+            )
+        }))
+    }
+
     fn not_last_owner(&self, name: &'static str, id: UserId) -> Result<Stmt> {
         guard(self, name, NOT_LAST_OWNER, &[bound(id.0), bound(id.0)])
     }
 
-    /// The `set_role` batch for a non-owner `role`: the guard, then the write at index 1.
+    /// The `set_role` batch for a non-owner `role`: the guards, then the write at index 2.
     /// Separate so `selftest` can run it after the owners changed under it.
-    pub(super) fn demote_stmts(&self, id: UserId, role: Role, now: i64) -> Result<Vec<Stmt>> {
+    pub(super) fn demote_stmts(
+        &self,
+        by: &Admin,
+        id: UserId,
+        role: Role,
+        now: i64,
+    ) -> Result<Vec<Stmt>> {
         Ok(vec![
+            self.admin_guard(by, now)?,
             self.not_last_owner("set_role_guard", id)?,
-            self.stmt(
-                "set_role",
-                "UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
-                &[text(role.as_str()), int(now)?, bound(id.0)],
-            )?,
+            self.role_stmt(id, role, now)?,
+            self.drop_unused_invites("set_role_invites", id)?,
         ])
     }
 
-    /// Runs `stmts` (a [`Self::not_last_owner`] guard first) and checks that statement
-    /// `write_at` changed the user's row.
+    /// A demoted or disabled owner's unused invites go in the same batch: a link minted with
+    /// a stolen session must not outlive that owner's access.
+    fn drop_unused_invites(&self, name: &'static str, id: UserId) -> Result<Stmt> {
+        self.stmt(
+            name,
+            "DELETE FROM invites WHERE created_by = ? AND used_at IS NULL",
+            &[bound(id.0)],
+        )
+    }
+
+    fn role_stmt(&self, id: UserId, role: Role, now: i64) -> Result<Stmt> {
+        self.stmt(
+            "set_role",
+            "UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
+            &[text(role.as_str()), int(now)?, bound(id.0)],
+        )
+    }
+
+    /// Runs `stmts` (an [`Self::admin_guard`] for `by` first, then maybe a
+    /// [`Self::not_last_owner`] guard) and checks that statement `write_at` changed the
+    /// user's row.
     async fn guarded_user_write(
         &self,
         what: &'static str,
+        by: &Admin,
         id: UserId,
         stmts: Vec<Stmt>,
         write_at: usize,
+        now: i64,
     ) -> Result<()> {
         let results = match self.batch_guarded(what, stmts).await {
             Ok(r) => r,
-            Err(Failure::Guard) => return Err(last_owner(id)),
+            // D1 does not say which guard fired; the actor's is told apart by a read.
+            Err(Failure::Guard) => {
+                return Err(self
+                    .admin_refusal(by, now)
+                    .await?
+                    .unwrap_or_else(|| last_owner(id)));
+            }
             Err(Failure::Error(e)) => return Err(e),
         };
         if Self::changes(what, &results[write_at])? == 0 {
@@ -340,43 +424,69 @@ impl UserStore for D1Store {
         Self::last_row_id("change_password_session", last)
     }
 
-    async fn set_role(&self, id: UserId, role: Role, now: i64) -> Result<()> {
+    async fn set_role(&self, by: &Admin, id: UserId, role: Role, now: i64) -> Result<()> {
         if role == Role::Owner {
+            let stmts = vec![self.admin_guard(by, now)?, self.role_stmt(id, role, now)?];
             return self
-                .set_user_column("set_role", "role", text(role.as_str()), id, now)
+                .guarded_user_write("set_role", by, id, stmts, 1, now)
                 .await;
         }
-        let stmts = self.demote_stmts(id, role, now)?;
-        self.guarded_user_write("set_role", id, stmts, 1).await
+        let stmts = self.demote_stmts(by, id, role, now)?;
+        self.guarded_user_write("set_role", by, id, stmts, 2, now)
+            .await
     }
 
-    async fn set_disabled(&self, id: UserId, disabled_at: Option<i64>, now: i64) -> Result<()> {
+    async fn set_disabled(
+        &self,
+        by: &Admin,
+        id: UserId,
+        disabled_at: Option<i64>,
+        now: i64,
+    ) -> Result<()> {
         let Some(at) = disabled_at else {
+            let stmts = vec![
+                self.admin_guard(by, now)?,
+                self.stmt(
+                    "set_disabled",
+                    "UPDATE users SET disabled_at = NULL, updated_at = ? WHERE id = ?",
+                    &[int(now)?, bound(id.0)],
+                )?,
+            ];
             return self
-                .set_user_column("set_disabled", "disabled_at", opt_int(None)?, id, now)
+                .guarded_user_write("set_disabled", by, id, stmts, 1, now)
                 .await;
         };
         let stmts = vec![
+            self.admin_guard(by, now)?,
             self.not_last_owner("set_disabled_guard", id)?,
             self.stmt(
                 "set_disabled",
                 "UPDATE users SET disabled_at = ?, updated_at = ? WHERE id = ?",
                 &[int(at)?, int(now)?, bound(id.0)],
             )?,
-            // Same transaction: a disabled account must not stay signed in.
+            // Same transaction: a disabled account must not stay signed in, nor keep tokens
+            // that come back when it is re-enabled.
             self.stmt(
                 "set_disabled_sessions",
                 "DELETE FROM sessions WHERE user_id = ?",
                 &[bound(id.0)],
             )?,
+            self.drop_unused_invites("set_disabled_invites", id)?,
+            self.stmt(
+                "set_disabled_tokens",
+                "UPDATE api_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+                &[int(now)?, bound(id.0)],
+            )?,
         ];
-        self.guarded_user_write("set_disabled", id, stmts, 1).await
+        self.guarded_user_write("set_disabled", by, id, stmts, 2, now)
+            .await
     }
 
-    async fn delete_user(&self, id: UserId) -> Result<()> {
+    async fn delete_user(&self, by: &Admin, id: UserId, now: i64) -> Result<()> {
         // The schema's ON DELETE rules do the cascades and SET NULLs, and posts.author_id
         // RESTRICT refuses the delete while they author posts.
         let stmts = vec![
+            self.admin_guard(by, now)?,
             self.not_last_owner("delete_user_guard", id)?,
             self.stmt(
                 "delete_user",
@@ -384,7 +494,7 @@ impl UserStore for D1Store {
                 &[bound(id.0)],
             )?,
         ];
-        self.guarded_user_write("delete_user", id, stmts, 1)
+        self.guarded_user_write("delete_user", by, id, stmts, 2, now)
             .await
             .map_err(|e| {
                 if e.detail.contains("FOREIGN KEY constraint failed") {

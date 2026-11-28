@@ -18,6 +18,10 @@ unavailable = "The site's pushed theme did not load, so its settings cannot be c
 # A JSON body with more values in all than the API takes (4096).
 too_complex = "This request holds too many items. Send less at a time."
 
+[error.user]
+# Demoting, disabling or deleting the only active owner is refused.
+last_owner = "The site needs at least one active owner. Make another user owner first."
+
 [syslog]
 # Shown in the system log wherever a secret or personal value was removed.
 redacted = "[hidden]"

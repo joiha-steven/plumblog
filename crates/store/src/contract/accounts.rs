@@ -4,7 +4,7 @@ use plumblog_model::{ErrorCode, Role, TokenScope, UserId};
 use plumblog_syslog::EventKind;
 
 use super::kit::{
-    Check, T0, eq, event, fails, media, new_user, ok, post, save, that, update, user,
+    ADMIN, Check, Got, T0, eq, event, fails, media, new_user, ok, post, save, that, update, user,
 };
 use crate::{
     LogQuery, NewInvite, NewPasskey, NewRevision, NewSession, NewToken, PostStatus, ProfileUpdate,
@@ -115,27 +115,27 @@ pub async fn user_errors<S: Store>(db: &S) -> Check {
     )?;
     fails(
         "set_role missing",
-        db.set_role(missing, Role::Writer, T0).await,
+        db.set_role(&ADMIN, missing, Role::Writer, T0).await,
         ErrorCode::UserNotFound,
     )?;
     fails(
         "set_role owner missing",
-        db.set_role(missing, Role::Owner, T0).await,
+        db.set_role(&ADMIN, missing, Role::Owner, T0).await,
         ErrorCode::UserNotFound,
     )?;
     fails(
         "set_disabled missing",
-        db.set_disabled(missing, Some(T0), T0).await,
+        db.set_disabled(&ADMIN, missing, Some(T0), T0).await,
         ErrorCode::UserNotFound,
     )?;
     fails(
         "set_disabled none missing",
-        db.set_disabled(missing, None, T0).await,
+        db.set_disabled(&ADMIN, missing, None, T0).await,
         ErrorCode::UserNotFound,
     )?;
     fails(
         "delete_user missing",
-        db.delete_user(missing).await,
+        db.delete_user(&ADMIN, missing, T0).await,
         ErrorCode::UserNotFound,
     )?;
     fails(
@@ -159,7 +159,7 @@ pub async fn user_errors<S: Store>(db: &S) -> Check {
 
 /// RESTRICT on posts, CASCADE on sign-in rows and own invites, SET NULL elsewhere.
 pub async fn user_delete_effects<S: Store>(db: &S) -> Check {
-    let owner = user(db, "owner").await?;
+    let owner = owner_user(db).await?;
     let invite_for_v = ok(
         "create_invite",
         db.create_invite(NewInvite {
@@ -220,7 +220,7 @@ pub async fn user_delete_effects<S: Store>(db: &S) -> Check {
 
     fails(
         "delete_user who authors a post",
-        db.delete_user(v).await,
+        db.delete_user(&ADMIN, v, T0).await,
         ErrorCode::Conflict,
     )?;
     eq!(
@@ -231,7 +231,7 @@ pub async fn user_delete_effects<S: Store>(db: &S) -> Check {
     p.author_id = owner;
     p.revision = None;
     save(db, update(db, pid, p).await?).await?;
-    ok("delete_user", db.delete_user(v).await)?;
+    ok("delete_user", db.delete_user(&ADMIN, v, T0).await)?;
 
     sign_in_rows_gone(db, v).await?;
     let invites = ok("list_invites", db.list_invites().await)?;
@@ -649,6 +649,13 @@ pub async fn token_scopes_round_trip<S: Store>(db: &S) -> Check {
     )
 }
 
+/// An active owner: only an active owner's invite can be accepted.
+async fn owner_user<S: Store>(db: &S) -> Got<UserId> {
+    let mut nu = new_user("owner");
+    nu.role = Role::Owner;
+    ok("create_user owner", db.create_user(nu).await)
+}
+
 fn invite(by: UserId, code: &str, role: Role, created_at: i64, expires_at: i64) -> NewInvite {
     NewInvite {
         code_hash: code.into(),
@@ -661,7 +668,7 @@ fn invite(by: UserId, code: &str, role: Role, created_at: i64, expires_at: i64) 
 }
 
 pub async fn invites<S: Store>(db: &S) -> Check {
-    let o = user(db, "owner").await?;
+    let o = owner_user(db).await?;
     let missing = UserId(o.0 + 1000);
     let i1 = ok(
         "create_invite",
@@ -739,10 +746,10 @@ pub async fn invites<S: Store>(db: &S) -> Check {
         2,
     )?;
 
-    ok("delete_invite", db.delete_invite(i3).await)?;
+    ok("delete_invite", db.delete_invite(&ADMIN, i3, T0).await)?;
     fails(
         "delete_invite again",
-        db.delete_invite(i3).await,
+        db.delete_invite(&ADMIN, i3, T0).await,
         ErrorCode::NotFound,
     )?;
     fails(
@@ -754,7 +761,7 @@ pub async fn invites<S: Store>(db: &S) -> Check {
 
 /// A login or slug conflict leaves the invite unused and adds no user.
 pub async fn accept_invite_conflict_is_atomic<S: Store>(db: &S) -> Check {
-    let o = user(db, "owner").await?;
+    let o = owner_user(db).await?;
     let id = ok(
         "create_invite",
         db.create_invite(invite(o, "c", Role::Writer, T0, 5000))

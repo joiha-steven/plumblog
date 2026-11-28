@@ -3,7 +3,7 @@
 
 use plumblog_model::{ErrorCode, Role, TokenScope, UserId};
 
-use super::kit::{Check, Got, T0, eq, fails, new_user, ok, that};
+use super::kit::{ADMIN, Check, Got, T0, eq, fails, new_user, ok, that};
 use crate::{
     NewInvite, NewPasskey, NewSession, NewToken, OWNER_RESET_HASH_KEY, OWNER_RESET_KEYS,
     OWNER_RESET_SINCE_MARGIN_MS, ProfileUpdate, Proof, Store,
@@ -477,10 +477,10 @@ pub async fn owner_reset_needs_an_active_owner<S: Store>(db: &S) -> Check {
             db.put_owner_reset("code", o, LATER, true, RESET).await,
         )?;
         if disable {
-            ok("set_role", db.set_role(o, Role::Owner, T0).await)?;
-            ok("disable", db.set_disabled(o, Some(T0), T0).await)?;
+            ok("set_role", db.set_role(&ADMIN, o, Role::Owner, T0).await)?;
+            ok("disable", db.set_disabled(&ADMIN, o, Some(T0), T0).await)?;
         } else {
-            ok("demote", db.set_role(o, Role::Writer, T0).await)?;
+            ok("demote", db.set_role(&ADMIN, o, Role::Writer, T0).await)?;
         }
         fails(
             what,
@@ -505,7 +505,7 @@ pub async fn owner_reset_needs_an_active_owner<S: Store>(db: &S) -> Check {
             Some(o),
         )?;
         if disable {
-            ok("enable", db.set_disabled(o, None, T0).await)?;
+            ok("enable", db.set_disabled(&ADMIN, o, None, T0).await)?;
         }
     }
     Ok(())
