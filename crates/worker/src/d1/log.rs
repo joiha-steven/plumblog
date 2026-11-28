@@ -4,7 +4,8 @@ use plumblog_syslog::{Event, EventKind, LogSink};
 use worker::console_log;
 use worker::wasm_bindgen::JsValue;
 
-use super::{D1Store, Row, bound, limit, opt_int, opt_text, storage, text, ubound, uint};
+use super::log_sql::{Bind, select};
+use super::{D1Store, Row, bound, opt_int, opt_text, probe_limit, storage, text, ubound, uint};
 
 fn read_entry(r: &mut Row) -> Result<LogEntry> {
     let id = r.int()?;
@@ -16,9 +17,11 @@ fn read_entry(r: &mut Row) -> Result<LogEntry> {
     let actor = r.opt_int()?.map(UserId);
     let error = r.opt_code("error", ErrorCode::parse)?;
     let detail = r.text()?;
+    let actor_name = r.opt_text()?;
     Ok(LogEntry {
         id,
         event: Event::restore(at_ms, request_id, kind, actor, error, &detail),
+        actor_name,
     })
 }
 
@@ -42,29 +45,19 @@ impl LogStore for D1Store {
         Self::last_row_id("log_append", &r)
     }
 
-    // 1 query.
-    async fn query_log(&self, q: LogQuery) -> Result<Vec<LogEntry>> {
-        let (before_at, before_id) = match q.before {
-            Some((at, id)) => (ubound(at), bound(id)),
-            None => (JsValue::NULL, JsValue::NULL),
-        };
-        let s = self.stmt(
-            "query_log",
-            "SELECT id, at_ms, request_id, kind, actor_id, error_code, detail FROM system_log \
-             WHERE (?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR actor_id = ?2) \
-             AND (?3 IS NULL OR at_ms >= ?3) AND (?4 IS NULL OR at_ms < ?4) \
-             AND (?5 IS NULL OR (at_ms, id) < (?5, ?6)) \
-             ORDER BY at_ms DESC, id DESC LIMIT ?7",
-            &[
-                opt_text(q.kind.map(EventKind::as_str)),
-                opt_int(q.actor.map(|a| a.0))?,
-                q.from_ms.map_or(JsValue::NULL, ubound),
-                q.to_ms.map_or(JsValue::NULL, ubound),
-                before_at,
-                before_id,
-                limit(q.limit),
-            ],
-        )?;
+    // 1 query (the actor's name is joined in).
+    async fn query_log(&self, q: LogQuery<'_>) -> Result<Vec<LogEntry>> {
+        let (sql, binds) = select(&q);
+        let params: Vec<JsValue> = binds
+            .iter()
+            .map(|b| match b {
+                Bind::Text(s) => text(s),
+                Bind::Int(n) => bound(*n),
+                Bind::Time(t) => ubound(*t),
+                Bind::Limit(n) => probe_limit(*n),
+            })
+            .collect();
+        let s = self.stmt("query_log", &sql, &params)?;
         self.rows(s).await?.iter_mut().map(read_entry).collect()
     }
 

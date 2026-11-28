@@ -108,6 +108,42 @@ export const RENDER_WARNINGS = [
 ] as const;
 export type RenderWarning = (typeof RENDER_WARNINGS)[number];
 
+export const LOG_KINDS = [
+  "auth.sign_in",
+  "auth.sign_in_failed",
+  "auth.sign_in_locked",
+  "auth.global_cap",
+  "auth.password_changed",
+  "auth.owner_reset",
+  "auth.owner_reset_redeemed",
+  "auth.sign_out",
+  "auth.passkey_added",
+  "auth.passkey_removed",
+  "auth.token_created",
+  "auth.token_revoked",
+  "user.created",
+  "content.changed",
+  "settings.changed",
+  "theme.changed",
+  "plugin.changed",
+  "plugin.disabled",
+  "system.deploy",
+  "system.migration",
+  "job.run",
+  "webhook.delivery",
+  "error",
+  "comment.created",
+  "comment.moderated",
+] as const;
+export type LogKind = (typeof LOG_KINDS)[number];
+
+export const LOG_LEVELS = [
+  "info",
+  "warning",
+  "error",
+] as const;
+export type LogLevel = (typeof LOG_LEVELS)[number];
+
 /** Response bodies of `/api/v1`, one interface per shape. */
 export interface PostSummary {
   id: number;
@@ -183,6 +219,26 @@ export interface User {
 }
 export interface UserPage {
   users: User[];
+  next_cursor: string | null;
+}
+export interface LogField {
+  key: string;
+  value: string;
+}
+export interface LogEntry {
+  id: number;
+  at: number;
+  request_id: string;
+  kind: LogKind;
+  level: LogLevel;
+  actor_id: number | null;
+  actor_name: string | null;
+  error_code: ErrorCode | null;
+  subject: string;
+  fields: LogField[];
+}
+export interface LogPage {
+  entries: LogEntry[];
   next_cursor: string | null;
 }
 export interface Conflict {
@@ -364,6 +420,26 @@ export const SHAPES: Readonly<Record<string, Readonly<Record<string, string>>>> 
   },
   "user_page": {
     "users": "shape:user[]",
+    "next_cursor": "string|null",
+  },
+  "log_field": {
+    "key": "string",
+    "value": "string",
+  },
+  "log_entry": {
+    "id": "integer",
+    "at": "integer",
+    "request_id": "string",
+    "kind": "code:LOG_KINDS",
+    "level": "code:LOG_LEVELS",
+    "actor_id": "integer|null",
+    "actor_name": "string|null",
+    "error_code": "code:ERROR_CODES|null",
+    "subject": "string",
+    "fields": "shape:log_field[]",
+  },
+  "log_page": {
+    "entries": "shape:log_entry[]",
     "next_cursor": "string|null",
   },
   "conflict": {
