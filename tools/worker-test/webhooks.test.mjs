@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { after, before, beforeEach, test } from "node:test";
-import { startWorker, wrangler } from "./harness.mjs";
+import { d1Sql, startWorker } from "./harness.mjs";
 
 const MIN_MS = 60_000;
 let worker;
@@ -55,10 +55,7 @@ function verify(hit, secret) {
 }
 
 function sql(command) {
-  const out = wrangler(["d1", "execute", "DB", "--local", "--persist-to", worker.state, "--json", "--command", command]);
-  const start = out.indexOf("[");
-  assert.ok(start >= 0, `no JSON in wrangler output:\n${out}`);
-  return JSON.parse(out.slice(start)).at(-1).results ?? [];
+  return d1Sql(worker.state, command);
 }
 
 async function post(path, params = {}) {
@@ -79,6 +76,13 @@ async function until(what, fn, ms = 15_000) {
 const deliveries = () =>
   sql("SELECT id, webhook_id, msg_id, event, attempts, next_at_ms, last_status, last_error FROM webhook_deliveries ORDER BY id");
 const deliveryLog = () => sql("SELECT kind, error_code, detail FROM system_log WHERE kind = 'webhook.delivery' ORDER BY id");
+// The Worker saves the delivery row first and logs the outcome after it, so a read of the log
+// right after the row appears can come first. Wait for the entries the test expects (the
+// assertions after it still check the exact count).
+const deliveryLogAfter = (n) => until(`${n} delivery log entries`, () => {
+  const rows = deliveryLog();
+  return rows.length >= n && rows;
+});
 const finished = (row) => row && row.next_at_ms === null;
 
 async function create(path, events = "post.published", params = {}) {
@@ -130,7 +134,7 @@ test("success: one signed request, row delivered, one log entry with the host on
   assert.equal(body.data.previous_url, undefined);
   assert.deepEqual([row.attempts, row.last_status, row.last_error], [1, 200, null]);
 
-  const log = deliveryLog();
+  const log = await deliveryLogAfter(1);
   console.log("system_log webhook.delivery:", JSON.stringify(log));
   assert.equal(log.length, 1);
   assert.equal(log[0].error_code, null);
@@ -156,7 +160,7 @@ test("failure then retry: 500 schedules +10 min; cron resends the same id and bo
   console.log("after attempt 1:", JSON.stringify(first), `next in ${Math.round(delay / 1000)} s`);
   assert.equal(first.last_error, "status");
   assert.ok(delay > 9 * MIN_MS && delay <= 10 * MIN_MS, `next_at about +10 min, got ${delay} ms`);
-  const log1 = deliveryLog();
+  const log1 = await deliveryLogAfter(1);
   console.log("system_log after attempt 1:", JSON.stringify(log1));
   assert.equal(log1.length, 1);
   assert.equal(log1[0].error_code, "webhook.delivery_failed");
@@ -244,7 +248,7 @@ test("SSRF: refused URLs save nothing; a tampered row is checked again before se
     const d = deliveries()[0];
     return d.last_error && d;
   });
-  const log = deliveryLog();
+  const log = await deliveryLogAfter(2);
   console.log("cron row:", JSON.stringify(cronRow), "log:", JSON.stringify(log));
   assert.equal(cronRow.last_error, "url_blocked");
   assert.equal(log.length, 2, "one entry per refused attempt (production run, then cron)");
