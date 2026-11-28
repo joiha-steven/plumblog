@@ -51,7 +51,7 @@ contract_target="$PWD/target/contract-tests"
   -- --features contract-tests --target-dir "$contract_target") \
   || fail "worker-build failed"
 
-scripts/worker-entry "$out" || fail "worker entry (above)"
+scripts/worker-entry --mark-loaded "$out" || fail "worker entry (above)"
 scripts/assemble-assets "$out/assets" "$admin_dir" || fail "assembling assets (above)"
 
 if $serve; then

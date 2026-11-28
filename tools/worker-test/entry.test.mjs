@@ -166,6 +166,33 @@ describe("embedded theme", () => {
     }
   });
 
+  // Proves the fast paths never load wasm: a freshly started isolate (same D1 and cache, so
+  // the pages below are already cached) answers /healthz and cached pages with no
+  // x-plumblog-wasm marker, then loads wasm on the first miss. A static import of ./index.js
+  // would put the marker on every response.
+  test("a new isolate answers /healthz and cached pages without loading wasm", async () => {
+    const paths = ["/", "/reading-on-screens", "/feed.xml"];
+    for (const p of paths) await hit(w, p);
+    await w.stop({ keepState: true });
+    // Same port: the cache key carries the origin.
+    w = await startWorker({ state: w.state, port: Number(new URL(w.url).port) });
+    const health = await get(w, "/healthz");
+    assert.equal(health.headers.get(MARK), "js");
+    assert.equal(health.headers.get("x-plumblog-wasm"), null, "healthz loaded wasm");
+    await health.text();
+    for (const p of paths) {
+      const r = await read(w, p);
+      assert.equal(r.res.headers.get(MARK), "js", `${p}: cache survived the restart`);
+      assert.equal(r.res.headers.get("x-plumblog-wasm"), null, `${p} loaded wasm`);
+    }
+    const miss = await read(w, "/no-such-post");
+    assert.equal(miss.res.status, 404);
+    assert.equal(miss.res.headers.get("x-plumblog-wasm"), "loaded", "the marker works: a miss loads wasm");
+    const after = await get(w, "/healthz");
+    assert.equal(after.headers.get("x-plumblog-wasm"), "loaded", "and sticks for the isolate");
+    await after.text();
+  });
+
   test("a D1 failure in the fast path hands over to wasm, which fails exactly as before", async () => {
     const path = "/reading-on-screens";
     await hit(w, path);

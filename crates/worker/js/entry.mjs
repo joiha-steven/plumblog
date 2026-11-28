@@ -6,14 +6,21 @@
 // theme_runtime.rs; tools/worker-test/entry.test.mjs pins them to the Rust side.
 import { WorkerEntrypoint } from "cloudflare:workers";
 
+// A failed import is not retried: ES modules cache a failed evaluation, so a retry would get
+// the same error. Non-fast-path requests of this isolate fail (the runtime logs why) until
+// Cloudflare replaces the isolate; /healthz and cache hits keep working meanwhile.
 let app;
-// A failed import is forgotten, so the next request retries it instead of the isolate
-// answering every request with the same error.
-const load = () =>
-  (app ??= import("./index.js").catch((e) => {
-    app = undefined;
-    throw e;
-  }));
+// Test builds only (PLUMBLOG_CONTRACT_TESTS): responses say whether index.js has been evaluated
+// in this isolate, so entry.test.mjs can prove the fast paths never load wasm. The test build's
+// index.js sets the flag itself (`scripts/worker-entry --mark-loaded`), so any way of loading it,
+// a static import included, shows.
+const load = () => (app ??= import("./index.js"));
+const withLoadedMark = (res, env) => {
+  if (globalThis.__plumblogWasmLoaded !== true || !env.PLUMBLOG_CONTRACT_TESTS) return res;
+  const out = new Response(res.body, res);
+  out.headers.set("x-plumblog-wasm", "loaded");
+  return out;
+};
 const wasm = async () => (await load()).default;
 
 const MARK = "x-plumblog-entry";
@@ -64,16 +71,16 @@ async function cached(req, url, env) {
 export default class extends WorkerEntrypoint {
   async fetch(req) {
     const url = new URL(req.url);
-    if (req.method === "GET" && url.pathname === "/healthz") return healthz(this.env);
+    if (req.method === "GET" && url.pathname === "/healthz") return withLoadedMark(healthz(this.env), this.env);
     if ((req.method === "GET" || req.method === "HEAD") && isReaderPath(url.pathname)) {
       try {
         const res = await cached(req, url, this.env);
-        if (res) return res;
+        if (res) return withLoadedMark(res, this.env);
       } catch (e) {
         console.warn(`entry: cache fast path failed, wasm takes over: ${e}`);
       }
     }
-    return new (await wasm())(this.ctx, this.env).fetch(req);
+    return withLoadedMark(await new (await wasm())(this.ctx, this.env).fetch(req), this.env);
   }
 
   async scheduled(event) {

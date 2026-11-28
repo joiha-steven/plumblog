@@ -5,6 +5,10 @@ name = "plumblog-dev"
 main = "../target/worker-dev/entry.mjs"
 compatibility_date = "2026-11-01"
 
+# Bundled by wrangler (esbuild), unlike a deploy: `no_bundle = true` loses `--test-scheduled` and the
+# media size tests. entry.test.mjs still proves wasm
+# stays unloaded: x-plumblog-wasm.
+
 # Theme fonts and JS as static assets, at the URL crates/worker pages::THEME_ASSETS_URL names.
 # scripts/worker-test copies themes/minimal/assets here before starting wrangler.
 # Bound as ASSETS, as `blog deploy` does: the Worker reads a pushed theme's theme.json through it.

@@ -188,7 +188,7 @@ function cleanupSync(entry) {
       // Group already gone.
     }
   }
-  rmSync(entry.state, { recursive: true, force: true });
+  if (!entry.keepState) rmSync(entry.state, { recursive: true, force: true });
   if (entry.pgidFile) rmSync(entry.pgidFile, { force: true });
   if (entry.portLock) rmSync(entry.portLock, { force: true });
   live.delete(entry);
@@ -379,8 +379,9 @@ export async function seedSample(worker) {
   if (res.status !== 200) throw new Error(`/__seed: ${res.status} ${await res.text()}`);
 }
 
-export async function startWorker({ seedSql = null, vars = {}, port: pinned = null, assets = ASSETS_DIR } = {}) {
-  const entry = { state: mkdtempSync(join(RUN_DIR, "plumblog-wrangler-")), pgid: null, pgidFile: null, portLock: null };
+export async function startWorker({ seedSql = null, vars = {}, port: pinned = null, assets = ASSETS_DIR, state = null } = {}) {
+  // `state`: the dir a previous worker left (stop({ keepState: true })): same D1 and cache, new isolate.
+  const entry = { state: state ?? mkdtempSync(join(RUN_DIR, "plumblog-wrangler-")), pgid: null, pgidFile: null, portLock: null, keepState: false };
   live.add(entry);
   const common = ["--config", CONFIG, "--persist-to", entry.state];
   const who = basename(process.argv[1] ?? "worker-test");
@@ -396,7 +397,7 @@ export async function startWorker({ seedSql = null, vars = {}, port: pinned = nu
     }
     const url = `http://127.0.0.1:${port}`;
     entry.url = url;
-    run(WRANGLER, ["d1", "migrations", "apply", "DB", "--local", ...common]);
+    if (state === null) run(WRANGLER, ["d1", "migrations", "apply", "DB", "--local", ...common]);
     const sql = typeof seedSql === "function" ? seedSql(url) : seedSql;
     if (sql) {
       // No Worker runs yet and the file was just created by migrations apply: nothing to lock against.
@@ -433,8 +434,9 @@ export async function startWorker({ seedSql = null, vars = {}, port: pinned = nu
   let exited = null;
   child.on("exit", (code, signal) => (exited = code ?? signal));
 
-  const stop = () =>
+  const stop = ({ keepState = false } = {}) =>
     new Promise((ok) => {
+      entry.keepState = keepState;
       // Waiting for the exit needs a live handle, or node sees an empty loop and cancels the test.
       child.ref();
       if (exited !== null) {
@@ -466,8 +468,10 @@ export async function startWorker({ seedSql = null, vars = {}, port: pinned = nu
       throw new Error(`${who}: wrangler dev on ${url} exited early (${exited}):\n${log}`);
     }
     try {
-      const res = await fetch(`${url}/__instance`, { signal: AbortSignal.timeout(2_000) });
-      const body = await res.text();
+      // A restart on kept state is ready on /healthz, which the JS entry answers without loading
+      // wasm; /__instance would load it and defeat entry.test.mjs. The port is ours (lock held).
+      const res = await fetch(`${url}${state === null ? "/__instance" : "/healthz"}`, { signal: AbortSignal.timeout(2_000) });
+      const body = state === null ? await res.text() : (await res.text(), token);
       last = `HTTP ${res.status} ${JSON.stringify(body.slice(0, 80))}`;
       if (res.status === 200 && body === token && exited === null) {
         // Read the running Worker's local D1 / R2 (test assertions only), straight from the files.
