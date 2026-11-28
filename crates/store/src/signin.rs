@@ -35,6 +35,11 @@ pub const OWNER_RESET_EXPIRES_KEY: &str = "owner_reset_expires_at";
 /// flight across the reset may have left. Absent (a code from an older `blog`): the redeem
 /// revokes every token and owner invite of the user.
 pub const OWNER_RESET_AT_KEY: &str = "owner_reset_at";
+/// How far before the recorded reset time the redeem still treats tokens and owner invites as
+/// made since the reset: a request that began before the reset stamps `created_at` with its own
+/// start, and the CLI's clock may run ahead of the Worker's, so a strict comparison could keep a
+/// token an attacker minted during the reset.
+pub const OWNER_RESET_SINCE_MARGIN_MS: i64 = 10 * 60 * 1000;
 pub const OWNER_RESET_KEEP_TOKENS_KEY: &str = "owner_reset_keep_tokens";
 /// Every owner reset key, deleted together when the code is taken.
 pub const OWNER_RESET_KEYS: &[&str] = &[

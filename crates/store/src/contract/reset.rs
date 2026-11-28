@@ -6,10 +6,16 @@ use plumblog_model::{ErrorCode, Role, TokenScope, UserId};
 use super::kit::{Check, Got, T0, eq, fails, new_user, ok, that};
 use crate::{
     NewInvite, NewPasskey, NewSession, NewToken, OWNER_RESET_HASH_KEY, OWNER_RESET_KEYS,
-    ProfileUpdate, Proof, Store,
+    OWNER_RESET_SINCE_MARGIN_MS, ProfileUpdate, Proof, Store,
 };
 
 const LATER: i64 = T0 + 1_000_000;
+
+fn named(v: &[(&str, bool)]) -> Vec<(String, bool)> {
+    v.iter().map(|&(n, r)| (n.to_string(), r)).collect()
+}
+/// The reset happens past the margin after the old credentials, so they count as before it.
+const RESET: i64 = T0 + OWNER_RESET_SINCE_MARGIN_MS + 10;
 
 async fn owner<S: Store>(db: &S, login: &str, role: Role) -> Got<UserId> {
     let mut nu = new_user(login);
@@ -238,32 +244,38 @@ async fn after_reset<S: Store>(db: &S, keep_tokens: bool) -> Got<(UserId, UserId
     )?;
     ok(
         "w's invite",
-        db.create_invite(invite(w, "w-invite", T0 + 20)).await,
+        db.create_invite(invite(w, "w-invite", RESET + 10)).await,
+    )?;
+    // Minted by a request that began just before the reset (or under a CLI clock running ahead).
+    ok(
+        "straddling token",
+        db.create_token(token(o, "straddle", RESET - 1_000, Proof::Unchecked))
+            .await,
     )?;
     ok(
         "reset",
-        db.put_owner_reset("code", o, LATER, keep_tokens, T0 + 10)
+        db.put_owner_reset("code", o, LATER, keep_tokens, RESET)
             .await,
     )?;
     ok(
         "late passkey",
-        db.add_passkey(passkey(o, "late", T0 + 20, Proof::Unchecked))
+        db.add_passkey(passkey(o, "late", RESET + 10, Proof::Unchecked))
             .await,
     )?;
     ok(
         "late token",
-        db.create_token(token(o, "late", T0 + 20, Proof::Unchecked))
+        db.create_token(token(o, "late", RESET + 10, Proof::Unchecked))
             .await,
     )?;
     ok(
         "late invite",
-        db.create_invite(invite(o, "late-invite", T0 + 20)).await,
+        db.create_invite(invite(o, "late-invite", RESET + 10)).await,
     )?;
     Ok((o, w))
 }
 
 fn by_code(o: UserId, hash: &str) -> NewSession {
-    session(o, "redeemed", T0 + 30, Proof::ResetCode(hash.into()))
+    session(o, "redeemed", RESET + 20, Proof::ResetCode(hash.into()))
 }
 
 async fn revoked<S: Store>(db: &S, u: UserId) -> Got<Vec<(String, bool)>> {
@@ -294,13 +306,13 @@ pub async fn owner_reset_redeem_replaces_credentials<S: Store>(db: &S) -> Check 
     };
     fails(
         "wrong code",
-        db.redeem_owner_reset(o, "pw-x".into(), None, by_code(o, "nope"), T0 + 30)
+        db.redeem_owner_reset(o, "pw-x".into(), None, by_code(o, "nope"), RESET + 20)
             .await,
         ErrorCode::SetupInvalid,
     )?;
     fails(
         "the code of another user",
-        db.redeem_owner_reset(w, "pw-x".into(), None, by_code(w, "code"), T0 + 30)
+        db.redeem_owner_reset(w, "pw-x".into(), None, by_code(w, "code"), RESET + 20)
             .await,
         ErrorCode::SetupInvalid,
     )?;
@@ -317,7 +329,7 @@ pub async fn owner_reset_redeem_replaces_credentials<S: Store>(db: &S) -> Check 
             "pw-x".into(),
             Some(profile("w")),
             by_code(o, "code"),
-            T0 + 30,
+            RESET + 20,
         )
         .await,
         ErrorCode::Conflict,
@@ -338,7 +350,7 @@ pub async fn owner_reset_redeem_replaces_credentials<S: Store>(db: &S) -> Check 
             "pw-o2".into(),
             Some(profile("o2")),
             by_code(o, "code"),
-            T0 + 30,
+            RESET + 20,
         )
         .await,
     )?;
@@ -353,9 +365,9 @@ pub async fn owner_reset_redeem_replaces_credentials<S: Store>(db: &S) -> Check 
         0
     )?;
     eq!(
-        "kept tokens stay, the one minted after the reset is revoked",
+        "kept tokens stay, those minted since the margin before the reset are revoked",
         revoked(db, o).await?,
-        vec![("old-so".to_string(), false), ("late".to_string(), true)],
+        named(&[("old-so", false), ("straddle", true), ("late", true)]),
     )?;
     eq!(
         "the owner invite made after the reset is gone",
@@ -379,7 +391,7 @@ pub async fn owner_reset_redeem_replaces_credentials<S: Store>(db: &S) -> Check 
     )?;
     fails(
         "single use",
-        db.redeem_owner_reset(o, "pw-o3".into(), None, by_code(o, "code"), T0 + 31)
+        db.redeem_owner_reset(o, "pw-o3".into(), None, by_code(o, "code"), RESET + 21)
             .await,
         ErrorCode::SetupInvalid,
     )?;
@@ -391,13 +403,13 @@ pub async fn owner_reset_redeem_revokes_all_tokens<S: Store>(db: &S) -> Check {
     let (o, _) = after_reset(db, false).await?;
     ok(
         "redeem",
-        db.redeem_owner_reset(o, "pw-o2".into(), None, by_code(o, "code"), T0 + 30)
+        db.redeem_owner_reset(o, "pw-o2".into(), None, by_code(o, "code"), RESET + 20)
             .await,
     )?;
     eq!(
         "all revoked",
         revoked(db, o).await?,
-        vec![("old-so".to_string(), true), ("late".to_string(), true)],
+        named(&[("old-so", true), ("straddle", true), ("late", true)]),
     )
 }
 
@@ -410,7 +422,7 @@ pub async fn owner_reset_needs_an_active_owner<S: Store>(db: &S) -> Check {
     for (what, disable) in [("demoted", false), ("disabled", true)] {
         ok(
             "code",
-            db.put_owner_reset("code", o, LATER, true, T0 + 10).await,
+            db.put_owner_reset("code", o, LATER, true, RESET).await,
         )?;
         if disable {
             ok("set_role", db.set_role(o, Role::Owner, T0).await)?;
@@ -420,7 +432,7 @@ pub async fn owner_reset_needs_an_active_owner<S: Store>(db: &S) -> Check {
         }
         fails(
             what,
-            db.redeem_owner_reset(o, "pw-o2".into(), None, by_code(o, "code"), T0 + 30)
+            db.redeem_owner_reset(o, "pw-o2".into(), None, by_code(o, "code"), RESET + 20)
                 .await,
             ErrorCode::SetupInvalid,
         )?;
@@ -437,7 +449,7 @@ pub async fn owner_reset_needs_an_active_owner<S: Store>(db: &S) -> Check {
         )?;
         eq!(
             &format!("{what}: the take spends it and names the user"),
-            ok("take", db.take_owner_reset("code", T0 + 30).await)?,
+            ok("take", db.take_owner_reset("code", RESET + 20).await)?,
             Some(o),
         )?;
         if disable {

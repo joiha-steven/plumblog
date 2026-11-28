@@ -4,8 +4,9 @@ use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 use plumblog_store::{
     ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewSession, NewUser,
     OWNER_RESET_AT_KEY, OWNER_RESET_EXPIRES_KEY, OWNER_RESET_HASH_KEY, OWNER_RESET_KEEP_TOKENS_KEY,
-    OWNER_RESET_KEYS, OWNER_RESET_USER_KEY, ProfileUpdate, Proof, Recorded, SETUP_CODE_EXPIRES_KEY,
-    SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore, setup_hash_json,
+    OWNER_RESET_KEYS, OWNER_RESET_SINCE_MARGIN_MS, OWNER_RESET_USER_KEY, ProfileUpdate, Proof,
+    Recorded, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore,
+    setup_hash_json,
 };
 use worker::wasm_bindgen::JsValue;
 
@@ -550,7 +551,9 @@ impl D1Store {
             &user,
         )?);
         // Absent keys (a code from an older `blog`): every token and owner invite goes.
-        let since = "COALESCE((SELECT CAST(value_json AS INTEGER) FROM settings WHERE key = ?), 0)";
+        let since = format!(
+            "(COALESCE((SELECT CAST(value_json AS INTEGER) FROM settings WHERE key = ?), 0) - {OWNER_RESET_SINCE_MARGIN_MS})"
+        );
         out.push(self.stmt(
             "redeem_owner_reset_tokens",
             &format!(

@@ -156,8 +156,9 @@ describe("owner reset", () => {
     reset(1, "flight-code", Date.now() + HOUR, { keepTokens: true });
     const at = Number(w.query("SELECT value_json AS v FROM settings WHERE key = 'owner_reset_at'")[0].v);
     // Written after the reset by requests that authenticated before it (what the Worker now refuses).
+    // 'kept' predates the reset by more than OWNER_RESET_SINCE_MARGIN_MS (10 min), so --keep-tokens keeps it.
     w.exec(`INSERT INTO passkeys (user_id, credential_id, public_key, created_at) VALUES (1, 'late-cred', 'k', ${at + 1});
-      INSERT INTO api_tokens (user_id, name, token_hash, scope, created_at) VALUES (1, 'kept', 'kept-hash', 'owner', ${at - 1}), (1, 'late', 'late-hash', 'owner', ${at + 1});
+      INSERT INTO api_tokens (user_id, name, token_hash, scope, created_at) VALUES (1, 'kept', 'kept-hash', 'owner', ${at - 11 * 60 * 1000}), (1, 'late', 'late-hash', 'owner', ${at + 1});
       INSERT INTO invites (code_hash, role, created_by, created_at, expires_at) VALUES ('late-invite', 'owner', 1, ${at + 1}, ${at + DAY});`);
     const r = await api(w, "POST", "/api/auth/reset", { body: { code: "flight-code", login: "Bobby", password: await stretch("Bobby", "new bob pass") }, ip: "203.0.113.20" });
     assert.equal(r.status, 200, r.text);

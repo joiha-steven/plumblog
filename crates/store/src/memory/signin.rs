@@ -4,8 +4,9 @@ use super::{MemoryStore, conflict, count, invalid};
 use crate::{
     ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewSession, NewUser,
     OWNER_RESET_AT_KEY, OWNER_RESET_EXPIRES_KEY, OWNER_RESET_HASH_KEY, OWNER_RESET_KEEP_TOKENS_KEY,
-    OWNER_RESET_KEYS, OWNER_RESET_USER_KEY, ProfileUpdate, Proof, Recorded, SETUP_CODE_EXPIRES_KEY,
-    SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore, setup_hash_json,
+    OWNER_RESET_KEYS, OWNER_RESET_SINCE_MARGIN_MS, OWNER_RESET_USER_KEY, ProfileUpdate, Proof,
+    Recorded, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore,
+    setup_hash_json,
 };
 
 /// `window_start + window_ms <= now`, overflow-safe.
@@ -367,7 +368,7 @@ impl SetupStore for MemoryStore {
             let since = setting(OWNER_RESET_AT_KEY)
                 .as_deref()
                 .and_then(parse_expiry)
-                .unwrap_or(0);
+                .map_or(0, |t| t - OWNER_RESET_SINCE_MARGIN_MS);
             let keep = setting(OWNER_RESET_KEEP_TOKENS_KEY).as_deref() == Some("true");
             if let Some(p) = &profile {
                 s.check_user_unique(&p.login, &p.slug, Some(id))?;
