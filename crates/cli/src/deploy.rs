@@ -1216,9 +1216,6 @@ pub(crate) fn prepared(
     check_source(opts, cx.text)?;
     let _lock = Lock::take(cx)?;
     let (st, site) = start(client, account_id, cx)?;
-    restore_pending(&st, cx)?;
-    // Refuses a bad test override before anything is built.
-    smoke_url(&site.origin, rt, cx.text)?;
     let client: &Client = client;
     let mut first = Run {
         client,
@@ -1227,6 +1224,10 @@ pub(crate) fn prepared(
         state: st,
         secrets: Vec::new(),
     };
+    crate::restore::remind_reset(&mut first);
+    restore_pending(&first.state, cx)?;
+    // Refuses a bad test override before anything is built.
+    smoke_url(&site.origin, rt, cx.text)?;
     let (_, b) = bundle(&mut first, opts)?;
     // The migrations come with the code they belong to.
     let bcx = Context {

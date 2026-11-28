@@ -112,8 +112,9 @@ pub struct RollbackRecord {
     pub previous: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smoke: Option<String>,
-    /// `blog restore` only: `started`, `upload_failed`, `import_failed`, `import_uncertain`,
-    /// `migration_failed` or `restored`. Written before the import, so a run that dies
+    /// `blog restore` only: `started`, `importing` (until the run ends), `upload_failed`,
+    /// `import_failed`, `import_uncertain`, `migration_failed`, `count_mismatch`,
+    /// `credentials_not_reset` or `restored`. Written before the import, so a run that dies
     /// halfway still names the bookmark that undoes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,

@@ -161,7 +161,7 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
         return Ok(Response::empty()?.with_status(304).with_headers(h));
     }
 
-    let key = cache::key(&origin, version, crate::theme_runtime::cache_tag(), &path);
+    let key = cache::key_for(env, &origin, version, &path);
     let lookup = cache::get(&key).await;
     if let cache::Lookup::Hit(resp) = lookup {
         return Ok(resp);
@@ -208,13 +208,64 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
             if let Some(t) = tag {
                 h.set(plumblog_render::pushed::THEME_HEADER, t)?;
             }
+            let stored = if store && matches!(lookup, cache::Lookup::Miss) {
+                stored_copy(
+                    req,
+                    env,
+                    version,
+                    &path,
+                    &body,
+                    content_type,
+                    &etag,
+                    cache_control,
+                    tag,
+                )?
+            } else {
+                None
+            };
             let mut resp = Response::ok(body)?.with_status(status).with_headers(h);
             if store && matches!(lookup, cache::Lookup::Miss) {
-                cache::put_later(ctx, key, resp.cloned()?);
+                cache::put_later(ctx, env, key, resp.cloned()?, stored);
             }
             Ok(resp)
         }
     }
+}
+
+/// The R2 copy of a page the Cache API is about to keep, or `None` when the guards
+/// ([`cache::may_store`]) or a missing version id keep it local.
+#[expect(clippy::too_many_arguments, reason = "the parts of one rendered page")]
+fn stored_copy(
+    req: &Request,
+    env: &Env,
+    version: u64,
+    path: &str,
+    body: &str,
+    content_type: &'static str,
+    etag: &str,
+    cache_control: &'static str,
+    theme: Option<&'static str>,
+) -> Result<Option<cache::Stored>> {
+    let Some(id) = crate::version_id(env) else {
+        return Ok(None);
+    };
+    let headers = req.headers();
+    let credentials = headers.has("cookie")? || headers.has("authorization")?;
+    let key = cache::store_key(&id, version, crate::theme_runtime::cache_tag(), path);
+    let get = req.method() == worker::Method::Get;
+    if !cache::may_store(get, credentials, body.len(), &key, cache::store_limit(env)) {
+        return Ok(None);
+    }
+    Ok(Some(cache::Stored {
+        key,
+        body: body.as_bytes().to_vec(),
+        content_type,
+        etag: etag.to_owned(),
+        cache_control,
+        theme,
+        path: path.to_owned(),
+        cf_ray: headers.get("cf-ray")?,
+    }))
 }
 
 /// A page rendered for this request only: no `ETag`, no Cache API, never stored by browsers.
