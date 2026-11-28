@@ -40,7 +40,7 @@ import posts from "../../fixtures/posts.json";
 import settingsFixture from "../../fixtures/settings.json";
 import tokenFixtures from "../../fixtures/tokens.json";
 import longPost from "../../fixtures/post-1.txt";
-import { type Api, type JsonBody, type LogQuery, type Me, type Media, type MediaItem, type MediaPage, type Method, type Result, fail } from "./client";
+import { type Api, type JsonBody, type LogQuery, type Me, type MediaItem, type MediaPage, type Method, type Result, fail } from "./client";
 import { LOG_KINDS, LOG_LEVELS, type LogEntry, type LogPage, type Post, type PostCreateInput, type PostPage, type PostUpdateInput, type RenderWarning } from "./model.gen";
 
 /** Cloudflare's public always-pass Turnstile key: the real widget works in dev. */
@@ -488,8 +488,13 @@ export function mockApi(params: URLSearchParams): Api {
         img.onerror = () => resolve([0, 0]);
         img.src = url;
       });
-      const media: Media = { id: ++mediaId, url, width: size[0], height: size[1] };
-      return { ok: true, value: media };
+      if (up === "refuse") return fail("input.invalid", 400, { field: "sha256" });
+      // `?upload=dup`: the caller's own first picture answers, as the server does for a known hash.
+      const known = up === "dup" ? library[0] : undefined;
+      if (known) return { ok: true, value: { id: known.id, url: known.src, width: known.width, height: known.height, item: known, existing: true } };
+      const item: MediaItem = { id: ++mediaId, src: url, mime: file.type, bytes: file.size, width: size[0], height: size[1], alt: "", uploaded_by: me.user.id, created_at: Date.now() };
+      library.unshift(item);
+      return { ok: true, value: { id: item.id, url, width: size[0], height: size[1], item, existing: false } };
     },
   };
 }
