@@ -564,6 +564,7 @@ dependencies = [
  "miniz_oxide",
  "plumblog-auth",
  "plumblog-i18n",
+ "plumblog-markdown",
  "plumblog-model",
  "plumblog-render",
  "plumblog-store",
@@ -581,7 +582,9 @@ dependencies = [
 name = "plumblog-i18n"
 version = "0.1.0"
 dependencies = [
+ "plumblog-i18n",
  "plumblog-model",
+ "serde_json",
  "toml",
 ]
 
@@ -605,6 +608,7 @@ dependencies = [
  "minijinja",
  "plumblog-i18n",
  "plumblog-markdown",
+ "plumblog-render",
  "serde",
  "serde_json",
  "toml",
@@ -643,6 +647,7 @@ dependencies = [
 name = "plumblog-worker"
 version = "0.1.0"
 dependencies = [
+ "futures-core",
  "idna_adapter",
  "plumblog-auth",
  "plumblog-i18n",
@@ -654,6 +659,7 @@ dependencies = [
  "plumblog-webhook",
  "roxmltree",
  "rusqlite",
+ "serde_json",
  "worker",
 ]
 

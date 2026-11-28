@@ -86,6 +86,9 @@ stable_codes! {
         CommentForm => "comments.form_invalid",
         CommentCheckFailed => "comments.check_failed",
         CommentRateLimited => "comments.rate_limited",
+        // The site's pushed theme failed to load, so its option declarations are unknown:
+        // writes to its options wait until it loads again (push it again).
+        ThemeUnavailable => "theme.unavailable",
     }
 }
 
@@ -334,6 +337,7 @@ mod tests {
                 (ErrorCode::CommentForm, "comments.form_invalid"),
                 (ErrorCode::CommentCheckFailed, "comments.check_failed"),
                 (ErrorCode::CommentRateLimited, "comments.rate_limited"),
+                (ErrorCode::ThemeUnavailable, "theme.unavailable"),
             ]
         );
     }

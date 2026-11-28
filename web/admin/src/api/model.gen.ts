@@ -36,6 +36,7 @@ export const ERROR_CODES = [
   "comments.form_invalid",
   "comments.check_failed",
   "comments.rate_limited",
+  "theme.unavailable",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
@@ -136,6 +137,13 @@ export interface PostSaved extends PostSummary {
 export interface PostPage {
   posts: PostSummary[];
   next_cursor: string | null;
+  counts: PostCounts | null;
+}
+export interface PostCounts {
+  draft: number;
+  scheduled: number;
+  published: number;
+  trashed: number;
 }
 export interface Conflict {
   error: string;
@@ -280,6 +288,13 @@ export const SHAPES: Readonly<Record<string, Readonly<Record<string, string>>>> 
   "post_page": {
     "posts": "shape:post_summary[]",
     "next_cursor": "string|null",
+    "counts": "shape:post_counts|null",
+  },
+  "post_counts": {
+    "draft": "integer",
+    "scheduled": "integer",
+    "published": "integer",
+    "trashed": "integer",
   },
   "conflict": {
     "error": "string",

@@ -124,6 +124,18 @@ codes! {
     RestoreImportFailed => "restore.import_failed",
     RestoreImportUncertain => "restore.import_uncertain",
     RestoreCountMismatch => "restore.count_mismatch",
+    ThemeDirNotEmpty => "theme.dir_not_empty",
+    ThemeDirTracked => "theme.dir_tracked",
+    ThemeDirUnreadable => "theme.dir_unreadable",
+    ThemeNameInvalid => "theme.name_invalid",
+    ThemeCheckFailed => "theme.check_failed",
+    ThemeServeFailed => "theme.serve_failed",
+    PluginCheckFailed => "plugin.check_failed",
+    ThemeInvalid => "theme.invalid",
+    ThemePushPending => "theme.push_pending_migrations",
+    ThemeUnrecoverable => "deploy.theme_unrecoverable",
+    ThemeRollbackNoRecord => "theme.rollback_no_record",
+    ThemeRollbackUnknown => "theme.rollback_unknown",
 }
 
 /// One language's `[cli]` text, English behind it.
@@ -137,7 +149,7 @@ fn strings(lang: &str) -> HashMap<String, String> {
         .iter()
         .find(|(l, _)| *l == lang)
         // The locale check parses these files on every commit; a broken file falls back.
-        .and_then(|(_, src)| plumblog_i18n::parse(src).ok())
+        .and_then(|(_, src)| plumblog_i18n::parse_toml(src).ok())
         .unwrap_or_default()
 }
 

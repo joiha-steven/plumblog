@@ -7,7 +7,7 @@ use super::db::Db;
 use super::sample::SampleSource;
 use super::search::{MAX_QUERY_CHARS, RESULT_LIMIT};
 use super::tests_support::run;
-use super::{Outcome, render, seed};
+use super::{Outcome, RenderError, render, seed};
 use plumblog_store::memory::MemoryStore;
 
 fn store() -> MemoryStore {
@@ -164,7 +164,8 @@ fn a_store_failure_is_an_error_not_an_empty_page() {
         "/search",
         "duong",
     ));
-    assert_eq!(r.unwrap_err(), "d1 down");
+    // A storage error, never a theme one: a pushed theme does not fall back on it.
+    assert_eq!(r.unwrap_err(), RenderError::Other("d1 down".to_owned()));
     // A query with no words never reaches the store.
     assert!(
         run(render(

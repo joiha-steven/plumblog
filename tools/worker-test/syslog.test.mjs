@@ -2,7 +2,7 @@
 // prunes by age and leaves one `job.run` entry tied to its Worker log line by request id.
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import { startWorker, wrangler } from "./harness.mjs";
+import { d1Sql, startWorker } from "./harness.mjs";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // The one cron runs every 10 minutes; the run scheduled 03:10 UTC also does the daily jobs
@@ -23,10 +23,7 @@ after(async () => {
 });
 
 function sql(command) {
-  const out = wrangler(["d1", "execute", "DB", "--local", "--persist-to", worker.state, "--json", "--command", command]);
-  const start = out.indexOf("[");
-  assert.ok(start >= 0, `no JSON in wrangler output:\n${out}`);
-  return JSON.parse(out.slice(start)).at(-1).results ?? [];
+  return d1Sql(worker.state, command);
 }
 
 // The daily run also records the webhook delivery prune; this file is about the log's own.

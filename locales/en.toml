@@ -11,6 +11,9 @@ page_not_found = "This page does not exist."
 [error.post]
 published_in_future = "A published post cannot have a future date. Schedule it instead, or publish it now."
 
+[error.theme]
+unavailable = "The site's pushed theme did not load, so its settings cannot be checked. Push the theme again, then change them."
+
 [error.input]
 # A JSON body with more values in all than the API takes (4096).
 too_complex = "This request holds too many items. Send less at a time."
@@ -204,8 +207,16 @@ domain_pending = "Warning: {origin} does not serve the new version yet ({seen}).
 seen_no_reply = "{path} did not answer ({detail})"
 seen_status = "{path} answered HTTP {status}"
 seen_version = "/healthz answered as version {got}, not {want}"
+seen_theme_default = "/ was rendered with the default theme, not the pushed theme {want} (an older bundle, or the theme files are not served)"
+seen_theme_still = "/ was rendered with the pushed theme {got}, not the default theme"
+seen_theme_other = "/ was rendered with theme {got}, not {want}"
 log_failed = "Note: the deploy could not be written to the site's system log: {error}"
 done = "Deployed version {version} to {origin}."
+theme_default_help = "Switch to the default theme: do not carry the pushed theme to the new version"
+theme_dropped = "The pushed theme {name} is dropped (--theme-default): the new version uses the default theme."
+theme_local = "Keeping the pushed theme {name} ({hash}) from this folder's copy."
+theme_local_unusable = "This folder's copy of the theme {name} cannot be used ({reason}); fetching it from the site instead."
+theme_fetched = "Keeping the pushed theme {name} ({hash}), fetched from the site and checked."
 
 [cli.release]
 downloading = "Downloading the release bundle: {url}"
@@ -483,6 +494,11 @@ update_downgrade = "Release {target} is older than this blog ({current}), so blo
 update_version_invalid = "\"{value}\" is not a version. Write it as vX.Y.Z, for example v0.2.0."
 update_no_build = "Release {tag} has no blog for this computer ({target}). Nothing was changed. See {page}."
 update_replace_failed = "Cannot replace {path}: {reason}. The current blog still works and was not changed. Move blog to a folder you can write to, or run blog update with permission to change that file."
+theme_unrecoverable = "The site uses the pushed theme {name}, but blog cannot get its files back ({reason}). Every deploy uploads all static files again, so this deploy would silently drop the theme. Push the theme folder again (`blog theme push <folder>`), or deploy with --theme-default to switch to the default theme on purpose."
+theme_invalid = "Cannot push the theme: {path}: {reason}."
+theme_push_pending = "This bundle has database migrations the site has not run yet ({list}). A theme push never migrates the database: run `blog deploy` first, then push the theme."
+theme_rollback_unknown = "Version {version} was not made by a theme push recorded in this folder. Recent versions with a theme: {list}. See `blog theme list`."
+theme_rollback_no_record = "No theme push is recorded in {path}, so there is no theme to go back from. `blog rollback` goes back to the version before the last deploy."
 
 [cli.reason]
 # Why a release file or signature was refused: the {reason} of release.archive_invalid,
@@ -545,6 +561,180 @@ sig_no_trusted_comment = "the signature has no trusted comment line"
 sig_global_not_base64 = "the signature's second part is unreadable"
 sig_global_wrong_length = "the signature's second part has the wrong length"
 sig_unknown_algorithm = "the signature uses an unknown method"
+
+[cli.theme]
+about = "Make, check and publish themes (new, dev, check, push, rollback, list)"
+dir_value = "FOLDER"
+name_value = "NAME"
+port_value = "PORT"
+dir_unreadable = "Cannot read or write {dir}: {reason}."
+dir_not_empty = "{dir} already exists and is not empty. Pick a new folder, or empty this one first."
+dir_tracked = "{dir} is inside the plumblog source checkout, whose files are tracked. Make the theme in a folder of your own."
+name_invalid = "\"{name}\" is not a theme name. Use lowercase letters, digits and -, starting with a letter (pass --name if the folder name does not fit)."
+
+[cli.theme.new]
+about = "Start a theme: copy the default theme into a new folder"
+dir_help = "New folder for the theme (must not exist, or be empty)"
+name_help = "Theme name (default: the folder name)"
+done = "Theme {name} created in {dir} ({count} files). Next: `blog theme dev {dir}` to preview it, `blog theme check {dir}` before you use it."
+
+[cli.theme.check]
+about = "Check a theme folder the way the blog loads it: templates, colors, contrast, size, files that must not be public"
+dir_help = "The theme folder"
+
+[cli.theme.dev]
+about = "Preview a theme on this computer with sample posts; edits show on refresh"
+dir_help = "The theme folder"
+port_help = "Port to listen on (default 4321); only this computer can connect"
+listening = "Previewing {dir} at {url} (Ctrl-C to stop). Edit the theme and refresh the page."
+bind_failed = "Cannot listen on port {port}: {reason}. Try another with --port."
+serve_failed = "The preview stopped: {reason}."
+problem_title = "This theme has problems"
+problem_hint = "Fix the errors below and refresh. They are the same as `blog theme check` reports."
+
+[cli.theme.push]
+about = "Put a theme on the site: check it, then deploy a new version that carries it (rolled back by itself if the site check fails)"
+dir_help = "The theme folder (checked first; any error stops the push)"
+default_help = "Go back to the default theme instead"
+pushing = "Pushing theme {name} {version} ({hash})."
+default = "Switching to the default theme."
+
+[cli.theme.rollback]
+about = "Go back to the version before the last theme push, or to a version an earlier theme push made"
+to_help = "A version made by an earlier theme push (see `blog theme list`)"
+active = "The site now uses the theme {name} {version} ({hash})."
+default = "The site now uses the default theme."
+
+[cli.theme.list]
+about = "List recent versions and their themes, newest first"
+push = "{at}  {version}  {outcome}  theme push: {theme}"
+deploy = "{at}  {version}  {outcome}  deploy: {theme}"
+default = "default theme"
+empty = "No deploy is recorded in this folder yet."
+
+[cli.theme.why]
+hash_mismatch = "theme.json states hash {stated}, but its content hashes to {got}"
+asset_missing = "{path} is missing"
+asset_changed = "{path} does not match its SHA-256 in theme.json"
+too_large = "larger than {max} bytes"
+not_utf8 = "not UTF-8 text"
+bad_name = "name \"{name}\" in theme.toml is not a theme name (lowercase letters, digits, _ and -, starting with a letter)"
+copy_holds_other = "{path} holds another theme ({hash})"
+served_not_utf8 = "{path} on the site is not UTF-8 text"
+served_other = "the site serves theme {served}, but the deploy record names {recorded}"
+document_too_large = "theme.json would be {size} bytes; the limit is {max} (the Worker would not load it)"
+
+[cli.plugin]
+about = "Check plugins (check)"
+dir_value = "FOLDER"
+
+[cli.plugin.check]
+about = "Check a plugin folder the way the blog loads it, and that it renders on the default theme"
+dir_help = "The plugin folder (its name is the plugin's name)"
+
+[cli.finding]
+error = "error"
+warning = "warning"
+fix = "Fix:"
+summary_ok = "No problems found in {dir}."
+summary_warnings = "No errors in {dir}; warnings: {warnings}."
+summary_errors = "Problems in {dir}: errors {errors}, warnings {warnings}."
+
+[cli.finding.theme_load]
+what = "The theme does not load: {detail}"
+fix = "Fix what the message names; `blog theme check` loads the theme exactly as the blog does."
+
+[cli.finding.theme_template]
+what = "Template error: {detail}"
+fix = "Fix the template at that line and run the check again."
+
+[cli.finding.theme_dark_token]
+what = "Color `{name}` has a {have} value but no {missing} value."
+fix = "Add `{name}` to [colors.{missing}] in theme.toml; both modes define the same colors."
+
+[cli.finding.theme_contrast]
+what = "Low contrast in {mode} mode: `{fg}` on `{bg}` is {ratio}:1, below {need}:1."
+fix = "Change `{fg}` or `{bg}` in [colors.{mode}] (or the option that overrides it) until the ratio is at least {need}:1."
+
+[cli.finding.theme_css_size]
+what = "The stylesheet is {size} KB compressed; the limit is {max} KB."
+fix = "Remove unused rules, or move styles most readers do not need into a style file chosen by an option."
+
+[cli.finding.theme_js_size]
+what = "The theme's scripts are {size} KB compressed; the limit is {max} KB."
+fix = "Trim the scripts, or load rare ones only on the pages that need them with asset()."
+
+[cli.finding.theme_hard_color]
+what = "Fixed color {text} in a stylesheet; styles use colors from theme.toml only."
+fix = "Define the color in [colors.light] and [colors.dark], and use var(--c-<name>) here."
+
+[cli.finding.theme_locale_key]
+what = "Text key `{key}` has no text in language {lang}, or in English."
+fix = "Add the key to locales/en.toml, and to the other language files the theme ships."
+
+[cli.finding.theme_page_problem]
+what = "A page was left incomplete: {detail}"
+fix = "Fix the part the message names."
+
+[cli.finding.theme_asset_missing]
+what = "Uses {asset}, which is not in the theme's assets/ folder; the live site answers 404 for it."
+fix = "Add the file to assets/, or stop using it. A template the theme does not have comes from the default theme: copy it into templates/ to change it."
+
+[cli.finding.file_secret_name]
+what = "This file looks like a secret ({why}), and every file in a theme or plugin is public."
+fix = "Delete it from the folder. If it held a real secret, treat the secret as leaked and replace it."
+
+[cli.finding.file_secret_content]
+what = "This looks like a {name}, and every file in a theme or plugin is public."
+fix = "Delete it from the file and revoke it where it was issued: treat it as leaked."
+
+[cli.finding.file_stray]
+what = "This file is outside the allowed layout ({layout})."
+fix = "Move it into one of those, or delete it."
+
+[cli.finding.file_symlink]
+what = "A symbolic link: it is not followed, and would not be part of the theme."
+fix = "Replace it with a real copy of the file."
+
+[cli.finding.file_admin]
+what = "This file targets the admin. No theme or plugin file ever runs in the admin."
+fix = "Delete it, and do not name files admin*."
+
+[cli.finding.file_too_many]
+what = "More files than a theme or plugin has; the rest were not read."
+fix = "Check that this is the right folder, and remove files that do not belong."
+
+[cli.finding.theme_too_large]
+what = "The theme's text files make a theme.json of {size} KB; the limit is {max} KB, and the site would show the default theme."
+fix = "Move large text out of templates, styles and locales (images and fonts belong in assets/, which do not count), or trim it."
+
+[cli.finding.file_too_large]
+what = "Larger than {max} bytes, the most a theme file may be."
+fix = "Make it smaller, or remove it from the folder."
+
+[cli.finding.file_not_text]
+what = "Not UTF-8 text. Outside assets/, a theme holds only text files."
+fix = "Save it as UTF-8, or move it into assets/ if it is not text."
+
+[cli.finding.file_asset_name]
+what = "Asset file names may use only A-Z, a-z, 0-9, dot, _ and - in each part of the path."
+fix = "Rename the file or folder (for example, spaces to -), and update what links to it."
+
+[cli.finding.text_hard]
+what = "Fixed text {text} in a template. Text shown to readers belongs in locales/."
+fix = "Add the text to locales/en.toml (and the other languages) and call t(\"section.key\") here."
+
+[cli.finding.plugin_load]
+what = "The plugin does not load: {detail}"
+fix = "Fix what the message names; `blog plugin check` loads the plugin exactly as the blog does."
+
+[cli.finding.plugin_broken]
+what = "The plugin breaks a page on the default theme: {detail}"
+fix = "Fix the partial or option the message names. A plugin that fails is left out of the page and disabled."
+
+[cli.finding.plugin_css_size]
+what = "With this plugin enabled the stylesheet is {size} KB compressed; the limit is {max} KB."
+fix = "Trim the plugin's CSS."
 
 [cli.guide_token]
 # `blog guide token`. Button and field names (Create Token, Account Resources...) are the

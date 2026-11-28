@@ -124,7 +124,7 @@ fn status(code: ErrorCode) -> u16 {
         | ErrorCode::UserNotFound
         | ErrorCode::NotFound
         | ErrorCode::RouteNotFound => 404,
-        ErrorCode::Conflict => 409,
+        ErrorCode::Conflict | ErrorCode::ThemeUnavailable => 409,
         ErrorCode::InviteInvalid => 410,
         ErrorCode::LengthRequired => 411,
         // A size cap like the byte cap: the client must send less, not fix a field.

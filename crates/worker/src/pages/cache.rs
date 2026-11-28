@@ -1,13 +1,14 @@
 //! Rendered pages in the Cache API. Keys carry the content version, so a publish makes every
 //! old entry unreachable without purge calls. Any cache failure falls back to rendering: the
-//! blog works without the cache, only slower.
+//! blog works without the cache, only slower. The theme tag (`crate::theme_runtime::cache_tag`)
+//! is in the key too, so a theme push or rollback never serves the other theme's pages.
 
 use worker::{Cache, Context, Headers, Response, console_warn};
 
 /// Internal URL that names a cached page; never served. The query string is left out so
 /// `?x=1` variants cannot multiply entries.
-pub fn key(origin: &str, version: u64, path: &str) -> String {
-    format!("{origin}/__page/v{version}{path}")
+pub fn key(origin: &str, version: u64, theme_tag: &str, path: &str) -> String {
+    format!("{origin}/__page/v{version}{theme_tag}{path}")
 }
 
 pub enum Lookup {
@@ -68,4 +69,19 @@ pub fn put_later(ctx: &Context, key: String, resp: Response) {
             console_warn!("pages: cache store failed (page still served): {e}");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_theme_is_part_of_the_key() {
+        let k = |tag| super::key("https://b.test", 7, tag, "/a");
+        assert_eq!(
+            k(""),
+            "https://b.test/__page/v7/a",
+            "default theme: keys unchanged"
+        );
+        assert_ne!(k("-t0123456789abcdef"), k(""));
+        assert_ne!(k("-t0123456789abcdef"), k("-tfedcba9876543210"));
+    }
 }

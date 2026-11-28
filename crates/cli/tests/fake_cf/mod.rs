@@ -112,6 +112,9 @@ pub struct Site {
     pub version_override: Option<String>,
     /// `/` answers this status (default 200) while the given version is active.
     pub home_status: Option<(String, u16)>,
+    /// `/` reports this theme tag (`None`: no `x-plumblog-theme`) while the given version is
+    /// active, instead of the one its binding and `theme.json` give (a Worker that fell back).
+    pub theme_tag: Option<(String, Option<String>)>,
     pub hits: usize,
     /// `/healthz` answers only after this long (a slow site).
     pub delay: std::time::Duration,
@@ -205,6 +208,17 @@ pub struct State {
     pub after_import: Option<String>,
     /// `(request number, reply body bytes)` of every API reply.
     pub reply_bytes: Vec<(usize, usize)>,
+    /// Bytes of every uploaded asset, by hash.
+    pub asset_bytes: HashMap<String, Vec<u8>>,
+    /// Manifest (`path -> hash`) of each upload session, by session JWT.
+    pub session_manifest: HashMap<String, HashMap<String, String>>,
+    /// Completion JWT -> its session JWT.
+    pub completion_session: HashMap<String, String>,
+    /// Static assets (`path -> hash`) of each version, by version id: what `/_theme/...`
+    /// serves while the version is active.
+    pub version_assets: HashMap<String, HashMap<String, String>>,
+    /// Served instead of the active version's file at that path (a file changed on the way).
+    pub public_override: HashMap<String, Vec<u8>>,
 }
 
 /// An R2 object: bytes (text, for the tests) and the `ETag` header it answers with.
@@ -335,6 +349,83 @@ fn write_reply_with(mut stream: &TcpStream, status: u16, body: &str, extra: &str
     let _ = stream.write_all(reply.as_bytes());
 }
 
+fn write_bytes(mut stream: &TcpStream, status: u16, body: &[u8]) {
+    let head = format!(
+        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(body);
+}
+
+/// A pushed theme's static files (`<base>/<host>/_theme/...`), as the active version serves
+/// them: from that version's assets, unless overridden. No token.
+fn serve_theme(st: &State, req: &Recorded) -> Option<(u16, Vec<u8>)> {
+    let at = req.path.find("/_theme/")?;
+    if req.method != "GET" || at == 0 {
+        return None;
+    }
+    // Static assets are looked up by the decoded path, as Cloudflare does.
+    let path = &percent_decode(&req.path[at..]);
+    if let Some(b) = st.public_override.get(path) {
+        return Some((200, b.clone()));
+    }
+    let active = st
+        .scripts
+        .get(&st.site.script)
+        .and_then(|s| s.deployments.first())?;
+    let found = st
+        .version_assets
+        .get(active)
+        .and_then(|m| m.get(path))
+        .and_then(|h| st.asset_bytes.get(h));
+    Some(found.map_or_else(|| (404, b"not found".to_vec()), |b| (200, b.clone())))
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = b
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (b[i], hex) {
+            (b'%', Some(v)) => {
+                out.push(v);
+                i += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// What the Worker would send as `x-plumblog-theme` for `version`: the first 16 hex digits
+/// of the hash in the `theme.json` its `PLUMBLOG_THEME` binding names, if it serves one.
+fn served_theme_tag(st: &State, version: &str) -> Option<String> {
+    let meta = &st.versions.iter().find(|v| v.id == version)?.metadata;
+    let name = meta["bindings"]
+        .as_array()?
+        .iter()
+        .find(|b| b["name"] == "PLUMBLOG_THEME")?["text"]
+        .as_str()?
+        .to_string();
+    let doc = format!("/_theme/{name}/theme.json");
+    let bytes = match st.public_override.get(&doc) {
+        Some(b) => b,
+        None => st
+            .asset_bytes
+            .get(st.version_assets.get(version)?.get(&doc)?)?,
+    };
+    let v: Value = serde_json::from_slice(bytes).ok()?;
+    Some(v["hash"].as_str()?.get(..16)?.to_string())
+}
+
 /// The public side: the site's `/healthz` and `/`, and presigned upload URLs. No token.
 fn serve_public(st: &mut State, req: &Recorded) -> Option<(u16, String, String)> {
     let active = |st: &State| {
@@ -372,7 +463,15 @@ fn serve_public(st: &mut State, req: &Recorded) -> Option<(u16, String, String)>
                 (Some((v, s)), Some(a)) if *v == a => *s,
                 _ => 200,
             };
-            Some((status, "<html></html>".into(), String::new()))
+            let a = active(st);
+            let tag = match (&st.site.theme_tag, &a) {
+                (Some((v, t)), Some(a)) if v == a => t.clone(),
+                _ => a.and_then(|a| served_theme_tag(st, &a)),
+            };
+            let header = tag
+                .map(|t| format!("x-plumblog-theme: {t}\r\n"))
+                .unwrap_or_default();
+            Some((status, "<html></html>".into(), header))
         }
         ("PUT", p) if p.starts_with("/__upload/") => Some(upload(st, req, p)),
         _ => None,
@@ -386,6 +485,11 @@ fn serve(stream: &TcpStream, state: &Mutex<State>) {
     let mut st = state.lock().unwrap();
     st.requests.push(req.clone());
     let n = st.requests.len();
+    if let Some((status, body)) = serve_theme(&st, &req) {
+        drop(st);
+        write_bytes(stream, status, &body);
+        return;
+    }
     if let Some((status, body, extra)) = serve_public(&mut st, &req) {
         let delay = if req.path.ends_with("/healthz") {
             st.site.delay
@@ -1175,6 +1279,17 @@ fn new_version(st: &mut State, req: &Recorded, name: &str) -> (u16, Value) {
         return err(400, 10021, "assets jwt is not a completion token");
     }
     let id = upload_id(st);
+    let session = st
+        .completion_session
+        .get(jwt)
+        .cloned()
+        .unwrap_or_else(|| jwt.to_string());
+    let served = st
+        .session_manifest
+        .get(&session)
+        .cloned()
+        .unwrap_or_default();
+    st.version_assets.insert(id.clone(), served);
     st.versions.push(Version {
         id: id.clone(),
         metadata: meta.clone(),
@@ -1224,6 +1339,11 @@ fn route_versions(st: &mut State, req: &Recorded, segs: &[&str]) -> (u16, Value)
                 }
             }
             let jwt = format!("sessionJWT{}", st.sessions.len() + 1);
+            let paths = manifest
+                .iter()
+                .map(|(p, e)| (p.clone(), e["hash"].as_str().unwrap_or("").to_string()))
+                .collect();
+            st.session_manifest.insert(jwt.clone(), paths);
             // Two files per bucket, so tests see several uploads.
             let buckets: Vec<Vec<String>> = missing.chunks(2).map(<[String]>::to_vec).collect();
             st.sessions.insert(jwt.clone(), missing.clone());
@@ -1427,9 +1547,9 @@ fn assets_upload(st: &mut State, req: &Recorded) -> (u16, Value) {
         else {
             return err(400, 10021, "part without a name");
         };
-        if b64_decode(content).is_none() {
+        let Some(bytes) = b64_decode(content) else {
             return err(400, 10021, "part is not base64");
-        }
+        };
         // Content as sent (base64) plus the manifest path's extension.
         let ext = st
             .asset_paths
@@ -1444,11 +1564,13 @@ fn assets_upload(st: &mut State, req: &Recorded) -> (u16, Value) {
             return err(400, 10021, "hash does not match the content");
         }
         st.assets.insert(hash.to_string());
+        st.asset_bytes.insert(hash.to_string(), bytes);
         st.sessions.get_mut(jwt).unwrap().retain(|m| m != hash);
     }
     if st.sessions[jwt].is_empty() {
         let done = format!("completionJWT{}", st.completions.len() + 1);
         st.completions.push(done.clone());
+        st.completion_session.insert(done.clone(), jwt.to_string());
         let (_, mut v) = ok(&json!({"jwt": done}));
         v["success"] = json!(true);
         return (201, v);

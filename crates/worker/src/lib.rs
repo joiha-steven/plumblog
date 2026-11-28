@@ -9,6 +9,7 @@ pub mod d1;
 mod jobs;
 mod keys;
 mod pages;
+mod theme_runtime;
 mod webcrypto;
 pub mod webhooks;
 
@@ -47,7 +48,10 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
         ("GET" | "HEAD", p) if p == admin::PREFIX || p.starts_with("/admin/") => {
             admin::serve(&req, &env).await
         }
-        ("GET" | "HEAD", _) => pages::serve(&req, &env, &ctx).await,
+        ("GET" | "HEAD", _) => {
+            theme_runtime::prepare(&env).await;
+            pages::serve(&req, &env, &ctx).await
+        }
         _ => Ok(Response::empty()?.with_status(405)),
     }
 }

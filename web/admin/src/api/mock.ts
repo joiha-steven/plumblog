@@ -178,7 +178,13 @@ export function mockApi(params: URLSearchParams): Api {
         return summary;
       });
       const next = offset + limit < all.length ? btoa(String(offset + limit)) : null;
-      return { ok: true, value: { posts: page, next_cursor: next } };
+      // As the server: first page only, by kind and lang, whatever the status filter.
+      let counts: PostPage["counts"] = null;
+      if (q.cursor === undefined) {
+        counts = { draft: 0, scheduled: 0, published: 0, trashed: 0 };
+        if (mode !== "empty") for (const p of store) if ((q.kind === undefined || p.kind === q.kind) && (q.lang === undefined || p.lang === q.lang)) counts[p.status]++;
+      }
+      return { ok: true, value: { posts: page, next_cursor: next, counts } };
     },
     async post(id) {
       await settle();
