@@ -1344,3 +1344,20 @@ fn the_site_language_follows_flag_then_env_then_os_locale_then_english() {
         );
     }
 }
+
+/// `site_lang` decides post URLs, so a site that already has users (an older one with no stored
+/// value) is never given one by a re-run.
+#[test]
+fn a_rerun_on_a_site_with_users_does_not_set_the_site_language() {
+    let (fake, dir, _) = fresh_in("en");
+    fake.sql("db-1", "DELETE FROM settings WHERE key = 'site_lang'");
+    add_owner(&fake);
+    ok(&run_with(
+        &fake,
+        &dir,
+        &Options::default(),
+        &migrations::bundled(),
+        &Text::new("vi"),
+    ));
+    assert_eq!(setting(&fake, "site_lang"), None);
+}

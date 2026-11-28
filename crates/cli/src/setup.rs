@@ -1280,9 +1280,10 @@ fn write_settings(run: &mut Run, db: &Database, origin: &str) -> Result<(), Fail
             written.push(TURNSTILE_SITE_KEY);
         }
     }
-    // The owner's language (flag, env, OS locale, else English) starts the site in it; a value
-    // already there is the owner's later choice and stays.
-    if get(SITE_LANG_KEY).is_none() {
+    // A first setup (no user yet) starts the site in the owner's language (flag, env, OS locale,
+    // else English). Never on a site with users or over a stored value: `site_lang` decides post
+    // URLs, so setting it later would move every `/<slug>` and break old links.
+    if get(SITE_LANG_KEY).is_none() && !d1::has_users(db).map_err(|e| run.api(&e))? {
         let lang = json_string(run.cx.text.lang());
         d1::put_setting(db, SITE_LANG_KEY, &lang, now).map_err(|e| run.api(&e))?;
         written.push(SITE_LANG_KEY);

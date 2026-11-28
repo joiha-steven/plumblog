@@ -194,6 +194,20 @@ test("signed out, the client runs under the CSP and sends the writer to a plain 
   }
 });
 
+test("a site with no users sends /admin/signin to /admin/setup, in a real browser", async () => {
+  const empty = await startWorker({});
+  const browser = await chromium.launch({ channel: "chrome", headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, locale: "en-US" });
+    await page.goto(`${empty.url}/admin/signin`, { waitUntil: "networkidle" });
+    await page.waitForURL(/\/admin\/setup$/);
+    assert.equal(new URL(page.url()).pathname, "/admin/setup");
+  } finally {
+    await browser.close();
+    await empty.stop();
+  }
+});
+
 test("a draft previews as the published page, with no script for the frame to block", async () => {
   const body = "## Ch\u01b0\u01a1ng m\u1ed9t\n\nC\u00f3 $x^2$ v\u00e0 <b>raw</b>.\n\n```rust\nfn main() {}\n```\n";
   const res = await fetch(`${worker.url}/__preview`, {
