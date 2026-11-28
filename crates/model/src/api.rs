@@ -222,6 +222,7 @@ pub enum RouteId {
     MediaVariant,
     CommentList,
     UserList,
+    LogList,
     RedirectList,
     RedirectPut,
     RedirectDelete,
@@ -420,6 +421,17 @@ const MEDIA_VARIANT: &[Field] = &[
 ];
 /// An id-ordered listing: `cursor` is the last id of the previous page.
 const BY_ID: &[Field] = &[query("cursor", Type::Str), query("limit", Type::Int)];
+const LOG: &[Field] = &[
+    query("kind", Type::Str),
+    query("level", Type::Str),
+    query("code", Type::Str),
+    query("actor", Type::Int),
+    query("from", Type::Int),
+    query("to", Type::Int),
+    query("q", Type::Str),
+    query("cursor", Type::Str),
+    query("limit", Type::Int),
+];
 const VALUE: &[Field] = &[path_name("key"), req("value", Type::Json)];
 const OWNER: &[Field] = &[path_name("name")];
 const OWNER_VALUE: &[Field] = &[
@@ -751,6 +763,17 @@ pub const ROUTES: &[Route] = &[
         200,
         "user_page",
     ),
+    // Newest first. `level` is a minimum (`warning` or `error`; `info` is no filter); `q`
+    // matches a request id exactly or text of the entry's subject and fields.
+    route(
+        RouteId::LogList,
+        Method::Get,
+        "/api/v1/log",
+        Access::Require(Permission::ViewSystemLog),
+        LOG,
+        200,
+        "log_page",
+    ),
     route(
         RouteId::RedirectList,
         Method::Get,
@@ -903,6 +926,7 @@ pub const fn tool_name(id: RouteId) -> Option<&'static str> {
         RouteId::Me => Some("me"),
         RouteId::CommentList => Some("comment_list"),
         RouteId::UserList => Some("user_list"),
+        RouteId::LogList => Some("log_list"),
         RouteId::PostList => Some("post_list"),
         RouteId::PostGet => Some("post_get"),
         RouteId::PostCreate => Some("post_create"),
