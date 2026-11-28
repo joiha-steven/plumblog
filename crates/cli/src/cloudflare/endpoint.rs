@@ -156,9 +156,13 @@ endpoints! {
     D1Restore => Post "/accounts/{account_id}/d1/database/{database_id}/time_travel/restore",
         Some(D1Edit), ApiToken, key!("cli.call.d1_restore"),
         "https://developers.cloudflare.com/api/resources/d1/subresources/database/subresources/time_travel/methods/restore/";
-    D1Export => Post "/accounts/{account_id}/d1/database/{database_id}/export", Some(D1Edit),
-        ApiToken, key!("cli.call.d1_export"),
-        "https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/export/";
+    // `{action: "init" | "ingest" | "poll"}`, as wrangler 4.160.0 sends them for
+    // `d1 execute --file --remote` (wrangler-dist/cli.js `executeRemotely`,
+    // `uploadAndBeginIngestion`, `pollUntilComplete`, near line 240040). The file itself goes
+    // to the `upload_url` the init reply names, a presigned URL, never with the token.
+    D1Import => Post "/accounts/{account_id}/d1/database/{database_id}/import", Some(D1Edit),
+        ApiToken, key!("cli.call.d1_import"),
+        "https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/import/";
 
     R2BucketList => Get "/accounts/{account_id}/r2/buckets", Some(WorkersR2StorageEdit), ApiToken,
         key!("cli.call.r2_list"),
@@ -166,6 +170,12 @@ endpoints! {
     R2BucketCreate => Post "/accounts/{account_id}/r2/buckets", Some(WorkersR2StorageEdit),
         ApiToken, key!("cli.call.r2_create"),
         "https://developers.cloudflare.com/api/resources/r2/subresources/buckets/methods/create/";
+
+    // Raw bytes, not the JSON envelope (a miss is a bare 404). The REST docs do not list this
+    // call; the source is wrangler 4.160.0 `getR2Object`, which sends the key with its slashes.
+    R2ObjectGet => Get "/accounts/{account_id}/r2/buckets/{bucket_name}/objects/{object_key}",
+        Some(WorkersR2StorageEdit), ApiToken, key!("cli.call.r2_object_get"),
+        "https://developers.cloudflare.com/api/resources/r2/subresources/buckets/";
 
     // The first upload of a new script; versions cannot be the first upload.
     ScriptUpload => Put "/accounts/{account_id}/workers/scripts/{script_name}",

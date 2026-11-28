@@ -126,7 +126,7 @@ test("success: one signed request, row delivered, one log entry with the host on
   assert.equal(body.id, row.msg_id);
   assert.equal(body.type, "post.published");
   assert.equal(body.data.post_id, postId);
-  assert.match(body.data.url, /^https:\/\/blog\.test\/[a-z]+\/[a-z0-9-]+$/);
+  assert.match(body.data.url, /^https:\/\/blog\.test\/[a-z0-9-]+$/);
   assert.equal(body.data.previous_url, undefined);
   assert.deepEqual([row.attempts, row.last_status, row.last_error], [1, 200, null]);
 
@@ -272,7 +272,7 @@ test("cron publish_due: a scheduled post that is due sends post.published", asyn
   console.log("post status:", status, "job.run:", JSON.stringify(job));
   assert.ok(verify(hit, hook.secret));
   assert.equal(body.type, "post.published");
-  assert.equal(body.data.url, "https://blog.test/en/due-now");
+  assert.equal(body.data.url, "https://blog.test/due-now");
   assert.equal(status, "published");
   assert.ok(job.some((j) => j.detail.startsWith("posts.publish_due\npublished\t1")));
 });

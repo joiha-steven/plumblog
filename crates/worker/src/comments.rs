@@ -1,4 +1,4 @@
-//! `POST /<slug>/comments`: a reader's comment form (docs/ARCHITECTURE.md, Reader site).
+//! `POST /<slug>/comments` (and `/<lang>/<slug>/comments`): a reader's comment form (docs/ARCHITECTURE.md, Reader site).
 //!
 //! Order, cheapest refusal first, and nothing written before the gate has passed: method and
 //! form shape (64 KB cap) -> post exists, published, comments open -> name and body limits ->
@@ -10,7 +10,8 @@
 
 use crate::api::{Ctx, limit, site};
 use crate::d1::D1Store;
-use crate::pages::{comment_target, routes};
+use crate::keys;
+use crate::pages::{comment_target, core_text, routes};
 use crate::webcrypto::WebCrypto;
 use plumblog_model::{Error, ErrorCode, RequestId, Result as CoreResult};
 use plumblog_store::comment;
@@ -205,14 +206,20 @@ async fn gate(env: &Env, req: &Request, scope: &Scope) -> Gate {
     }
 }
 
-/// Handles a form post to `/<slug>/comments`.
-pub async fn handle(req: &mut Request, env: &Env, slug: &str) -> Result<Response> {
+/// Handles a form post to `/<slug>/comments` or `/<lang>/<slug>/comments`.
+pub async fn handle(
+    req: &mut Request,
+    env: &Env,
+    lang: Option<&str>,
+    slug: &str,
+) -> Result<Response> {
     let scope = Scope::new(
         request_id(req.headers().get("cf-ray")?.as_deref(), random_id),
         None,
     );
     let origin = req.url()?.origin().ascii_serialization();
-    let post_url = format!("{origin}{}", routes::post(slug));
+    let page = lang.map_or_else(|| routes::post(slug), |l| format!("/{l}/{slug}"));
+    let post_url = format!("{origin}{page}");
     let store = match env.d1("DB") {
         Ok(d) => D1Store::new(d),
         Err(e) => {
@@ -220,9 +227,13 @@ pub async fn handle(req: &mut Request, env: &Env, slug: &str) -> Result<Response
             return redirect(&post_url, Err(unavailable().code));
         }
     };
-    match accept(req, env, &store, &scope, slug).await {
+    match accept(req, env, &store, &scope, lang, slug).await {
         Accept::Stored => redirect(&post_url, Ok(())),
-        Accept::NoPost => Ok(Response::empty()?.with_status(404)),
+        Accept::NoPost => {
+            // A form for something that is not a public post (stale page, a static page).
+            console_log!("{} comments.no_post slug={slug}", scope.log_prefix());
+            Ok(Response::error(core_text("en", keys::PAGE_NOT_FOUND), 404)?)
+        }
         Accept::Refused(e) => {
             // Worker log only: refusals are not system log events (one write per event,
             // never per spam attempt).
@@ -248,13 +259,14 @@ async fn accept(
     env: &Env,
     store: &D1Store,
     scope: &Scope,
+    lang: Option<&str>,
     slug: &str,
 ) -> Accept {
     let form = match read_form(req).await {
         Ok(f) => f,
         Err(e) => return Accept::Refused(e),
     };
-    let post = match comment_target(store, slug).await {
+    let post = match comment_target(store, lang, slug).await {
         Ok(Some((id, true))) => id,
         Ok(Some((_, false))) => {
             return Accept::Refused(Error::new(ErrorCode::CommentsClosed, "closed"));

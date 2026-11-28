@@ -17,8 +17,9 @@ pub struct FeedMeta<'a> {
     pub rss_path: &'a str,
     pub json_path: &'a str,
     pub author: Option<&'a str>,
-    /// Unix time the site last changed; the feed date when there are no posts yet.
-    pub updated: i64,
+    /// Unix time the site last changed: the feed date when there are no posts yet. `None`
+    /// when the site has no time of its own: the feed then states no date (never 1970).
+    pub updated: Option<i64>,
 }
 
 /// One `<url>` of the sitemap. `alternates` lists every language version, this one included
@@ -56,7 +57,10 @@ pub fn atom(m: &FeedMeta<'_>, posts: &[&Post]) -> String {
     );
     // The feed's own URL: unique per language and format, unlike the home page.
     let _ = writeln!(o, "<id>{}</id>", x(&abs(m.origin, m.atom_path)));
-    let _ = writeln!(o, "<updated>{}</updated>", rfc3339(newest(m, posts)));
+    // Atom asks for it; a site with no post and no settings has no real time to give.
+    if let Some(t) = newest(m, posts) {
+        let _ = writeln!(o, "<updated>{}</updated>", rfc3339(t));
+    }
     // Atom requires an author on the feed or on every entry.
     let _ = writeln!(
         o,
@@ -110,11 +114,9 @@ pub fn rss(m: &FeedMeta<'_>, posts: &[&Post]) -> String {
     };
     let _ = writeln!(o, "<description>{}</description>", x(description));
     let _ = writeln!(o, "<language>{}</language>", x(m.lang));
-    let _ = writeln!(
-        o,
-        "<lastBuildDate>{}</lastBuildDate>",
-        rfc822(newest(m, posts))
-    );
+    if let Some(t) = newest(m, posts) {
+        let _ = writeln!(o, "<lastBuildDate>{}</lastBuildDate>", rfc822(t));
+    }
     let _ = writeln!(
         o,
         "<atom:link href=\"{}\" rel=\"self\" type=\"application/rss+xml\"/>",
@@ -261,13 +263,9 @@ fn excerpt(p: &Post) -> &str {
     }
 }
 
-/// Newest post, else the site's last change: never 1970 for an empty feed.
-fn newest(m: &FeedMeta<'_>, posts: &[&Post]) -> i64 {
-    posts
-        .iter()
-        .map(|p| p.published_at)
-        .max()
-        .unwrap_or(m.updated)
+/// Newest post, else the site's last change, else nothing: never 1970 for an empty feed.
+fn newest(m: &FeedMeta<'_>, posts: &[&Post]) -> Option<i64> {
+    posts.iter().map(|p| p.published_at).max().or(m.updated)
 }
 
 /// hreflang set for a post (site-relative URLs): every language version, this one included,
@@ -399,7 +397,7 @@ mod tests {
             rss_path: "/rss.xml",
             json_path: "/feed.json",
             author: None,
-            updated: 1_790_942_400,
+            updated: Some(1_790_942_400),
         };
         let a = atom(&m, &[]);
         assert!(a.contains("<updated>2026-10-02T12:00:00Z</updated>"), "{a}");

@@ -102,6 +102,7 @@ impl Reply {
 fn status(code: ErrorCode) -> u16 {
     match code {
         ErrorCode::InvalidInput
+        | ErrorCode::PostPublishedInFuture
         | ErrorCode::PasskeyInvalid
         | ErrorCode::WebhookUrlBlocked
         | ErrorCode::CommentName

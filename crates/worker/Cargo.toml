@@ -28,6 +28,7 @@ plumblog-webhook.workspace = true
 
 [dev-dependencies]
 roxmltree.workspace = true
+rusqlite.workspace = true
 
 [lints]
 workspace = true

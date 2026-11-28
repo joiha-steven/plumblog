@@ -26,6 +26,9 @@ pub struct PluginState {
 pub trait SettingsStore {
     /// `(key, value_json)` ordered by key.
     async fn all_settings(&self) -> Result<Vec<(String, String)>>;
+    /// Newest `updated_at` (ms) of any setting, `None` when there are none: the site's last
+    /// real change time, for a feed with no posts. 1 query.
+    async fn settings_updated_at(&self) -> Result<Option<i64>>;
     async fn get_setting(&self, key: &str) -> Result<Option<String>>;
     /// Upsert; bumps the content version.
     async fn put_setting(&self, key: &str, value_json: &str, now: i64) -> Result<()>;

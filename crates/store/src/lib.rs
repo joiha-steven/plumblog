@@ -18,6 +18,7 @@ mod log;
 mod media;
 pub mod memory;
 mod posts;
+mod reader;
 mod redirects;
 pub mod search;
 mod settings;
@@ -44,12 +45,17 @@ pub use posts::{
     NewRevision, Post, PostCursor, PostKind, PostOrder, PostQuery, PostStatus, PostStore,
     PostSummary, Revision, SavePost,
 };
+pub use reader::{
+    READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage,
+    ReaderPost, ReaderRow, ReaderSitemapRow, ReaderStore, ReaderTag, year_bounds, year_of,
+};
 pub use redirects::{Redirect, RedirectStore};
 pub use settings::{OptionOwner, PluginState, SettingsStore};
 pub use signin::{
-    ChallengePurpose, ChallengeStore, INTERNAL_SETTING_KEYS, LoginLimitStore, MAX_FAILURE_KEYS,
-    ORIGIN_KEY, Recorded, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore,
-    TURNSTILE_SITE_KEY, is_internal_setting, public_settings, setup_hash_json,
+    ChallengePurpose, ChallengeStore, INTERNAL_SETTING_KEYS, LAST_BACKUP_KEY, LoginLimitStore,
+    MAX_FAILURE_KEYS, ORIGIN_KEY, Recorded, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY,
+    SITE_ID_KEY, SetupStore, TURNSTILE_SITE_KEY, is_internal_setting, public_settings,
+    setup_hash_json,
 };
 pub use taxonomy::{NewSeries, Series, Tag, TaxonomyStore};
 pub use users::{NewUser, ProfileUpdate, SiteStore, User, UserStore};
@@ -74,6 +80,7 @@ pub trait Store:
     + MediaStore
     + TaxonomyStore
     + PostStore
+    + ReaderStore
     + RedirectStore
     + CommentStore
     + SettingsStore
@@ -97,6 +104,7 @@ impl<T> Store for T where
         + MediaStore
         + TaxonomyStore
         + PostStore
+        + ReaderStore
         + RedirectStore
         + CommentStore
         + SettingsStore
