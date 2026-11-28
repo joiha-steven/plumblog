@@ -347,11 +347,13 @@ test("a trashed post opens trashed: nothing autosaves, Publish is off, Restore b
     await page.getByRole("toolbar", { name: tx("admin.editor.toolbar") }).waitFor();
     assert.equal(await page.locator(".crumb .st").innerText(), tx("admin.status.trashed"));
     await page.getByText(tx("admin.editor.pub.trashed_banner")).waitFor();
+    assert.equal(await page.locator(".ed-actions .saved").innerText(), "", "a trashed post shows only its Trashed state");
     await page.locator(".cm-content").click();
     await page.keyboard.press("Control+End");
     await page.keyboard.type(" Edited.");
     await page.waitForTimeout(4000); // past a draft's autosave delay
     assert.deepEqual(sent, [], "nothing is sent for a trashed post");
+    assert.equal(await page.locator(".ed-actions .saved").innerText(), "", "still no saved-here text after typing");
     assert.equal(await button(tx("admin.editor.pub.publish")).isDisabled(), true);
     await button(tx("admin.editor.pub.settings")).click();
     assert.equal(await page.locator('[data-act="trash"], [data-act="unpublish"]').count(), 0, "no Trash for a trashed post");
@@ -364,6 +366,32 @@ test("a trashed post opens trashed: nothing autosaves, Publish is off, Restore b
     const row = w.query(`SELECT status, markdown FROM posts WHERE id = ${id}`)[0];
     assert.deepEqual(row, { status: "draft", markdown: "Start. Edited." });
     assert.deepEqual(sent, [`POST /api/v1/posts/${id}/restore`, `PATCH /api/v1/posts/${id}`]);
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("Restore on a Trashed list row brings the post back as a draft", async () => {
+  const made = await api("POST", "/api/v1/posts", { lang: "en", slug: "list-restore", title: "List restore", markdown: "Body." });
+  assert.equal(made.status, 201, JSON.stringify(made.json));
+  const id = made.json.id;
+  assert.equal((await api("POST", `/api/v1/posts/${id}/trash`)).status, 200);
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: "en-US" });
+  await context.addCookies(cookies);
+  const page = await context.newPage();
+  const problems = [];
+  page.on("pageerror", (e) => problems.push(`page error: ${e}`));
+  page.on("console", (m) => m.type() === "error" && problems.push(`console: ${m.text()}`));
+  try {
+    await page.goto(at("/admin/?status=trashed"));
+    const row = page.locator(".rows .row", { hasText: "List restore" });
+    await row.waitFor();
+    await page.getByRole("button", { name: `${tx("admin.list.restore")} List restore` }).click();
+    await page.locator(".toast", { hasText: tx("admin.editor.pub.restored") }).waitFor();
+    assert.equal(await row.count(), 0, "the row leaves the Trashed list");
+    assert.equal(page.url(), at("/admin/?status=trashed"), "the click did not open the editor");
+    assert.equal(w.query(`SELECT status FROM posts WHERE id = ${id}`)[0].status, "draft");
     assert.deepEqual(problems, []);
   } finally {
     await context.close();

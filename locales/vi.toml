@@ -69,6 +69,8 @@ more = "Tải thêm"
 loading_more = "Đang tải\u2026"
 edited = "Sửa {when}"
 device_title = "Trên thiết bị này"
+restore = "Khôi phục"
+restore_named = "Khôi phục {title}"
 device_kept = "Lưu trên thiết bị này, {when}"
 
 [admin.list.lc]

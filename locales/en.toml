@@ -77,6 +77,8 @@ more = "Load more"
 loading_more = "Loading\u2026"
 edited = "Edited {when}"
 device_title = "On this device"
+restore = "Restore"
+restore_named = "Restore {title}"
 device_kept = "Kept on this device, {when}"
 
 [admin.list.lc]
