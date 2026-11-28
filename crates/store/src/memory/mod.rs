@@ -8,6 +8,7 @@ mod media;
 mod post_list;
 mod post_save;
 mod posts;
+mod reader;
 mod redirects;
 mod settings;
 mod signin;

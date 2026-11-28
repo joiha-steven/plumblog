@@ -107,7 +107,7 @@ fn ms(t: i64) -> u64 {
 /// What payloads say about post `id`, as stored now.
 async fn post_info(store: &D1Store, id: PostId) -> Result<PostInfo> {
     let post = store.get_post(id).await?;
-    let url = crate::pages::post_url(&post.lang, &post.slug).await;
+    let url = crate::pages::post_url(store, &post.lang, &post.slug).await;
     Ok(PostInfo::from_post(&post, url))
 }
 

@@ -654,6 +654,7 @@ dependencies = [
  "plumblog-syslog",
  "plumblog-webhook",
  "roxmltree",
+ "rusqlite",
  "worker",
 ]
 

@@ -3,11 +3,12 @@
 // fit its declaration falls back to the default without breaking the page.
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import { startWorker } from "./harness.mjs";
+import { seedSample, startWorker } from "./harness.mjs";
 
 let worker;
 before(async () => {
   worker = await startWorker();
+  await seedSample(worker);
 });
 after(async () => {
   await worker?.stop();
