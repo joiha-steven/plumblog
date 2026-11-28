@@ -154,7 +154,11 @@ fn status(code: ErrorCode) -> u16 {
         // A size cap like the byte cap: the client must send less, not fix a field.
         ErrorCode::BodyTooLarge | ErrorCode::TooComplex => 413,
         ErrorCode::Locked | ErrorCode::CommentRateLimited => 429,
-        ErrorCode::Storage | ErrorCode::Internal | ErrorCode::WebhookSecretUnreadable => 500,
+        // PageStoreFailed is only ever logged; 500 if an API answer ever carries it.
+        ErrorCode::Storage
+        | ErrorCode::Internal
+        | ErrorCode::WebhookSecretUnreadable
+        | ErrorCode::PageStoreFailed => 500,
         // The receiver failed, not this server.
         ErrorCode::WebhookDeliveryFailed => 502,
         // The site is not set up for this yet (no configured origin, no WEBHOOK_KEY): not the

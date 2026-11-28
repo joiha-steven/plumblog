@@ -231,6 +231,8 @@ export function d1File(state) {
   return f;
 }
 export const r2File = (state) => sqliteFileIn(state, "r2/miniflare-R2BucketObject");
+/** The local Cache API database (table `_mf_entries`, one row per key), or null before the first put. */
+export const cacheFile = (state) => sqliteFileIn(state, "cache/miniflare-CacheObject");
 
 /**
  * Runs `fn(db)` on a fresh connection to a local SQLite file, then closes it. Fresh each call: a

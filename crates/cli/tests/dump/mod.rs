@@ -830,15 +830,22 @@ fn a_refused_id_counter_write_only_warns() {
         "{out}"
     );
     assert!(out.contains("SQLITE_AUTH"), "{out}");
-    // The data is the backup's.
+    // The data is the backup's, but for the one-time codes every restore deletes.
     let mut after = live(&fake);
     let mut want = snapshot(&import_into_empty(&text));
+    let code_keys: Vec<String> = [
+        plumblog_store::SETUP_CODE_HASH_KEY,
+        plumblog_store::SETUP_CODE_EXPIRES_KEY,
+    ]
+    .iter()
+    .map(|k| format!("T{:?}", k.as_bytes()))
+    .collect();
     for snap in [&mut after, &mut want] {
         snap.remove("system_log");
         snap.remove("site");
-        snap.get_mut("settings")
-            .unwrap()
-            .retain(|r| !r.contains("last_backup"));
+        snap.get_mut("settings").unwrap().retain(|r| {
+            !r.contains("last_backup") && !code_keys.iter().any(|k| r.starts_with(k.as_str()))
+        });
     }
     assert_eq!(after, want);
     let log = fake.sql(DB, "SELECT detail FROM system_log");
