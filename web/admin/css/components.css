@@ -87,6 +87,8 @@ code { font: var(--type-mono); background: var(--field); border: 1px solid var(-
 .input::placeholder, .textarea::placeholder { color: var(--faint); }
 .select.auto { width: auto; max-width: 100%; }
 .select { appearance: none; padding-right: calc(var(--sp-12) + var(--icon) + var(--sp-4)); background-image: linear-gradient(var(--ov), var(--ov)), var(--chevron); background-repeat: no-repeat; background-position: 0 0, right var(--sp-12) center; background-size: auto, var(--icon); }
+/* A select sized to its longest option, for one beside other controls in a row. */
+.select.fit { width: auto; }
 .opt { display: flex; align-items: center; gap: var(--sp-12); min-height: var(--ctl); font: var(--type-body); cursor: pointer; }
 .opt.between { justify-content: space-between; }
 .opt-wrap { display: grid; gap: var(--sp-2); }

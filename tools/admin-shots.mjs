@@ -319,6 +319,72 @@ const STATES = [
   ["settings-empty", "/admin/settings?mock=empty", "#set-site_title"],
   ["settings-loading", "/admin/settings?mock=loading"],
   ["settings-error", "/admin/settings?mock=error", "main [role=alert]"],
+  // Settings > People: the list, its states, a confirm, the server's refusal, and the invitations.
+  ["users", "/admin/settings/users", ".usr"],
+  ["users-empty", "/admin/settings/users?mock=empty", ".settings-main .empty"],
+  ["users-loading", "/admin/settings/users?mock=loading"],
+  ["users-error", "/admin/settings/users?users=error", ".settings-main [role=alert] .empty"],
+  [
+    "users-offline",
+    "/admin/settings/users",
+    ".usr",
+    async (page) => {
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, "onLine", { get: () => false });
+        dispatchEvent(new Event("offline"));
+      });
+      await page.waitForSelector(".usr select:disabled");
+    },
+  ],
+  [
+    "users-confirm-delete",
+    "/admin/settings/users",
+    ".usr",
+    async (page) => {
+      await page.locator('.usr[data-id="4"] [data-act=delete]').click();
+      await page.waitForSelector(".confirm");
+      await settle(page, ".pop");
+    },
+  ],
+  [
+    "users-last-owner",
+    "/admin/settings/users?users=last_owner",
+    ".usr",
+    async (page) => {
+      await page.locator('.usr[data-id="2"] select').selectOption("writer");
+      await page.waitForSelector(".auth-alert:not(:empty)");
+    },
+  ],
+  [
+    "users-invites",
+    "/admin/settings/users",
+    ".inv",
+    async (page) => {
+      await page.locator("#inv-h").scrollIntoViewIfNeeded();
+    },
+  ],
+  [
+    "users-invite-form",
+    "/admin/settings/users",
+    ".inv",
+    async (page) => {
+      await page.locator(".usr-add > button").click();
+      await page.locator(".usr-add .seg button").nth(1).click();
+      await page.locator("#inv-h").scrollIntoViewIfNeeded();
+      await page.locator(".usr-add").scrollIntoViewIfNeeded();
+    },
+  ],
+  [
+    "users-invite-created",
+    "/admin/settings/users",
+    ".inv",
+    async (page) => {
+      await page.locator(".usr-add > button").click();
+      await page.locator(".usr-add button[type=submit]").click();
+      await page.waitForSelector("input[readonly]");
+      await page.locator("#inv-h").scrollIntoViewIfNeeded();
+    },
+  ],
   [
     "settings-offline",
     "/admin/settings",
@@ -833,7 +899,7 @@ try {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const english = ["syslog", "syslog-detail", "syslog-filtered", "syslog-writer", "posts", "posts-strip", "pages", "media", "media-details", "media-in-use", "media-upload-progress", "media-upload-drop", "media-upload-exists", "media-upload-error", "no-permission", "settings", "settings-saved", "settings-field-error", "settings-offline", "appearance", "appearance-saved", "appearance-field-error", "appearance-offline", "appearance-unavailable", "plugins", "plugins-empty", "plugin-tab", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow", "account-tokens", "account-tokens-secret", "account-tokens-writer"];
+        const english = ["syslog", "syslog-detail", "syslog-filtered", "syslog-writer", "posts", "posts-strip", "pages", "media", "media-details", "media-in-use", "media-upload-progress", "media-upload-drop", "media-upload-exists", "media-upload-error", "no-permission", "settings", "settings-saved", "settings-field-error", "settings-offline", "users", "users-offline", "users-confirm-delete", "users-last-owner", "users-invites", "users-invite-created", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow", "account-tokens", "account-tokens-secret", "account-tokens-writer", "appearance", "appearance-saved", "appearance-field-error", "appearance-offline", "appearance-unavailable", "plugins", "plugins-empty", "plugin-tab"];
         const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
         const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);

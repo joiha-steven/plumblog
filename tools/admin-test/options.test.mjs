@@ -349,7 +349,7 @@ test("Appearance: a bound theme that did not load is said plainly, with no form"
 
 test("Settings list shows Appearance and Plugins for the owner only", async () => {
   const s = await mount("appearance");
-  assert.deepEqual([...s.box.querySelectorAll(".subnav a")].map((a) => a.textContent), ["General", "Appearance", "Plugins", "System log"]);
+  assert.deepEqual([...s.box.querySelectorAll(".subnav a")].map((a) => a.textContent), ["General", "People", "Appearance", "Plugins", "System log"]);
   assert.equal(s.$(".subnav a[aria-current=page]").textContent, "Appearance");
   const box = document.createElement("div");
   m.mountSettings(box, { call: async () => ({ ok: false, error: { code: "network", status: 0 } }) }, { role: "writer", offline: () => false });

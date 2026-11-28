@@ -15,6 +15,9 @@
 <article>
   <header class="post-head">
     <p class="meta"><time datetime="{{ post.date_iso }}">{{ post.date_display }}</time><span>{{ t("post.reading_time", minutes=post.reading_minutes) }}</span></p>
+    {%- if post.series %}
+    <p class="series">{{ t("post.series") }} {% if post.series.url %}<a href="{{ post.series.url }}">{{ post.series.name }}</a>{% else %}{{ post.series.name }}{% endif %}{% if post.series.position %} ({{ post.series.position }}){% endif %}</p>
+    {%- endif %}
     <h1>{{ post.title }}</h1>
     {%- if post.excerpt %}
     <p class="standfirst">{{ post.excerpt }}</p>
@@ -33,7 +36,7 @@
     {%- if post.tags %}
     <ul class="tags">
       {%- for tag in post.tags %}
-      <li><a href="{{ tag.url }}" rel="tag">{{ t("post.tag", name=tag.name) }}</a></li>
+      <li>{% if tag.url %}<a href="{{ tag.url }}" rel="tag">{{ t("post.tag", name=tag.name) }}</a>{% else %}<span>{{ t("post.tag", name=tag.name) }}</span>{% endif %}</li>
       {%- endfor %}
     </ul>
     {%- endif %}

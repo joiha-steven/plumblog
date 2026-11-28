@@ -26,7 +26,6 @@
   --r-md: 6px;   /* controls, code blocks, images */
   --r-lg: 8px;   /* popovers */
   --tap: 44px;   /* smallest finger target */
-  --ctl-sm: 32px; /* small control on a surface (copy button) */
   --s-1: .25rem; --s-2: .5rem; --s-3: .75rem; --s-4: 1rem; --s-5: 1.25rem; --s-6: 1.5rem; --s-7: 2rem;
   --ease: cubic-bezier(.2, .7, .2, 1);
   --dur: 200ms;       /* page and panel motion */
@@ -128,7 +127,7 @@ a:hover { color: var(--c-accent); text-decoration-color: var(--c-accent); }
 .prose li:has(> label > input[type="checkbox"]) { list-style: none; margin-left: -1.4em; padding-left: 0; }
 /* Centre the box on the first line; flex baseline would sit it on the baseline instead. */
 .prose label:has(> input[type="checkbox"]) { display: inline-flex; gap: .65em; align-items: flex-start; }
-.prose input[type="checkbox"] { appearance: none; -webkit-appearance: none; font: inherit; flex: none; display: inline-grid; place-content: center; width: 1.1em; height: 1.1em; margin: calc((var(--lh) - 1.1) * .5em) 0 0; border: 1px solid var(--c-border); border-radius: var(--r-sm); background: var(--c-field); box-shadow: var(--inset); }
+.prose input[type="checkbox"] { appearance: none; -webkit-appearance: none; font: inherit; flex: none; display: inline-grid; place-content: center; width: 1.25em; height: 1.25em; margin: calc((var(--lh) - 1.25) * .5em) 0 0; border: 1px solid var(--c-border); border-radius: var(--r-sm); background: var(--c-field); box-shadow: var(--inset); }
 .prose input[type="checkbox"]::before { content: ""; width: .55em; height: .3em; margin-top: -.12em; border: solid var(--c-bg); border-width: 0 0 2px 2px; transform: rotate(-45deg) scale(0); transition: transform var(--dur-state) ease-out; }
 .prose input[type="checkbox"]:checked { background: var(--c-text); border-color: var(--c-text); box-shadow: none; } /* ink, like every selected state */
 .prose input[type="checkbox"]:checked::before { transform: rotate(-45deg) scale(1); }
@@ -144,9 +143,9 @@ hr { border: 0; height: 1px; margin: 2.6em auto; width: 4em; background: var(--c
 code, kbd, pre { font-family: var(--mono); font-size: var(--t-sm); letter-spacing: 0; font-feature-settings: normal; }
 :not(pre) > code { padding: .1em .3em; border-radius: var(--r-sm); background: var(--c-surface); overflow-wrap: anywhere; }
 .code { position: relative; border-radius: var(--r-md); background: var(--c-surface); }
-.code[data-lang]::before { content: attr(data-lang); position: absolute; top: .55em; left: 1.1rem; font: var(--t-xs)/var(--ctl-sm) var(--mono); color: var(--c-text-2); }
+.code[data-lang]::before { content: attr(data-lang); position: absolute; top: 0; left: 1.1rem; font: var(--t-xs)/var(--tap) var(--mono); color: var(--c-text-2); }
 pre { padding: 1em 1.1rem; border-radius: var(--r-md); background: var(--c-surface); color: var(--c-code); line-height: 1.65; overflow-x: auto; tab-size: 4; }
-.code pre { margin: 0; padding-top: 2.4em; background: none; }
+.code pre { margin: 0; padding-top: var(--tap); background: none; }
 pre code { font-size: inherit; }
 .tok-keyword, .tok-tag { color: var(--c-syn-keyword); }
 .tok-string { color: var(--c-syn-string); }
@@ -156,10 +155,9 @@ pre code { font-size: inherit; }
 .tok-property, .tok-attr { color: var(--c-syn-property); }
 .tok-punct, .tok-operator { color: var(--c-syn-punct); }
 .tok-comment { color: var(--c-syn-comment); }
-.copy { position: absolute; top: .5em; right: .5em; min-height: var(--ctl-sm); padding: 0 var(--s-3); border: 1px solid var(--c-border); border-radius: var(--r-md); background: var(--c-bg); box-shadow: var(--raised); font: 500 var(--t-xs) var(--font); color: var(--c-text); cursor: pointer; transition: background var(--dur-state) ease-out, box-shadow var(--dur-state) ease-out; }
+.copy { position: absolute; top: 0; right: var(--s-2); min-height: var(--tap); min-width: var(--tap); padding: 0 var(--s-3); border: 1px solid var(--c-border); border-radius: var(--r-md); background: var(--c-bg); box-shadow: var(--raised); font: 500 var(--t-xs) var(--font); color: var(--c-text); cursor: pointer; transition: background var(--dur-state) ease-out, box-shadow var(--dur-state) ease-out; }
 .copy:hover { background: linear-gradient(var(--tint-hover), var(--tint-hover)) var(--c-bg); }
 .copy:active { background: linear-gradient(var(--tint-press), var(--tint-press)) var(--c-bg); box-shadow: var(--pressed); padding-top: 1px; }
-.copy::after { content: ""; position: absolute; inset: -6px; } /* finger-sized target */
 kbd { padding: .05em .4em; border: 1px solid var(--c-rule); border-bottom-width: 2px; border-radius: var(--r-sm); }
 
 /* Media */
@@ -185,6 +183,8 @@ td[align="right"], th[align="right"] { text-align: right; }
 /* Post */
 .post-head { margin-bottom: 2.75em; }
 .post-head .meta { margin-bottom: 1em; }
+.series { margin: 0 0 .5em; font-size: var(--t-sm); color: var(--c-text-2); }
+.series a { display: inline-block; min-width: var(--tap); padding-block: .7em; } /* finger-sized */
 .standfirst { margin: .7em 0 0; font-size: var(--t-md); line-height: 1.55; color: var(--c-text-2); }
 /* Cover runs wider than the text on large screens. */
 .cover { margin: 2.25em 0 0; }
@@ -268,6 +268,7 @@ textarea.field { resize: vertical; line-height: 1.55; }
 .search-title { margin: 0 0 .6em; }
 /* Tag, archive and 404 pages: a title over the style's post list. */
 .list-title { margin: 0 0 1em; }
+.list-desc { margin: -.4em 0 1.6em; font-size: var(--t-md); line-height: 1.55; color: var(--c-text-2); }
 .list-sub { margin: 2.5em 0 1.2em; font-size: var(--t-md); }
 .older.years { justify-content: flex-start; flex-wrap: wrap; gap: 0 1.25em; }
 .older.years a[aria-current="page"] { color: var(--c-text-2); text-decoration: none; }

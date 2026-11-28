@@ -21,7 +21,7 @@ const SETTINGS_SCREENS: readonly Screen[] = ["settings", "syslog"];
 export const inSettings = (s: Screen): boolean => SETTINGS_SCREENS.includes(s);
 
 /** Sections drawn by the settings screen itself, at /admin/settings/<id> ("general" is /admin/settings). */
-export const SETTINGS_SECTIONS: readonly string[] = ["appearance", "plugins"];
+export const SETTINGS_SECTIONS: readonly string[] = ["users", "appearance", "plugins"];
 
 export const editHref = (id: number): string => `/admin/posts/${id}`;
 

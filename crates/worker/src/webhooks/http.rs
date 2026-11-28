@@ -33,6 +33,7 @@ impl WebhookHttp for Fetch {
         // A 3xx comes back as itself: following it could reach a host the URL guard never saw.
         init.set_redirect(RequestRedirect::Manual);
         init.set_signal(Some(&signal));
+        crate::subrequests::count();
         let scope: WorkerGlobalScope = js_sys::global().unchecked_into();
         let res = JsFuture::from(scope.fetch_with_str_and_init(url, &init)).await;
         match res {

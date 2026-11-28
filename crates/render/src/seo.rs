@@ -137,6 +137,15 @@ impl Ctx<'_> {
     }
 }
 
+fn absolute(origin: &str, set: &[Alternate]) -> Vec<Alternate> {
+    set.iter()
+        .map(|a| Alternate {
+            lang: a.lang.clone(),
+            url: abs(origin, &a.url),
+        })
+        .collect()
+}
+
 /// `list_title` is the visible title of a tag or archive page (from the theme locale).
 pub fn build(
     site: &Site,
@@ -198,16 +207,11 @@ pub fn build(
             graph
         }
         Body::Home { .. } => {
-            seo.alternates = home_alternates
-                .iter()
-                .map(|a| Alternate {
-                    lang: a.lang.clone(),
-                    url: abs(o, &a.url),
-                })
-                .collect();
+            seo.alternates = absolute(o, home_alternates);
             vec![c.blog()]
         }
-        Body::Tag { .. } | Body::Archive { .. } => {
+        Body::Tag { .. } | Body::Series { .. } | Body::Archive { .. } => {
+            seo.alternates = absolute(o, home_alternates);
             let name = list_title.unwrap_or(&site.title);
             name.clone_into(&mut seo.title);
             vec![c.collection(name), c.breadcrumbs(name)]

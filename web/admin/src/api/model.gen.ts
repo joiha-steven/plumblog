@@ -40,6 +40,8 @@ export const ERROR_CODES = [
   "auth.reset_expired",
   "user.last_owner",
   "pages.store_failed",
+  "pages.prerender_failed",
+  "pages.cleanup_failed",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 

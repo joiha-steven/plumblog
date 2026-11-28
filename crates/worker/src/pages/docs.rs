@@ -2,7 +2,7 @@
 //! They go through the same versioned cache as pages (see `serve`).
 
 use super::routes::{self, FeedFormat};
-use super::source::{Filter, ReaderSource, Settings, SitemapPost};
+use super::source::{Filter, ReaderSource, Settings, SitemapPost, TaxonPage};
 use super::{Pages, core_text, err, warn};
 use crate::keys;
 use plumblog_render::feeds::{self, FeedMeta, SitemapUrl};
@@ -90,7 +90,7 @@ impl<S: ReaderSource> Pages<'_, S> {
         }))
     }
 
-    /// Home, every post and page (with its language versions), tag and year pages.
+    /// Home, every post and page (with its language versions), tag, series and year pages.
     pub(super) async fn sitemap(&self, s: &Settings) -> std::result::Result<String, String> {
         // One read for every post (a dedicated query, not the listing's 100-row pages).
         let posts = self.src.sitemap_posts(SITEMAP_LIMIT).await.map_err(err)?;
@@ -120,13 +120,10 @@ impl<S: ReaderSource> Pages<'_, S> {
                 alternates,
             });
         }
-        for t in self.src.tags().await.map_err(err)? {
-            urls.push(SitemapUrl {
-                path: routes::tag_page(&t.slug, 1),
-                lastmod: None,
-                alternates: Vec::new(),
-            });
-        }
+        let tags = self.src.tag_pages(&s.languages).await.map_err(err)?;
+        taxon_urls(&mut urls, s, &tags, routes::tag_in);
+        let series = self.src.series_pages(&s.languages).await.map_err(err)?;
+        taxon_urls(&mut urls, s, &series, routes::series_in);
         for y in self.src.years().await.map_err(err)? {
             urls.push(SitemapUrl {
                 path: routes::archive(y, 1),
@@ -157,6 +154,29 @@ impl<S: ReaderSource> Pages<'_, S> {
             &heading,
             &refs,
         ))
+    }
+}
+
+/// One sitemap URL per tag or series page that exists (a language with posts), each with the
+/// hreflang set of the languages that have it.
+fn taxon_urls(
+    urls: &mut Vec<SitemapUrl>,
+    s: &Settings,
+    pages: &[TaxonPage],
+    url: fn(&str, &str, &str, usize) -> String,
+) {
+    let mut langs: HashMap<&str, Vec<String>> = HashMap::new();
+    for p in pages {
+        langs.entry(&p.slug).or_default().push(p.lang.clone());
+    }
+    for p in pages {
+        urls.push(SitemapUrl {
+            path: url(&p.lang, &s.lang, &p.slug, 1),
+            lastmod: None,
+            alternates: super::taxon_alternates(&s.lang, &p.lang, &langs[p.slug.as_str()], |l| {
+                url(l, &s.lang, &p.slug, 1)
+            }),
+        });
     }
 }
 

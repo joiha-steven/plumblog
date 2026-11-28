@@ -129,6 +129,8 @@ cases! {
     reader::reader_posts_published_only,
     reader::reader_posts_offset_and_count,
     reader::reader_tags_and_tag_filter,
+    reader::reader_tag_filter_per_language,
+    reader::reader_series_filter_and_pages,
     reader::reader_years_at_the_edges,
     reader::reader_translations_published_only,
     reader::reader_neighbours_by_date,

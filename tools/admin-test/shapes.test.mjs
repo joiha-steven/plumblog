@@ -139,6 +139,75 @@ test("mock: ?conflict=1 makes the first update conflict only", async () => {
   ok(await a.updatePost(2, { expected_version: first.error.version, title: "X" }));
 });
 
+// --- people and invitations ---
+
+const people = JSON.parse(readFileSync(new URL("web/admin/fixtures/users.json", root), "utf8"));
+const call = (a, method, path, body) => a.call(method, path, body);
+
+test("fixtures: every person matches SHAPES.user, ids 1..N, with owners, writers and a disabled one", () => {
+  people.users.forEach((u, i) => {
+    assert.deepEqual(check("user", u), [], `user ${i + 1}`);
+    assert.equal(u.id, i + 1);
+  });
+  assert.ok(people.users.some((u) => u.role === "owner") && people.users.some((u) => u.disabled_at !== null));
+  assert.ok(people.invites.some((i) => i.expires_in_days < 0), "one invitation has expired");
+});
+
+test("mock: people and invitations answer in the real shapes; paging is by id", async () => {
+  const a = api();
+  assert.deepEqual(check("user_page", ok(await call(a, "GET", "/api/v1/users"))), []);
+  assert.deepEqual(check("invite_list", ok(await call(a, "GET", "/api/v1/invites"))), []);
+  const first = ok(await call(a, "GET", "/api/v1/users?limit=3"));
+  assert.equal(first.users.length, 3);
+  assert.equal(first.next_cursor, "3");
+  const rest = ok(await call(a, "GET", `/api/v1/users?cursor=${first.next_cursor}&limit=50`));
+  assert.equal(rest.next_cursor, null);
+  assert.equal(first.users.length + rest.users.length, people.users.length);
+  const made = ok(await call(a, "POST", "/api/v1/invites", { role: "writer", expires_at: Date.now() + 86_400_000 }));
+  assert.deepEqual(check("invite_created", made), []);
+  assert.equal((await call(a, "POST", "/api/v1/invites", { role: "root" })).ok, false);
+  assert.equal(ok(await call(a, "DELETE", `/api/v1/invites/${made.id}`)), undefined);
+  const gone = await call(a, "DELETE", `/api/v1/invites/${made.id}`);
+  assert.ok(!gone.ok && gone.error.status === 404);
+});
+
+test("mock: role, disable and delete follow the server's rules", async () => {
+  const a = api();
+  assert.deepEqual(check("user", ok(await call(a, "PUT", "/api/v1/users/3/role", { role: "owner" }))), []);
+  assert.equal(ok(await call(a, "PUT", "/api/v1/users/3/disabled", { disabled: true })).disabled_at > 0, true);
+  assert.equal(ok(await call(a, "PUT", "/api/v1/users/3/disabled", { disabled: false })).disabled_at, null);
+  // Two active owners can become one; the last cannot go.
+  ok(await call(a, "PUT", "/api/v1/users/3/role", { role: "writer" }));
+  ok(await call(a, "PUT", "/api/v1/users/2/role", { role: "writer" }));
+  const last = await call(a, "PUT", "/api/v1/users/1/role", { role: "writer" });
+  assert.ok(!last.ok && last.error.code === "user.last_owner" && last.error.status === 409);
+  assert.equal((await call(a, "DELETE", "/api/v1/users/1")).error.code, "user.last_owner");
+  assert.equal((await call(a, "DELETE", "/api/v1/users/1")).error.code, "user.last_owner");
+  assert.equal(ok(await call(a, "DELETE", "/api/v1/users/4")), undefined);
+  assert.equal((await call(a, "DELETE", "/api/v1/users/4")).error.status, 404);
+  // Demoting an owner drops their invitations.
+  const b = api();
+  ok(await call(b, "PUT", "/api/v1/users/2/role", { role: "writer" }));
+  assert.ok(!ok(await call(b, "GET", "/api/v1/invites")).invites.some((i) => i.created_by === 2));
+});
+
+test("mock: ?users= forces each refusal, ?mock=empty leaves only you, a writer gets 403", async () => {
+  const code = async (qs, method, path, body) => {
+    const r = await call(api(qs), method, path, body);
+    return r.ok ? "ok" : `${r.error.code} ${r.error.status}`;
+  };
+  assert.equal(await code("users=last_owner", "PUT", "/api/v1/users/2/role", { role: "writer" }), "user.last_owner 409");
+  assert.equal(await code("users=posts", "DELETE", "/api/v1/users/2"), "store.conflict 409");
+  assert.equal(await code("users=gone", "PUT", "/api/v1/users/2/disabled", { disabled: true }), "user.not_found 404");
+  assert.equal(await code("users=forbidden", "DELETE", "/api/v1/users/2"), "auth.forbidden 403");
+  assert.equal(await code("users=error", "GET", "/api/v1/users"), "internal 500");
+  assert.equal(await code("invites=error", "GET", "/api/v1/invites"), "internal 500");
+  assert.equal(await code("role=writer", "GET", "/api/v1/users"), "auth.forbidden 403");
+  const empty = api("mock=empty");
+  assert.equal(ok(await call(empty, "GET", "/api/v1/users")).users.length, 1);
+  assert.deepEqual(ok(await call(empty, "GET", "/api/v1/invites")).invites, []);
+});
+
 // --- Appearance and Plugins fixtures ---
 
 test("fixtures: theme and plugin declarations match SHAPES.option_declarations and cover every field type", async () => {

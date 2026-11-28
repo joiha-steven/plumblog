@@ -21,6 +21,7 @@ interface Entry {
 /** The section list. Entries drawn by other screens (they only link there) belong here too. */
 const ENTRIES: readonly Entry[] = [
   { key: "general", href: HREF.settings, label: () => t("admin.settings.general"), permission: "settings.manage" },
+  { key: "users", href: "/admin/settings/users", label: () => t("admin.settings.users"), permission: "user.manage" },
   { key: "appearance", href: "/admin/settings/appearance", label: () => t("admin.settings.appearance"), permission: "theme.manage" },
   { key: "plugins", href: "/admin/settings/plugins", label: () => t("admin.settings.plugins"), permission: "plugin.manage" },
   { key: "log", href: HREF.syslog, label: () => t("admin.syslog.title"), permission: "syslog.view" },
@@ -28,6 +29,8 @@ const ENTRIES: readonly Entry[] = [
 
 export interface SettingsOptions {
   role: Role;
+  /** The signed-in user, marked "you" in People. */
+  userId: number;
   /** Read at each use: a page that goes offline keeps its values but cannot save. */
   offline: () => boolean;
   /** The section id from the route; General when absent. */
@@ -51,7 +54,24 @@ export function mountSettings(box: HTMLElement, api: Api, o: SettingsOptions): v
   const content = h("div", { class: "settings-main" });
   box.replaceChildren(h("div", { class: "settings" }, nav, content));
   if (active === "general") general(content, api, o.offline);
-  if (active === "appearance" || active === "plugins") options(content, api, o.offline, active);
+  else if (active === "users") usersSection(content, api, o);
+  else if (active === "appearance" || active === "plugins") options(content, api, o.offline, active);
+}
+
+/** People is its own chunk: the General form never carries it. */
+function usersSection(content: HTMLElement, api: Api, o: SettingsOptions): void {
+  const load = (): void => {
+    content.replaceChildren(loadingRows(3));
+    import("./users").then(
+      (m) => m.mountUsers(content, api, { me: o.userId, offline: o.offline }),
+      (e: unknown) => {
+        // A chunk that failed to load (offline, new deploy): say so instead of a blank screen.
+        console.error("admin: people failed to load", e);
+        content.replaceChildren(failed({ code: "network", status: 0 }, load));
+      },
+    );
+  };
+  load();
 }
 
 /** Appearance and Plugins draw forms from declarations: a chunk of their own, loaded when asked for. */

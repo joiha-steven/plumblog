@@ -76,6 +76,33 @@ const DB = "plumblog-admin";
 const VERSION = 2;
 const STORE = "drafts";
 
+/** localStorage key of the `client_id` a new post's creates send (sync.ts); its value is a UUID, never content. */
+export const createIdKey = (key: string): string => `plumblog-create:${key}`;
+
+/** Forgets the stored create id of one draft key. A storage failure is logged, never thrown. */
+export function forgetStoredCreateId(key: string): void {
+  try {
+    localStorage.removeItem(createIdKey(key));
+  } catch (e) {
+    console.error(`admin drafts: removing the create id of ${key} failed; it stays`, e);
+  }
+}
+
+/** Forgets every stored create id of `user`'s drafts (sign-out). */
+function forgetStoredCreateIds(user: number): void {
+  const prefix = createIdKey(`${user}:`);
+  try {
+    const found: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k?.startsWith(prefix)) found.push(k);
+    }
+    for (const k of found) localStorage.removeItem(k);
+  } catch (e) {
+    console.error(`admin drafts: removing the create ids of user ${user} failed; they stay`, e);
+  }
+}
+
 /** The key of a post's draft for a user: `<user>:post-<id>`, or `<user>:new-<id>` for a post
  * not saved yet (each new post has its own, kept in its URL, so two never share one). */
 export const draftKey = (user: number, post: number | undefined, newId: string): string =>
@@ -242,7 +269,7 @@ export async function putDraft(key: string, d: Draft): Promise<SaveResult> {
  */
 export async function dropDraft(key: string, expectRev: number): Promise<boolean> {
   try {
-    return await run<boolean>("readwrite", (s, done) => {
+    const gone = await run<boolean>("readwrite", (s, done) => {
       const req = s.get(key);
       req.onsuccess = () => {
         const cur: unknown = req.result;
@@ -250,6 +277,11 @@ export async function dropDraft(key: string, expectRev: number): Promise<boolean
         s.delete(key).onsuccess = () => done(true);
       };
     });
+    // Defensive: today no caller drops a `new-` draft itself (sync moves it to `post-<id>` once the
+    // create answers, and the editor drops only side copies), so sign-out is where ids really go.
+    // Should a caller ever drop one, its create id must not outlive it.
+    if (gone && isNewKey(key)) forgetStoredCreateId(key);
+    return gone;
   } catch (e) {
     console.error(`admin drafts: removing ${key} failed`, e);
     return false;
@@ -429,6 +461,7 @@ export async function clearDrafts(user: number): Promise<void> {
       const req = s.delete(IDBKeyRange.bound(`${user}:`, `${user}:\uffff`));
       req.onsuccess = () => done(true);
     });
+    forgetStoredCreateIds(user);
   } catch (e) {
     console.error(`admin drafts: clearing user ${user} failed`, e);
   }

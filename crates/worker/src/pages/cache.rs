@@ -8,7 +8,11 @@
 use plumblog_model::ErrorCode;
 use plumblog_syslog::{Event, EventKind, request_id};
 use std::collections::HashMap;
-use worker::{Cache, Context, Env, Headers, HttpMetadata, Response, console_error, console_warn};
+use std::sync::atomic::{AtomicBool, Ordering};
+use worker::{
+    Bucket, Cache, Conditional, Context, Env, Headers, HttpMetadata, Response, console_error,
+    console_warn,
+};
 
 /// Internal URL that names a cached page; never served. The query string is left out so
 /// `?x=1` variants cannot multiply entries. `version_id` (the deployed Worker version) is
@@ -56,6 +60,13 @@ pub fn store_key(version_id: &str, version: u64, theme_tag: &str, path: &str) ->
     format!("pages/{version_id}/v{version}{theme_tag}{path}")
 }
 
+/// The marker of version id `id` in R2: written once, when the first page of that id is
+/// stored, so its upload time is when that version first served (the cron keeps the newest
+/// versions by it). `.` sorts before `v`, so it comes first when the id's keys are listed.
+pub fn seen_key(id: &str) -> String {
+    format!("pages/{id}/.seen")
+}
+
 /// Whether a page the Cache API keeps may also go to R2. GET only: a HEAD has no body to
 /// store. No credentials: reader pages ignore them today, and this keeps any page that ever
 /// varies by viewer out of a store shared by every reader.
@@ -66,6 +77,8 @@ pub fn may_store(get: bool, credentials: bool, body_len: usize, key: &str, limit
 /// One page for R2: the bytes and the headers a hit must send.
 pub struct Stored {
     pub key: String,
+    /// The deployed version id in `key`, for its [`seen_key`] marker.
+    pub version_id: String,
     pub body: Vec<u8>,
     pub content_type: &'static str,
     pub etag: String,
@@ -123,10 +136,14 @@ fn relabel(cached: Response) -> worker::Result<Response> {
     Ok(cached.with_headers(headers))
 }
 
+/// Set once this isolate has tried to write its version's [`seen_key`] marker.
+static MARKED: AtomicBool = AtomicBool::new(false);
+
 /// Stores after the response is sent, so a slow cache or R2 write never delays the reader.
-/// At most one R2 put per call, so per miss. The R2 put (or its failure log) finishes before
-/// the Cache API put starts: a Cache API entry then proves this miss's R2 step is over, which
-/// tests rely on to show a page was not stored without sleeping.
+/// At most one R2 put per call, so per miss, plus the marker's conditional put once per
+/// isolate. The R2 puts (or their failure logs) finish before the Cache API put starts: a
+/// Cache API entry then proves this miss's R2 step is over, which tests rely on to show a page
+/// was not stored without sleeping.
 pub fn put_later(ctx: &Context, env: &Env, key: String, resp: Response, stored: Option<Stored>) {
     let env = env.clone();
     ctx.wait_until(async move {
@@ -136,6 +153,22 @@ pub fn put_later(ctx: &Context, env: &Env, key: String, resp: Response, stored: 
             if let Err(e) = put_r2(&env, &s, body).await {
                 store_failed(&env, &s, &e.to_string()).await;
             }
+            // Once per isolate, tried or not: a failing marker must not add a put per miss.
+            if !MARKED.swap(true, Ordering::Relaxed) {
+                let marked = match env.bucket(&bucket_name(&env)) {
+                    Ok(b) => mark_seen(&b, &s.version_id).await,
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = marked {
+                    // Worker log only: the page is served and stored; the cron writes the
+                    // marker too, and an id without one is only cleaned up sooner.
+                    console_warn!(
+                        "{} marker={} error={e}",
+                        ErrorCode::PagePrerenderFailed.as_str(),
+                        seen_key(&s.version_id)
+                    );
+                }
+            }
         }
         if let Err(e) = Cache::default().put(key.as_str(), resp).await {
             console_warn!("pages: cache store failed (page still served): {e}");
@@ -143,8 +176,23 @@ pub fn put_later(ctx: &Context, env: &Env, key: String, resp: Response, stored: 
     });
 }
 
+/// Writes [`seen_key`] for `id` unless it exists (one conditional put): the first upload
+/// time is the one that counts. `Ok(true)` when this call wrote it.
+pub(super) async fn mark_seen(bucket: &Bucket, id: &str) -> worker::Result<bool> {
+    crate::subrequests::count();
+    let wrote = bucket
+        .put(seen_key(id), Vec::<u8>::new())
+        .only_if(Conditional {
+            etag_does_not_match: Some("*".to_owned()),
+            ..Conditional::default()
+        })
+        .execute()
+        .await?;
+    Ok(wrote.is_some())
+}
+
 /// Binding that holds stored pages; a test build may name a missing one to make puts fail.
-fn bucket_name(env: &Env) -> String {
+pub(super) fn bucket_name(env: &Env) -> String {
     #[cfg(feature = "contract-tests")]
     if let Ok(v) = env.var("PLUMBLOG_TEST_PAGE_BUCKET") {
         return v.to_string();
@@ -168,7 +216,7 @@ pub fn store_limit(env: &Env) -> usize {
     MAX_STORED_PAGE
 }
 
-async fn put_r2(env: &Env, s: &Stored, body: Vec<u8>) -> worker::Result<()> {
+pub(super) async fn put_r2(env: &Env, s: &Stored, body: Vec<u8>) -> worker::Result<()> {
     let mut meta = HashMap::from([
         ("etag".to_owned(), s.etag.clone()),
         ("cache-control".to_owned(), s.cache_control.to_owned()),
@@ -179,6 +227,7 @@ async fn put_r2(env: &Env, s: &Stored, body: Vec<u8>) -> worker::Result<()> {
             t.to_owned(),
         );
     }
+    crate::subrequests::count();
     env.bucket(&bucket_name(env))?
         .put(s.key.clone(), body)
         .http_metadata(HttpMetadata {

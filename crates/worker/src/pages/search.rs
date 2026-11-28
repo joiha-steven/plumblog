@@ -90,6 +90,7 @@ fn to_render(s: &PostSummary, default_lang: &str) -> Post {
         cover: None,
         thumb: None,
         translations: Vec::new(),
+        series: None,
     }
 }
 

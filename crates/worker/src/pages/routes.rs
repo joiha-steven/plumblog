@@ -1,9 +1,26 @@
 //! Reader URLs, in one place: parsing a path and building the links pages point to.
 //!
-//! `/` and `/page/N` home, `/<lang>/` and `/<lang>/page/N` a language's home, `/<slug>` post in the default language, `/<lang>/<slug>` in another, `/tag/<slug>` and `/archive/<year>` (each with
+//! `/` and `/page/N` home, `/<lang>/` and `/<lang>/page/N` a language's home, `/<slug>` post in the default language, `/<lang>/<slug>` in another, `/tag/<slug>`, `/series/<slug>` (and
+//! `/<lang>/tag/<slug>`, `/<lang>/series/<slug>` for another language) and `/archive/<year>` (each with
 //! `/page/N`). Redirect targets are always built here as `/`-rooted paths with no `//`, so a
 //! request path can never turn into an off-site `Location`.
 //! `/search?q=` and `/<lang>/search?q=`. The names in [`RESERVED`] cannot be post slugs.
+
+/// Which listing a tag-or-series route is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Taxon {
+    Tag,
+    Series,
+}
+
+impl Taxon {
+    const fn segment(self) -> &'static str {
+        match self {
+            Self::Tag => "tag",
+            Self::Series => "series",
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Route {
@@ -25,9 +42,26 @@ pub enum Route {
         lang: Option<String>,
         slug: String,
     },
+    /// `/tag/<slug>` (`lang` `None`: the default language) and `/<lang>/tag/<slug>`, with
+    /// `/page/N`. Whether `lang` is a site language, and not the default (whose pages are at
+    /// the root), only the page knows.
     Tag {
+        lang: Option<String>,
         slug: String,
         page: usize,
+    },
+    /// As [`Route::Tag`], for `/series/<slug>` and `/<lang>/series/<slug>`.
+    Series {
+        lang: Option<String>,
+        slug: String,
+        page: usize,
+    },
+    /// `/<lang>/tag/<slug>/page/1` and the series form: a redirect to the page-less URL of a
+    /// site language (the default language's is the root), else not a page.
+    TaxonFirstPage {
+        kind: Taxon,
+        lang: String,
+        slug: String,
     },
     Archive {
         year: i32,
@@ -83,18 +117,14 @@ pub fn parse(path: &str) -> Route {
             Some(page) => Route::Home { page },
             None => Route::NotFound,
         },
-        ["tag", slug] if is_slug(slug) => Route::Tag {
-            slug: (*slug).to_owned(),
-            page: 1,
-        },
-        ["tag", slug, "page", n] if is_slug(slug) => match page_number(n) {
-            Some(1) => Route::Redirect(tag_page(slug, 1)),
-            Some(page) => Route::Tag {
-                slug: (*slug).to_owned(),
-                page,
-            },
-            None => Route::NotFound,
-        },
+        [kind @ ("tag" | "series"), slug, rest @ ..] if is_slug(slug) && is_paging(rest) => {
+            taxon(kind, None, slug, rest)
+        }
+        [lang, kind @ ("tag" | "series"), slug, rest @ ..]
+            if is_lang(lang) && !RESERVED.contains(lang) && is_slug(slug) && is_paging(rest) =>
+        {
+            taxon(kind, Some(lang), slug, rest)
+        }
         ["archive", y] => match year(y) {
             Some(year) => Route::Archive { year, page: 1 },
             None => Route::NotFound,
@@ -129,7 +159,7 @@ pub fn parse(path: &str) -> Route {
             lang: Some((*lang).to_owned()),
             format: FeedFormat::from_file(file).unwrap_or(FeedFormat::Atom),
         },
-        [slug] if is_slug(slug) && !RESERVED.contains(slug) => Route::Post {
+        [slug] if is_slug(slug) && !is_owned(slug) => Route::Post {
             lang: None,
             slug: (*slug).to_owned(),
         },
@@ -147,7 +177,7 @@ pub fn parse(path: &str) -> Route {
 pub fn comment_form(path: &str) -> Option<(Option<&str>, &str)> {
     let rest = path.strip_prefix('/')?.strip_suffix("/comments")?;
     match rest.split_once('/') {
-        None => (is_slug(rest) && !RESERVED.contains(&rest)).then_some((None, rest)),
+        None => (is_slug(rest) && !is_owned(rest)).then_some((None, rest)),
         Some((lang, slug)) => (is_lang(lang) && !RESERVED.contains(&lang) && is_slug(slug))
             .then_some((Some(lang), slug)),
     }
@@ -158,14 +188,101 @@ pub fn comments(lang: &str, default_lang: &str, slug: &str) -> String {
     format!("{}/comments", post_in(lang, default_lang, slug))
 }
 
-/// First path segments the router, the static assets or the API own, so none is a post
-/// slug in the default language (the posts API refuses them too, from this list).
+/// First path segments the router, the static assets or the API own, so none is a language
+/// and none is a new post slug in the default language (the posts API refuses them from this
+/// list). Two names are also single-segment pages that stay reachable if a post already has
+/// the slug: see [`is_owned`].
 pub(crate) const RESERVED: &[&str] = &[
-    "page", "tag", "archive", "search", "theme", "plugin", "media", "admin", "api", "healthz",
+    "page", "tag", "series", "archive", "search", "theme", "plugin", "media", "admin", "api",
+    "healthz",
 ];
+
+/// Whether `/<slug>` (one segment) belongs to the router rather than to a post. `series` is
+/// reserved for new posts but `/series` alone is not owned: only `/series/<slug>` is, so a
+/// default-language post that already has the slug (stored before the series pages) stays
+/// served. (`search` is owned: the posts API refused it in the default language before.)
+fn is_owned(slug: &str) -> bool {
+    slug != "series" && RESERVED.contains(&slug)
+}
+
+/// What follows `/tag/<slug>` or `/series/<slug>`: nothing, or `/page/N`.
+fn is_paging(rest: &[&str]) -> bool {
+    matches!(rest, [] | ["page", _])
+}
+
+/// A tag or series route; `/page/1` is the page without it.
+fn taxon(kind: &str, lang: Option<&str>, slug: &str, rest: &[&str]) -> Route {
+    let kind = if kind == "tag" {
+        Taxon::Tag
+    } else {
+        Taxon::Series
+    };
+    let (lang_owned, slug_owned) = (lang.map(str::to_owned), slug.to_owned());
+    let page = match rest {
+        [] => 1,
+        [_, n] => match page_number(n) {
+            Some(1) => {
+                return match lang {
+                    Some(l) => Route::TaxonFirstPage {
+                        kind,
+                        lang: l.to_owned(),
+                        slug: slug_owned,
+                    },
+                    None => Route::Redirect(taxon_in(kind, None, slug, 1)),
+                };
+            }
+            Some(p) => p,
+            None => return Route::NotFound,
+        },
+        _ => return Route::NotFound,
+    };
+    match kind {
+        Taxon::Tag => Route::Tag {
+            lang: lang_owned,
+            slug: slug_owned,
+            page,
+        },
+        Taxon::Series => Route::Series {
+            lang: lang_owned,
+            slug: slug_owned,
+            page,
+        },
+    }
+}
+
+/// Page `n` of a tag or series page: the default language's at the root, another's under
+/// `/<lang>/` (`lang` `None` is the root).
+fn taxon_in(kind: Taxon, lang: Option<&str>, slug: &str, n: usize) -> String {
+    let prefix = lang.map_or_else(String::new, |l| format!("/{l}"));
+    let seg = kind.segment();
+    if n <= 1 {
+        format!("{prefix}/{seg}/{slug}")
+    } else {
+        format!("{prefix}/{seg}/{slug}/page/{n}")
+    }
+}
+
+/// Page `n` of tag `slug` in `lang`: `/tag/<slug>` for the default language, else
+/// `/<lang>/tag/<slug>`.
+pub fn tag_in(lang: &str, default_lang: &str, slug: &str, n: usize) -> String {
+    taxon_in(Taxon::Tag, (lang != default_lang).then_some(lang), slug, n)
+}
+
+/// As [`tag_in`] for a series page.
+pub fn series_in(lang: &str, default_lang: &str, slug: &str, n: usize) -> String {
+    taxon_in(
+        Taxon::Series,
+        (lang != default_lang).then_some(lang),
+        slug,
+        n,
+    )
+}
 
 /// The default language's search page; results are `?q=` on it.
 pub const SEARCH: &str = "/search";
+
+/// The sitemap (`Route::Sitemap`).
+pub const SITEMAP: &str = "/sitemap.xml";
 
 /// A language's search page: the default language's at the root, any other under `/<lang>/`.
 pub fn search_in(lang: &str, default_lang: &str) -> String {
@@ -286,14 +403,6 @@ pub fn post_in(lang: &str, default_lang: &str, slug: &str) -> String {
         post(slug)
     } else {
         format!("/{lang}/{slug}")
-    }
-}
-
-pub fn tag_page(slug: &str, n: usize) -> String {
-    if n <= 1 {
-        format!("/tag/{slug}")
-    } else {
-        format!("/tag/{slug}/page/{n}")
     }
 }
 

@@ -140,6 +140,27 @@ fn check_passes_the_default_theme() {
 }
 
 #[test]
+fn check_warns_when_series_html_is_missing_and_still_passes() {
+    let (_t, dir) = fresh_theme("t");
+    std::fs::remove_file(dir.join("templates/series.html")).unwrap();
+    let f = findings(&dir);
+    assert!(
+        has(
+            &f,
+            Kind::ThemeTemplateDefault,
+            "templates/series.html",
+            None
+        ),
+        "{f:?}"
+    );
+    let out = theme::check_theme(&en(), &dir).unwrap();
+    assert!(
+        out.contains("series.html"),
+        "a warning, not a failure: {out}"
+    );
+}
+
+#[test]
 fn check_flags_a_template_error_with_file_and_line() {
     let (_t, dir) = fresh_theme("t");
     edit(&dir, "templates/home.html", |s| {

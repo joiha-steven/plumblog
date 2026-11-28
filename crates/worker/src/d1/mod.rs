@@ -94,6 +94,7 @@ impl D1Store {
 
     /// Runs a read and returns its rows.
     pub(crate) async fn rows(&self, s: Stmt) -> Result<Vec<Row>> {
+        crate::subrequests::count();
         let raw = s
             .inner
             .raw_js_value()
@@ -109,6 +110,7 @@ impl D1Store {
 
     /// Runs one write statement.
     pub(crate) async fn exec(&self, s: Stmt) -> Result<D1Result> {
+        crate::subrequests::count();
         s.inner.run().await.map_err(|e| map_error(s.name, &e))
     }
 
@@ -130,6 +132,7 @@ impl D1Store {
         what: &'static str,
         stmts: Vec<Stmt>,
     ) -> std::result::Result<Vec<D1Result>, Failure> {
+        crate::subrequests::count();
         let names: Vec<&str> = stmts.iter().map(|s| s.name).collect();
         let n = stmts.len();
         let results = self
