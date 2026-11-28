@@ -52,7 +52,7 @@ with `curl --data-binary @heron.jpg`. `width`, `height`: the file's own (read th
 AVIF, WebP, JPEG, PNG or GIF, at most 20 MiB. Use the answer's `src` in Markdown. Always send
 `sha256`, the lowercase hex SHA-256 of the bytes you send: if it matches one of your items, that
 item is the answer (200, unchanged, these bytes not checked); else R2 checks it (wrong: 400).
-Always write `alt` (later: `PATCH /api/v1/media/{id}`). Used media can't be deleted (409 lists posts).
+Always write `alt` (later: `PATCH /api/v1/media/{id}`). Delete own uploads only (owner: any); used: 409.
 
 ## Not built yet
 

@@ -402,10 +402,18 @@ pub async fn update(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
     get(ctx, input).await
 }
 
-/// `DELETE /api/v1/media/<id>`: refused while posts use it (409 with their ids).
+/// `DELETE /api/v1/media/<id>`: another uploader's (or an orphan's) needs `media.delete_any`;
+/// refused while posts use it (409 with their ids).
 pub async fn delete(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
-    p.require(Permission::UploadMedia)?;
+    let user = p.require(Permission::UploadMedia)?;
     let m = ctx.store.get_media(MediaId(input.id())).await?;
+    // Ownership before the in-use check, so a refused caller learns nothing about usage. The
+    // row may change between this read and the delete, but harmlessly: ids are AUTOINCREMENT
+    // (never reused) and `uploaded_by` only ever changes to NULL (user deletion), which
+    // would only have made this check stricter.
+    if m.uploaded_by != Some(user.id) {
+        p.require(Permission::DeleteAnyMedia)?;
+    }
     if let Err(e) = ctx.store.delete_media(m.id).await {
         if e.code != ErrorCode::Conflict {
             return Err(e);

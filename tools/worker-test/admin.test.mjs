@@ -1,6 +1,7 @@
 // The admin shell, manifest and icon from the real Worker, and the built client running in
 // the system Chrome under the shell's CSP (docs/ARCHITECTURE.md, Admin and editor).
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 import { chromium } from "playwright-core";
 import { startWorker } from "./harness.mjs";
@@ -37,6 +38,38 @@ test("every admin path gets the same shell, with a strict CSP and no caching", a
     assert.equal(boot(html).messages, undefined);
     assert.match(html, /<link rel="modulepreload" href="\/admin\/i18n\/en.js">/);
   }
+});
+
+// The shell names the entry's static imports so the browser fetches them beside app.js. The
+// expected list is computed here from esbuild's metafile, not from the file the Worker was
+// built with, so a Worker built against an older admin (or none) fails.
+test("the shell preloads exactly the static chunks of app.js, from the build's metafile", () => {
+  const outputs = JSON.parse(readFileSync(new URL("../../target/admin.meta.json", import.meta.url), "utf8")).outputs;
+  const seen = new Set();
+  const todo = ["target/admin/app.js"];
+  while (todo.length) {
+    const f = todo.pop();
+    if (seen.has(f)) continue;
+    seen.add(f);
+    for (const i of outputs[f].imports) if (i.kind === "import-statement") todo.push(i.path);
+  }
+  seen.delete("target/admin/app.js");
+  const expected = [...seen].map((f) => "/admin/" + f.slice("target/admin/".length)).sort();
+  assert.ok(expected.length > 0 && expected.every((u) => u.startsWith("/admin/chunks/")), "the entry has static chunks");
+  return fetch(worker.url + "/admin/").then(async (res) => {
+    const html = await res.text();
+    const got = [...html.matchAll(/<link rel="modulepreload" href="(\/admin\/chunks\/[^"]+)">/g)].map((m) => m[1]).sort();
+    assert.deepEqual(got, expected);
+    for (const u of expected) assert.equal((await fetch(worker.url + u)).status, 200, u);
+  });
+});
+
+// Faces nobody on the page uses only compete with what the first paint waits for: the posts
+// list scored 1.8 s LCP with them, 1.2 s without.
+test("the writing faces are preloaded on the editor and sign-in pages only", async () => {
+  const faces = async (path) => ((await (await fetch(worker.url + path)).text()).match(/<link rel="preload"[^>]*as="font"/g) ?? []).length;
+  for (const path of ["/admin/posts/1", "/admin/posts/new", "/admin/signin"]) assert.ok((await faces(path)) >= 2, path);
+  for (const path of ["/admin/", "/admin/pages", "/admin/media", "/admin/settings"]) assert.equal(await faces(path), 0, path);
 });
 
 test("only the sign-in, setup and invite pages admit Turnstile in their CSP", async () => {

@@ -1,4 +1,4 @@
--- Sample data valid right after migrations/0007_media_sha256.sql: at least one row in every
+-- Sample data valid right after migrations/0008_media_sha256.sql: at least one row in every
 -- table. A copy of 0005.sql (see 0001.sql's header for char(N)) plus media with sha256: two
 -- uploaders holding the same bytes, and a row without a hash.
 

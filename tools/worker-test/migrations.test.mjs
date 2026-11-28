@@ -248,7 +248,7 @@ test("api_tokens after every migration: scopes, unique hash, user cascade, index
   }
 });
 
-// 0007 (media dedupe): sha256 is unique per uploader; NULL hashes and NULL uploaders never collide.
+// 0008 (media dedupe): sha256 is unique per uploader; NULL hashes and NULL uploaders never collide.
 test("media after every migration: sha256 unique per uploader, NULLs distinct, lookup on the index", () => {
   const db = makeStateDir();
   try {

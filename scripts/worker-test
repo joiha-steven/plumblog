@@ -25,6 +25,19 @@ if $serve; then out=target/worker-dev; else out=target/worker-test; fi
 # Pinned Node tools (wrangler, esbuild...) from tools/package-lock.json.
 scripts/tools-install || fail "contributor tools (above)"
 
+# The admin (scripts/admin-build), served with the mock API when a person clicks through,
+# since the posts and media APIs do not exist yet. Assets laid out as a deploy ships them.
+if $serve; then
+  scripts/admin-build --dev || fail "admin build (above)"
+  admin_dir=target/admin-dev
+else
+  $admin_prebuilt || scripts/admin-build || fail "admin build (above)"
+  admin_dir=target/admin
+fi
+# The Worker's HTML shell preloads the chunks this build lists, so the admin is built first
+# (crates/worker/build.rs; a stale list is caught by admin.test.mjs).
+export PLUMBLOG_ADMIN_PRELOAD="$PWD/$admin_dir.preload"
+
 # Pinned worker-build (scripts/worker-build installs it on first use).
 wb=$(scripts/worker-build) || fail "worker-build unavailable"
 
@@ -38,15 +51,6 @@ contract_target="$PWD/target/contract-tests"
   -- --features contract-tests --target-dir "$contract_target") \
   || fail "worker-build failed"
 
-# The admin (scripts/admin-build), served with the mock API when a person clicks through,
-# since the posts and media APIs do not exist yet. Assets laid out as a deploy ships them.
-if $serve; then
-  scripts/admin-build --dev || fail "admin build (above)"
-  admin_dir=target/admin-dev
-else
-  $admin_prebuilt || scripts/admin-build || fail "admin build (above)"
-  admin_dir=target/admin
-fi
 scripts/assemble-assets "$out/assets" "$admin_dir" || fail "assembling assets (above)"
 
 if $serve; then
