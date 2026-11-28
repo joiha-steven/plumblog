@@ -8,10 +8,10 @@ import type { Api, ApiError, Result } from "../api/client";
 import { h } from "../dom";
 import { t } from "../i18n";
 import { icon } from "../icons";
-import { type NewAccount, acceptInvite, params, setup, signIn, signInPasskey } from "./flows";
+import { type NewAccount, acceptInvite, params, redeemReset, setup, signIn, signInPasskey } from "./flows";
 import { safeNext } from "./next";
 
-export type Kind = "signin" | "setup" | "invite";
+export type Kind = "signin" | "setup" | "invite" | "reset";
 
 export interface AuthOptions {
   root: HTMLElement;
@@ -125,7 +125,7 @@ export function field(o: { id: string; label: string; type?: string; autocomplet
 export const chars = (s: string): number => [...s].length;
 
 /** The one message for a failure, or undefined when nothing should be said (a dismissed prompt). */
-export function message(e: ApiError, passkey: boolean): string | undefined {
+export function message(e: ApiError, passkey: boolean, kind?: Kind): string | undefined {
   switch (e.code) {
     case "cancelled":
       return undefined;
@@ -137,7 +137,9 @@ export function message(e: ApiError, passkey: boolean): string | undefined {
     case "settings.origin_missing":
       return t("admin.auth.err_origin");
     case "setup.invalid":
-      return t("admin.auth.err_setup_invalid");
+      return kind === "reset" ? t("admin.auth.err_reset_invalid") : t("admin.auth.err_setup_invalid");
+    case "store.conflict":
+      return kind === "reset" ? t("admin.auth.err_login_taken") : t("admin.auth.err_bad_response");
     case "invite.invalid":
       return t("admin.auth.err_invite_invalid");
     case "input.invalid":
@@ -154,11 +156,30 @@ export function message(e: ApiError, passkey: boolean): string | undefined {
 export function mountAuth(o: AuthOptions): void {
   const { api, kind } = o;
   const signin = kind === "signin";
-  const title = signin ? t("admin.auth.title_signin", { site: o.site }) : kind === "setup" ? t("admin.auth.title_setup", { site: o.site }) : t("admin.auth.title_invite", { site: o.site });
-  const sub = signin ? t("admin.auth.sub_signin", { site: o.site }) : kind === "setup" ? t("admin.auth.sub_setup") : t("admin.auth.sub_invite");
+  const reset = kind === "reset";
+  const titles = {
+    signin: () => t("admin.auth.title_signin", { site: o.site }),
+    setup: () => t("admin.auth.title_setup", { site: o.site }),
+    invite: () => t("admin.auth.title_invite", { site: o.site }),
+    reset: () => t("admin.auth.title_reset", { site: o.site }),
+  };
+  const subs = {
+    signin: () => t("admin.auth.sub_signin", { site: o.site }),
+    setup: () => t("admin.auth.sub_setup"),
+    invite: () => t("admin.auth.sub_invite"),
+    reset: () => t("admin.auth.sub_reset"),
+  };
+  const codes = {
+    signin: () => "",
+    setup: () => t("admin.auth.code_setup"),
+    invite: () => t("admin.auth.code_invite"),
+    reset: () => t("admin.auth.code_reset"),
+  };
+  const title = titles[kind]();
+  const sub = subs[kind]();
   document.title = `${title}`;
 
-  const code = field({ id: "code", label: kind === "setup" ? t("admin.auth.code_setup") : t("admin.auth.code_invite"), autocomplete: "off", value: o.query.get("code") ?? "", mono: true });
+  const code = field({ id: "code", label: codes[kind](), autocomplete: "off", value: o.query.get("code") ?? "", mono: true });
   const login = field({ id: "login", label: t("admin.auth.login"), autocomplete: "username" });
   const slug = field({ id: "slug", label: t("admin.auth.slug"), autocomplete: "off", hint: t("admin.auth.slug_hint"), mono: true });
   const name = field({ id: "display-name", label: t("admin.auth.display_name"), autocomplete: "name" });
@@ -173,7 +194,8 @@ export function mountAuth(o: AuthOptions): void {
 
   const alert = h("div", { class: "auth-alert", role: "alert", tabindex: "-1" });
   const challenge = h("div", { class: "auth-challenge", role: "group", "aria-label": t("admin.auth.challenge"), hidden: true });
-  const submit = h("button", { class: "btn primary lg block", type: "submit" }, signin ? t("admin.auth.signin") : t("admin.auth.create"));
+  const idle = signin ? t("admin.auth.signin") : reset ? t("admin.auth.reset") : t("admin.auth.create");
+  const submit = h("button", { class: "btn primary lg block", type: "submit" }, idle);
   const passkey = signin ? h("button", { class: "btn lg block", type: "button", onclick: () => submitOnce(true, (tok) => signInPasskey(api, tok)) }, t("admin.auth.passkey")) : null;
 
   const say = (text: string | undefined, invalid?: HTMLInputElement): void => {
@@ -188,7 +210,8 @@ export function mountAuth(o: AuthOptions): void {
     submit.disabled = on;
     if (passkey) passkey.disabled = on;
     form.setAttribute("aria-busy", String(on));
-    submit.textContent = signin ? (on && !viaPasskey ? t("admin.auth.signin_busy") : t("admin.auth.signin")) : on ? t("admin.auth.create_busy") : t("admin.auth.create");
+    const working = signin ? (viaPasskey ? idle : t("admin.auth.signin_busy")) : reset ? t("admin.auth.reset_busy") : t("admin.auth.create_busy");
+    submit.textContent = on ? working : idle;
     if (passkey) passkey.textContent = on && viaPasskey ? t("admin.auth.passkey_busy") : t("admin.auth.passkey");
   };
 
@@ -250,7 +273,7 @@ export function mountAuth(o: AuthOptions): void {
     }
     setBusy(false, viaPasskey);
     if (r.error.code === "auth.turnstile_required") return challenged();
-    say(message(r.error, viaPasskey));
+    say(message(r.error, viaPasskey, kind));
   }
 
   /** The rules the server checks (crates/worker/src/api/fields.rs), so a mistake is named, not guessed. */
@@ -258,9 +281,9 @@ export function mountAuth(o: AuthOptions): void {
     if (!code.input.value.trim()) return { text: t("admin.auth.err_code"), at: code.input };
     const n = chars(login.input.value.trim());
     if (n < 1 || n > 64) return { text: t("admin.auth.err_login"), at: login.input };
-    if (!/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(slug.input.value.trim())) return { text: t("admin.auth.err_slug"), at: slug.input };
+    if (!reset && !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(slug.input.value.trim())) return { text: t("admin.auth.err_slug"), at: slug.input };
     const m = chars(name.input.value.trim());
-    if (m < 1 || m > 100) return { text: t("admin.auth.err_name"), at: name.input };
+    if (!reset && (m < 1 || m > 100)) return { text: t("admin.auth.err_name"), at: name.input };
     if (chars(password.input.value) < MIN_PASSWORD) return { text: t("admin.auth.err_password_short"), at: password.input };
     if (password.input.value !== repeat.input.value) return { text: t("admin.auth.err_password_mismatch"), at: repeat.input };
     return undefined;
@@ -283,6 +306,11 @@ export function mountAuth(o: AuthOptions): void {
           say(bad.text, bad.at);
           return;
         }
+        if (reset) {
+          const f = { code: code.input.value.trim(), login: user, password: password.input.value };
+          submitOnce(false, (tok) => redeemReset(api, f, tok));
+          return;
+        }
         const account: NewAccount = {
           code: code.input.value.trim(),
           login: user,
@@ -294,7 +322,7 @@ export function mountAuth(o: AuthOptions): void {
       },
     },
     alert,
-    signin ? [login.el, password.el] : [code.el, login.el, slug.el, name.el, password.el, repeat.el],
+    signin ? [login.el, password.el] : reset ? [code.el, login.el, password.el, repeat.el] : [code.el, login.el, slug.el, name.el, password.el, repeat.el],
     challenge,
     submit,
     passkey ? [h("div", { class: "or" }, t("admin.auth.or")), passkey] : null,

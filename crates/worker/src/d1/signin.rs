@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 use plumblog_store::{
-    ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewUser, Recorded,
+    ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewUser,
+    OWNER_RESET_EXPIRES_KEY, OWNER_RESET_HASH_KEY, OWNER_RESET_USER_KEY, Recorded,
     SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore, setup_hash_json,
 };
 
@@ -356,4 +357,96 @@ impl SetupStore for D1Store {
             Err(Failure::Error(e)) => Err(e),
         }
     }
+    async fn put_owner_reset(
+        &self,
+        code_hash: &str,
+        user: UserId,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<()> {
+        // Hash first: a code half written by `blog admin reset` (REST, not atomic) is one
+        // nobody was shown, and the previous code stops working at once.
+        let mut stmts = Vec::new();
+        for (name, key, value) in [
+            (
+                "put_owner_reset_hash",
+                OWNER_RESET_HASH_KEY,
+                setup_hash_json(code_hash),
+            ),
+            (
+                "put_owner_reset_user",
+                OWNER_RESET_USER_KEY,
+                user.0.to_string(),
+            ),
+            (
+                "put_owner_reset_expiry",
+                OWNER_RESET_EXPIRES_KEY,
+                expires_at.to_string(),
+            ),
+        ] {
+            stmts.push(self.stmt(name, PUT_OWNER_RESET, &[text(key), text(&value), int(now)?])?);
+        }
+        self.batch("put_owner_reset", stmts).await.map(drop)
+    }
+
+    async fn take_owner_reset(&self, code_hash: &str, now: i64) -> Result<Option<UserId>> {
+        // One batch (a transaction): the read and the deletes see the same rows, so of two
+        // takes racing only the first reads a row. Every delete is conditioned on the hash,
+        // and the hash row goes last, so a wrong code deletes nothing.
+        let hash = setup_hash_json(code_hash);
+        let read = self.stmt(
+            "take_owner_reset_read",
+            "SELECT u.value_json AS user, e.value_json AS expires FROM settings h \
+             LEFT JOIN settings u ON u.key = ? LEFT JOIN settings e ON e.key = ? \
+             WHERE h.key = ? AND h.value_json = ?",
+            &[
+                text(OWNER_RESET_USER_KEY),
+                text(OWNER_RESET_EXPIRES_KEY),
+                text(OWNER_RESET_HASH_KEY),
+                text(&hash),
+            ],
+        )?;
+        let rest = self.stmt(
+            "take_owner_reset_rest",
+            "DELETE FROM settings WHERE key IN (?, ?) \
+             AND EXISTS (SELECT 1 FROM settings WHERE key = ? AND value_json = ?)",
+            &[
+                text(OWNER_RESET_USER_KEY),
+                text(OWNER_RESET_EXPIRES_KEY),
+                text(OWNER_RESET_HASH_KEY),
+                text(&hash),
+            ],
+        )?;
+        let consume = self.stmt(
+            "take_owner_reset_hash",
+            "DELETE FROM settings WHERE key = ? AND value_json = ?",
+            &[text(OWNER_RESET_HASH_KEY), text(&hash)],
+        )?;
+        let results = self
+            .batch("take_owner_reset", vec![read, rest, consume])
+            .await?;
+        let rows: Vec<HashMap<String, Option<String>>> = results
+            .first()
+            .ok_or_else(|| storage("take_owner_reset", "batch returned no read result"))?
+            .results()
+            .map_err(|e| storage("take_owner_reset", &format!("{e}")))?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        // Exactly a JSON integer, as the memory store and the setup expiry require.
+        let int_of = |k: &str| {
+            row.get(k)
+                .cloned()
+                .flatten()
+                .and_then(|v| v.parse::<i64>().ok().filter(|n| n.to_string() == v))
+        };
+        let fresh = int_of("expires").is_some_and(|at| at > now);
+        Ok(int_of("user").map(UserId).filter(|_| fresh))
+    }
 }
+
+/// The reset code upsert, one statement per key. `blog admin reset` sends the same SQL
+/// (crates/cli/src/d1.rs `PUT_OWNER_RESET`).
+const PUT_OWNER_RESET: &str = "INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, ?) \
+     ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json, \
+     updated_at = excluded.updated_at";

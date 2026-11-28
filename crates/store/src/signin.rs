@@ -24,6 +24,13 @@ pub const SETUP_CODE_HASH_KEY: &str = "setup_code_hash";
 /// Settings key holding when the setup code expires (ms), as a JSON integer.
 pub const SETUP_CODE_EXPIRES_KEY: &str = "setup_code_expires_at";
 
+/// Settings keys of the owner reset code `blog admin reset` stores: its hash (a JSON string,
+/// as [`setup_hash_json`]), the owner it is bound to (JSON integer id) and when it expires
+/// (ms, JSON integer). Internal, like the setup code.
+pub const OWNER_RESET_HASH_KEY: &str = "owner_reset_hash";
+pub const OWNER_RESET_USER_KEY: &str = "owner_reset_user";
+pub const OWNER_RESET_EXPIRES_KEY: &str = "owner_reset_expires_at";
+
 /// Settings key holding the site's random id (a JSON string), part of the browser's password
 /// stretch salt. Public: the sign-in page needs it before anyone is signed in.
 pub const SITE_ID_KEY: &str = "site_id";
@@ -40,8 +47,14 @@ pub const TURNSTILE_SITE_KEY: &str = "turnstile_site_key";
 pub const ORIGIN_KEY: &str = "origin";
 
 /// Settings that must never leave the Worker (API responses, theme data, exports).
-pub const INTERNAL_SETTING_KEYS: &[&str] =
-    &[SETUP_CODE_HASH_KEY, SETUP_CODE_EXPIRES_KEY, LAST_BACKUP_KEY];
+pub const INTERNAL_SETTING_KEYS: &[&str] = &[
+    SETUP_CODE_HASH_KEY,
+    SETUP_CODE_EXPIRES_KEY,
+    LAST_BACKUP_KEY,
+    OWNER_RESET_HASH_KEY,
+    OWNER_RESET_USER_KEY,
+    OWNER_RESET_EXPIRES_KEY,
+];
 
 /// Whether `key` is in [`INTERNAL_SETTING_KEYS`].
 #[must_use]
@@ -176,6 +189,21 @@ pub trait SetupStore {
     /// `SetupInvalid` and nothing changes. Two setups racing: at most one succeeds.
     /// Comparing in constant time is the caller's job. No version bump.
     async fn create_first_owner(&self, code_hash: &str, user: NewUser, now: i64) -> Result<UserId>;
+    /// Writes the owner reset code (`blog admin reset` writes the same rows over D1's REST
+    /// API): hash first, then user, then expiry, replacing any earlier code. No version bump.
+    async fn put_owner_reset(
+        &self,
+        code_hash: &str,
+        user: UserId,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<()>;
+    /// Single use: if the stored hash equals `code_hash` exactly, deletes the three reset
+    /// keys in one atomic write and returns the bound user when the code has not expired
+    /// (`expires_at > now`, both values exactly JSON integers). An expired code is deleted
+    /// too and gives `None`; a wrong code changes nothing and gives `None`; of two takes
+    /// racing, at most one gets the user. Comparing in constant time is the caller's job.
+    async fn take_owner_reset(&self, code_hash: &str, now: i64) -> Result<Option<UserId>>;
 }
 
 #[cfg(test)]
@@ -193,5 +221,14 @@ mod tests {
         let shown: Vec<String> = public_settings(all).into_iter().map(|(k, _)| k).collect();
         assert_eq!(shown, [SITE_ID_KEY, "title"]);
         assert!(is_internal_setting(LAST_BACKUP_KEY));
+        for k in [
+            OWNER_RESET_HASH_KEY,
+            OWNER_RESET_USER_KEY,
+            OWNER_RESET_EXPIRES_KEY,
+        ] {
+            assert!(is_internal_setting(k), "{k}");
+            let shown = public_settings(vec![(k.to_string(), "1".to_string())]);
+            assert!(shown.is_empty(), "{k}");
+        }
     }
 }

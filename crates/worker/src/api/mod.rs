@@ -356,6 +356,7 @@ async fn route(
         (Method::Get, "/api/auth/me") => auth::me(ctx, p).await,
         (Method::Patch, "/api/auth/me") => auth::update_me(ctx, p, body).await,
         (Method::Post, "/api/auth/setup") => auth::setup(ctx, p, body).await,
+        (Method::Post, "/api/auth/reset") => auth::redeem_reset(ctx, p, body).await,
         (Method::Post, "/api/auth/login") => auth::login(ctx, p, body).await,
         (Method::Post, "/api/auth/logout") => auth::logout(ctx, p).await,
         (Method::Post, "/api/auth/invite/accept") => auth::accept_invite(ctx, p, body).await,

@@ -347,6 +347,13 @@ test("setup and acceptInvite stretch with the new login", async () => {
   }
 });
 
+test("redeemReset stretches with the login typed and sends only code, login, password, token", async () => {
+  const api = fakeApi({ "GET /api/auth/params": PARAMS, "POST /api/auth/reset": { ok: true, value: { user: ME } } });
+  assert.equal((await flows.redeemReset(api, { code: "c0de", login: "Back", password: "secret pw" }, "tok")).ok, true);
+  const call = api.calls.find((c) => c.path === "/api/auth/reset");
+  assert.deepEqual(call.body, { code: "c0de", login: "Back", password: expected("back", "secret pw"), turnstile_token: "tok" });
+});
+
 test("signInPasskey: options, browser prompt, verify with the assertion fields", async () => {
   const seen = fakeCredentials({ get: fakeAssertion("u1") });
   const api = fakeApi({ "POST /api/auth/passkey/login/options": LOGIN_OPTS, "POST /api/auth/passkey/login/verify": { ok: true, value: { user: ME } } });

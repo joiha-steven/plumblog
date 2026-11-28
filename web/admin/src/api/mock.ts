@@ -80,6 +80,10 @@ async function auth<T>(params: URLSearchParams, method: Method, path: string, bo
   if (path === "/api/auth/setup") {
     return flag === "setup_invalid" ? fail("setup.invalid", 403) : signedIn();
   }
+  if (path === "/api/auth/reset") {
+    if (flag === "reset_taken") return fail("store.conflict", 409);
+    return flag === "setup_invalid" ? fail("setup.invalid", 403) : signedIn();
+  }
   if (path === "/api/auth/invite/accept") {
     return flag === "invite_invalid" ? fail("invite.invalid", 410) : signedIn();
   }

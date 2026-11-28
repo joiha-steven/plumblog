@@ -63,6 +63,7 @@ const typed = async (page, values) => {
 const answered = (page) => page.waitForFunction(() => document.querySelector(".auth-alert")?.textContent);
 const SIGN = { login: "lan", password: "correct horse battery" };
 const ACCOUNT = { login: "lan", slug: "lan", "display-name": "Lan Nguyen", password: "correct horse battery", "password-repeat": "correct horse battery" };
+const RESET = { login: "lan", password: "correct horse battery", "password-repeat": "correct horse battery" };
 const submitWith = (values, click = "button[type=submit]") => async (page) => {
   await typed(page, values);
   await page.click(click);
@@ -427,6 +428,9 @@ const STATES = [
   ["setup", "/admin/setup?code=7f3a-91c2"],
   ["setup-short", "/admin/setup?code=7f3a-91c2", null, submitWith({ ...ACCOUNT, password: "short", "password-repeat": "short" })],
   ["setup-invalid", "/admin/setup?auth=setup_invalid&code=0000-0000", null, submitWith(ACCOUNT)],
+  ["reset", "/admin/reset"],
+  ["reset-invalid", "/admin/reset?auth=setup_invalid", null, submitWith({ code: "0000-0000", ...RESET })],
+  ["reset-taken", "/admin/reset?auth=reset_taken", null, submitWith({ code: "7f3a-91c2", ...RESET, login: "a-very-long-login-that-someone-else-already-uses-here" })],
   ["invite", "/admin/invite?code=b2d8-44e0"],
   ["invite-invalid", "/admin/invite?auth=invite_invalid&code=0000-0000", null, submitWith(ACCOUNT)],
   ["account", "/admin/account", PASSKEYS],
@@ -525,7 +529,7 @@ try {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const english = ["posts", "posts-strip", "pages", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow"];
+        const english = ["posts", "posts-strip", "pages", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow"];
         const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
         const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);

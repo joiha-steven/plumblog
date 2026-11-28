@@ -1,4 +1,4 @@
-//! `/api/auth/*`: setup, password sign-in, sign-out, invites, own password and profile.
+//! `/api/auth/*`: setup, owner reset, password sign-in, sign-out, invites, own password and profile.
 //! Request bodies carry the browser-stretched password (`web/admin/src/auth/stretch.ts`), never the
 //! password itself.
 
@@ -8,8 +8,9 @@ use plumblog_auth::password::{
 use plumblog_auth::{Crypto, base64url, constant_time_eq, session};
 use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 use plumblog_store::{
-    InviteStore, NewSession, NewUser, ProfileUpdate, SETUP_CODE_HASH_KEY, SITE_ID_KEY,
-    SessionStore, SettingsStore, SetupStore, User, UserStore, setup_hash_json,
+    InviteStore, NewSession, NewUser, OWNER_RESET_HASH_KEY, OWNER_RESET_USER_KEY, ProfileUpdate,
+    SETUP_CODE_HASH_KEY, SITE_ID_KEY, SessionStore, SettingsStore, SetupStore, User, UserStore,
+    setup_hash_json,
 };
 use plumblog_syslog::EventKind;
 
@@ -232,6 +233,85 @@ pub async fn setup(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
     .await;
     let user = ctx.store.get_user(id).await?;
     sign_in(ctx, p, &user, 201, "setup").await
+}
+
+/// `POST /api/auth/reset`: an owner's new password (and maybe login), with the one-time code
+/// `blog admin reset` printed. Limited like setup codes. The code is taken (single use) before
+/// the write; a write that then fails leaves no code, and the owner runs the reset again.
+pub async fn redeem_reset(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
+    let f = Fields::parse(body, &["code", "login", "password", "turnstile_token"])?;
+    let stretched = password::parse_stretched(f.req("password")?)?;
+    let hash = code_hash(ctx, f.req("code")?).await?;
+    let login = f.req("login")?;
+    fields::login(login)?;
+    let keys = Keys::address(ctx).await?;
+    let attempt = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
+    let stored = ctx.store.get_setting(OWNER_RESET_HASH_KEY).await?;
+    let matches =
+        stored.is_some_and(|s| constant_time_eq(s.as_bytes(), setup_hash_json(&hash).as_bytes()));
+    let taken = if matches {
+        // A login another user holds would fail the write after the code is spent: refuse
+        // it first (the take below stays the check that counts).
+        if let Some(other) = ctx.store.find_user_by_login(login).await?
+            && ctx
+                .store
+                .get_setting(OWNER_RESET_USER_KEY)
+                .await?
+                .as_deref()
+                != Some(other.id.0.to_string().as_str())
+        {
+            return Err(Error::new(ErrorCode::Conflict, "login is taken").at("login"));
+        }
+        ctx.store.take_owner_reset(&hash, ctx.now).await?
+    } else {
+        None
+    };
+    let Some(id) = taken else {
+        code_failed(ctx, &attempt, "reset code").await?;
+        return Err(Error::new(
+            ErrorCode::SetupInvalid,
+            "reset code does not match, expired or was used",
+        ));
+    };
+    // The code was right: this attempt was not a guess.
+    limit::succeeded(ctx, &keys).await?;
+    let user = ctx.store.get_user(id).await?;
+    if user.role != Role::Owner || user.disabled_at.is_some() {
+        // Demoted or disabled since the reset: the code is spent and gives nothing.
+        return Err(Error::new(
+            ErrorCode::SetupInvalid,
+            format!(
+                "reset code for user {} who is no longer an active owner",
+                id.0
+            ),
+        ));
+    }
+    let profile = (login != user.login).then(|| ProfileUpdate {
+        login: login.to_owned(),
+        slug: user.slug.clone(),
+        display_name: user.display_name.clone(),
+        bio: user.bio.clone(),
+    });
+    let new_hash = Some(hash_password(&ctx.crypto, &stretched).await?);
+    let (session, cookie) = new_session(ctx, user.id).await?;
+    // The password write that ends every session of the user and creates this one.
+    ctx.store
+        .change_password(user.id, new_hash, profile, session, ctx.now)
+        .await?;
+    if let Some(old) = p.session_hash()
+        && let Err(e) = ctx.store.delete_session(old).await
+    {
+        worker::console_error!(
+            "[{}] reset: deleting the request's previous session failed: {e}",
+            ctx.request_id.as_str()
+        );
+    }
+    ctx.syslog(
+        ctx.event(EventKind::OwnerResetRedeemed, Some(user.id))
+            .subject("owner reset redeemed"),
+    )
+    .await;
+    Ok(user_reply(200, &ctx.store.get_user(user.id).await?).with_cookie(cookie))
 }
 
 /// `POST /api/auth/invite/accept`: a new account with the invite's role.

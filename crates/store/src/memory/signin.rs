@@ -2,7 +2,8 @@ use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 
 use super::{MemoryStore, conflict, count, invalid};
 use crate::{
-    ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewUser, Recorded,
+    ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewUser,
+    OWNER_RESET_EXPIRES_KEY, OWNER_RESET_HASH_KEY, OWNER_RESET_USER_KEY, Recorded,
     SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore, setup_hash_json,
 };
 
@@ -188,7 +189,8 @@ impl ChallengeStore for MemoryStore {
     }
 }
 
-/// The setup expiry if `value_json` is exactly a JSON integer (D1 checks the same text).
+/// A setup or reset value (expiry, user id) if `value_json` is exactly a JSON integer (D1
+/// checks the same text).
 fn parse_expiry(value_json: &str) -> Option<i64> {
     value_json
         .parse::<i64>()
@@ -249,6 +251,48 @@ impl SetupStore for MemoryStore {
             s.settings.remove(SETUP_CODE_HASH_KEY);
             s.settings.remove(SETUP_CODE_EXPIRES_KEY);
             Ok(id)
+        })
+    }
+
+    async fn put_owner_reset(
+        &self,
+        code_hash: &str,
+        user: UserId,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<()> {
+        self.write(|s| {
+            for (k, v) in [
+                (OWNER_RESET_HASH_KEY, setup_hash_json(code_hash)),
+                (OWNER_RESET_USER_KEY, user.0.to_string()),
+                (OWNER_RESET_EXPIRES_KEY, expires_at.to_string()),
+            ] {
+                s.settings.insert(k.to_owned(), (v, now));
+            }
+            Ok(())
+        })
+    }
+
+    async fn take_owner_reset(&self, code_hash: &str, now: i64) -> Result<Option<UserId>> {
+        self.write(|s| {
+            let code_ok = s
+                .settings
+                .get(OWNER_RESET_HASH_KEY)
+                .is_some_and(|(v, _)| *v == setup_hash_json(code_hash));
+            if !code_ok {
+                return Ok(None);
+            }
+            let read = |k: &str| s.settings.get(k).and_then(|(v, _)| parse_expiry(v));
+            let fresh = read(OWNER_RESET_EXPIRES_KEY).is_some_and(|at| at > now);
+            let user = read(OWNER_RESET_USER_KEY).map(UserId);
+            for k in [
+                OWNER_RESET_HASH_KEY,
+                OWNER_RESET_USER_KEY,
+                OWNER_RESET_EXPIRES_KEY,
+            ] {
+                s.settings.remove(k);
+            }
+            Ok(user.filter(|_| fresh))
         })
     }
 }

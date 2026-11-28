@@ -71,6 +71,7 @@ cases! {
     signin::setup_refuses_bad_codes,
     signin::setup_creates_first_owner_once,
     signin::site_id_is_set_once,
+    signin::owner_reset_is_single_use,
     signin::session_renewal,
     library::media_round_trip,
     library::media_paging,
