@@ -186,13 +186,14 @@ pub async fn handle(ctx: &Ctx, req: &mut Request) -> Result<Reply> {
     }
     // DNS rebinding: a page on another origin that reaches a local or proxied server.
     if let Some(got) = header("origin") {
-        let want = site::configured(ctx)
-            .await?
-            .map_or_else(|| ctx.request_origin.clone(), |s| s.origin);
-        if got != want {
+        let configured = site::configured(ctx).await?.map(|s| s.origin);
+        if !origin_allowed(&got, configured.as_deref(), &ctx.request_origin) {
             return Err(Error::new(
                 ErrorCode::Forbidden,
-                format!("mcp: Origin {got:?} is not {want:?}"),
+                format!(
+                    "mcp: Origin {got:?} refused (site origin {configured:?}, request {:?})",
+                    ctx.request_origin
+                ),
             ));
         }
     }
@@ -234,6 +235,31 @@ pub async fn handle(ctx: &Ctx, req: &mut Request) -> Result<Reply> {
             Ok(Reply::json(200, error_json(&id, &e)))
         }
     }
+}
+
+/// Whether a browser page on `got` may call MCP. With the site's origin set, only that one.
+/// Without it the request's own Host proves nothing: a rebound name (`evil.example` resolving
+/// to 127.0.0.1) sends `Origin` and `Host` that match. So only loopback pages (a local dev
+/// tool, any port) or the site's own `*.workers.dev` address, a name no one else can point
+/// at another server, are accepted.
+fn origin_allowed(got: &str, configured: Option<&str>, request_origin: &str) -> bool {
+    if let Some(want) = configured {
+        return got == want;
+    }
+    let Ok(url) = worker::Url::parse(got) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") || url.origin().ascii_serialization() != got {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let ip = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = ip.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    host == "localhost" || (got == request_origin && host.ends_with(".workers.dev"))
 }
 
 fn log(ctx: &Ctx, what: &str, e: &Error) {
@@ -416,12 +442,61 @@ fn read_resource(uri: &str) -> std::result::Result<String, RpcError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GUIDES, INVALID_PARAMS, INVALID_REQUEST, Message, PARSE_ERROR, negotiate, parse,
-        read_resource, resources,
+        GUIDES, INVALID_PARAMS, INVALID_REQUEST, Message, PARSE_ERROR, negotiate, origin_allowed,
+        parse, read_resource, resources,
     };
     use plumblog_auth::json::Value;
     use plumblog_model::ErrorCode;
     use plumblog_model::api::MCP_MAX_BODY;
+
+    #[test]
+    fn origin_rule() {
+        let site = Some("https://blog.example");
+        assert!(origin_allowed(
+            "https://blog.example",
+            site,
+            "http://127.0.0.1:8787"
+        ));
+        assert!(!origin_allowed(
+            "http://localhost:8787",
+            site,
+            "http://localhost:8787"
+        ));
+        // Unconfigured: loopback pages, any port.
+        for o in [
+            "http://localhost:3000",
+            "http://127.0.0.1:8787",
+            "http://127.9.0.1",
+            "http://[::1]:8787",
+        ] {
+            assert!(origin_allowed(o, None, "http://127.0.0.1:8787"), "{o}");
+        }
+        // DNS rebinding: Origin and Host agree, and still the page is not ours.
+        let rebound = "http://evil.example:8787";
+        assert!(!origin_allowed(rebound, None, rebound));
+        let dev = "https://blog.someone.workers.dev";
+        assert!(origin_allowed(dev, None, dev));
+        assert!(!origin_allowed(
+            "https://other.someone.workers.dev",
+            None,
+            dev
+        ));
+        assert!(!origin_allowed(
+            "https://workers.dev.evil.example",
+            None,
+            "https://workers.dev.evil.example"
+        ));
+        for o in [
+            "null",
+            "",
+            "file://",
+            "http://localhost/x",
+            "ftp://127.0.0.1",
+            "http://localhost.evil.example",
+        ] {
+            assert!(!origin_allowed(o, None, o), "{o}");
+        }
+    }
 
     #[test]
     fn negotiates_versions() {

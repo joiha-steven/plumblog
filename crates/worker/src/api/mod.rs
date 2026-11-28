@@ -401,7 +401,14 @@ pub async fn handle(mut req: Request, env: &Env) -> worker::Result<Response> {
     if reply.cookie.is_none() {
         reply.cookie = gate_cookie;
     }
-    respond(reply)
+    let unauthenticated = reply.status == 401;
+    let mut res = respond(reply)?;
+    // RFC 6750 names the scheme. No `resource_metadata`: there is no OAuth server, only a
+    // token the owner pastes into the client.
+    if is_mcp && unauthenticated {
+        res.headers_mut().set("www-authenticate", "Bearer")?;
+    }
+    Ok(res)
 }
 
 async fn route(

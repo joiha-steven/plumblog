@@ -18,7 +18,14 @@ const newSecret = () => `plb_${b64u(randomBytes(32))}`;
 // crates/model MCP_MAX_BODY: MAX_POST_BODY (160 KiB) + 4 KiB.
 const MCP_MAX_BODY = 164 * 1024;
 
-const TOK = { owner: newSecret(), read: newSecret(), writer: newSecret() };
+const TOK = {
+  owner: newSecret(),
+  read: newSecret(),
+  writer: newSecret(),
+  expired: newSecret(),
+  revoked: newSecret(),
+  disabled: newSecret(),
+};
 const SESSION = b64u(randomBytes(32));
 
 let w;
@@ -26,13 +33,17 @@ before(async () => {
   const seed = [
     `INSERT INTO users (id, login, slug, display_name, role, password_hash, disabled_at, created_at, updated_at) VALUES
       (1, 'olga', 'olga', 'Olga', 'owner', NULL, NULL, ${T}, ${T}),
-      (2, 'will', 'will', 'Will', 'writer', NULL, NULL, ${T}, ${T});`,
+      (2, 'will', 'will', 'Will', 'writer', NULL, NULL, ${T}, ${T}),
+      (3, 'dora', 'dora', 'Dora', 'writer', NULL, ${T}, ${T}, ${T});`,
     `INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES
       (${sq(sha256hex(SESSION))}, 1, ${T}, ${T + 29 * DAY});`,
     `INSERT INTO api_tokens (user_id, name, token_hash, scope, created_at, expires_at, revoked_at) VALUES
       (1, 'owner', ${sq(sha256hex(TOK.owner))}, 'owner', ${T}, NULL, NULL),
       (1, 'reader', ${sq(sha256hex(TOK.read))}, 'read', ${T}, NULL, NULL),
-      (2, 'writer', ${sq(sha256hex(TOK.writer))}, 'writer', ${T}, NULL, NULL);`,
+      (2, 'writer', ${sq(sha256hex(TOK.writer))}, 'writer', ${T}, NULL, NULL),
+      (2, 'expired', ${sq(sha256hex(TOK.expired))}, 'writer', ${T - 2 * DAY}, ${T - DAY}, NULL),
+      (2, 'revoked', ${sq(sha256hex(TOK.revoked))}, 'writer', ${T}, NULL, ${T}),
+      (3, 'disabled', ${sq(sha256hex(TOK.disabled))}, 'writer', ${T}, NULL, NULL);`,
   ].join("\n");
   w = await startWorker({ seedSql: seed });
 });
@@ -123,10 +134,34 @@ describe("mcp transport", () => {
     assertRefused(await rpc("ping", undefined, { bearer: newSecret() }), 401, -32600, "auth.unauthenticated");
   });
 
-  test("a foreign Origin is 403; the site's own is fine", async () => {
+  test("expired, revoked and disabled-user tokens: 401 with WWW-Authenticate", async () => {
+    for (const bearer of [TOK.expired, TOK.revoked, TOK.disabled, newSecret(), null]) {
+      const r = await rpc("tools/list", undefined, { bearer });
+      assertRefused(r, 401, -32600, "auth.unauthenticated");
+      assert.equal(r.headers.get("www-authenticate"), "Bearer");
+    }
+    // Only a 401 names the scheme.
+    const ok = await rpc("ping");
+    assert.equal(ok.headers.get("www-authenticate"), null);
+  });
+
+  test("a notification is not 202 without a valid token", async () => {
+    for (const bearer of [null, newSecret(), TOK.revoked]) {
+      const n = await post({ jsonrpc: "2.0", method: "notifications/initialized" }, { bearer });
+      assertRefused(n, 401, -32600, "auth.unauthenticated");
+    }
+  });
+
+  test("Origin with no site origin set: loopback pages only", async () => {
     assertRefused(await rpc("ping", undefined, { headers: { origin: "https://evil.example" } }), 403, -32600, "auth.forbidden");
-    const own = await rpc("ping", undefined, { headers: { origin: w.url } });
-    assert.equal(own.status, 200, own.text);
+    // A rebound name: the page's Origin is not loopback even though the socket is.
+    const port = new URL(w.url).port;
+    const rebound = await rpc("ping", undefined, { headers: { origin: `http://evil.example:${port}` } });
+    assertRefused(rebound, 403, -32600, "auth.forbidden");
+    for (const origin of [w.url, "http://localhost:3000"]) {
+      const r = await rpc("ping", undefined, { headers: { origin } });
+      assert.equal(r.status, 200, `${origin}: ${r.text}`);
+    }
   });
 
   test("size and shape refusals", async () => {
