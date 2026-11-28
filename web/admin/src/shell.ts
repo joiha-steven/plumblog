@@ -4,8 +4,9 @@ import type { Me } from "./api/client";
 import { PERMISSION_ROLES } from "./api/model.gen";
 import { h } from "./dom";
 import { type IconName, icon } from "./icons";
-import { lang, langs, setLang, t } from "./i18n";
+import { t } from "./i18n";
 import { HREF, type Screen } from "./router";
+import { langSwitch, seg } from "./seg";
 import { THEMES, type ThemeChoice, applyTheme, storedTheme } from "./theme";
 import { closePop, openPop } from "./ui";
 
@@ -70,30 +71,10 @@ export function shell(root: HTMLElement, screen: Screen, site: string, me: Me | 
   return main;
 }
 
-function seg<T extends string>(label: string, values: readonly T[], chosen: T, name: (v: T) => string, pick: (v: T) => void) {
-  const buttons = values.map((v) =>
-    h(
-      "button",
-      {
-        type: "button",
-        "aria-pressed": String(v === chosen),
-        onclick: () => {
-          for (const b of buttons) b.setAttribute("aria-pressed", String(b === buttons[values.indexOf(v)]));
-          pick(v);
-        },
-      },
-      name(v),
-    ),
-  );
-  return h("div", { class: "seg", role: "group", "aria-label": label }, ...buttons);
-}
-
 function meMenu(signOut: (() => void) | undefined): HTMLElement {
   const themeName = (v: ThemeChoice) =>
     // i18n: admin.theme.light admin.theme.dark admin.theme.system
     t(`admin.theme.${v}`);
-  // i18n: admin.lang.en admin.lang.vi
-  const langName = (l: string) => t(`admin.lang.${l}`);
   return h(
     "div",
     {},
@@ -102,7 +83,7 @@ function meMenu(signOut: (() => void) | undefined): HTMLElement {
     h("div", { class: "menu-head cap" }, t("admin.me.colors")),
     h("div", { class: "menu-pad" }, seg(t("admin.me.colors"), THEMES, storedTheme(), themeName, applyTheme)),
     h("div", { class: "menu-head cap" }, t("admin.me.language")),
-    h("div", { class: "menu-pad" }, seg(t("admin.me.language"), langs(), lang(), langName, (l) => l !== lang() && setLang(l))),
+    h("div", { class: "menu-pad" }, langSwitch()),
     signOut ? h("div", { class: "menu-sep" }) : null,
     signOut
       ? h("button", { class: "menu-item", type: "button", "data-act": "signout", onclick: () => (closePop(false), signOut()) }, t("admin.account.signout"))
