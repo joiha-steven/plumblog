@@ -90,7 +90,7 @@ function render(): void {
   if (me === undefined) main.append(loadingRows());
   else if (!me.ok) main.append(failed(me.error, () => void load()));
   else {
-    main.append(...screen(name, me.value, api).filter((c): c is HTMLElement => c instanceof HTMLElement));
+    main.append(...screen(name, me.value, api, route.section).filter((c): c is HTMLElement => c instanceof HTMLElement));
     if (navigated) main.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
   }
 }

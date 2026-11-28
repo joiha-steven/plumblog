@@ -78,8 +78,15 @@ pub trait MediaStore {
     /// Posts that use the item in their body (`SavePost::media_ids`) or as cover, any
     /// status including trashed; ascending, each once. Empty for unknown media.
     async fn media_usage(&self, id: MediaId) -> Result<Vec<PostId>>;
+    /// Sets `variants_json` to `new` only while it still is `expected`, the text the caller
+    /// read: R2 and D1 share no transaction, so two sizes added at once each read, append and
+    /// swap, and the loser re-reads instead of dropping the winner's size. `NotFound`;
+    /// `Conflict` when the row changed since. Bumps the content version (sizes are in
+    /// reader `srcset`s).
+    async fn replace_media_variants(&self, id: MediaId, expected: &str, new: &str) -> Result<()>;
     /// `NotFound`. `Conflict` while any post uses it (see `media_usage`); the detail lists
     /// those post ids and nothing is deleted. Never bumps the content version: unused media
-    /// is on no reader page.
-    async fn delete_media(&self, id: MediaId) -> Result<()>;
+    /// is on no reader page. Returns the deleted row's `variants_json` as it was at the
+    /// delete, so a size added after the caller's read still has its object removed.
+    async fn delete_media(&self, id: MediaId) -> Result<String>;
 }

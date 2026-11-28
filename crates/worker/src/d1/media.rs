@@ -1,9 +1,11 @@
+use std::collections::HashMap;
+
 use plumblog_model::{Error, ErrorCode, MediaId, PostId, Result, UserId};
 use plumblog_store::{Media, MediaQuery, MediaStore, NewMedia};
 
 use super::{
     D1Store, Failure, GUARD_RETRIES, Row, bound, bump_if, changed_concurrently, flag, guard, int,
-    not_found, opt_int, opt_text, probe_limit, text,
+    not_found, opt_int, opt_text, probe_limit, storage, text,
 };
 
 const MEDIA_COLS: &str =
@@ -156,7 +158,27 @@ impl MediaStore for D1Store {
             .collect()
     }
 
-    async fn delete_media(&self, id: MediaId) -> Result<()> {
+    async fn replace_media_variants(&self, id: MediaId, expected: &str, new: &str) -> Result<()> {
+        let unchanged = "EXISTS (SELECT 1 FROM media WHERE id = ?1 AND variants_json = ?2)";
+        let bump = bump_if(self, unchanged, &[bound(id.0), text(expected)])?;
+        let s = self.stmt(
+            "replace_media_variants",
+            "UPDATE media SET variants_json = ?3 WHERE id = ?1 AND variants_json = ?2",
+            &[bound(id.0), text(expected), text(new)],
+        )?;
+        let results = self.batch("replace_media_variants", vec![bump, s]).await?;
+        if Self::changes("replace_media_variants", &results[1])? == 0 {
+            // Gone, or changed since the caller read it: one read tells which.
+            self.get_media(id).await?;
+            return Err(Error::new(
+                ErrorCode::Conflict,
+                format!("media {} variants changed since read", id.0),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn delete_media(&self, id: MediaId) -> Result<String> {
         // The schema's RESTRICT FKs would refuse too, but only as a bare FK error; the guard
         // lets us name the posts. Unused media is on no reader page: no bump.
         for _ in 0..GUARD_RETRIES {
@@ -168,15 +190,18 @@ impl MediaStore for D1Store {
             )?;
             let del = self.stmt(
                 "delete_media",
-                "DELETE FROM media WHERE id = ?",
+                "DELETE FROM media WHERE id = ? RETURNING variants_json",
                 &[bound(id.0)],
             )?;
             match self.batch_guarded("delete_media", vec![unused, del]).await {
                 Ok(results) => {
-                    if Self::changes("delete_media", &results[1])? == 0 {
-                        return Err(not_found("media", id.0));
-                    }
-                    return Ok(());
+                    let rows: Vec<HashMap<String, String>> = results[1]
+                        .results()
+                        .map_err(|e| storage("delete_media", &e.to_string()))?;
+                    return match rows.into_iter().next() {
+                        Some(mut r) => Ok(r.remove("variants_json").unwrap_or_default()),
+                        None => Err(not_found("media", id.0)),
+                    };
                 }
                 Err(Failure::Guard) => {
                     let users = self.media_usage(id).await?;

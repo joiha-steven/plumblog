@@ -51,7 +51,25 @@ const mediaBox = (me: Me, api: Api): HTMLElement =>
     mountMedia(box, me, api);
   });
 
-export function screen(name: Screen, me: Me, api: Api): Child[] {
+/** Settings lives in its own chunk: the shell never carries it. */
+function settingsBox(me: Me, api: Api, section: string | undefined): HTMLElement {
+  const box = h("div", { class: "settings-box" });
+  const load = (): void => {
+    box.replaceChildren(loadingRows(3));
+    import("./settings").then(
+      (m) => m.mountSettings(box, api, { role: me.role, section, offline: () => !navigator.onLine }),
+      (e: unknown) => {
+        // A chunk that failed to load (offline, new deploy): say so instead of a blank screen.
+        console.error("admin: settings failed to load", e);
+        box.replaceChildren(failed({ code: "network", status: 0 }, load));
+      },
+    );
+  };
+  load();
+  return box;
+}
+
+export function screen(name: Screen, me: Me, api: Api, section?: string): Child[] {
   switch (name) {
     case "posts":
       return [head(t("admin.nav.posts"), newPost(true)), postsList(api, { user: me.id, newPost: () => newPost(false) })];
@@ -72,7 +90,7 @@ export function screen(name: Screen, me: Me, api: Api): Child[] {
           }),
         ];
       }
-      return [head(t("admin.nav.settings")), building()];
+      return [head(t("admin.nav.settings")), settingsBox(me, api, section)];
     case "account":
       return [head(t("admin.account.title")), accountBox(me, api)];
     case "new":
@@ -96,6 +114,3 @@ export function screen(name: Screen, me: Me, api: Api): Child[] {
       ];
   }
 }
-
-const building = (): HTMLElement =>
-  empty({ icon: "settings", title: t("admin.state.building_title"), hint: t("admin.state.building_hint"), full: true });
