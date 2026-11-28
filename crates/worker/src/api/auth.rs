@@ -377,6 +377,8 @@ pub async fn accept_invite(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Repl
     let attempt = limit::check(ctx, &keys, f.opt("turnstile_token")?).await?;
     let user = new_user(&f, ctx.now, hash_password(&ctx.crypto, &stretched).await?)?;
     let id = match ctx.store.accept_invite(&hash, user, ctx.now).await {
+        // Also an invite whose creator was since demoted or disabled: counted like a wrong
+        // code on purpose, so the answer never tells a guesser which codes once existed.
         Err(e) if e.code == ErrorCode::InviteInvalid => {
             code_failed(ctx, &attempt, "invite code").await?;
             return Err(e);

@@ -128,9 +128,8 @@ pub trait UserStore {
     async fn set_role(&self, by: &Admin, id: UserId, role: Role, now: i64) -> Result<()>;
     /// `Some(at)` disables the account and, in the same atomic write, deletes all its
     /// sessions and unused invites and revokes its unrevoked API tokens (`revoked_at = now`),
-    /// so re-enabling
-    /// (`None`) brings back neither. `UserNotFound`; `LastOwner` when disabling the last
-    /// active owner (nothing written). No version bump.
+    /// so re-enabling (`None`) brings back none of them. `UserNotFound`; `LastOwner` when
+    /// disabling the last active owner (nothing written). No version bump.
     async fn set_disabled(
         &self,
         by: &Admin,
