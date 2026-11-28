@@ -171,6 +171,17 @@ const DOCS_HTML =
   "<ul><li><p><span>Tr\u00e0 n\u00f3ng</span></p></li><li><p><span>\u00c1o m\u01b0a</span></p></li></ul>" +
   "<table><tr><td><p>Ng\u00e0y</p></td><td><p>N\u01a1i</p></td></tr><tr><td><p>1</p></td><td><p>Ch\u1ee3 s\u1edbm</p></td></tr></table></b>";
 
+// The media library: every picture has loaded before the shot; `openDetails(n)` clicks the nth tile.
+const MEDIA_GRID = ".media .tile";
+const mediaLoaded = (page) => page.waitForFunction(() => [...document.querySelectorAll(".media img")].every((i) => i.complete));
+const openDetails = (n) => async (page) => {
+  await mediaLoaded(page);
+  await page.locator(".tile").nth(n).click();
+  await page.waitForSelector(".insp-card .kv dd");
+  await mediaLoaded(page);
+  // Where it is used arrives with its own request (the mock answers in 150 ms).
+  await page.waitForTimeout(500);
+};
 const STATES = [
   ["posts", "/admin/", ROWS],
   ["posts-draft", "/admin/?status=draft", ROWS],
@@ -199,6 +210,33 @@ const STATES = [
   ],
   ["pages", "/admin/pages", ROWS],
   ["pages-empty", "/admin/pages?mock=empty", "main .empty"],
+  ["media", "/admin/media", MEDIA_GRID, mediaLoaded],
+  ["media-nodesc", "/admin/media?show=missing_alt", MEDIA_GRID, mediaLoaded],
+  ["media-unused", "/admin/media?show=unused", MEDIA_GRID, mediaLoaded],
+  ["media-empty", "/admin/media?mock=empty", ".media .empty"],
+  ["media-error", "/admin/media?media=error", ".media [role=alert]"],
+  ["media-details", "/admin/media", MEDIA_GRID, openDetails(0)],
+  ["media-details-nodesc", "/admin/media", MEDIA_GRID, openDetails(1)],
+  ["media-viewer", "/admin/media", MEDIA_GRID, async (page) => {
+    await mediaLoaded(page);
+    await page.locator(".peek").first().click();
+    await page.waitForSelector(".lb img");
+    await settle(page, ".lb");
+  }],
+  ["media-delete-confirm", "/admin/media", MEDIA_GRID, async (page) => {
+    await openDetails(1)(page);
+    await page.locator(".insp-card .btn.danger").click();
+    await page.waitForSelector(".confirm");
+    await settle(page, ".pop");
+  }],
+  ["media-in-use", "/admin/media", MEDIA_GRID, async (page) => {
+    await openDetails(0)(page);
+    await page.locator(".insp-card .btn.danger").click();
+    await page.waitForSelector(".confirm");
+    await page.locator(".confirm .btn.danger").click();
+    await page.waitForSelector(".del-note .chip");
+  }],
+  ["media-writer", "/admin/media?role=writer", MEDIA_GRID, openDetails(1)],
   ["empty", "/admin/?mock=empty", "main .empty"],
   ["loading", "/admin/?mock=loading"],
   ["error", "/admin/?mock=error", "main [role=alert]"],
@@ -530,7 +568,7 @@ try {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const english = ["posts", "posts-strip", "pages", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow"];
+        const english = ["posts", "posts-strip", "pages", "media", "media-details", "media-in-use", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow"];
         const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
         const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);

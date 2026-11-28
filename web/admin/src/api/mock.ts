@@ -15,6 +15,9 @@
  * taken slug; trash and restore work on the same list. `?create=slow` leaves every create
  * unanswered (the editor's "still saving" message).
  *
+ * The media library lives in memory too (fixtures/media.json; `?mock=empty` empties it, `?media=error`
+ * fails only its list; delete answers 403 for another's picture to a writer and 409 with the posts while in use).
+ *
  * Posts live in memory, from fixtures/posts.json, and reset on page load; the long post (id 1)
  * keeps its body in post-1.txt, so its `markdown` in the JSON is empty and is filled in here.
  * They answer as `/api/v1/posts` does: paged lists (opaque cursor), `post.not_found`, 409
@@ -24,9 +27,10 @@
  */
 
 import me from "../../fixtures/me.json";
+import mediaFixtures from "../../fixtures/media.json";
 import posts from "../../fixtures/posts.json";
 import longPost from "../../fixtures/post-1.txt";
-import { type Api, type JsonBody, type Me, type Media, type Method, type Result, fail } from "./client";
+import { type Api, type JsonBody, type Me, type Media, type MediaItem, type MediaPage, type Method, type Result, fail } from "./client";
 import type { Post, PostCreateInput, PostPage, PostUpdateInput, RenderWarning } from "./model.gen";
 
 /** Cloudflare's public always-pass Turnstile key: the real widget works in dev. */
@@ -141,6 +145,7 @@ export function mockApi(params: URLSearchParams): Api {
   let mediaId = 100;
   const role = params.get("role") === "writer" ? "writer" : "owner";
   const store: Post[] = (posts as Post[]).map((p) => structuredClone(p));
+  const library: MediaItem[] = (mediaFixtures as MediaItem[]).map((m) => structuredClone(m));
   const first = store.find((p) => p.id === 1);
   if (first) first.markdown = longPost;
   /** The first update fails once with the server's newer version when `?conflict=1`. */
@@ -289,6 +294,57 @@ export function mockApi(params: URLSearchParams): Api {
       p.version += 1;
       p.updated_at = Date.now();
       return { ok: true, value: structuredClone(p) as T };
+    },
+    // The library lives in memory like the posts; `usage` is kept beside each item and sent only with one.
+    async media(q) {
+      await settle();
+      // `?media=error`: the library fails while the rest of the admin works.
+      if (params.get("media") === "error") return fail("internal", 500);
+      const bad = down<MediaPage>();
+      if (bad) return bad;
+      // Keyset like the server: newest first, the cursor is the last item's "created_at.id".
+      let before: [number, number] | undefined;
+      if (q.cursor !== undefined) {
+        const [at, id] = atob(q.cursor).split(".").map(Number);
+        if (!Number.isInteger(at) || !Number.isInteger(id)) return fail("input.invalid", 400, { field: "cursor" });
+        before = [at as number, id as number];
+      }
+      const limit = q.limit ?? PAGE;
+      const all = (mode === "empty" ? [] : library)
+        .filter((m) => (!q.missing_alt || m.alt === "") && (!q.unused || !m.usage?.length))
+        .sort((a, b) => b.created_at - a.created_at || b.id - a.id)
+        .filter((m) => !before || m.created_at < before[0] || (m.created_at === before[0] && m.id < before[1]));
+      const page = all.slice(0, limit);
+      const last = page[page.length - 1];
+      const media = page.map(({ usage: _u, ...m }) => m);
+      return { ok: true, value: { media, next_cursor: all.length > limit && last ? btoa(`${last.created_at}.${last.id}`) : null } };
+    },
+    async mediaItem(id) {
+      await settle();
+      const bad = down<MediaItem>();
+      if (bad) return bad;
+      const m = library.find((x) => x.id === id);
+      return m ? { ok: true, value: structuredClone(m) } : fail("store.not_found", 404);
+    },
+    async setMediaAlt(id, alt) {
+      await settle();
+      const bad = down<MediaItem>();
+      if (bad) return bad;
+      const m = library.find((x) => x.id === id);
+      if (!m) return fail("store.not_found", 404);
+      m.alt = alt;
+      return { ok: true, value: structuredClone(m) };
+    },
+    async deleteMedia(id) {
+      await settle();
+      const bad = down<undefined>();
+      if (bad) return bad;
+      const m = library.find((x) => x.id === id);
+      if (!m) return fail("store.not_found", 404);
+      if (m.uploaded_by !== me.user.id && role !== "owner") return fail("auth.forbidden", 403);
+      if (m.usage?.length) return fail("store.conflict", 409, { posts: [...m.usage] });
+      library.splice(library.indexOf(m), 1);
+      return { ok: true, value: undefined };
     },
     // Sends nothing: progress over a second or two, then the picture from this browser.
     async upload(file, progress, signal) {
