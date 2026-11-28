@@ -48,4 +48,14 @@ export async function versionId(w) {
   assert.match(id ?? "", /^[0-9a-f-]{8,}$/i);
   return id;
 }
+/** Empty objects (no blob) uploaded at `uploaded` ms, as R2 would list them. */
+export const seed = (w, keys, uploaded = Date.now()) =>
+  r2(w, (db) => {
+    const st = db.prepare(
+      "INSERT INTO _mf_objects (key, blob_id, version, size, etag, uploaded, checksums, http_metadata, custom_metadata) VALUES (?, NULL, ?, 0, ?, ?, '{}', '{}', '{}')",
+    );
+    db.exec("BEGIN");
+    for (const k of [keys].flat()) st.run(k, `seed-${k}`, `etag-${k}`, uploaded);
+    db.exec("COMMIT");
+  });
 export const contentVersion = (w) => Number(w.query("SELECT content_version FROM site WHERE id = 1")[0].content_version);

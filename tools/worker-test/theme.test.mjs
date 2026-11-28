@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 
 import { ASSETS_DIR, startWorker } from "./harness.mjs";
 import { contentVersion, pageKeys, versionId } from "./r2.mjs";
+import { cron } from "./subreq.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const MINIMAL = join(ROOT, "themes/minimal");
@@ -281,8 +282,7 @@ describe("pushed theme", () => {
 
   test("the cron never stores a page the pushed theme fails to render (readers get the uncached default)", async () => {
     const w = workers.fragile;
-    const res = await fetch(`${w.url}/__scheduled?cron=${encodeURIComponent("*/10 * * * *")}`);
-    assert.equal(res.status, 200, await res.text());
+    await cron(w);
     const keys = pageKeys(w);
     const group = `pages/${await versionId(w)}/v${contentVersion(w)}-t${tagOf(FRAGILE)}`;
     assert.ok(keys.includes(`${group}/`), `home pre-rendered with the push: ${keys.join(", ")}`);
