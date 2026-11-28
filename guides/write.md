@@ -51,8 +51,8 @@ the body at `##`.
 Upload the original bytes: `POST /api/v1/media?name=heron.jpg&mime=image/jpeg&width=1600&height=1067&alt=...`
 with `curl --data-binary @heron.jpg`. `width` and `height` must be the file's own (read them,
 never guess); AVIF, WebP, JPEG, PNG or GIF, at most 20 MiB. Use the answer's `src` in Markdown.
-Always write `alt` (set it later with `PATCH /api/v1/media/{id}`). Media used by a post cannot
-be deleted; the 409 lists the posts.
+Always write `alt` (set it later with `PATCH /api/v1/media/{id}`). A writer deletes only their
+own uploads (the owner any); media used by a post cannot be deleted, the 409 lists the posts.
 
 ## Not built yet
 
