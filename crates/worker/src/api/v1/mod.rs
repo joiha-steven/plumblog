@@ -3,6 +3,7 @@
 //! route, checks its access and input against the table, then calls the handler. Session
 //! cookie or API token alike.
 
+mod export;
 mod input;
 mod media;
 mod post_body;
@@ -133,12 +134,12 @@ pub async fn dispatch(
         RouteId::PostTrash => posts::trash(ctx, p, &input, true).await,
         RouteId::PostRestore => posts::trash(ctx, p, &input, false).await,
         RouteId::PostDelete => posts::delete(ctx, p, &input).await,
-        RouteId::TagList => taxonomy::tag_list(ctx).await,
+        RouteId::TagList => taxonomy::tag_list(ctx, &input).await,
         RouteId::TagGet => taxonomy::tag_get(ctx, &input).await,
         RouteId::TagCreate => taxonomy::tag_create(ctx, p, &input).await,
         RouteId::TagUpdate => taxonomy::tag_update(ctx, p, &input).await,
         RouteId::TagDelete => taxonomy::tag_delete(ctx, p, &input).await,
-        RouteId::SeriesList => taxonomy::series_list(ctx).await,
+        RouteId::SeriesList => taxonomy::series_list(ctx, &input).await,
         RouteId::SeriesGet => taxonomy::series_get(ctx, &input).await,
         RouteId::SeriesCreate => taxonomy::series_create(ctx, p, &input).await,
         RouteId::SeriesUpdate => taxonomy::series_update(ctx, p, &input).await,
@@ -148,6 +149,9 @@ pub async fn dispatch(
         RouteId::MediaUpload => media::upload(ctx, p, &input, body).await,
         RouteId::MediaUpdate => media::update(ctx, p, &input).await,
         RouteId::MediaDelete => media::delete(ctx, p, &input).await,
+        RouteId::MediaOriginal => media::original(ctx, &input).await,
+        RouteId::CommentList => export::comments(ctx, &input).await,
+        RouteId::UserList => export::users(ctx, &input).await,
         RouteId::RedirectList => settings::redirects(ctx).await,
         RouteId::RedirectPut => settings::redirect_put(ctx, p, &input).await,
         RouteId::RedirectDelete => settings::redirect_delete(ctx, p, &input).await,

@@ -7,8 +7,10 @@ compatibility_date = "2026-11-01"
 
 # Theme fonts and JS as static assets, at the URL crates/worker pages::THEME_ASSETS_URL names.
 # scripts/worker-test copies themes/minimal/assets here before starting wrangler.
+# Bound as ASSETS, as `blog deploy` does: the Worker reads a pushed theme's theme.json through it.
 [assets]
 directory = "../target/worker-dev/assets"
+binding = "ASSETS"
 
 # Binding names are provisional until the store adapters land; keep them in sync with crates/worker.
 # One cron, every 10 minutes (crates/worker jobs): publish due posts, send due webhook

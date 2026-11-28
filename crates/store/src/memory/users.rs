@@ -1,11 +1,18 @@
+use std::ops::Bound;
+
 use plumblog_model::{Result, Role, UserId};
 
 use super::{MemoryStore, State, conflict, invalid, next_rowid, next_seq, user_not_found};
-use crate::{NewSession, NewUser, ProfileUpdate, Session, SiteStore, User, UserStore};
+use crate::{NewSession, NewUser, ProfileUpdate, Session, SiteStore, User, UserStore, page_len};
 
 impl State {
     /// `users.login` is `NOCASE` (ASCII only) and `users.slug` is unique.
-    fn check_user_unique(&self, login: &str, slug: &str, except: Option<UserId>) -> Result<()> {
+    pub(super) fn check_user_unique(
+        &self,
+        login: &str,
+        slug: &str,
+        except: Option<UserId>,
+    ) -> Result<()> {
         for u in self.users.values().filter(|u| Some(u.id) != except) {
             if u.login.eq_ignore_ascii_case(login) {
                 return Err(conflict(format!("login {login:?} is taken")));
@@ -33,7 +40,7 @@ impl State {
         self.users.get(&id).is_some_and(|u| u.disabled_at.is_none())
     }
 
-    fn user_mut(&mut self, id: UserId) -> Result<&mut User> {
+    pub(super) fn user_mut(&mut self, id: UserId) -> Result<&mut User> {
         self.users.get_mut(&id).ok_or_else(|| user_not_found(id))
     }
 
@@ -110,6 +117,21 @@ impl UserStore for MemoryStore {
         Ok(self.read(|s| s.users.values().cloned().collect()))
     }
 
+    async fn users_by_id(&self, after: Option<UserId>, limit: u32) -> Result<(Vec<User>, bool)> {
+        let keep = page_len(limit);
+        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut rows: Vec<User> = self.read(|s| {
+            s.users
+                .range((from, Bound::Unbounded))
+                .take(keep + 1)
+                .map(|(_, u)| u.clone())
+                .collect()
+        });
+        let more = rows.len() > keep;
+        rows.truncate(keep);
+        Ok((rows, more))
+    }
+
     async fn update_profile(&self, id: UserId, profile: ProfileUpdate, now: i64) -> Result<()> {
         self.write(|s| {
             s.user_mut(id)?;
@@ -143,6 +165,8 @@ impl UserStore for MemoryStore {
         now: i64,
     ) -> Result<i64> {
         self.write(|s| {
+            s.user_mut(id)?;
+            s.require_proof(id, &session.proof, session.created_at)?;
             let has_password = s.user_mut(id)?.password_hash.is_some();
             if hash.is_none() && has_password {
                 return Err(conflict(

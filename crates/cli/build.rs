@@ -5,6 +5,7 @@ use std::{env, fmt::Write, fs, path::PathBuf};
 
 fn main() {
     release_env();
+    embed_theme();
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../guides");
     println!("cargo:rerun-if-changed={}", root.display());
 
@@ -134,4 +135,68 @@ fn release_env() {
     // include_str! tracks the file itself; this also reruns when it is created.
     let key = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../release");
     println!("cargo:rerun-if-changed={}", key.display());
+}
+
+/// The default theme (every file, fonts included: `blog theme new` copies it for users, who
+/// get no repo) and the sample posts `blog theme dev` and `blog theme check` render, as
+/// `(path, bytes)` and `(file name, text)`. The Worker embeds the same files for its own use.
+fn embed_theme() {
+    let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../..");
+    let theme = root.join("themes/minimal");
+    let sample = root.join("crates/worker/sample");
+    for dir in [&theme, &sample] {
+        println!("cargo:rerun-if-changed={}", dir.display());
+    }
+    let mut out = String::from("pub const THEME_FILES: &[(&str, &[u8])] = &[\n");
+    let mut files = Vec::new();
+    walk(&theme, &mut files);
+    files.sort();
+    for p in &files {
+        let rel = p
+            .strip_prefix(&theme)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let abs = p.canonicalize().unwrap();
+        writeln!(
+            out,
+            "    ({rel:?}, include_bytes!({:?})),",
+            abs.to_str().unwrap()
+        )
+        .unwrap();
+    }
+    out.push_str("];\npub const SAMPLE_FILES: &[(&str, &str)] = &[\n");
+    let mut files = Vec::new();
+    walk(&sample, &mut files);
+    files.sort();
+    for p in files
+        .iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "txt"))
+    {
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        let abs = p.canonicalize().unwrap();
+        writeln!(
+            out,
+            "    ({name:?}, include_str!({:?})),",
+            abs.to_str().unwrap()
+        )
+        .unwrap();
+    }
+    out.push_str("];\n");
+    fs::write(
+        PathBuf::from(env::var("OUT_DIR").unwrap()).join("theme_embed.rs"),
+        out,
+    )
+    .unwrap();
+}
+
+fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    for e in fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_dir() {
+            walk(&p, out);
+        } else {
+            out.push(p);
+        }
+    }
 }

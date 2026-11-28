@@ -5,7 +5,9 @@ use plumblog_model::{ErrorCode, MediaId, PostId, SeriesId, TagId};
 use super::kit::{
     Check, Got, T0, asc, eq, fails, media, ok, post, save, that, update, user, version, version_is,
 };
-use crate::{MediaQuery, NewSeries, PostOrder, PostQuery, PostStatus, Series, Store, Tag};
+use crate::{
+    MAX_PAGE, MediaQuery, NewSeries, PostOrder, PostQuery, PostStatus, Series, Store, Tag,
+};
 
 fn page(before: Option<(i64, MediaId)>, missing_alt_only: bool, limit: u32) -> MediaQuery {
     MediaQuery {
@@ -14,6 +16,105 @@ fn page(before: Option<(i64, MediaId)>, missing_alt_only: bool, limit: u32) -> M
         unused_only: false,
         limit,
     }
+}
+
+/// `tags_page` / `series_page`: slug order (not name or insertion order), 101 rows over two
+/// pages at the cap with the probe row intact, a cursor past the end, a limit of 0, and the
+/// by-id reads.
+pub async fn taxonomy_paging<S: Store>(db: &S) -> Check {
+    let (empty, more) = ok("tags_page empty", db.tags_page(None, 10).await)?;
+    eq!("empty page", (empty.len(), more), (0, false))?;
+    // Names run against slugs, and insertion runs against both.
+    let mut slugs = Vec::new();
+    for i in (0..101).rev() {
+        let slug = format!("t{i:03}");
+        ok(
+            "ensure_tag",
+            db.ensure_tag(&slug, &format!("N{}", 100 - i)).await,
+        )?;
+        ok(
+            "create_series",
+            db.create_series(NewSeries {
+                slug: slug.clone(),
+                title: format!("N{}", 100 - i),
+                description: String::new(),
+            })
+            .await,
+        )?;
+        slugs.push(slug);
+    }
+    slugs.sort();
+    let first = slugs[..100].to_vec();
+
+    let (p1, more) = ok("tags_page 1", db.tags_page(None, MAX_PAGE).await)?;
+    eq!(
+        "tags page 1 slugs",
+        p1.iter().map(|t| t.slug.clone()).collect::<Vec<_>>(),
+        first.clone()
+    )?;
+    that("tags page 1 has more", more)?;
+    let (p2, more) = ok(
+        "tags_page 2",
+        db.tags_page(Some(&p1[99].slug), MAX_PAGE).await,
+    )?;
+    eq!("tags page 2", (p2.len(), more), (1, false))?;
+    eq!("tags page 2 slug", p2[0].slug.as_str(), slugs[100].as_str())?;
+    let (exact, more) = ok("tags_page exact", db.tags_page(Some("t000"), 100).await)?;
+    eq!(
+        "a page that ends the list has no more",
+        (exact.len(), more),
+        (100, false)
+    )?;
+    // A cursor is a slug value, not a row: deleting the last row of a page between two
+    // requests must not stop the walk.
+    ok("delete_tag", db.delete_tag(p1[99].id).await)?;
+    let (after_gone, more) = ok(
+        "tags_page after a deleted cursor",
+        db.tags_page(Some(&p1[99].slug), MAX_PAGE).await,
+    )?;
+    eq!(
+        "walk continues past a deleted cursor",
+        (after_gone.iter().map(|t| t.id).collect::<Vec<_>>(), more),
+        (vec![p2[0].id], false)
+    )?;
+    let (none, more) = ok("tags_page past", db.tags_page(Some("t100"), 5).await)?;
+    eq!("past the end", (none.len(), more), (0, false))?;
+    let (zero, _) = ok("tags_page 0", db.tags_page(None, 0).await)?;
+    eq!("limit 0 returns nothing", zero.len(), 0)?;
+
+    let (s1, more) = ok("series_page 1", db.series_page(None, MAX_PAGE).await)?;
+    eq!(
+        "series page 1 slugs",
+        s1.iter().map(|t| t.slug.clone()).collect::<Vec<_>>(),
+        first
+    )?;
+    that("series page 1 has more", more)?;
+    let (s2, more) = ok(
+        "series_page 2",
+        db.series_page(Some(&s1[99].slug), MAX_PAGE).await,
+    )?;
+    eq!("series page 2", (s2.len(), more), (1, false))?;
+
+    eq!(
+        "get_tag",
+        ok("get_tag", db.get_tag(p2[0].id).await)?,
+        p2[0].clone()
+    )?;
+    eq!(
+        "get_series",
+        ok("get_series", db.get_series(s2[0].id).await)?,
+        s2[0].clone()
+    )?;
+    fails(
+        "get_tag missing",
+        db.get_tag(TagId(999_999)).await,
+        ErrorCode::NotFound,
+    )?;
+    fails(
+        "get_series missing",
+        db.get_series(SeriesId(999_999)).await,
+        ErrorCode::NotFound,
+    )
 }
 
 pub async fn media_round_trip<S: Store>(db: &S) -> Check {

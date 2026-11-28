@@ -6,6 +6,9 @@ title_fallback = "Trang chưa đặt tên"
 page_failed = "Trang này tạm thời chưa hiện được. Bạn thử lại sau một phút nhé."
 page_not_found = "Trang này không tồn tại."
 
+[error.theme]
+unavailable = "Giao diện đã đẩy lên của trang không tải được, nên chưa kiểm được các thiết lập của nó. Hãy đẩy lại giao diện rồi đổi thiết lập."
+
 [error.input]
 too_complex = "Yêu cầu này chứa quá nhiều mục. Bạn gửi ít hơn mỗi lần nhé."
 
@@ -194,8 +197,16 @@ domain_pending = "Lưu ý: {origin} chưa chạy phiên bản mới ({seen}). T�
 seen_no_reply = "{path} không trả lời ({detail})"
 seen_status = "{path} trả lời HTTP {status}"
 seen_version = "/healthz trả lời bằng phiên bản {got}, không phải {want}"
+seen_theme_default = "/ được dựng bằng giao diện mặc định, không phải giao diện đã đẩy lên {want} (gói cũ, hoặc tệp giao diện không được phục vụ)"
+seen_theme_still = "/ vẫn được dựng bằng giao diện đã đẩy lên {got}, không phải giao diện mặc định"
+seen_theme_other = "/ được dựng bằng giao diện {got}, không phải {want}"
 log_failed = "Lưu ý: không ghi được lần đưa lên này vào nhật ký hệ thống của trang: {error}"
 done = "Đã đưa phiên bản {version} lên {origin}."
+theme_default_help = "Chuyển về giao diện mặc định: không mang giao diện đã đẩy lên sang phiên bản mới"
+theme_dropped = "Bỏ giao diện đã đẩy lên {name} (--theme-default): phiên bản mới dùng giao diện mặc định."
+theme_local = "Giữ giao diện đã đẩy lên {name} ({hash}) từ bản sao trong thư mục này."
+theme_local_unusable = "Không dùng được bản sao của giao diện {name} trong thư mục này ({reason}); lấy lại từ trang."
+theme_fetched = "Giữ giao diện đã đẩy lên {name} ({hash}), lấy lại từ trang và đã kiểm tra."
 
 [cli.release]
 downloading = "Đang tải gói phát hành: {url}"
@@ -272,6 +283,27 @@ reason_variants_unreadable = "variants_json không phải JSON hợp lệ ({deta
 reason_variants_not_list = "variants_json không phải là một danh sách"
 reason_variant_no_key = "có một biến thể không có key"
 reason_variant_no_bytes = "có một biến thể không ghi kích thước (bytes)"
+
+[cli.admin]
+about = "Công cụ cho tài khoản chủ, chỉ cần mã Cloudflare"
+reset_about = "Lấy lại quyền chủ khi mất mật khẩu và passkey: đăng xuất chủ đó ở mọi nơi, gỡ mật khẩu, passkey và mã API của họ, rồi in một mã dùng một lần để đặt mật khẩu mới"
+login_help = "Chủ cần đặt lại (bắt buộc khi trang có nhiều chủ)"
+login_value = "TÊN_ĐĂNG_NHẬP"
+yes_help = "Xác nhận: chủ đó bị đăng xuất và mất mọi mật khẩu, passkey và mã API"
+keep_tokens_help = "Giữ các mã API của chủ này (chỉ khi bạn chắc không ai khác đã tạo thêm)"
+plan_owner = "Chủ sẽ được đặt lại: {login} trên {site}."
+plan_revoke = "Mật khẩu của họ thôi dùng được, {passkeys} passkey bị gỡ và {sessions} phiên đăng nhập kết thúc, ở mọi nơi."
+plan_tokens = "{tokens} mã API của họ bị thu hồi (giữ lại bằng --keep-tokens)."
+plan_keep_tokens = "{tokens} mã API của họ vẫn dùng được (--keep-tokens)."
+plan_invites = "{invites} lời mời chưa dùng do họ tạo bị xoá, dù với vai trò nào."
+plan_code = "Sau đó một mã dùng một lần hiện ở đây, có hiệu lực {minutes} phút, để đặt mật khẩu mới."
+others_none = "Không có chủ nào khác đang hoạt động."
+others_head = "Các chủ khác đang hoạt động (đặt lại không đụng tới họ; hãy khoá trong trang quản trị người bạn không biết):"
+others_item = "  {login} ({role}), tạo lúc {created}"
+done = "Xong: {login} đã bị đăng xuất ở mọi nơi và không còn mật khẩu hay passkey cho tới khi dùng mã."
+tokens_kept = "Các mã API được giữ lại (--keep-tokens): hãy thu hồi trong trang quản trị những mã bạn không nhận ra."
+code = "Mã đặt lại (chỉ hiện lúc này, có hiệu lực {minutes} phút): {code}"
+code_next = "Mở {url}, nhập mã, tên đăng nhập và mật khẩu mới, rồi thêm lại passkey. blog không giữ mã: chạy lại blog admin reset sẽ tạo mã mới và mã cũ hết dùng được. Sau đó, trong trang quản trị, đổi khoá bí mật của webhook và mọi khoá bí mật khác hiện ở đó, rồi soát lại người dùng và lời mời."
 
 [cli.restore]
 about = "Thay toàn bộ cơ sở dữ liệu bằng một bản sao lưu .sql (do blog backup hay blog deploy tạo), kể cả bản cũ hơn 7 ngày"
@@ -425,6 +457,12 @@ backup_row_invalid = "Dòng media {id}: {reason}. Các tệp của dòng này kh
 backup_media_unwritable = "Không ghi được {path}: {reason}. Hãy sửa rồi chạy lại blog backup: lệnh sẽ làm tiếp từ chỗ dừng."
 backup_incomplete = "Bản sao lưu chưa đầy đủ: {failed} tệp bị lỗi và {missing} tệp bị thiếu (đã chép {objects} tệp). Các dòng phía trên nói rõ tệp nào; chạy lại blog backup để thử lại."
 backup_missing = "Bản sao lưu chưa đầy đủ: {missing} tệp mà cơ sở dữ liệu ghi nhận không có trong R2 ({list}), {failed} tệp bị lỗi, đã chép {objects} tệp. Nếu tệp nào cũng thiếu thì nhiều khả năng quyền R2 của token, bucket hoặc đường dẫn tệp bị sai, chứ không phải tệp đã mất. Hãy kiểm tra lại rồi chạy lại blog backup."
+admin_reset_foreign = "Chưa có gì thay đổi. Worker {worker} hoặc cơ sở dữ liệu của nó không mang dấu của thư mục này (biến {binding} và mã trang mà blog setup đã ghi), nên có thể đó là trang của người khác. Hãy chạy `blog setup` trong thư mục này một lần (lệnh không đổi gì đã có, chỉ ghi lại các dấu), rồi thử lại."
+admin_reset_unmarked = "Chưa có gì thay đổi. Worker {worker} chưa có biến {binding} (được dựng bằng bản blog cũ, hoặc đã quay về một bản trước khi có biến này), nên thư mục này chưa chứng minh được trang là của nó. Hãy chạy `blog setup` trong thư mục này (lệnh ghi lại dấu), rồi `blog deploy` (chỉ lần deploy mới đưa dấu lên Worker), rồi thử lại."
+admin_reset_unconfirmed = "Chưa có gì thay đổi. Nếu đúng ý bạn, chạy lại đúng lệnh đó kèm --yes."
+admin_reset_ambiguous = "Chưa có gì thay đổi. Trang có nhiều chủ ({list}): chọn người cần đặt lại bằng --login."
+admin_reset_not_owner = "Chưa có gì thay đổi. {login} không phải chủ đang hoạt động của trang này. Các chủ: {list}."
+admin_reset_no_owner = "Chưa có gì thay đổi. Trang chưa có chủ: hãy chạy `blog setup` để lấy mã thiết lập."
 restore_unconfirmed = "Chưa có gì thay đổi. Khôi phục {path} sẽ thay toàn bộ cơ sở dữ liệu như liệt kê phía trên, và huỷ các truy vấn đang chạy. Nếu đúng ý bạn, chạy lại đúng lệnh đó kèm --yes."
 restore_unreadable = "Không đọc được {path}: {reason}. Chưa có gì thay đổi."
 restore_not_a_backup = "{path} không phải bản sao lưu cơ sở dữ liệu do blog tạo: {reason}. Chưa có gì thay đổi."
@@ -469,6 +507,11 @@ update_downgrade = "Bản phát hành {target} cũ hơn blog này ({current}), n
 update_version_invalid = "\"{value}\" không phải số phiên bản. Hãy viết dạng vX.Y.Z, ví dụ v0.2.0."
 update_no_build = "Bản phát hành {tag} không có blog cho máy này ({target}). Chưa có gì thay đổi. Xem {page}."
 update_replace_failed = "Không thay được {path}: {reason}. Blog hiện tại vẫn chạy và không bị đổi. Hãy chuyển blog sang thư mục bạn có quyền ghi, hoặc chạy blog update với quyền sửa file đó."
+theme_unrecoverable = "Trang đang dùng giao diện đã đẩy lên {name}, nhưng blog không lấy lại được các tệp của nó ({reason}). Mỗi lần đưa lên đều tải lại toàn bộ tệp tĩnh, nên lần này sẽ âm thầm làm mất giao diện. Hãy đẩy lại thư mục giao diện (`blog theme push <thư-mục>`), hoặc đưa lên với --theme-default nếu bạn muốn chuyển về giao diện mặc định."
+theme_invalid = "Không đẩy giao diện lên được: {path}: {reason}."
+theme_push_pending = "Gói này có các bản cập nhật cơ sở dữ liệu mà trang chưa chạy ({list}). Đẩy giao diện không bao giờ cập nhật cơ sở dữ liệu: hãy chạy `blog deploy` trước, rồi đẩy giao diện."
+theme_rollback_unknown = "Phiên bản {version} không do một lần đẩy giao diện được ghi trong thư mục này tạo ra. Các phiên bản gần đây có giao diện: {list}. Xem `blog theme list`."
+theme_rollback_no_record = "Trong {path} không có lần đẩy giao diện nào, nên không có giao diện nào để quay lại. `blog rollback` quay về phiên bản trước lần đưa lên gần nhất."
 
 [cli.reason]
 # Lý do một file phát hành hay chữ ký bị từ chối: phần {reason} của release.archive_invalid,
@@ -532,6 +575,180 @@ sig_global_not_base64 = "phần thứ hai của chữ ký không đọc được
 sig_global_wrong_length = "phần thứ hai của chữ ký có độ dài sai"
 sig_unknown_algorithm = "chữ ký dùng cách chưa biết"
 
+[cli.theme]
+about = "Tạo, kiểm tra và đưa giao diện lên (new, dev, check, push, rollback, list)"
+dir_value = "THƯ MỤC"
+name_value = "TÊN"
+port_value = "CỔNG"
+dir_unreadable = "Không đọc hoặc ghi được {dir}: {reason}."
+dir_not_empty = "{dir} đã có và không trống. Chọn thư mục mới, hoặc dọn trống thư mục này trước."
+dir_tracked = "{dir} nằm trong mã nguồn plumblog, nơi mọi tệp đều được git theo dõi. Hãy tạo giao diện trong thư mục riêng của bạn."
+name_invalid = "\"{name}\" không phải tên giao diện. Dùng chữ thường, chữ số và dấu -, bắt đầu bằng chữ cái (thêm --name nếu tên thư mục không hợp lệ)."
+
+[cli.theme.new]
+about = "Bắt đầu một giao diện: chép giao diện mặc định vào thư mục mới"
+dir_help = "Thư mục mới cho giao diện (chưa có, hoặc đang trống)"
+name_help = "Tên giao diện (mặc định: tên thư mục)"
+done = "Đã tạo giao diện {name} trong {dir} ({count} tệp). Tiếp theo: `blog theme dev {dir}` để xem thử, `blog theme check {dir}` trước khi dùng."
+
+[cli.theme.check]
+about = "Kiểm tra thư mục giao diện như blog sẽ nạp nó: mẫu trang, màu, độ tương phản, dung lượng, tệp không được công khai"
+dir_help = "Thư mục giao diện"
+
+[cli.theme.dev]
+about = "Xem thử giao diện ngay trên máy với bài mẫu; sửa xong chỉ cần tải lại trang"
+dir_help = "Thư mục giao diện"
+port_help = "Cổng để lắng nghe (mặc định 4321); chỉ máy này kết nối được"
+listening = "Đang xem thử {dir} tại {url} (Ctrl-C để dừng). Sửa giao diện rồi tải lại trang."
+bind_failed = "Không lắng nghe được cổng {port}: {reason}. Thử cổng khác bằng --port."
+serve_failed = "Bản xem thử đã dừng: {reason}."
+problem_title = "Giao diện này có lỗi"
+problem_hint = "Sửa các lỗi bên dưới rồi tải lại trang. Đây cũng là những gì `blog theme check` báo."
+
+[cli.theme.push]
+about = "Đưa giao diện lên trang: kiểm tra, rồi đưa lên một phiên bản mới mang giao diện đó (tự quay lại nếu kiểm tra trang không đạt)"
+dir_help = "Thư mục giao diện (được kiểm tra trước; có lỗi là dừng)"
+default_help = "Quay về giao diện mặc định"
+pushing = "Đang đẩy giao diện {name} {version} ({hash})."
+default = "Đang chuyển về giao diện mặc định."
+
+[cli.theme.rollback]
+about = "Quay về phiên bản trước lần đẩy giao diện gần nhất, hoặc về một phiên bản do lần đẩy giao diện trước đó tạo ra"
+to_help = "Một phiên bản do lần đẩy giao diện trước đó tạo ra (xem `blog theme list`)"
+active = "Trang giờ dùng giao diện {name} {version} ({hash})."
+default = "Trang giờ dùng giao diện mặc định."
+
+[cli.theme.list]
+about = "Liệt kê các phiên bản gần đây và giao diện của chúng, mới nhất trước"
+push = "{at}  {version}  {outcome}  đẩy giao diện: {theme}"
+deploy = "{at}  {version}  {outcome}  đưa lên: {theme}"
+default = "giao diện mặc định"
+empty = "Thư mục này chưa ghi lần đưa lên nào."
+
+[cli.theme.why]
+hash_mismatch = "theme.json ghi mã băm {stated}, nhưng nội dung của nó cho ra {got}"
+asset_missing = "thiếu {path}"
+asset_changed = "{path} không khớp với SHA-256 ghi trong theme.json"
+too_large = "lớn hơn {max} byte"
+not_utf8 = "không phải văn bản UTF-8"
+bad_name = "tên \"{name}\" trong theme.toml không phải tên giao diện hợp lệ (chữ thường, chữ số, _ và -, bắt đầu bằng một chữ cái)"
+copy_holds_other = "{path} đang chứa một giao diện khác ({hash})"
+served_not_utf8 = "{path} trên trang không phải văn bản UTF-8"
+served_other = "trang đang phục vụ giao diện {served}, nhưng bản ghi đưa lên ghi {recorded}"
+document_too_large = "theme.json sẽ nặng {size} byte; giới hạn là {max} (Worker sẽ không tải nó)"
+
+[cli.plugin]
+about = "Kiểm tra plugin (check)"
+dir_value = "THƯ MỤC"
+
+[cli.plugin.check]
+about = "Kiểm tra thư mục plugin như blog sẽ nạp nó, và xem nó có hiển thị được trên giao diện mặc định"
+dir_help = "Thư mục plugin (tên thư mục là tên plugin)"
+
+[cli.finding]
+error = "lỗi"
+warning = "cảnh báo"
+fix = "Cách sửa:"
+summary_ok = "Không thấy vấn đề nào trong {dir}."
+summary_warnings = "Không có lỗi trong {dir}; cảnh báo: {warnings}."
+summary_errors = "Vấn đề trong {dir}: lỗi {errors}, cảnh báo {warnings}."
+
+[cli.finding.theme_load]
+what = "Giao diện không nạp được: {detail}"
+fix = "Sửa chỗ thông báo nêu; `blog theme check` nạp giao diện đúng như blog làm."
+
+[cli.finding.theme_template]
+what = "Lỗi mẫu trang: {detail}"
+fix = "Sửa mẫu trang ở dòng đó rồi chạy kiểm tra lại."
+
+[cli.finding.theme_dark_token]
+what = "Màu `{name}` có giá trị {have} nhưng thiếu giá trị {missing}."
+fix = "Thêm `{name}` vào [colors.{missing}] trong theme.toml; hai chế độ phải có cùng các màu."
+
+[cli.finding.theme_contrast]
+what = "Độ tương phản thấp ở chế độ {mode}: `{fg}` trên `{bg}` chỉ {ratio}:1, dưới {need}:1."
+fix = "Đổi `{fg}` hoặc `{bg}` trong [colors.{mode}] (hoặc tuỳ chọn ghi đè nó) cho tới khi đạt ít nhất {need}:1."
+
+[cli.finding.theme_css_size]
+what = "Tệp CSS nặng {size} KB sau khi nén; giới hạn là {max} KB."
+fix = "Bỏ các quy tắc không dùng, hoặc chuyển phần ít người cần sang tệp kiểu do một tuỳ chọn chọn."
+
+[cli.finding.theme_js_size]
+what = "Mã JS của giao diện nặng {size} KB sau khi nén; giới hạn là {max} KB."
+fix = "Cắt bớt mã, hoặc chỉ nạp phần ít dùng ở trang cần bằng asset()."
+
+[cli.finding.theme_hard_color]
+what = "Màu cố định {text} trong CSS; CSS chỉ dùng màu khai báo trong theme.toml."
+fix = "Khai báo màu trong [colors.light] và [colors.dark], rồi dùng var(--c-<tên>) ở đây."
+
+[cli.finding.theme_locale_key]
+what = "Khoá chữ `{key}` không có nội dung ở ngôn ngữ {lang}, cũng không có bản tiếng Anh."
+fix = "Thêm khoá vào locales/en.toml và các tệp ngôn ngữ khác của giao diện."
+
+[cli.finding.theme_page_problem]
+what = "Một trang bị thiếu phần: {detail}"
+fix = "Sửa phần mà thông báo nêu."
+
+[cli.finding.theme_asset_missing]
+what = "Dùng {asset}, nhưng tệp này không có trong thư mục assets/ của giao diện; trang thật sẽ trả 404 cho nó."
+fix = "Thêm tệp vào assets/, hoặc thôi dùng nó. Mẫu nào giao diện không có thì lấy từ giao diện mặc định: chép mẫu đó vào templates/ để sửa."
+
+[cli.finding.file_secret_name]
+what = "Tệp này trông như bí mật ({why}), mà mọi tệp trong giao diện hay plugin đều công khai."
+fix = "Xoá nó khỏi thư mục. Nếu bên trong là bí mật thật, coi như đã lộ và đổi cái mới."
+
+[cli.finding.file_secret_content]
+what = "Chỗ này trông như {name}, mà mọi tệp trong giao diện hay plugin đều công khai."
+fix = "Xoá khỏi tệp và thu hồi ở nơi đã cấp: coi như đã lộ."
+
+[cli.finding.file_stray]
+what = "Tệp này nằm ngoài cấu trúc cho phép ({layout})."
+fix = "Chuyển vào một trong các mục đó, hoặc xoá."
+
+[cli.finding.file_symlink]
+what = "Liên kết tượng trưng: không được theo, và sẽ không thuộc về giao diện."
+fix = "Thay bằng bản sao thật của tệp."
+
+[cli.finding.file_admin]
+what = "Tệp này nhắm vào trang quản trị. Không tệp nào của giao diện hay plugin được chạy trong trang quản trị."
+fix = "Xoá nó, và đừng đặt tên tệp bắt đầu bằng admin."
+
+[cli.finding.file_too_many]
+what = "Nhiều tệp hơn mức một giao diện hay plugin có; phần còn lại chưa được đọc."
+fix = "Kiểm tra đúng thư mục chưa, và bỏ các tệp không thuộc về nó."
+
+[cli.finding.theme_too_large]
+what = "Các tệp văn bản của giao diện tạo ra theme.json nặng {size} KB; giới hạn là {max} KB, vượt quá thì trang sẽ hiện giao diện mặc định."
+fix = "Bớt chữ lớn trong mẫu, tệp kiểu và tệp ngôn ngữ (ảnh và phông chữ để trong assets/, không tính vào giới hạn), hoặc rút gọn chúng."
+
+[cli.finding.file_too_large]
+what = "Lớn hơn {max} byte, mức tối đa cho một tệp của giao diện."
+fix = "Làm tệp nhỏ lại, hoặc bỏ nó khỏi thư mục."
+
+[cli.finding.file_not_text]
+what = "Không phải văn bản UTF-8. Ngoài assets/, giao diện chỉ chứa tệp văn bản."
+fix = "Lưu lại dưới dạng UTF-8, hoặc chuyển vào assets/ nếu nó không phải văn bản."
+
+[cli.finding.file_asset_name]
+what = "Tên tệp trong assets/ chỉ được dùng A-Z, a-z, 0-9, dấu chấm, _ và - ở mỗi phần của đường dẫn."
+fix = "Đổi tên tệp hoặc thư mục (ví dụ thay dấu cách bằng -), rồi sửa những chỗ đang trỏ tới nó."
+
+[cli.finding.text_hard]
+what = "Chữ cố định {text} trong mẫu trang. Chữ hiện cho người đọc phải nằm trong locales/."
+fix = "Thêm chữ vào locales/en.toml (và các ngôn ngữ khác) rồi gọi t(\"section.key\") ở đây."
+
+[cli.finding.plugin_load]
+what = "Plugin không nạp được: {detail}"
+fix = "Sửa chỗ thông báo nêu; `blog plugin check` nạp plugin đúng như blog làm."
+
+[cli.finding.plugin_broken]
+what = "Plugin làm hỏng trang trên giao diện mặc định: {detail}"
+fix = "Sửa phần hoặc tuỳ chọn mà thông báo nêu. Plugin lỗi bị bỏ khỏi trang và bị tắt."
+
+[cli.finding.plugin_css_size]
+what = "Khi bật plugin này, CSS nặng {size} KB sau khi nén; giới hạn là {max} KB."
+fix = "Cắt bớt CSS của plugin."
+
 [cli.guide_token]
 title = "# API token Cloudflare"
 intro = "Cách tạo API token mà `blog` dùng (sinh từ bảng các lệnh gọi API trong code)."
@@ -559,6 +776,14 @@ trashed = "Đã xoá"
 cancel = "Huỷ"
 
 [admin.auth]
+title_reset = "Vào lại {site}"
+sub_reset = "Nhập mã đặt lại mà blog admin reset đã in, tên đăng nhập và mật khẩu mới. Bạn cũng có thể đổi tên đăng nhập ở đây."
+code_reset = "Mã đặt lại"
+reset = "Đặt mật khẩu mới"
+reset_busy = "Đang đặt mật khẩu..."
+err_reset_invalid = "Mã đặt lại không đúng, đã hết hạn hoặc đã dùng rồi. Hãy chạy lại blog admin reset để lấy mã mới."
+err_reset_expired = "Mã đặt lại đã hết hạn. Hãy chạy lại blog admin reset để lấy mã mới."
+err_login_taken = "Một tài khoản khác đã dùng tên đăng nhập đó. Hãy chọn tên khác."
 title_signin = "Đăng nhập"
 sub_signin = "Chào mừng quay lại {site}."
 title_setup = "Thiết lập {site}"

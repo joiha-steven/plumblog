@@ -2,7 +2,7 @@
  * The same interface as client.ts over web/admin/fixtures, for building screens before their
  * API exists (`scripts/admin-dev`). Query flags force each state for review and screenshots:
  * `?mock=loading|error|offline|empty`, `?role=writer`. The auth endpoints answer from
- * `?auth=`: `out` (signed out), `wrong|locked|turnstile|origin|setup_invalid|invite_invalid|
+ * `?auth=`: `out` (signed out), `wrong|locked|turnstile|origin|setup_invalid|reset_expired|reset_taken|invite_invalid|
  * offline|cancelled` force that failure (`turnstile_hold`: like `turnstile`, then a call with a
  * token never answers, to hold the busy state for a screenshot); otherwise a call succeeds after a short wait.
  * Adding or removing a passkey (account screen): `reauth_wrong|reauth|conflict|origin|unsupported|turnstile`
@@ -78,6 +78,11 @@ async function auth<T>(params: URLSearchParams, method: Method, path: string, bo
     return signedIn();
   }
   if (path === "/api/auth/setup") {
+    return flag === "setup_invalid" ? fail("setup.invalid", 403) : signedIn();
+  }
+  if (path === "/api/auth/reset") {
+    if (flag === "reset_taken") return fail("store.conflict", 409);
+    if (flag === "reset_expired") return fail("auth.reset_expired", 403);
     return flag === "setup_invalid" ? fail("setup.invalid", 403) : signedIn();
   }
   if (path === "/api/auth/invite/accept") {
@@ -178,7 +183,13 @@ export function mockApi(params: URLSearchParams): Api {
         return summary;
       });
       const next = offset + limit < all.length ? btoa(String(offset + limit)) : null;
-      return { ok: true, value: { posts: page, next_cursor: next } };
+      // As the server: first page only, by kind and lang, whatever the status filter.
+      let counts: PostPage["counts"] = null;
+      if (q.cursor === undefined) {
+        counts = { draft: 0, scheduled: 0, published: 0, trashed: 0 };
+        if (mode !== "empty") for (const p of store) if ((q.kind === undefined || p.kind === q.kind) && (q.lang === undefined || p.lang === q.lang)) counts[p.status]++;
+      }
+      return { ok: true, value: { posts: page, next_cursor: next, counts } };
     },
     async post(id) {
       await settle();

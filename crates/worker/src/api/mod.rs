@@ -70,6 +70,16 @@ pub struct Reply {
     pub body: Option<String>,
     /// `Set-Cookie` value, when the session changed.
     pub cookie: Option<String>,
+    /// Stored bytes instead of JSON (a media original); `body` is then `None`.
+    pub raw: Option<Raw>,
+}
+
+/// Bytes handed to the runtime as a stream (an R2 object body), so they never pass through
+/// Wasm memory.
+pub struct Raw {
+    pub body: worker::ResponseBody,
+    pub mime: String,
+    pub length: u64,
 }
 
 impl Reply {
@@ -79,6 +89,7 @@ impl Reply {
             status,
             body: Some(body),
             cookie: None,
+            raw: None,
         }
     }
 
@@ -88,6 +99,18 @@ impl Reply {
             status: 204,
             body: None,
             cookie: None,
+            raw: None,
+        }
+    }
+
+    /// 200 with `raw` as the body.
+    #[must_use]
+    pub fn raw(raw: Raw) -> Self {
+        Self {
+            status: 200,
+            body: None,
+            cookie: None,
+            raw: Some(raw),
         }
     }
 
@@ -114,6 +137,7 @@ fn status(code: ErrorCode) -> u16 {
         // session, so not 401.
         ErrorCode::Forbidden
         | ErrorCode::SetupInvalid
+        | ErrorCode::ResetExpired
         | ErrorCode::TurnstileRequired
         | ErrorCode::ReauthRequired
         | ErrorCode::CommentsClosed
@@ -122,7 +146,7 @@ fn status(code: ErrorCode) -> u16 {
         | ErrorCode::UserNotFound
         | ErrorCode::NotFound
         | ErrorCode::RouteNotFound => 404,
-        ErrorCode::Conflict => 409,
+        ErrorCode::Conflict | ErrorCode::ThemeUnavailable => 409,
         ErrorCode::InviteInvalid => 410,
         ErrorCode::LengthRequired => 411,
         // A size cap like the byte cap: the client must send less, not fix a field.
@@ -163,6 +187,22 @@ fn request_id(req: &Request, crypto: Option<&WebCrypto>) -> RequestId {
 }
 
 fn respond(reply: Reply) -> worker::Result<Response> {
+    if let Some(raw) = reply.raw {
+        let mut res = Response::from_body(raw.body)?.with_status(reply.status);
+        let h = res.headers_mut();
+        h.set("content-type", &raw.mime)?;
+        h.set("content-length", &raw.length.to_string())?;
+        // Read with a session or token: no shared cache may keep it, nor the browser's.
+        h.set("cache-control", "private, no-store")?;
+        h.set("x-content-type-options", "nosniff")?;
+        // Defence in depth: even if a browser renders the bytes as a document, it runs
+        // sandboxed, with no scripts and an opaque origin.
+        h.set("content-security-policy", "sandbox")?;
+        if let Some(c) = reply.cookie {
+            h.set("set-cookie", &c)?;
+        }
+        return Ok(res);
+    }
     let mut res = match reply.body {
         Some(b) => Response::ok(b)?.with_status(reply.status),
         None => Response::empty()?.with_status(reply.status),
@@ -356,6 +396,7 @@ async fn route(
         (Method::Get, "/api/auth/me") => auth::me(ctx, p).await,
         (Method::Patch, "/api/auth/me") => auth::update_me(ctx, p, body).await,
         (Method::Post, "/api/auth/setup") => auth::setup(ctx, p, body).await,
+        (Method::Post, "/api/auth/reset") => auth::redeem_reset(ctx, p, body).await,
         (Method::Post, "/api/auth/login") => auth::login(ctx, p, body).await,
         (Method::Post, "/api/auth/logout") => auth::logout(ctx, p).await,
         (Method::Post, "/api/auth/invite/accept") => auth::accept_invite(ctx, p, body).await,

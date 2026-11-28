@@ -73,6 +73,7 @@ export function screen(name: Screen, me: Me, api: Api): Child[] {
     case "signin":
     case "setup":
     case "invite":
+    case "reset":
       // Drawn by the editor chunk and the sign-in chunk (main.ts); never reached.
       return [];
     case "missing":

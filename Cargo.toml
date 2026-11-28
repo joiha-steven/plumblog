@@ -24,6 +24,9 @@ publish = false
 # Cloudflare Workers runtime bindings (fetch handler, D1, R2); no other way to run Rust on Workers.
 # d1: bindings for the D1 store adapter (crates/worker/src/d1).
 worker = { version = "0.9.0", features = ["d1"] }
+# The Stream trait, to read theme.json from ASSETS in chunks and stop at its size cap; worker
+# returns a Stream but does not re-export the trait. Already linked through worker: no wasm cost.
+futures-core = "0.3"
 # Argument parsing for the `blog` CLI; derive keeps commands declarative.
 clap = { version = "4.6.7", features = ["derive"] }
 # NFC before slugging so the same heading typed on macOS (NFD) and elsewhere (NFC) gets one id;
@@ -36,9 +39,12 @@ unicode-properties = { version = "0.1.5", default-features = false, features = [
 # Theme templates are Jinja (docs/ARCHITECTURE.md, Themes); a template engine with inheritance,
 # macros and autoescape is far more code than a dependency. Only the features templates use.
 minijinja = { version = "3.1.0", default-features = false, features = ["builtins", "macros", "multi_template", "adjacent_loop_items", "serde"] }
-# theme.toml and theme locale files are TOML; parse-only, no writer.
+# Authors write theme.toml, plugin.toml and locale files in TOML. Only `blog`, the Worker's
+# build script and tests parse it (optional, behind the `toml` feature of plumblog-i18n and
+# plumblog-render, to convert it to JSON): the Worker loads JSON, so the three toml crates stay
+# out of the wasm (about 51 KB gzip; issue #65). Parse-only; `blog` adds the writer itself.
 toml = { version = "1.2.1", default-features = false, features = ["std", "parse", "serde"] }
-# Typed theme.toml and template data; minijinja and toml both speak serde.
+# Typed theme manifest and template data; minijinja and serde_json both speak serde.
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
 # Stored theme/plugin option values are JSON (store: extension_options.value_json); a correct
 # JSON parser is more code than this, and the Worker already links it through `worker`.

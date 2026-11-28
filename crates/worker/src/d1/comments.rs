@@ -7,7 +7,7 @@ use super::{
     opt_text, text,
 };
 
-const COMMENT_COLS: &str =
+pub(super) const COMMENT_COLS: &str =
     "id, post_id, parent_id, author_name, body, body_html, status, created_at";
 
 fn read_comment(r: &mut Row) -> Result<Comment> {
@@ -108,6 +108,33 @@ impl CommentStore for D1Store {
         let more = rows.len() > keep;
         rows.truncate(keep);
         rows.reverse();
+        Ok((rows, more))
+    }
+
+    // 1 query: a primary-key range (`reader_sql::comments_by_id`). Reads one row past the
+    // page to know whether more exist.
+    async fn comments_by_id(
+        &self,
+        after: Option<CommentId>,
+        limit_n: u32,
+    ) -> Result<(Vec<Comment>, bool)> {
+        let keep = plumblog_store::page_len(limit_n);
+        let s = self.stmt(
+            "comments_by_id",
+            &super::reader_sql::comments_by_id(),
+            &[
+                bound(after.map_or(0, |c| c.0)),
+                bound(i64::try_from(keep).unwrap_or(0) + 1),
+            ],
+        )?;
+        let mut rows = self
+            .rows(s)
+            .await?
+            .iter_mut()
+            .map(read_comment)
+            .collect::<Result<Vec<_>>>()?;
+        let more = rows.len() > keep;
+        rows.truncate(keep);
         Ok((rows, more))
     }
 

@@ -61,6 +61,9 @@ pub trait UserStore {
     async fn find_user_by_slug(&self, slug: &str) -> Result<Option<User>>;
     /// Ordered by id.
     async fn list_users(&self) -> Result<Vec<User>>;
+    /// By id ascending, strictly after `after`: at most `limit` (capped at
+    /// [`crate::MAX_PAGE`]) users, and whether more follow.
+    async fn users_by_id(&self, after: Option<UserId>, limit: u32) -> Result<(Vec<User>, bool)>;
     // Each write below touches only its own columns plus `updated_at = now`, so two admins
     // changing different things (or a profile edit racing a password change) never undo
     // each other. An "active owner" is `role = Owner` with `disabled_at = None`; a write

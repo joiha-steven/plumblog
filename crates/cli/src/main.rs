@@ -3,7 +3,7 @@ use plumblog_cli::cloudflare::{Client, Credentials, TokenError, TokenKind, endpo
 use plumblog_cli::help;
 use plumblog_cli::release::{self, Version, fetch::Source};
 use plumblog_cli::text::{Code, Text, pick_lang};
-use plumblog_cli::{backup, deploy, migrations, restore, setup};
+use plumblog_cli::{admin, backup, deploy, migrations, restore, setup, theme};
 use plumblog_i18n::{Key, key};
 use std::{fmt::Write, path::Path, process::ExitCode};
 
@@ -137,6 +137,8 @@ enum Command {
         build: bool,
         #[arg(long)]
         allow_older: bool,
+        #[arg(long)]
+        theme_default: bool,
     },
     Backup {
         #[arg(long)]
@@ -175,12 +177,92 @@ enum Command {
         #[arg(long, conflicts_with = "db")]
         allow_older: bool,
     },
+    Theme {
+        #[command(subcommand)]
+        action: ThemeAction,
+    },
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+    Admin {
+        #[command(subcommand)]
+        action: AdminAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdminAction {
+    Reset {
+        #[arg(long)]
+        login: Option<String>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        keep_tokens: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ThemeAction {
+    New {
+        dir: std::path::PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    Check {
+        dir: std::path::PathBuf,
+    },
+    Dev {
+        dir: std::path::PathBuf,
+        #[arg(long, default_value_t = 4321)]
+        port: u16,
+    },
+    Push {
+        #[arg(required_unless_present = "default", conflicts_with = "default")]
+        dir: Option<std::path::PathBuf>,
+        #[arg(long)]
+        default: bool,
+        #[arg(long, conflicts_with = "build")]
+        bundle: Option<std::path::PathBuf>,
+        #[arg(long)]
+        build: bool,
+    },
+    Rollback {
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        allow_older: bool,
+    },
+    List,
+}
+
+#[derive(Subcommand)]
+enum PluginAction {
+    Check { dir: std::path::PathBuf },
 }
 
 /// clap takes value names only as `&'static str` without its `string` feature; a few bytes,
 /// once per run.
 fn leak(s: String) -> &'static str {
     s.leak()
+}
+
+/// `blog admin`'s help texts.
+fn admin_help(c: clap::Command, text: &Text) -> clap::Command {
+    let t = |k: Key| text.t(k, &[]);
+    c.about(t(key!("cli.admin.about")))
+        .mut_subcommand("reset", |c| {
+            c.about(t(key!("cli.admin.reset_about")))
+                .mut_arg("login", |a| {
+                    a.help(t(key!("cli.admin.login_help")))
+                        .value_name(leak(t(key!("cli.admin.login_value"))))
+                })
+                .mut_arg("yes", |a| a.help(t(key!("cli.admin.yes_help"))))
+                .mut_arg("keep_tokens", |a| {
+                    a.help(t(key!("cli.admin.keep_tokens_help")))
+                })
+        })
 }
 
 /// `blog restore`'s help texts.
@@ -199,6 +281,82 @@ fn restore_help(c: clap::Command, text: &Text) -> clap::Command {
         .mut_arg("build", |a| a.help(t(key!("cli.restore.build_help"))))
         .mut_arg("allow_other_site", |a| {
             a.help(t(key!("cli.restore.allow_other_site_help")))
+        })
+}
+
+/// `blog theme`'s help texts.
+fn theme_help(c: clap::Command, text: &Text) -> clap::Command {
+    let t = |k: Key| text.t(k, &[]);
+
+    c.about(t(key!("cli.theme.about")))
+        .mut_subcommand("new", |c| {
+            c.about(t(key!("cli.theme.new.about")))
+                .mut_arg("dir", |a| {
+                    a.help(t(key!("cli.theme.new.dir_help")))
+                        .value_name(leak(t(key!("cli.theme.dir_value"))))
+                })
+                .mut_arg("name", |a| {
+                    a.help(t(key!("cli.theme.new.name_help")))
+                        .value_name(leak(t(key!("cli.theme.name_value"))))
+                })
+        })
+        .mut_subcommand("check", |c| {
+            c.about(t(key!("cli.theme.check.about")))
+                .mut_arg("dir", |a| {
+                    a.help(t(key!("cli.theme.check.dir_help")))
+                        .value_name(leak(t(key!("cli.theme.dir_value"))))
+                })
+        })
+        .mut_subcommand("dev", |c| {
+            c.about(t(key!("cli.theme.dev.about")))
+                .mut_arg("dir", |a| {
+                    a.help(t(key!("cli.theme.dev.dir_help")))
+                        .value_name(leak(t(key!("cli.theme.dir_value"))))
+                })
+                .mut_arg("port", |a| {
+                    a.help(t(key!("cli.theme.dev.port_help")))
+                        .value_name(leak(t(key!("cli.theme.port_value"))))
+                })
+        })
+        .mut_subcommand("push", |c| {
+            c.about(t(key!("cli.theme.push.about")))
+                .mut_arg("dir", |a| {
+                    a.help(t(key!("cli.theme.push.dir_help")))
+                        .value_name(leak(t(key!("cli.theme.dir_value"))))
+                })
+                .mut_arg("default", |a| {
+                    a.help(t(key!("cli.theme.push.default_help")))
+                })
+                .mut_arg("bundle", |a| {
+                    a.help(t(key!("cli.deploy.bundle_help")))
+                        .value_name(leak(t(key!("cli.deploy.bundle_value"))))
+                })
+                .mut_arg("build", |a| a.help(t(key!("cli.deploy.build_help"))))
+        })
+        .mut_subcommand("rollback", |c| {
+            c.about(t(key!("cli.theme.rollback.about")))
+                .mut_arg("to", |a| {
+                    a.help(t(key!("cli.theme.rollback.to_help")))
+                        .value_name(leak(t(key!("cli.rollback.to_value"))))
+                })
+                .mut_arg("allow_older", |a| {
+                    a.help(t(key!("cli.rollback.allow_older_help")))
+                })
+        })
+        .mut_subcommand("list", |c| c.about(t(key!("cli.theme.list.about"))))
+}
+
+/// `blog plugin`'s help texts.
+fn plugin_help(c: clap::Command, text: &Text) -> clap::Command {
+    let t = |k: Key| text.t(k, &[]);
+
+    c.about(t(key!("cli.plugin.about")))
+        .mut_subcommand("check", |c| {
+            c.about(t(key!("cli.plugin.check.about")))
+                .mut_arg("dir", |a| {
+                    a.help(t(key!("cli.plugin.check.dir_help")))
+                        .value_name(leak(t(key!("cli.plugin.dir_value"))))
+                })
         })
 }
 
@@ -256,6 +414,9 @@ fn command(text: &Text) -> clap::Command {
                 .mut_arg("allow_older", |a| {
                     a.help(t(key!("cli.deploy.allow_older_help")))
                 })
+                .mut_arg("theme_default", |a| {
+                    a.help(t(key!("cli.deploy.theme_default_help")))
+                })
         })
         .mut_subcommand("backup", |c| {
             c.about(t(key!("cli.backup.about")))
@@ -277,6 +438,9 @@ fn command(text: &Text) -> clap::Command {
                     a.help(t(key!("cli.update.allow_older_help")))
                 })
         })
+        .mut_subcommand("theme", |c| theme_help(c, text))
+        .mut_subcommand("plugin", |c| plugin_help(c, text))
+        .mut_subcommand("admin", |c| admin_help(c, text))
         .mut_subcommand("rollback", |c| {
             c.about(t(key!("cli.rollback.about")))
                 .mut_arg("to", |a| {
@@ -408,11 +572,17 @@ fn now_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
-/// `blog deploy` and `blog rollback`: progress to stdout as each step finishes.
-fn deploy_or_rollback(
-    text: &Text,
-    action: Result<deploy::Options, deploy::RollbackOptions>,
-) -> Result<String, (Code, String)> {
+/// The commands that make or switch Worker versions.
+enum Versions {
+    Deploy(deploy::Options),
+    Rollback(deploy::RollbackOptions),
+    ThemePush(theme::push::PushOptions),
+    ThemeRollback(theme::push::RollbackOptions),
+}
+
+/// `blog deploy`, `blog rollback`, `blog theme push | rollback`: progress to stdout as each
+/// step finishes.
+fn deploy_or_rollback(text: &Text, action: Versions) -> Result<String, (Code, String)> {
     let creds = Credentials::load(Path::new(".")).map_err(|e| (e.code(), e.message(text)))?;
     let mut client = Client::from_env(creds.token).map_err(|e| (e.code(), e.message(text)))?;
     let migrations = migrations::bundled();
@@ -432,14 +602,27 @@ fn deploy_or_rollback(
     };
     let mut out = std::io::stdout().lock();
     let account = creds.account_id.as_deref();
+    let baked = |opts: &mut deploy::Options| -> Result<(), (Code, String)> {
+        if opts.bundle.is_none() && !opts.build {
+            opts.release = release::baked(text).map_err(|f| (f.code, f.message))?;
+        }
+        Ok(())
+    };
     match action {
-        Ok(mut opts) => {
-            if opts.bundle.is_none() && !opts.build {
-                opts.release = release::baked(text).map_err(|f| (f.code, f.message))?;
-            }
+        Versions::Deploy(mut opts) => {
+            baked(&mut opts)?;
             deploy::run(&mut client, account, &opts, &cx, &rt, &mut out)
         }
-        Err(opts) => deploy::rollback(&mut client, account, &opts, &cx, &rt, &mut out),
+        Versions::Rollback(opts) => {
+            deploy::rollback(&mut client, account, &opts, &cx, &rt, &mut out)
+        }
+        Versions::ThemePush(mut opts) => {
+            baked(&mut opts.source)?;
+            theme::push::push(&mut client, account, &opts, &cx, &rt, &mut out)
+        }
+        Versions::ThemeRollback(opts) => {
+            theme::push::rollback(&mut client, account, &opts, &cx, &rt, &mut out)
+        }
     }
     .map_err(|f| (f.code, f.message))?;
     Ok(String::new())
@@ -467,6 +650,39 @@ fn restore(text: &Text, mut opts: restore::Options) -> Result<String, (Code, Str
         &opts,
         &cx,
         &clock,
+        &mut out,
+    )
+    .map_err(|f| (f.code, f.message))?;
+    Ok(String::new())
+}
+
+/// `blog admin reset`: the plan, then the code, to stdout.
+fn admin_reset(text: &Text, action: AdminAction) -> Result<String, (Code, String)> {
+    let AdminAction::Reset {
+        login,
+        yes,
+        keep_tokens,
+    } = action;
+    let opts = &admin::Options {
+        login,
+        yes,
+        keep_tokens,
+    };
+    let creds = Credentials::load(Path::new(".")).map_err(|e| (e.code(), e.message(text)))?;
+    let mut client = Client::from_env(creds.token).map_err(|e| (e.code(), e.message(text)))?;
+    let migrations = migrations::bundled();
+    let cx = setup::Context {
+        dir: Path::new("."),
+        migrations: &migrations,
+        now_ms: now_ms(),
+        text,
+    };
+    let mut out = std::io::stdout().lock();
+    admin::run(
+        &mut client,
+        creds.account_id.as_deref(),
+        opts,
+        &cx,
         &mut out,
     )
     .map_err(|f| (f.code, f.message))?;
@@ -559,6 +775,81 @@ enum Outcome {
     Fail(Code, String),
 }
 
+fn deploy_command(text: &Text, command: Command) -> Result<String, (Code, String)> {
+    let Command::Deploy {
+        export,
+        bundle,
+        build,
+        allow_older,
+        theme_default,
+    } = command
+    else {
+        return Ok(String::new());
+    };
+    let theme = if theme_default {
+        deploy::ThemeCarry::Drop
+    } else {
+        deploy::ThemeCarry::Keep
+    };
+    deploy_or_rollback(
+        text,
+        Versions::Deploy(deploy::Options {
+            export,
+            bundle,
+            build,
+            allow_older,
+            release: None,
+            theme,
+        }),
+    )
+}
+
+fn theme_command(text: &Text, command: Command) -> Result<String, (Code, String)> {
+    match command {
+        Command::Theme {
+            action: ThemeAction::New { dir, name },
+        } => theme::new(text, &dir, name.as_deref()),
+        Command::Theme {
+            action: ThemeAction::Check { dir },
+        } => theme::check_theme(text, &dir),
+        Command::Theme {
+            action: ThemeAction::Dev { dir, port },
+        } => theme::dev(text, &dir, port),
+        Command::Theme {
+            action:
+                ThemeAction::Push {
+                    dir,
+                    default: _,
+                    bundle,
+                    build,
+                },
+        } => deploy_or_rollback(
+            text,
+            Versions::ThemePush(theme::push::PushOptions {
+                dir,
+                source: deploy::Options {
+                    bundle,
+                    build,
+                    ..deploy::Options::default()
+                },
+            }),
+        ),
+        Command::Theme {
+            action: ThemeAction::Rollback { to, allow_older },
+        } => deploy_or_rollback(
+            text,
+            Versions::ThemeRollback(theme::push::RollbackOptions { to, allow_older }),
+        ),
+        Command::Theme {
+            action: ThemeAction::List,
+        } => theme::push::list(text, Path::new(".")),
+        Command::Plugin {
+            action: PluginAction::Check { dir },
+        } => theme::check_plugin(text, &dir),
+        _ => Ok(String::new()),
+    }
+}
+
 fn run(text: &Text, args: &[String]) -> Outcome {
     let has = |flags: &[&str]| args.iter().skip(1).any(|a| flags.contains(&a.as_str()));
     let cmd = command(text);
@@ -600,21 +891,7 @@ fn run(text: &Text, args: &[String]) -> Outcome {
                 clear_failed_migration,
             },
         ),
-        Some(Command::Deploy {
-            export,
-            bundle,
-            build,
-            allow_older,
-        }) => deploy_or_rollback(
-            text,
-            Ok(deploy::Options {
-                export,
-                bundle,
-                build,
-                allow_older,
-                release: None,
-            }),
-        ),
+        Some(c @ Command::Deploy { .. }) => deploy_command(text, c),
         Some(Command::Backup { no_media, out }) => backup(text, &backup::Options { no_media, out }),
         Some(Command::Restore {
             file,
@@ -646,7 +923,7 @@ fn run(text: &Text, args: &[String]) -> Outcome {
             allow_older,
         }) => deploy_or_rollback(
             text,
-            Err(deploy::RollbackOptions {
+            Versions::Rollback(deploy::RollbackOptions {
                 to,
                 db,
                 yes,
@@ -654,6 +931,8 @@ fn run(text: &Text, args: &[String]) -> Outcome {
                 allow_older,
             }),
         ),
+        Some(c @ (Command::Theme { .. } | Command::Plugin { .. })) => theme_command(text, c),
+        Some(Command::Admin { action }) => admin_reset(text, action),
         None => return Outcome::Help(help::render(&cmd, &[], text)),
     };
     match result {

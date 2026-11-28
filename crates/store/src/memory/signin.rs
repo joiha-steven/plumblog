@@ -2,8 +2,11 @@ use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 
 use super::{MemoryStore, conflict, count, invalid};
 use crate::{
-    ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewUser, Recorded,
-    SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore, setup_hash_json,
+    ChallengePurpose, ChallengeStore, LoginLimitStore, MAX_FAILURE_KEYS, NewSession, NewUser,
+    OWNER_RESET_AT_KEY, OWNER_RESET_EXPIRES_KEY, OWNER_RESET_HASH_KEY, OWNER_RESET_KEEP_TOKENS_KEY,
+    OWNER_RESET_KEYS, OWNER_RESET_SINCE_MARGIN_MS, OWNER_RESET_USER_KEY, ProfileUpdate, Proof,
+    Recorded, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore,
+    setup_hash_json,
 };
 
 /// `window_start + window_ms <= now`, overflow-safe.
@@ -188,7 +191,47 @@ impl ChallengeStore for MemoryStore {
     }
 }
 
-/// The setup expiry if `value_json` is exactly a JSON integer (D1 checks the same text).
+/// A setup or reset value (expiry, user id) if `value_json` is exactly a JSON integer (D1
+/// checks the same text).
+impl super::State {
+    /// Whether `proof` still holds for `user` at `now` (see [`crate::Proof`]).
+    pub(super) fn proof_holds(&self, user: UserId, proof: &Proof, now: i64) -> bool {
+        match proof {
+            Proof::Session(h) => self
+                .sessions
+                .values()
+                .any(|x| x.token_hash == *h && x.user_id == user),
+            Proof::Password(h) => self
+                .users
+                .get(&user)
+                .is_some_and(|u| u.password_hash.as_deref() == Some(h.as_str())),
+            Proof::Passkey(id) => self.passkeys.get(id).is_some_and(|x| x.user_id == user),
+            Proof::ResetCode(h) => {
+                let get = |k: &str| self.settings.get(k).map(|(v, _)| v.as_str());
+                get(OWNER_RESET_HASH_KEY) == Some(setup_hash_json(h).as_str())
+                    && get(OWNER_RESET_USER_KEY).and_then(parse_expiry) == Some(user.0)
+                    && get(OWNER_RESET_EXPIRES_KEY)
+                        .and_then(parse_expiry)
+                        .is_some_and(|at| at > now)
+            }
+            #[cfg(any(test, feature = "contract"))]
+            Proof::Unchecked => true,
+        }
+    }
+
+    /// `Unauthenticated` unless `proof` holds (checked before anything else, as D1 does).
+    pub(super) fn require_proof(&self, user: UserId, proof: &Proof, now: i64) -> Result<()> {
+        if self.proof_holds(user, proof, now) {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorCode::Unauthenticated,
+                "the credential this request authenticated with is gone",
+            ))
+        }
+    }
+}
+
 fn parse_expiry(value_json: &str) -> Option<i64> {
     value_json
         .parse::<i64>()
@@ -249,6 +292,131 @@ impl SetupStore for MemoryStore {
             s.settings.remove(SETUP_CODE_HASH_KEY);
             s.settings.remove(SETUP_CODE_EXPIRES_KEY);
             Ok(id)
+        })
+    }
+
+    async fn put_owner_reset(
+        &self,
+        code_hash: &str,
+        user: UserId,
+        expires_at: i64,
+        keep_tokens: bool,
+        now: i64,
+    ) -> Result<()> {
+        self.write(|s| {
+            for (k, v) in [
+                (OWNER_RESET_HASH_KEY, setup_hash_json(code_hash)),
+                (OWNER_RESET_USER_KEY, user.0.to_string()),
+                (OWNER_RESET_EXPIRES_KEY, expires_at.to_string()),
+                (OWNER_RESET_AT_KEY, now.to_string()),
+                (OWNER_RESET_KEEP_TOKENS_KEY, keep_tokens.to_string()),
+            ] {
+                s.settings.insert(k.to_owned(), (v, now));
+            }
+            Ok(())
+        })
+    }
+
+    async fn take_owner_reset(&self, code_hash: &str, now: i64) -> Result<Option<UserId>> {
+        self.write(|s| {
+            let code_ok = s
+                .settings
+                .get(OWNER_RESET_HASH_KEY)
+                .is_some_and(|(v, _)| *v == setup_hash_json(code_hash));
+            if !code_ok {
+                return Ok(None);
+            }
+            let read = |k: &str| s.settings.get(k).and_then(|(v, _)| parse_expiry(v));
+            let fresh = read(OWNER_RESET_EXPIRES_KEY).is_some_and(|at| at > now);
+            let user = read(OWNER_RESET_USER_KEY).map(UserId);
+            for &k in OWNER_RESET_KEYS {
+                s.settings.remove(k);
+            }
+            Ok(user.filter(|_| fresh))
+        })
+    }
+
+    async fn redeem_owner_reset(
+        &self,
+        id: UserId,
+        hash: String,
+        profile: Option<ProfileUpdate>,
+        session: NewSession,
+        now: i64,
+    ) -> Result<i64> {
+        let invalid_code = || {
+            Error::new(
+                ErrorCode::SetupInvalid,
+                "reset code wrong, expired or used, or its user is not an active owner",
+            )
+        };
+        if session.user_id != id || !matches!(session.proof, Proof::ResetCode(_)) {
+            return Err(invalid(
+                "redeem needs a reset-code session of the same user",
+            ));
+        }
+        self.write(|s| {
+            let active_owner = s
+                .users
+                .get(&id)
+                .is_some_and(|u| u.role == Role::Owner && u.disabled_at.is_none());
+            if !active_owner || !s.proof_holds(id, &session.proof, now) {
+                return Err(invalid_code());
+            }
+            let setting = |k: &str| s.settings.get(k).map(|(v, _)| v.clone());
+            // Absent (a code from an older `blog`): everything of the user goes.
+            let since = setting(OWNER_RESET_AT_KEY)
+                .as_deref()
+                .and_then(parse_expiry)
+                .map_or(0, |t| t - OWNER_RESET_SINCE_MARGIN_MS);
+            let keep = setting(OWNER_RESET_KEEP_TOKENS_KEY).as_deref() == Some("true");
+            if let Some(p) = &profile {
+                s.check_user_unique(&p.login, &p.slug, Some(id))?;
+            }
+            s.sessions.retain(|_, x| x.user_id != id);
+            if s.sessions
+                .values()
+                .any(|x| x.token_hash == session.token_hash)
+            {
+                return Err(conflict("session token hash already exists"));
+            }
+            s.passkeys.retain(|_, x| x.user_id != id);
+            for t in s.tokens.values_mut() {
+                if t.user_id == id && t.revoked_at.is_none() && (!keep || t.created_at >= since) {
+                    t.revoked_at = Some(now);
+                }
+            }
+            s.invites.retain(|_, x| {
+                !(x.created_by == id && x.used_at.is_none() && x.created_at >= since)
+            });
+            for &k in OWNER_RESET_KEYS {
+                s.settings.remove(k);
+            }
+            let bump = profile.is_some();
+            let u = s.user_mut(id)?;
+            if let Some(p) = profile {
+                u.login = p.login;
+                u.slug = p.slug;
+                u.display_name = p.display_name;
+                u.bio = p.bio;
+            }
+            u.password_hash = Some(hash);
+            u.updated_at = now;
+            if bump {
+                s.bump();
+            }
+            let sid = super::next_rowid(&s.sessions);
+            s.sessions.insert(
+                sid,
+                crate::Session {
+                    id: sid,
+                    token_hash: session.token_hash,
+                    user_id: id,
+                    created_at: session.created_at,
+                    expires_at: session.expires_at,
+                },
+            );
+            Ok(sid)
         })
     }
 }

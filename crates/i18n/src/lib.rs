@@ -1,6 +1,8 @@
 //! UI text: locale files, lookup with English fallback, CLDR plurals and `{name}` arguments.
 //!
-//! Locale files are TOML. Sections nest keys (`[post] next = "Next"` is `post.next`). A
+//! Locale files are TOML to write, JSON to run: the Worker links no TOML parser, so a build or
+//! push step converts them ([`toml_to_json`], feature `toml`) and [`parse`] reads the JSON.
+//! Sections nest keys (`[post] next = "Next"` is `post.next`). A
 //! plural message is a table of CLDR categories that includes `other` (a table without
 //! `other` is an ordinary section): `reading_time = { one = "{count} minute", other =
 //! "{count} minutes" }`, chosen by the `count` argument. Output is plain text: escaping
@@ -72,22 +74,32 @@ impl MissingKeys {
     }
 }
 
-/// Flattens a locale file into `section.key -> text`; a plural message's forms become
-/// `key.<category>`. Anything but text and tables is an error naming the key, because a
-/// number or list where text belongs is a mistake the author must see.
+/// Flattens a locale file, as JSON, into `section.key -> text`; a plural message's forms
+/// become `key.<category>`. Anything but text and objects is an error naming the key, because
+/// a number or list where text belongs is a mistake the author must see.
 ///
 /// # Errors
 ///
-/// [`ErrorCode::InvalidInput`] for invalid TOML or a non-text value.
+/// [`ErrorCode::InvalidInput`] for invalid JSON or a non-text value.
 pub fn parse(src: &str) -> Result<HashMap<String, String>> {
-    let table: toml::Table =
-        toml::from_str(src).map_err(|e| Error::new(ErrorCode::InvalidInput, e.to_string()))?;
+    let value: serde_json::Value = serde_json::from_str(src)
+        .map_err(|e| Error::new(ErrorCode::InvalidInput, format!("invalid locale JSON: {e}")))?;
+    let serde_json::Value::Object(table) = &value else {
+        return Err(Error::new(
+            ErrorCode::InvalidInput,
+            "a locale file is a table of sections".to_owned(),
+        ));
+    };
     let mut out = HashMap::new();
-    walk("", &table, &mut out)?;
+    walk("", table, &mut out)?;
     Ok(out)
 }
 
-fn walk(prefix: &str, table: &toml::Table, out: &mut HashMap<String, String>) -> Result<()> {
+fn walk(
+    prefix: &str,
+    table: &serde_json::Map<String, serde_json::Value>,
+    out: &mut HashMap<String, String>,
+) -> Result<()> {
     for (k, v) in table {
         let key = if prefix.is_empty() {
             k.clone()
@@ -95,10 +107,10 @@ fn walk(prefix: &str, table: &toml::Table, out: &mut HashMap<String, String>) ->
             format!("{prefix}.{k}")
         };
         match v {
-            toml::Value::String(s) => {
+            serde_json::Value::String(s) => {
                 out.insert(key, s.clone());
             }
-            toml::Value::Table(t) => walk(&key, t, out)?,
+            serde_json::Value::Object(t) => walk(&key, t, out)?,
             _ => {
                 return Err(Error::new(
                     ErrorCode::InvalidInput,
@@ -108,6 +120,68 @@ fn walk(prefix: &str, table: &toml::Table, out: &mut HashMap<String, String>) ->
         }
     }
     Ok(())
+}
+
+/// TOML text as the JSON text the runtime takes (`blog` and the Worker's build script; the
+/// Worker itself never links the TOML parser). Datetimes become strings. Any TOML table
+/// converts, not only locale files: theme and plugin manifests use it too.
+///
+/// # Errors
+///
+/// [`ErrorCode::InvalidInput`] for invalid TOML, with the parser's line and column.
+#[cfg(feature = "toml")]
+pub fn toml_to_json(src: &str) -> Result<String> {
+    // A float with no JSON form (nan, inf) would become null and silently turn `step = nan`
+    // into "no step"; refuse it, naming the key.
+    fn json(key: &str, v: &toml::Value) -> Result<serde_json::Value> {
+        use serde_json::Value as J;
+        Ok(match v {
+            toml::Value::String(s) => J::String(s.clone()),
+            toml::Value::Integer(i) => J::from(*i),
+            toml::Value::Float(f) => {
+                J::Number(serde_json::Number::from_f64(*f).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::InvalidInput,
+                        format!("{key}: {f} is not a valid number"),
+                    )
+                })?)
+            }
+            toml::Value::Boolean(b) => J::Bool(*b),
+            toml::Value::Datetime(d) => J::String(d.to_string()),
+            toml::Value::Array(a) => J::Array(
+                a.iter()
+                    .enumerate()
+                    .map(|(i, v)| json(&format!("{key}[{i}]"), v))
+                    .collect::<Result<_>>()?,
+            ),
+            toml::Value::Table(t) => J::Object(
+                t.iter()
+                    .map(|(k, v)| {
+                        let at = if key.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{key}.{k}")
+                        };
+                        Ok((k.clone(), json(&at, v)?))
+                    })
+                    .collect::<Result<_>>()?,
+            ),
+        })
+    }
+    let table: toml::Table =
+        toml::from_str(src).map_err(|e| Error::new(ErrorCode::InvalidInput, e.to_string()))?;
+    let value = json("", &toml::Value::Table(table))?;
+    serde_json::to_string(&value).map_err(|e| Error::new(ErrorCode::InvalidInput, e.to_string()))
+}
+
+/// [`parse`] for a TOML locale file: what the `blog` CLI and the locale checks read.
+///
+/// # Errors
+///
+/// As [`toml_to_json`] and [`parse`].
+#[cfg(feature = "toml")]
+pub fn parse_toml(src: &str) -> Result<HashMap<String, String>> {
+    parse(&toml_to_json(src)?)
 }
 
 /// One language's strings with English behind it.
@@ -232,7 +306,7 @@ pub fn fill(text: &str, args: &[(&str, String)]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Catalog, MissingKeys, fill, parse};
+    use super::{Catalog, MissingKeys, fill, parse_toml as parse};
     use std::collections::HashMap;
 
     fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -284,6 +358,12 @@ two = \"Second\"
         assert_eq!(c.t_template("rank.two", &[], &m), "Second");
         assert!(m.take().is_empty());
         assert!(parse("not toml =").is_err());
+        assert!(
+            parse("n = 1")
+                .unwrap_err()
+                .detail
+                .contains("n: locale values must be text")
+        );
     }
 
     #[test]
@@ -344,5 +424,47 @@ two = \"Second\"
         assert_eq!(fill("{missing} x", &args), "{missing} x");
         assert_eq!(fill("open { brace", &args), "open { brace");
         assert_eq!(fill("{t}", &args), "<b>");
+    }
+
+    #[test]
+    fn the_runtime_reads_json_only() {
+        let json =
+            super::toml_to_json("[a]\nb = \"x\"\nc = { one = \"1\", other = \"2\" }\n").unwrap();
+        let flat = super::parse(&json).unwrap();
+        assert_eq!(flat["a.b"], "x");
+        assert_eq!(flat["a.c.other"], "2");
+        // TOML text is not JSON, and the error says so instead of guessing.
+        assert!(
+            super::parse("[a]\nb = \"x\"")
+                .unwrap_err()
+                .detail
+                .contains("JSON")
+        );
+        assert!(super::parse("[]").is_err());
+        assert!(super::parse("{\"a\":{\"b\":[1]}}").is_err());
+    }
+
+    #[test]
+    fn numbers_without_a_json_form_are_refused_with_their_key() {
+        for bad in ["nan", "inf", "-inf"] {
+            let e = super::toml_to_json(&format!("[options.x]\nstep = {bad}\n")).unwrap_err();
+            assert!(e.detail.contains("options.x.step"), "{}", e.detail);
+        }
+        assert!(
+            super::toml_to_json("a = [1.5, nan]")
+                .unwrap_err()
+                .detail
+                .contains("a[1]")
+        );
+    }
+
+    #[test]
+    fn toml_errors_name_the_line_and_datetimes_become_text() {
+        let e = super::toml_to_json("a = 1\nb = =").unwrap_err();
+        assert!(e.detail.contains("line 2"), "{}", e.detail);
+        assert_eq!(
+            super::toml_to_json("d = 2026-01-02").unwrap(),
+            "{\"d\":\"2026-01-02\"}"
+        );
     }
 }

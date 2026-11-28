@@ -3,7 +3,7 @@ use plumblog_store::{NewSession, NewUser, ProfileUpdate, SiteStore, User, UserSt
 
 use super::{
     D1Store, Failure, Row, Stmt, bound, bump, bump_if, guard, int, invalid, opt_int, opt_text,
-    storage, text,
+    proof_gone, proof_guard, storage, text,
 };
 
 pub(super) const USER_COLS: &str =
@@ -189,6 +189,28 @@ impl UserStore for D1Store {
         self.rows(s).await?.iter_mut().map(read_user).collect()
     }
 
+    // 1 query: a primary-key range (`reader_sql::users_by_id`), one row past the page.
+    async fn users_by_id(&self, after: Option<UserId>, limit_n: u32) -> Result<(Vec<User>, bool)> {
+        let keep = plumblog_store::page_len(limit_n);
+        let s = self.stmt(
+            "users_by_id",
+            &super::reader_sql::users_by_id(),
+            &[
+                bound(after.map_or(0, |u| u.0)),
+                bound(i64::try_from(keep).unwrap_or(0) + 1),
+            ],
+        )?;
+        let mut rows = self
+            .rows(s)
+            .await?
+            .iter_mut()
+            .map(read_user)
+            .collect::<Result<Vec<_>>>()?;
+        let more = rows.len() > keep;
+        rows.truncate(keep);
+        Ok((rows, more))
+    }
+
     async fn update_profile(&self, id: UserId, profile: ProfileUpdate, now: i64) -> Result<()> {
         let s = self.stmt(
             "update_profile",
@@ -248,12 +270,10 @@ impl UserStore for D1Store {
         } else {
             "EXISTS (SELECT 1 FROM users WHERE id = ? AND password_hash IS NULL)"
         };
-        let mut stmts = vec![guard(
-            self,
-            "change_password_guard",
-            condition,
-            &[bound(id.0)],
-        )?];
+        let mut stmts = vec![
+            proof_guard(self, id, &session.proof, session.created_at)?,
+            guard(self, "change_password_guard", condition, &[bound(id.0)])?,
+        ];
         let write = if let Some(p) = &profile {
             stmts.push(bump(self)?);
             self.stmt(
@@ -295,6 +315,14 @@ impl UserStore for D1Store {
         )?);
         let results = match self.batch_guarded("change_password", stmts).await {
             Ok(r) => r,
+            Err(Failure::Guard)
+                if !self
+                    .proof_holds(id, &session.proof, session.created_at)
+                    .await? =>
+            {
+                self.get_user(id).await?;
+                return Err(proof_gone());
+            }
             Err(Failure::Guard) if hash.is_none() => {
                 // Which half of the guard failed: a missing user, or one with a password.
                 self.get_user(id).await?;

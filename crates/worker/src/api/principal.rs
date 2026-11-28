@@ -5,7 +5,7 @@
 use plumblog_auth::api_token::{self, ApiTokenSecret};
 use plumblog_auth::session::{self, SessionToken};
 use plumblog_model::{Error, ErrorCode, Permission, Result, TokenScope};
-use plumblog_store::{SessionStore, TokenStore, User, UserStore};
+use plumblog_store::{Proof, SessionStore, TokenStore, User, UserStore};
 use plumblog_syslog::{Event, EventKind};
 use worker::Request;
 
@@ -101,6 +101,18 @@ impl Principal {
             Self::Session { .. } => e.field("via", "session"),
             Self::Anonymous { .. } => e,
         }
+    }
+
+    /// What this session request writes a new credential with ([`Proof::Session`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::session_user`].
+    pub fn session_proof(&self) -> Result<Proof> {
+        self.session_user()?;
+        self.session_hash()
+            .map(|h| Proof::Session(h.to_owned()))
+            .ok_or_else(|| Error::new(ErrorCode::Unauthenticated, "no valid session"))
     }
 
     /// Hash of the session this request came with (valid or stale), for rotation.

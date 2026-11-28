@@ -79,6 +79,23 @@ pub struct DeployRecord {
     /// before going back to this version. `None` in records older than this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_migrations: Option<Vec<String>>,
+    /// `theme_push` (`blog theme push`), `theme_default` (`blog theme push --default`);
+    /// `None` for `blog deploy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The pushed theme this version serves; `None`: the embedded default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<ThemeRecord>,
+}
+
+/// A pushed theme as a deploy record names it. Its files are kept in
+/// `.blog/themes/<hash>/` (see `theme::store`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemeRecord {
+    pub name: String,
+    pub version: String,
+    /// `PushedTheme::hash`.
+    pub hash: String,
 }
 
 /// One `blog rollback`: code (`kind = "version"`) or database (`kind = "database"`), or one
@@ -154,6 +171,10 @@ pub struct SiteState {
     /// by `blog` for this site, so setup never adopts someone else's Worker of the same name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_marker: Option<String>,
+    /// The database's `site_id` setting (decoded), recorded by `blog setup`: `blog admin reset`
+    /// changes nothing unless the database still carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_id: Option<String>,
     /// The custom domain has served a version once: from then on it is the smoke target.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub domain_smoke_passed: bool,

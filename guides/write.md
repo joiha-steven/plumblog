@@ -19,6 +19,7 @@ The answer shows the token once; keep it in an environment variable, never in a 
 
 - Send `Authorization: Bearer $TOKEN` and JSON bodies (`curl --json`); integers only.
 - Times are UTC milliseconds. Lists: `limit` <= 100, then `cursor=<next_cursor>` until null.
+- `GET /api/v1/posts` also returns `counts` (posts per status) on the first page; `null` when `cursor` is set.
 - Errors are `{"error": "<code>", "field": "<name>"}`: fix the named field, never retry blindly.
 
 ## Posts
@@ -32,7 +33,7 @@ The answer shows the token once; keep it in an environment variable, never in a 
 - Edit: `GET /api/v1/posts/{id}` for the full post and its `version`, then
   `PATCH /api/v1/posts/{id}` with only the changed fields and `expected_version`. A 409
   `store.conflict` means someone else saved: read again, merge, never overwrite.
-- Tags and series are ids: find or create them first (`/api/v1/tags`, `/api/v1/series`).
+- Tags and series are ids: find or create them first (`/api/v1/tags`, `/api/v1/series`; lists are paged, follow `next_cursor`).
 - Delete: `POST /api/v1/posts/{id}/trash` (undo with `/restore`); `DELETE` only from the trash
   and only when the owner asked.
 - The answer may carry `warnings` (for example `markdown.math_invalid`): fix and save again.

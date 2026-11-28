@@ -6,8 +6,8 @@
 
 use plumblog_model::{PostId, Role, UserId};
 use plumblog_store::{
-    NewPasskey, NewRevision, NewUser, PasskeyStore, PostKind, PostStatus, PostStore, RedirectStore,
-    SavePost, SettingsStore, SiteStore, TaxonomyStore, UserStore,
+    NewPasskey, NewRevision, NewUser, PasskeyStore, PostKind, PostStatus, PostStore, Proof,
+    RedirectStore, SavePost, SettingsStore, SiteStore, TaxonomyStore, UserStore,
 };
 
 use super::post_save::Old;
@@ -232,6 +232,7 @@ async fn last_passkey_guard_in_batch(db: &D1Store) -> Result<(), String> {
         sign_count: 0,
         name: cred.to_owned(),
         created_at: 1_000,
+        proof: Proof::Unchecked,
     };
     let a = db.add_passkey(key("a")).await.map_err(e)?;
     let b = db.add_passkey(key("b")).await.map_err(e)?;

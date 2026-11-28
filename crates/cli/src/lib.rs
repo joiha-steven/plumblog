@@ -1,5 +1,6 @@
 //! Library half of the `blog` binary, so integration tests can drive the same code.
 
+pub mod admin;
 pub mod backup;
 pub mod bundle;
 pub mod cloudflare;
@@ -13,3 +14,4 @@ pub mod restore;
 pub mod setup;
 pub mod state;
 pub mod text;
+pub mod theme;

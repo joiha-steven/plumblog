@@ -882,7 +882,7 @@ fn script_secrets(client: &Client, name: &str) -> Result<Option<Vec<String>>, Ap
 /// `GET .../scripts/{name}/settings`, `result.bindings[]`; a plain-text binding carries
 /// `text`, as `convertWorkerMetadataBindingsToFlatBindings` reads it).
 /// <https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/settings/methods/get/>
-fn script_bindings(client: &Client, name: &str) -> Result<Vec<Value>, ApiError> {
+pub(crate) fn script_bindings(client: &Client, name: &str) -> Result<Vec<Value>, ApiError> {
     let v = client
         .call(&Call::new(Endpoint::ScriptSettingsGet).param("script_name", name.to_string()))?;
     Ok(v.get("bindings")
@@ -1277,10 +1277,22 @@ fn write_settings(run: &mut Run, db: &Database, origin: &str) -> Result<(), Fail
             written.push(TURNSTILE_SITE_KEY);
         }
     }
-    if get(SITE_ID_KEY).is_none() {
+    let site_id = if let Some(v) = get(SITE_ID_KEY) {
+        v
+    } else {
         let id = run.random(new_site_id_json())?;
         d1::ensure_site_id(db, &id, now).map_err(|e| run.api(&e))?;
         written.push(SITE_ID_KEY);
+        // Read back: the Worker may have created one first, and that one wins.
+        d1::settings(db, &[SITE_ID_KEY])
+            .map_err(|e| run.api(&e))?
+            .into_iter()
+            .next()
+            .map_or(id, |(_, v)| v)
+    };
+    let site_id = serde_json::from_str::<String>(&site_id).ok();
+    if site_id.is_some() && run.state.site_id != site_id {
+        run.update(|s| s.site_id = site_id)?;
     }
     let s = if written.is_empty() {
         run.t(key!("cli.setup.status_unchanged"), &[])

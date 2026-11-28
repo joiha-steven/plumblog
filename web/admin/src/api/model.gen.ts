@@ -36,6 +36,8 @@ export const ERROR_CODES = [
   "comments.form_invalid",
   "comments.check_failed",
   "comments.rate_limited",
+  "theme.unavailable",
+  "auth.reset_expired",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
@@ -91,6 +93,14 @@ export const POST_KINDS = [
 ] as const;
 export type PostKind = (typeof POST_KINDS)[number];
 
+export const COMMENT_STATUSES = [
+  "pending",
+  "approved",
+  "spam",
+  "trashed",
+] as const;
+export type CommentStatus = (typeof COMMENT_STATUSES)[number];
+
 export const RENDER_WARNINGS = [
   "markdown.math_invalid",
 ] as const;
@@ -135,6 +145,42 @@ export interface PostSaved extends PostSummary {
 }
 export interface PostPage {
   posts: PostSummary[];
+  next_cursor: string | null;
+  counts: PostCounts | null;
+}
+export interface PostCounts {
+  draft: number;
+  scheduled: number;
+  published: number;
+  trashed: number;
+}
+export interface Comment {
+  id: number;
+  post_id: number;
+  parent_id: number | null;
+  author_name: string;
+  body: string;
+  body_html: string | null;
+  status: CommentStatus;
+  created_at: number;
+}
+export interface CommentPage {
+  comments: Comment[];
+  next_cursor: string | null;
+}
+export interface User {
+  id: number;
+  login: string;
+  slug: string;
+  display_name: string;
+  bio: string;
+  role: string;
+  disabled_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+export interface UserPage {
+  users: User[];
   next_cursor: string | null;
 }
 export interface Conflict {
@@ -279,6 +325,42 @@ export const SHAPES: Readonly<Record<string, Readonly<Record<string, string>>>> 
   },
   "post_page": {
     "posts": "shape:post_summary[]",
+    "next_cursor": "string|null",
+    "counts": "shape:post_counts|null",
+  },
+  "post_counts": {
+    "draft": "integer",
+    "scheduled": "integer",
+    "published": "integer",
+    "trashed": "integer",
+  },
+  "comment": {
+    "id": "integer",
+    "post_id": "integer",
+    "parent_id": "integer|null",
+    "author_name": "string",
+    "body": "string",
+    "body_html": "string|null",
+    "status": "code:COMMENT_STATUSES",
+    "created_at": "integer",
+  },
+  "comment_page": {
+    "comments": "shape:comment[]",
+    "next_cursor": "string|null",
+  },
+  "user": {
+    "id": "integer",
+    "login": "string",
+    "slug": "string",
+    "display_name": "string",
+    "bio": "string",
+    "role": "string",
+    "disabled_at": "integer|null",
+    "created_at": "integer",
+    "updated_at": "integer",
+  },
+  "user_page": {
+    "users": "shape:user[]",
     "next_cursor": "string|null",
   },
   "conflict": {

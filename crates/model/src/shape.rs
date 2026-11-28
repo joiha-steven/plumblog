@@ -8,6 +8,8 @@
 pub const POST_STATUSES: &[&str] = &["draft", "scheduled", "published", "trashed"];
 /// `PostKind` in `crates/store`.
 pub const POST_KINDS: &[&str] = &["post", "page"];
+/// `CommentStatus` in `crates/store`.
+pub const COMMENT_STATUSES: &[&str] = &["pending", "approved", "spam", "trashed"];
 /// `plumblog_markdown::WARNING_CODES`.
 pub const RENDER_WARNINGS: &[&str] = &["markdown.math_invalid"];
 
@@ -31,6 +33,11 @@ pub const CODE_LISTS: &[CodeList] = &[
         constant: "POST_KINDS",
         ty: "PostKind",
         values: POST_KINDS,
+    },
+    CodeList {
+        constant: "COMMENT_STATUSES",
+        ty: "CommentStatus",
+        values: COMMENT_STATUSES,
     },
     CodeList {
         constant: "RENDER_WARNINGS",
@@ -134,6 +141,53 @@ const FULL: &[Prop] = &[
 const PAGE: &[Prop] = &[
     list("posts", Ty::Shape("post_summary")),
     nullable("next_cursor", Ty::Str),
+    nullable("counts", Ty::Shape("post_counts")),
+];
+
+/// Posts per status; every key is always there.
+const COUNTS: &[Prop] = &[
+    p("draft", Ty::Int),
+    p("scheduled", Ty::Int),
+    p("published", Ty::Int),
+    p("trashed", Ty::Int),
+];
+
+/// Every comment, any status (`GET /api/v1/comments`, for export).
+const COMMENT: &[Prop] = &[
+    p("id", Ty::Int),
+    p("post_id", Ty::Int),
+    nullable("parent_id", Ty::Int),
+    p("author_name", Ty::Str),
+    p("body", Ty::Str),
+    // `None` for rows from before migration 0004.
+    nullable("body_html", Ty::Str),
+    p("status", Ty::Code("COMMENT_STATUSES")),
+    p("created_at", Ty::Int),
+];
+
+const COMMENT_PAGE: &[Prop] = &[
+    list("comments", Ty::Shape("comment")),
+    nullable("next_cursor", Ty::Str),
+];
+
+/// A user as `GET /api/v1/users` answers it: never the password hash, sessions, passkeys or
+/// tokens. `role` is a `Role` code (`ROLES` in the TS), which is emitted from the enum, not
+/// from a code list here.
+const USER: &[Prop] = &[
+    p("id", Ty::Int),
+    p("login", Ty::Str),
+    p("slug", Ty::Str),
+    p("display_name", Ty::Str),
+    p("bio", Ty::Str),
+    p("role", Ty::Str),
+    nullable("disabled_at", Ty::Int),
+    p("created_at", Ty::Int),
+    p("updated_at", Ty::Int),
+];
+
+const USER_PAGE: &[Prop] = &[
+    list("users", Ty::Shape("user")),
+    nullable("next_cursor", Ty::Str),
 ];
 
 const CONFLICT: &[Prop] = &[
@@ -162,6 +216,31 @@ pub const SHAPES: &[Shape] = &[
         name: "post_page",
         extends: None,
         props: PAGE,
+    },
+    Shape {
+        name: "post_counts",
+        extends: None,
+        props: COUNTS,
+    },
+    Shape {
+        name: "comment",
+        extends: None,
+        props: COMMENT,
+    },
+    Shape {
+        name: "comment_page",
+        extends: None,
+        props: COMMENT_PAGE,
+    },
+    Shape {
+        name: "user",
+        extends: None,
+        props: USER,
+    },
+    Shape {
+        name: "user_page",
+        extends: None,
+        props: USER_PAGE,
     },
     Shape {
         name: "conflict",

@@ -4,7 +4,9 @@ use plumblog_model::{PostId, Result, RevisionId};
 
 use super::post_save::post_path;
 use super::{MemoryStore, invalid, not_found, post_not_found};
-use crate::{Post, PostQuery, PostStatus, PostStore, PostSummary, Revision, SavePost};
+use crate::{
+    Post, PostCounts, PostKind, PostQuery, PostStatus, PostStore, PostSummary, Revision, SavePost,
+};
 
 #[expect(
     clippy::unused_async_trait_impl,
@@ -44,6 +46,22 @@ impl PostStore for MemoryStore {
 
     async fn list_posts(&self, query: &PostQuery) -> Result<Vec<PostSummary>> {
         self.read(|s| s.list_posts(query))
+    }
+
+    async fn count_posts_by_status(
+        &self,
+        kind: Option<PostKind>,
+        lang: Option<&str>,
+    ) -> Result<PostCounts> {
+        self.read(|s| {
+            let mut counts = PostCounts::default();
+            for p in s.posts.values() {
+                if kind.is_none_or(|k| p.kind == k) && lang.is_none_or(|l| p.lang == l) {
+                    counts.add(p.status, 1);
+                }
+            }
+            Ok(counts)
+        })
     }
 
     async fn trash_post(&self, id: PostId, now: i64) -> Result<()> {

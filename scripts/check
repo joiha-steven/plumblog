@@ -65,7 +65,9 @@ echo "check: worker.wasm gzip = $size bytes (budget $WASM_GZIP_BUDGET_BYTES; dep
 step "crate dependency graph"
 command -v jq > /dev/null || fail "jq is missing; install it (macOS: brew install jq, Debian/Ubuntu: apt install jq)"
 # Modules stay replaceable only if dependencies point down the list in docs/ARCHITECTURE.md
-# (Code layout); that list is the single source of the allowed order.
+# (Code layout); that list is the single source of the allowed order. A crate may list itself
+# as a dev-dependency (to turn its own feature on for its tests), so only a crate strictly
+# below another counts.
 order=$(awk '/^## Code layout/{s=1} s&&/^```/{n++; next} s&&n==1&&/^crates\//{split($1,a,"/"); print a[2]} n>=2{exit}' docs/ARCHITECTURE.md)
 [ -n "$order" ] || fail "no crates/ list found under '## Code layout' in docs/ARCHITECTURE.md"
 # External crates each module may use. Empty for most: a module crate gains an external
@@ -74,8 +76,10 @@ order=$(awk '/^## Code layout/{s=1} s&&/^```/{n++; next} s&&n==1&&/^crates\//{sp
 external_allowlist='
 worker   worker                 # the Cloudflare runtime; the only crate that does I/O
 worker   idna_adapter           # pins the IDNA back end of url, for size (see Cargo.toml)
+worker   futures-core           # Stream trait to read theme.json in bounded chunks; already in the wasm via worker
 worker   roxmltree              # tests only: feeds and sitemap parse as real XML
 worker   rusqlite               # tests only: EXPLAIN QUERY PLAN of every reader query
+worker   serde_json             # tests only: edits the JSON form of the embedded theme
 cli      clap                   # argument parsing for the `blog` binary
 cli      ureq                   # blocking HTTPS to the Cloudflare REST API (setup, deploy)
 cli      serde                  # typed Cloudflare API responses
@@ -88,12 +92,13 @@ cli      md-5                   # MD5 of R2 objects: single-part ETags (`blog ba
 cli      rusqlite               # tests only: the fake D1 runs real SQLite
 markdown unicode-normalization  # NFC before heading ids (pure Rust, no I/O)
 render   minijinja              # theme templates (pure Rust, no I/O)
-render   toml                   # theme.toml and theme locales (pure Rust, no I/O)
-render   serde                  # typed theme.toml and template data
+render   toml                   # feature `toml` only: TOML -> JSON for blog and the Worker build script, never in the wasm
+render   serde                  # typed theme manifest and template data
 render   serde_json             # stored option values are JSON
 markdown pulldown-cmark         # CommonMark + GFM parser
 markdown pulldown-latex         # LaTeX to MathML at save time
-i18n     toml                   # locale files are TOML
+i18n     toml                   # feature `toml` only: locale files are written in TOML, converted to JSON off the Worker
+i18n     serde_json             # the runtime reads locale files as JSON
 store unicode-normalization  # in-memory search folds diacritics like FTS5 unicode61
 store unicode-properties     # tests only: checks the comment-name invisible table against Unicode
 webhook serde_json            # payload JSON
@@ -109,7 +114,7 @@ graph_errors=$(jq -r --arg order "$order" --arg allow "$external_allowlist" '
     ($o[] | select($pkgs[.] == null) | "  crates/\(.) is listed in Code layout but is not a workspace member"),
     ($pkgs | to_entries[] | .key as $from | ($o | index($from)) as $i | select($i != null)
       | .value.dependencies[] | select($dir[.name] != null) | $dir[.name] as $to
-      | ($o | index($to)) as $j | select($j != null and $j >= $i)
+      | ($o | index($to)) as $j | select($j != null and $j > $i)
       | "  crates/\($from) -> crates/\($to): may only depend on crates listed above it"),
     ($pkgs | to_entries[] | .key as $from
       | .value.dependencies[] | select($dir[.name] == null) | .name as $ext
@@ -118,6 +123,16 @@ graph_errors=$(jq -r --arg order "$order" --arg allow "$external_allowlist" '
 ' <<< "$meta") || fail "jq failed while reading cargo metadata"
 if [ -n "$graph_errors" ]; then echo "$graph_errors"; fail "crate dependency graph (see docs/ARCHITECTURE.md, Code layout)"; fi
 # --- end crate dependency graph ---
+
+step "no TOML parser in the Worker wasm"
+# The 1 MiB budget would not notice the ~56 KB coming back: a `toml` feature reaching the
+# Worker's normal dependencies (docs/ARCHITECTURE.md, Budgets) is a failure of its own.
+# Anchored: the checkout path may contain "toml".
+tree=$(cargo tree -p plumblog-worker --target wasm32-unknown-unknown -e normal 2>&1) || fail "cargo tree failed: $tree"
+if printf '%s\n' "$tree" | grep -Eq ' toml(_parser|_datetime|_writer)? v'; then
+  printf '%s\n' "$tree" | grep -E ' toml(_parser|_datetime|_writer)? v' >&2
+  fail "a TOML crate is linked into the Worker wasm; the Worker loads JSON only (enable the toml features of plumblog-render/i18n only from the CLI, build.rs and tests)"
+fi
 
 step "admin build (tsc, esbuild, size budgets)"
 scripts/admin-build || fail "admin build (run scripts/admin-build for details)"
@@ -140,14 +155,15 @@ files=()
 while IFS= read -r -d '' f; do [ -f "$f" ] && files+=("$f"); done < "$list_file"
 
 step "site secrets and state stay out of git"
-# The API token (.env), resource names (site.local.toml) and database backups are per site;
+# The API token (.env), resource names (site.local.toml), database backups and pushed theme
+# copies (.blog/) are per site;
 # committed, they would leak or make every pull conflict (docs/ARCHITECTURE.md, Site-specific state).
 # .env.example (names only, no values) is the one allowed .env file, as in .gitignore.
 tracked=$(git -c core.quotePath=false ls-files -- ':(glob)**/.env' ':(glob)**/.env.*' \
-  ':(exclude,glob)**/.env.example' ':(glob)**/site.local.toml' ':(glob)**/backups/**') \
+  ':(exclude,glob)**/.env.example' ':(glob)**/site.local.toml' ':(glob)**/backups/**' ':(glob)**/.blog/**') \
   || fail "git ls-files failed"
 if [ -n "$tracked" ]; then echo "$tracked" | sed 's/^/  /'; fail "tracked site files; git rm --cached them"; fi
-for p in .env .env.local site.local.toml backups/x.sql; do
+for p in .env .env.local site.local.toml backups/x.sql .blog/themes/x/theme.json; do
   git check-ignore -q --no-index "$p" || fail "$p is not ignored by .gitignore"
 done
 

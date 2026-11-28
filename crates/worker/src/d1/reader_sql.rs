@@ -1,10 +1,13 @@
-//! The SQL of the reader reads, free of the Worker runtime so a test can run `EXPLAIN QUERY
-//! PLAN` on every statement against real SQLite with the migrations applied. Each doc line
-//! names the index the query is meant to use; the test fails when the plan drifts.
+//! The SQL of the reader reads (and of the admin and export listings), free of the Worker
+//! runtime so a test can run `EXPLAIN QUERY PLAN` on every statement against real SQLite with
+//! the migrations applied. Each doc line names the index the query is meant to use; the test
+//! fails when the plan drifts.
 
 use plumblog_store::{ReaderFilter, year_bounds};
 
+use super::comments::COMMENT_COLS;
 use super::posts::{POST_COLS, SUMMARY_COLS};
+use super::users::USER_COLS;
 
 /// Tags of `p` as JSON `[[id, slug, name], ...]`: names may hold any character, so no
 /// separator-joined list. JSON order is not relied on; `read_tags` sorts by id.
@@ -36,6 +39,26 @@ pub(super) fn listing_from(filter: ReaderFilter<'_>) -> Option<String> {
 /// The count of a listing: a covering index (`posts_home`, `posts_by_date`, `post_tags_tag`).
 pub(super) fn count(from: &str) -> String {
     format!("SELECT COUNT(*) FROM {from}")
+}
+
+/// Posts per status (admin list pills), any status. A covering scan of `posts_listing`
+/// (status, kind, lang): grouped by its first column, so no sort and no table read. Named
+/// explicitly: without it the planner takes `posts_admin` (no filter) or `posts_lang_slug`
+/// (lang, then a TEMP B-TREE for the GROUP BY).
+pub(super) fn post_counts(kind: bool, lang: bool) -> String {
+    let mut wh = Vec::new();
+    if kind {
+        wh.push("kind = ?");
+    }
+    if lang {
+        wh.push("lang = ?");
+    }
+    let wh = if wh.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", wh.join(" AND "))
+    };
+    format!("SELECT status, COUNT(*) FROM posts INDEXED BY posts_listing{wh} GROUP BY status")
 }
 
 /// One page of a listing. The inner query pages over the index alone (ids and sort keys);
@@ -133,6 +156,25 @@ pub(super) fn tags() -> String {
          FROM post_tags pt CROSS JOIN posts p ON p.id = pt.post_id \
          WHERE pt.tag_id = t.id AND {LISTED}) ORDER BY t.name, t.id"
     )
+}
+
+/// A page of tags or series by slug: `slug > ?` then `LIMIT ?` walk the slug's unique
+/// autoindex in order, with no sort and no scan. The first page binds `''`, which sorts
+/// before every slug (a slug is never empty).
+pub(super) fn taxonomy_page(table: &str, cols: &str) -> String {
+    format!("SELECT {cols} FROM {table} WHERE slug > ? ORDER BY slug LIMIT ?")
+}
+
+/// Every comment by id after a cursor id (0 = from the start), for export: a range of the
+/// primary key, so a page reads its own rows plus one, however many are spam. No status
+/// filter: `status` leads no index that also orders by id.
+pub(super) fn comments_by_id() -> String {
+    format!("SELECT {COMMENT_COLS} FROM comments WHERE id > ? ORDER BY id LIMIT ?")
+}
+
+/// Every user by id after a cursor id (0 = from the start): a range of the primary key.
+pub(super) fn users_by_id() -> String {
+    format!("SELECT {USER_COLS} FROM users WHERE id > ? ORDER BY id LIMIT ?")
 }
 
 #[cfg(test)]
@@ -254,6 +296,17 @@ mod plans {
             false,
         );
 
+        // The admin's status counts: an index alone, grouped without a sort.
+        for (kind, lang) in [(false, false), (true, false), (false, true), (true, true)] {
+            check(
+                &c,
+                &format!("post counts kind={kind} lang={lang}"),
+                &post_counts(kind, lang),
+                &["COVERING INDEX posts_listing"],
+                false,
+            );
+        }
+
         // Pages walk the index in order: no sort.
         check(&c, "rows home", &rows(&home, true), &["posts_home"], false);
         check(&c, "rows tag", &rows(&tag, false), &["post_tags_tag"], true);
@@ -294,5 +347,42 @@ mod plans {
         check_scans(&c, "tags", &tags(), &["post_tags_tag"], true, &["t"]);
         check(&c, "feed", &feed(), &["posts_listing"], false);
         check(&c, "sitemap", &sitemap(), &["posts_by_date"], false);
+
+        // API pages of tags and series: a SEARCH on the slug's unique autoindex, no sort.
+        for (table, cols, index) in [
+            ("tags", "id, slug, name", "sqlite_autoindex_tags_1"),
+            (
+                "series",
+                "id, slug, title, description",
+                "sqlite_autoindex_series_1",
+            ),
+        ] {
+            check(
+                &c,
+                &format!("{table} page"),
+                &taxonomy_page(table, cols),
+                &[&format!("SEARCH {table} USING INDEX {index} (slug>?)")],
+                false,
+            );
+        }
+    }
+
+    /// The export listings: a primary-key range read in key order, nothing else.
+    #[test]
+    fn export_listings_are_primary_key_ranges() {
+        let c = db();
+        for (name, sql, table) in [
+            ("comments by id", comments_by_id(), "comments"),
+            ("users by id", users_by_id(), "users"),
+        ] {
+            check(&c, name, &sql, &[], false);
+            assert_eq!(
+                plan(&c, &sql),
+                [format!(
+                    "SEARCH {table} USING INTEGER PRIMARY KEY (rowid>?)"
+                )],
+                "{name}"
+            );
+        }
     }
 }

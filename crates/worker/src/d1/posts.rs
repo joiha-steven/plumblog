@@ -4,12 +4,14 @@ use plumblog_model::{
     Error, ErrorCode, MediaId, PostId, Result, RevisionId, SeriesId, TagId, UserId,
 };
 use plumblog_store::{
-    Post, PostCursor, PostKind, PostOrder, PostQuery, PostStatus, PostStore, PostSummary, Revision,
-    SavePost, search,
+    Post, PostCounts, PostCursor, PostKind, PostOrder, PostQuery, PostStatus, PostStore,
+    PostSummary, Revision, SavePost, search,
 };
 use worker::wasm_bindgen::JsValue;
 
-use super::{D1Store, Row, bound, bump_if, flag, int, invalid, limit, not_found, storage, text};
+use super::{
+    D1Store, Row, bound, bump_if, flag, int, invalid, limit, not_found, probe_limit, storage, text,
+};
 
 /// Every `posts` column, in [`read_post`] order, with tag ids as one text column so a post
 /// and its tags are one query.
@@ -193,7 +195,7 @@ fn listing_sql(q: &PostQuery) -> Result<(String, Vec<JsValue>)> {
     } else {
         format!("WHERE {}", wh.join(" AND "))
     };
-    params.push(limit(q.limit));
+    params.push(probe_limit(q.limit));
     Ok((format!("{where_sql} ORDER BY {order} LIMIT ?"), params))
 }
 
@@ -268,6 +270,33 @@ impl PostStore for D1Store {
             &params,
         )?;
         self.rows(s).await?.iter_mut().map(read_summary).collect()
+    }
+
+    // 1 query: a covering scan of `posts_listing` (see `reader_sql::post_counts`).
+    async fn count_posts_by_status(
+        &self,
+        kind: Option<PostKind>,
+        lang: Option<&str>,
+    ) -> Result<PostCounts> {
+        let mut params = Vec::new();
+        if let Some(k) = kind {
+            params.push(text(k.as_str()));
+        }
+        if let Some(l) = lang {
+            params.push(text(l));
+        }
+        let s = self.stmt(
+            "count_posts_by_status",
+            &super::reader_sql::post_counts(kind.is_some(), lang.is_some()),
+            &params,
+        )?;
+        let mut counts = PostCounts::default();
+        for mut r in self.rows(s).await? {
+            // An unknown status is an error, never a silently missing count.
+            let status = r.code("post status", PostStatus::parse)?;
+            counts.add(status, r.int()?);
+        }
+        Ok(counts)
     }
 
     async fn trash_post(&self, id: PostId, now: i64) -> Result<()> {

@@ -27,6 +27,8 @@ const RUN_DIR = process.env.WORKER_TEST_RUN_DIR ?? tmpdir();
 // The test build (scripts/worker-test), apart from target/worker-dev that the config names
 // for scripts/admin-dev, so tests never replace files under a running dev server.
 const OUT = process.env.WORKER_TEST_OUT ?? join(ROOT, "target/worker-test");
+/** The static assets scripts/assemble-assets laid out for this build. */
+export const ASSETS_DIR = join(OUT, "assets");
 // Readiness and helper-process bounds. A start is wrangler migrations + seed + build of the
 // worker: about 5 s idle, 17 s under a loaded 16-core run (measured); 60 s leaves 3x on a slow CI box.
 const READY_TIMEOUT_MS = 60_000;
@@ -319,6 +321,15 @@ export function d1Exec(state, sql) {
   );
 }
 
+/** Runs `[{sql, params}]` (one statement each, params bound in order) in one transaction. */
+export function d1Batch(state, stmts) {
+  withDb(d1File(state), (db) =>
+    inTransaction(db, () => {
+      for (const { sql, params } of stmts) db.prepare(sql).run(...params);
+    }),
+  );
+}
+
 /**
  * For test helpers that take either: SQL whose first statement returns rows is a query (exactly
  * one statement, as d1Query); anything else is a write batch (d1Exec) and returns [].
@@ -360,6 +371,7 @@ export function makeStateDir() {
  * become `--var KEY:VALUE` (wrangler dev's way to set vars and secrets per run).
  * Ready means this start's own Worker answered with its own token (`/__instance`), not just
  * that something answers on the port. `port` pins the port; only the harness's own test uses it.
+ * `assets` replaces the static assets directory (default: the build's, see `ASSETS_DIR`).
  */
 /** Empties the database and saves the sample site (settings, posts, tags, one translated pair). */
 export async function seedSample(worker) {
@@ -367,7 +379,7 @@ export async function seedSample(worker) {
   if (res.status !== 200) throw new Error(`/__seed: ${res.status} ${await res.text()}`);
 }
 
-export async function startWorker({ seedSql = null, vars = {}, port: pinned = null } = {}) {
+export async function startWorker({ seedSql = null, vars = {}, port: pinned = null, assets = ASSETS_DIR } = {}) {
   const entry = { state: mkdtempSync(join(RUN_DIR, "plumblog-wrangler-")), pgid: null, pgidFile: null, portLock: null };
   live.add(entry);
   const common = ["--config", CONFIG, "--persist-to", entry.state];
@@ -400,7 +412,7 @@ export async function startWorker({ seedSql = null, vars = {}, port: pinned = nu
   // The inspector port 0 lets the OS pick: nothing here connects to it.
   const child = spawn(
     WRANGLER,
-    ["dev", join(OUT, "worker/shim.mjs"), "--assets", join(OUT, "assets"), ...common, "--ip", "127.0.0.1", "--port", String(port), "--inspector-port", "0",
+    ["dev", join(OUT, "worker/shim.mjs"), "--assets", assets, ...common, "--ip", "127.0.0.1", "--port", String(port), "--inspector-port", "0",
       "--show-interactive-dev-session=false", "--log-level", "log",
       // Serves /__scheduled so tests can fire the cron trigger.
       "--test-scheduled",

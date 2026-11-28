@@ -13,6 +13,10 @@ stable_codes! {
         SignInLocked => "auth.sign_in_locked",
         GlobalCap => "auth.global_cap",
         PasswordChanged => "auth.password_changed",
+        // `blog admin reset` locked an owner out of every credential and stored a reset code.
+        OwnerReset => "auth.owner_reset",
+        // The owner used that code to set a new password.
+        OwnerResetRedeemed => "auth.owner_reset_redeemed",
         SignOut => "auth.sign_out",
         PasskeyAdded => "auth.passkey_added",
         PasskeyRemoved => "auth.passkey_removed",
@@ -53,6 +57,7 @@ impl EventKind {
         match self {
             Self::SignIn
             | Self::PasswordChanged
+            | Self::OwnerResetRedeemed
             | Self::SignOut
             | Self::PasskeyAdded
             | Self::PasskeyRemoved
@@ -69,9 +74,11 @@ impl EventKind {
             | Self::WebhookDelivery
             | Self::CommentCreated
             | Self::CommentModerated => Severity::Info,
-            Self::SignInFailed | Self::SignInLocked | Self::GlobalCap | Self::PluginDisabled => {
-                Severity::Warning
-            }
+            Self::SignInFailed
+            | Self::SignInLocked
+            | Self::GlobalCap
+            | Self::PluginDisabled
+            | Self::OwnerReset => Severity::Warning,
             Self::Error => Severity::Error,
         }
     }
@@ -278,6 +285,8 @@ mod tests {
                 (EventKind::SignInLocked, "auth.sign_in_locked"),
                 (EventKind::GlobalCap, "auth.global_cap"),
                 (EventKind::PasswordChanged, "auth.password_changed"),
+                (EventKind::OwnerReset, "auth.owner_reset"),
+                (EventKind::OwnerResetRedeemed, "auth.owner_reset_redeemed"),
                 (EventKind::SignOut, "auth.sign_out"),
                 (EventKind::PasskeyAdded, "auth.passkey_added"),
                 (EventKind::PasskeyRemoved, "auth.passkey_removed"),

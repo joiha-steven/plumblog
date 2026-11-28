@@ -2,6 +2,7 @@
 //! site answering `/healthz` with the active version, and a virtual clock (no real waits).
 
 mod release;
+mod theme;
 
 use super::{GOOD, TempDir, client};
 use crate::fake_cf::{Failure, Fake, Recorded};
@@ -309,6 +310,9 @@ fn happy_deploy_runs_the_steps_in_order_with_the_documented_shapes() {
             "GET /user/tokens/verify".to_string(),
             "GET /accounts".into(),
             "GET /accounts/acc1/d1/database/db-1/time_travel/bookmark".into(),
+            // The serving version's pushed theme, if any (none here).
+            format!("GET {w}/deployments"),
+            format!("GET {w}/versions/{P}"),
             format!("POST {w}/assets-upload-session"),
             "POST /accounts/acc1/workers/assets/upload".into(),
             "POST /accounts/acc1/workers/assets/upload".into(),
@@ -487,9 +491,9 @@ fn a_migration_error_uploads_nothing_and_blocks_the_next_deploy() {
     assert!(log_rows(&fake, "system.deploy")[0].contains("migration_failed"));
     for r in &fake.requests()[skip0..] {
         assert!(
-            !r.path.contains("assets")
-                && !r.path.ends_with("/versions")
-                && !r.path.ends_with("/deployments"),
+            !(r.path.contains("assets")
+                || r.path.ends_with("/versions")
+                || (r.method == "POST" && r.path.ends_with("/deployments"))),
             "{} {}",
             r.method,
             r.path
@@ -1230,7 +1234,7 @@ fn an_unrecorded_migration_in_a_deploy_blocks_the_next_one() {
 
 /// A site set up with `--domain blog.example.com`; `workers_dev`: the account has a
 /// workers.dev subdomain.
-fn set_up_domain(workers_dev: bool) -> (Fake, TempDir, PathBuf) {
+pub(super) fn set_up_domain(workers_dev: bool) -> (Fake, TempDir, PathBuf) {
     let mut st = site(ALL);
     if !workers_dev {
         st.subdomain = None;

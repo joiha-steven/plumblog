@@ -185,6 +185,7 @@ pub async fn disable_ends_sessions<S: Store>(db: &S) -> Check {
                 user_id: u,
                 created_at: T0,
                 expires_at: T0 + 100,
+                proof: crate::Proof::Unchecked,
             })
             .await,
         )?;
@@ -221,6 +222,7 @@ pub async fn last_owner_is_kept<S: Store>(db: &S) -> Check {
             user_id: a,
             created_at: T0,
             expires_at: T0 + 100,
+            proof: crate::Proof::Unchecked,
         })
         .await,
     )?;
@@ -309,6 +311,7 @@ fn token(user: UserId, hash: &str, expires_at: Option<i64>) -> NewToken {
         scope: TokenScope::Writer,
         created_at: T0,
         expires_at,
+        proof: crate::Proof::Unchecked,
     }
 }
 
@@ -353,6 +356,7 @@ pub async fn disabled_user_credentials_do_not_resolve<S: Store>(db: &S) -> Check
             user_id: a,
             created_at: T0,
             expires_at: T0 + 100,
+            proof: crate::Proof::Unchecked,
         })
         .await,
     )?;
@@ -386,6 +390,7 @@ fn session(user: UserId, hash: &str) -> NewSession {
         user_id: user,
         created_at: T0,
         expires_at: T0 + 1_000_000,
+        proof: crate::Proof::Unchecked,
     }
 }
 

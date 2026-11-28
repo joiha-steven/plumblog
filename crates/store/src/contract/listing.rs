@@ -247,7 +247,51 @@ pub async fn post_filters<S: Store>(db: &S) -> Check {
     )
 }
 
-/// A limit above [`MAX_PAGE`] returns [`MAX_PAGE`] rows.
+/// A client's page of [`MAX_PAGE`] rows plus the one probe row that tells whether another
+/// page exists must come back whole, for posts and media: with `MAX_PAGE + 1` rows stored,
+/// asking for `MAX_PAGE + 1` returns all of them and the next page holds exactly one.
+pub async fn probe_row_past_max_page<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let probe = MAX_PAGE + 1;
+    for i in 0..probe {
+        let mut p = post(u, "vi", &format!("p{i}"), PostStatus::Published);
+        p.published_at = Some(i64::from(i));
+        save(db, p).await?;
+        ok(
+            "create_media",
+            db.create_media(media(&format!("k{i}"), i64::from(i))).await,
+        )?;
+    }
+    let mut q = PostQuery::new(PostOrder::PublishedDesc, probe);
+    let rows = ok("list_posts", db.list_posts(&q).await)?;
+    eq!("posts probe page", rows.len(), probe as usize)?;
+    q.limit = MAX_PAGE;
+    let first = ok("list_posts", db.list_posts(&q).await)?;
+    q.after = first.last().map(|p| q.order.cursor(p));
+    eq!(
+        "posts second page",
+        ok("list_posts", db.list_posts(&q).await)?.len(),
+        1
+    )?;
+
+    let m = |before, limit| MediaQuery {
+        before,
+        missing_alt_only: false,
+        unused_only: false,
+        limit,
+    };
+    let rows = ok("list_media", db.list_media(m(None, probe)).await)?;
+    eq!("media probe page", rows.len(), probe as usize)?;
+    let first = ok("list_media", db.list_media(m(None, MAX_PAGE)).await)?;
+    let last = first.last().map(|x| (x.created_at, x.id));
+    eq!(
+        "media second page",
+        ok("list_media", db.list_media(m(last, MAX_PAGE)).await)?.len(),
+        1
+    )
+}
+
+/// A limit above [`MAX_PAGE`] + 1 (the probe row) returns that many rows, no more.
 pub async fn limits_cap_at_max_page<S: Store>(db: &S) -> Check {
     let over = MAX_PAGE + 1;
     for i in 0..over {
@@ -271,7 +315,7 @@ pub async fn limits_cap_at_max_page<S: Store>(db: &S) -> Check {
         })
         .await,
     )?;
-    eq!("list_media capped", m.len(), crate::page_len(MAX_PAGE))?;
+    eq!("list_media capped", m.len(), crate::probe_len(MAX_PAGE + 1))?;
     let l = ok(
         "query_log",
         db.query_log(LogQuery {
@@ -285,4 +329,55 @@ pub async fn limits_cap_at_max_page<S: Store>(db: &S) -> Check {
         .await,
     )?;
     eq!("query_log capped", l.len(), crate::page_len(MAX_PAGE))
+}
+
+/// `count_posts_by_status`: zeros, kind and lang filters, trash moves a post's count.
+pub async fn post_counts_by_status<S: Store>(db: &S) -> Check {
+    let counts = async |kind, lang| {
+        let c = ok(
+            "count_posts_by_status",
+            db.count_posts_by_status(kind, lang).await,
+        )?;
+        Ok::<_, String>((c.draft, c.scheduled, c.published, c.trashed))
+    };
+    eq!("empty store", counts(None, None).await?, (0, 0, 0, 0))?;
+
+    let u = user(db, "alice").await?;
+    let mut ids = Vec::new();
+    for (slug, status, kind, lang) in [
+        ("d1", PostStatus::Draft, PostKind::Post, "vi"),
+        ("d2", PostStatus::Draft, PostKind::Post, "en"),
+        ("p1", PostStatus::Published, PostKind::Post, "vi"),
+        ("p2", PostStatus::Published, PostKind::Page, "vi"),
+        ("s1", PostStatus::Scheduled, PostKind::Post, "en"),
+    ] {
+        let mut p = post(u, lang, slug, status);
+        p.kind = kind;
+        ids.push(save(db, p).await?);
+    }
+    eq!("no filter", counts(None, None).await?, (2, 1, 2, 0))?;
+    eq!(
+        "kind",
+        counts(Some(PostKind::Post), None).await?,
+        (2, 1, 1, 0)
+    )?;
+    eq!("lang", counts(None, Some("vi")).await?, (1, 0, 2, 0))?;
+    eq!(
+        "kind and lang, none match",
+        counts(Some(PostKind::Page), Some("en")).await?,
+        (0, 0, 0, 0)
+    )?;
+
+    ok("trash_post", db.trash_post(ids[2], T0 + 1).await)?;
+    eq!(
+        "trash moves the count",
+        counts(None, None).await?,
+        (2, 1, 1, 1)
+    )?;
+    eq!(
+        "trash with filters",
+        counts(Some(PostKind::Post), Some("vi")).await?,
+        (1, 0, 0, 1)
+    )?;
+    Ok(())
 }

@@ -1,6 +1,9 @@
 //! Theme options and declarative plugins: schema checks at load, stored values that do not
 //! fit, and the fixture plugin (tests/fixtures/plugins/hello) filling the minimal theme.
 
+mod common;
+
+use common::{Runtime, runtime};
 use plumblog_markdown::Rendered;
 use plumblog_render::{Body, PageInfo, Plugin, Post, Site, Theme};
 use std::path::Path;
@@ -34,11 +37,8 @@ fn hello() -> Vec<(String, String)> {
     dir_files(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins/hello"))
 }
 
-fn refs(files: &[(String, String)]) -> Vec<(&str, &str)> {
-    files
-        .iter()
-        .map(|(a, b)| (a.as_str(), b.as_str()))
-        .collect()
+fn refs(files: &[(String, String)]) -> Runtime {
+    runtime(files.iter().map(|(a, b)| (a, b)))
 }
 
 /// `files` with `path` replaced by `f(old text)`.
@@ -54,11 +54,11 @@ fn edit(
 }
 
 fn plugin(files: &[(String, String)]) -> Result<Plugin, String> {
-    Plugin::load("hello", &refs(files).as_slice(), "/plugin/hello").map_err(|e| e.detail)
+    Plugin::load("hello", &refs(files), "/plugin/hello").map_err(|e| e.detail)
 }
 
 fn theme_with(files: &[(String, String)], plugins: Vec<Plugin>) -> Result<Theme, String> {
-    Theme::load(&refs(files).as_slice(), None, plugins, "/theme/minimal").map_err(|e| e.detail)
+    Theme::load(&refs(files), None, plugins, "/theme/minimal").map_err(|e| e.detail)
 }
 
 fn site() -> Site {
@@ -367,9 +367,7 @@ fn bad_plugins_do_not_load_and_say_why() {
         assert!(err.contains(want), "want {want:?} in {err:?}");
         assert!(err.starts_with("plugins/hello/"), "names the folder: {err}");
     }
-    let err = Plugin::load("Hello", &refs(&hello()).as_slice(), "/p")
-        .err()
-        .unwrap();
+    let err = Plugin::load("Hello", &refs(&hello()), "/p").err().unwrap();
     assert!(err.detail.contains("lowercase letters"), "{}", err.detail);
 }
 
@@ -564,8 +562,7 @@ const CSS_RAW_CAP: usize = 40_000;
 
 /// Bytes of CSS the minimal theme inlines with plugin `name` enabled, or why it does not fit.
 fn css_with(name: &str, files: &[(String, String)]) -> Result<usize, String> {
-    let p = Plugin::load(name, &refs(files).as_slice(), &format!("/plugin/{name}"))
-        .map_err(|e| e.detail)?;
+    let p = Plugin::load(name, &refs(files), &format!("/plugin/{name}")).map_err(|e| e.detail)?;
     let theme = theme_with(&minimal(), vec![p])?;
     let (on, problems) = theme.with_options(&[], &[(name.to_owned(), Vec::new())]);
     if !problems.is_empty() {
@@ -616,4 +613,36 @@ fn the_css_budget_check_counts_plugin_css_and_bites() {
     });
     let err = css_with("hello", &heavy).unwrap_err();
     assert!(err.contains("bytes of CSS (cap 40000)"), "{err}");
+}
+
+/// The options API refuses what a render would replace by the default, so an owner learns
+/// at write time, not from a log line.
+#[test]
+fn one_value_is_checked_against_the_theme_or_plugin_declaration() {
+    let theme = theme_with(&minimal(), vec![plugin(&hello()).unwrap()]).unwrap();
+    let ok = |p: Option<&str>, k: &str, v: &str| theme.check_option(p, k, v);
+    assert_eq!(ok(None, "excerpt_words", "40"), Some(Ok(())));
+    assert_eq!(
+        ok(None, "accent", r##"{"light":"#123456","dark":"#abcdef"}"##),
+        Some(Ok(()))
+    );
+    for (key, bad) in [
+        ("excerpt_words", "121"),
+        ("excerpt_words", "41"),
+        ("excerpt_words", "\"40\""),
+        ("accent", "\"#336699\""),
+        ("accent", r##"{"light":"red","dark":"#abcdef"}"##),
+        ("style", "\"magazine\""),
+        ("list_images", "not json"),
+    ] {
+        let e = ok(None, key, bad).expect("declared").unwrap_err();
+        assert!(!e.is_empty(), "{key}={bad}");
+    }
+    // Undeclared keys and unknown plugins are kept and not read, as before.
+    assert_eq!(ok(None, "only_theme", "true"), None);
+    assert_eq!(ok(Some("nope"), "x", "1"), None);
+    assert_eq!(ok(Some("hello"), "greeting", "\"Hi\""), Some(Ok(())));
+    let long = format!("\"{}\"", "x".repeat(41));
+    assert!(matches!(ok(Some("hello"), "greeting", &long), Some(Err(_))));
+    assert!(matches!(ok(Some("hello"), "greeting", "42"), Some(Err(_))));
 }

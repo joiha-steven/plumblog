@@ -1,6 +1,9 @@
 //! Renders every page kind with the real minimal theme, so a template or locale change that
 //! breaks a page fails here before it reaches the Worker.
 
+mod common;
+
+use common::runtime;
 use plumblog_markdown::Rendered;
 use plumblog_render::{
     Alternate, Body, CommentItem, Comments, Image, Link, PageInfo, Post, Site, Theme, ThemeFiles,
@@ -30,12 +33,14 @@ fn theme_files() -> Vec<(String, String)> {
     out
 }
 
-fn load(files: &[(String, String)], chosen: &BTreeMap<String, toml::Value>) -> Theme {
-    let refs: Vec<(&str, &str)> = files
-        .iter()
-        .map(|(a, b)| (a.as_str(), b.as_str()))
-        .collect();
-    let theme = Theme::load(&refs.as_slice(), None, Vec::new(), "/theme/assets").unwrap();
+fn load(files: &[(String, String)], chosen: &BTreeMap<String, serde_json::Value>) -> Theme {
+    let theme = Theme::load(
+        &runtime(files.iter().map(|(a, b)| (a, b))),
+        None,
+        Vec::new(),
+        "/theme/assets",
+    )
+    .unwrap();
     // Stored values are JSON, as the store keeps them.
     let stored: Vec<(String, String)> = chosen
         .iter()
@@ -204,14 +209,14 @@ fn options_come_from_declarations_and_owner_values() {
     let files = theme_files();
     let defaults = load(&files, &BTreeMap::new());
     let mut chosen = BTreeMap::new();
-    let mut accent = toml::Table::new();
-    accent.insert("light".into(), "#123456".into());
-    accent.insert("dark".into(), "#abcdef".into());
-    chosen.insert("accent".to_owned(), toml::Value::Table(accent));
+    chosen.insert(
+        "accent".to_owned(),
+        serde_json::json!({ "light": "#123456", "dark": "#abcdef" }),
+    );
     // On the step of 5 that theme.toml declares.
-    chosen.insert("excerpt_words".to_owned(), toml::Value::Integer(5));
+    chosen.insert("excerpt_words".to_owned(), serde_json::json!(5));
     // Not a declared choice: falls back to the default style instead of breaking the site.
-    chosen.insert("style".to_owned(), toml::Value::String("gone".into()));
+    chosen.insert("style".to_owned(), serde_json::json!("gone"));
     let custom = load(&files, &chosen);
     assert!(
         custom
@@ -253,16 +258,12 @@ fn inlined_css_fits_the_budget() {
 #[test]
 fn partial_theme_falls_back_and_bad_slots_fail() {
     let files = theme_files();
-    let default: Vec<(&str, &str)> = files
-        .iter()
-        .map(|(a, b)| (a.as_str(), b.as_str()))
-        .collect();
-    let default = default.as_slice();
-    let manifest = default.read("theme.toml").unwrap();
+    let default = runtime(files.iter().map(|(a, b)| (a, b)));
+    let manifest = default.read("theme.toml.json").unwrap();
     let style = default.read("style.css").unwrap();
     // A theme that overrides only the 404 page and one locale key.
     let child = [
-        ("theme.toml", manifest),
+        ("theme.toml.json", manifest),
         ("style.css", style),
         ("styles/writer.css", ""),
         ("assets/fonts/faces.css", ""),
@@ -270,7 +271,10 @@ fn partial_theme_falls_back_and_bad_slots_fail() {
             "templates/404.html",
             "{% extends \"base.html\" %}{% block main %}<p>{{ t(\"notfound.title\") }}</p>{% endblock %}",
         ),
-        ("locales/en.toml", "[notfound]\ntitle = \"Lost\"\n"),
+        (
+            "locales/en.toml.json",
+            "{\"notfound\":{\"title\":\"Lost\"}}",
+        ),
     ];
     let theme = Theme::load(&&child[..], Some(&default), Vec::new(), "/a").unwrap();
     let html = theme
@@ -283,7 +287,7 @@ fn partial_theme_falls_back_and_bad_slots_fail() {
     );
 
     let broken = [
-        ("theme.toml", manifest),
+        ("theme.toml.json", manifest),
         ("style.css", style),
         ("styles/writer.css", ""),
         ("assets/fonts/faces.css", ""),
@@ -328,13 +332,9 @@ fn highlighter_loads_only_on_posts_with_code() {
 #[test]
 fn post_flags_reach_templates() {
     let files = theme_files();
-    let default: Vec<(&str, &str)> = files
-        .iter()
-        .map(|(a, b)| (a.as_str(), b.as_str()))
-        .collect();
-    let default = default.as_slice();
+    let default = runtime(files.iter().map(|(a, b)| (a, b)));
     let child = [
-        ("theme.toml", default.read("theme.toml").unwrap()),
+        ("theme.toml.json", default.read("theme.toml.json").unwrap()),
         ("style.css", ""),
         ("styles/writer.css", ""),
         ("assets/fonts/faces.css", ""),

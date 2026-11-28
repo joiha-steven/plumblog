@@ -28,7 +28,10 @@ mod taxonomy;
 mod users;
 mod webhooks;
 
-use plumblog_model::{Error, ErrorCode, Result};
+use plumblog_model::{Error, ErrorCode, Result, UserId};
+use plumblog_store::{
+    OWNER_RESET_EXPIRES_KEY, OWNER_RESET_HASH_KEY, OWNER_RESET_USER_KEY, Proof, setup_hash_json,
+};
 use worker::wasm_bindgen::JsValue;
 use worker::{D1Database, D1PreparedStatement, D1Result};
 
@@ -198,6 +201,89 @@ pub(crate) fn guard(
     )
 }
 
+/// The SQL condition that `proof` still holds for `user` at `now`, and its parameters.
+pub(crate) fn proof_condition(
+    user: UserId,
+    proof: &Proof,
+    now: i64,
+) -> Result<(&'static str, Vec<JsValue>)> {
+    Ok(match proof {
+        Proof::Session(h) => (
+            "EXISTS (SELECT 1 FROM sessions WHERE token_hash = ? AND user_id = ?)",
+            vec![text(h), bound(user.0)],
+        ),
+        Proof::Password(h) => (
+            "EXISTS (SELECT 1 FROM users WHERE id = ? AND password_hash = ?)",
+            vec![bound(user.0), text(h)],
+        ),
+        Proof::Passkey(id) => (
+            "EXISTS (SELECT 1 FROM passkeys WHERE id = ? AND user_id = ?)",
+            vec![bound(*id), bound(user.0)],
+        ),
+        // Both values exactly JSON integers, as `take_owner_reset` reads them.
+        Proof::ResetCode(h) => (
+            "EXISTS (SELECT 1 FROM settings h, settings u, settings e \
+             WHERE h.key = ? AND h.value_json = ? AND u.key = ? AND u.value_json = ? \
+             AND e.key = ? AND CAST(CAST(e.value_json AS INTEGER) AS TEXT) = e.value_json \
+             AND CAST(e.value_json AS INTEGER) > ?)",
+            vec![
+                text(OWNER_RESET_HASH_KEY),
+                text(&setup_hash_json(h)),
+                text(OWNER_RESET_USER_KEY),
+                text(&user.0.to_string()),
+                text(OWNER_RESET_EXPIRES_KEY),
+                int(now)?,
+            ],
+        ),
+        #[cfg(feature = "contract-tests")]
+        Proof::Unchecked => ("1", Vec::new()),
+    })
+}
+
+/// A [`guard`] that aborts its batch unless `proof` holds for `user` at `now`.
+pub(crate) fn proof_guard(store: &D1Store, user: UserId, proof: &Proof, now: i64) -> Result<Stmt> {
+    let (condition, params) = proof_condition(user, proof, now)?;
+    guard(store, "proof_guard", condition, &params)
+}
+
+/// What a write gives when the credential its request authenticated with is gone.
+pub(crate) fn proof_gone() -> Error {
+    Error::new(
+        ErrorCode::Unauthenticated,
+        "the credential this request authenticated with is gone",
+    )
+}
+
+impl D1Store {
+    /// Whether `proof` holds for `user` at `now` (to name why a guarded batch was refused).
+    pub(crate) async fn proof_holds(&self, user: UserId, proof: &Proof, now: i64) -> Result<bool> {
+        let (condition, params) = proof_condition(user, proof, now)?;
+        let s = self.stmt(
+            "proof_holds",
+            &format!("SELECT ({condition}) AS ok"),
+            &params,
+        )?;
+        Ok(self.row(s).await?.map(|mut r| r.int()).transpose()? == Some(1))
+    }
+
+    /// Inserts with `insert` (one row) only if `proof` holds, in one batch; the new row id.
+    pub(crate) async fn insert_proven(
+        &self,
+        what: &'static str,
+        user: UserId,
+        proof: &Proof,
+        now: i64,
+        insert: Stmt,
+    ) -> Result<i64> {
+        let g = proof_guard(self, user, proof, now)?;
+        match self.batch_guarded(what, vec![g, insert]).await {
+            Ok(r) => Self::last_row_id(what, &r[1]),
+            Err(Failure::Guard) => Err(proof_gone()),
+            Err(Failure::Error(e)) => Err(e),
+        }
+    }
+}
+
 /// The statement that bumps `site.content_version`, when `condition` holds.
 pub(crate) fn bump_if(store: &D1Store, condition: &str, params: &[JsValue]) -> Result<Stmt> {
     store.stmt(
@@ -305,6 +391,11 @@ pub(crate) fn flag(b: bool) -> JsValue {
 /// `LIMIT` value: the page length capped at `MAX_PAGE`.
 pub(crate) fn limit(n: u32) -> JsValue {
     JsValue::from(n.min(plumblog_store::MAX_PAGE))
+}
+
+/// `LIMIT` value for a list paged by a probe row (see `plumblog_store::probe_len`).
+pub(crate) fn probe_limit(n: u32) -> JsValue {
+    JsValue::from(n.min(plumblog_store::MAX_PAGE + 1))
 }
 
 /// How many times a read-then-write method retries when a guard fires: each retry re-reads,

@@ -208,6 +208,27 @@ pub struct PostCursor {
     pub id: PostId,
 }
 
+/// How many posts hold each status; a status with none is 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PostCounts {
+    pub draft: i64,
+    pub scheduled: i64,
+    pub published: i64,
+    pub trashed: i64,
+}
+
+impl PostCounts {
+    /// Adds `n` posts of `status`.
+    pub fn add(&mut self, status: PostStatus, n: i64) {
+        match status {
+            PostStatus::Draft => self.draft += n,
+            PostStatus::Scheduled => self.scheduled += n,
+            PostStatus::Published => self.published += n,
+            PostStatus::Trashed => self.trashed += n,
+        }
+    }
+}
+
 /// Every filter set must hold; `None` means any.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PostQuery {
@@ -220,6 +241,7 @@ pub struct PostQuery {
     pub pinned: Option<bool>,
     pub order: PostOrder,
     pub after: Option<PostCursor>,
+    /// Capped at [`crate::MAX_PAGE`] + 1: a page plus the probe row for "is there more".
     pub limit: u32,
 }
 
@@ -270,6 +292,12 @@ pub trait PostStore {
     /// Every post of the group, any status, ordered by lang.
     async fn list_translations(&self, group: PostId) -> Result<Vec<PostSummary>>;
     async fn list_posts(&self, query: &PostQuery) -> Result<Vec<PostSummary>>;
+    /// Posts per status, any status (trash included), of `kind` and `lang` when given.
+    async fn count_posts_by_status(
+        &self,
+        kind: Option<PostKind>,
+        lang: Option<&str>,
+    ) -> Result<PostCounts>;
     /// `PostNotFound`; `InvalidInput` if already trashed. Keeps the old status in
     /// `trashed_from`; `updated_at = now`; `version + 1`; bumps if it was published.
     async fn trash_post(&self, id: PostId, now: i64) -> Result<()>;
@@ -300,6 +328,7 @@ pub trait PostStore {
 #[cfg(test)]
 mod tests {
     use super::{PostKind, PostStatus};
+    use crate::CommentStatus;
     use plumblog_model::shape;
 
     /// The model crate cannot see these enums, so it keeps copies for the admin's types.
@@ -310,5 +339,7 @@ mod tests {
         assert_eq!(shape::POST_STATUSES, statuses);
         assert_eq!(shape::POST_KINDS, kinds);
         assert_eq!(shape::RENDER_WARNINGS, plumblog_markdown::WARNING_CODES);
+        let comments: Vec<_> = CommentStatus::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(shape::COMMENT_STATUSES, comments);
     }
 }
