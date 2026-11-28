@@ -9,7 +9,7 @@ use crate::migrations::{self, Migration};
 use crate::state::{self, D1State, FailedMigration, R2State, SiteState, StateError};
 use crate::text::{Code, Text};
 use plumblog_i18n::{Key, key};
-use plumblog_store::{ORIGIN_KEY, SITE_ID_KEY, TURNSTILE_SITE_KEY};
+use plumblog_store::{ORIGIN_KEY, SITE_ID_KEY, SITE_LANG_KEY, TURNSTILE_SITE_KEY};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
@@ -1248,8 +1248,11 @@ fn attach_domain(run: &mut Run, worker: &str, host: &str, zone: &str) -> Result<
 
 fn write_settings(run: &mut Run, db: &Database, origin: &str) -> Result<(), Failure> {
     let now = run.cx.now_ms;
-    let current = d1::settings(db, &[ORIGIN_KEY, TURNSTILE_SITE_KEY, SITE_ID_KEY])
-        .map_err(|e| run.api(&e))?;
+    let current = d1::settings(
+        db,
+        &[ORIGIN_KEY, TURNSTILE_SITE_KEY, SITE_ID_KEY, SITE_LANG_KEY],
+    )
+    .map_err(|e| run.api(&e))?;
     let get = |k: &str| {
         current
             .iter()
@@ -1276,6 +1279,13 @@ fn write_settings(run: &mut Run, db: &Database, origin: &str) -> Result<(), Fail
             d1::put_setting(db, TURNSTILE_SITE_KEY, &want, now).map_err(|e| run.api(&e))?;
             written.push(TURNSTILE_SITE_KEY);
         }
+    }
+    // The owner's language (flag, env, OS locale, else English) starts the site in it; a value
+    // already there is the owner's later choice and stays.
+    if get(SITE_LANG_KEY).is_none() {
+        let lang = json_string(run.cx.text.lang());
+        d1::put_setting(db, SITE_LANG_KEY, &lang, now).map_err(|e| run.api(&e))?;
+        written.push(SITE_LANG_KEY);
     }
     let site_id = if let Some(v) = get(SITE_ID_KEY) {
         v

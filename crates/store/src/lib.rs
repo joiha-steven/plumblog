@@ -57,8 +57,8 @@ pub use signin::{
     MAX_FAILURE_KEYS, ORIGIN_KEY, OWNER_RESET_AT_KEY, OWNER_RESET_EXPIRES_KEY,
     OWNER_RESET_HASH_KEY, OWNER_RESET_KEEP_TOKENS_KEY, OWNER_RESET_KEYS,
     OWNER_RESET_SINCE_MARGIN_MS, OWNER_RESET_USER_KEY, Recorded, SETUP_CODE_EXPIRES_KEY,
-    SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore, TURNSTILE_SITE_KEY, is_internal_setting,
-    public_settings, setup_hash_json,
+    SETUP_CODE_HASH_KEY, SITE_ID_KEY, SITE_LANG_KEY, SetupStore, TURNSTILE_SITE_KEY,
+    is_internal_setting, public_settings, setup_hash_json,
 };
 pub use taxonomy::{NewSeries, Series, Tag, TaxonomyStore};
 pub use users::{NewUser, ProfileUpdate, SiteStore, User, UserStore};

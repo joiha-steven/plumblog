@@ -552,6 +552,11 @@ pub async fn setup_creates_first_owner_once<S: Store>(db: &S) -> Check {
         db.create_first_owner("old", new_user("a"), T0).await,
         ErrorCode::SetupInvalid,
     )?;
+    eq!(
+        "open on a fresh site",
+        ok("setup_open", db.setup_open().await)?,
+        true
+    )?;
     let mut nu = new_user("first");
     nu.role = Role::Writer;
     let id = ok(
@@ -563,6 +568,11 @@ pub async fn setup_creates_first_owner_once<S: Store>(db: &S) -> Check {
         "first user is an owner whatever role was asked",
         (u.login.as_str(), u.role),
         ("first", Role::Owner),
+    )?;
+    eq!(
+        "closed once a user exists",
+        ok("setup_open", db.setup_open().await)?,
+        false
     )?;
     eq!(
         "success consumes the code",

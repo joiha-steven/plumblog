@@ -73,6 +73,9 @@ pub async fn params(ctx: &Ctx) -> Result<Reply> {
     let turnstile = limit::turnstile_site_key(ctx)
         .await?
         .map_or(Out::Null, Out::Str);
+    // True exactly while setup could create the first owner (no user row), so the sign-in
+    // page can point a new owner at /admin/setup. Says nothing else about the accounts.
+    let setup_required = ctx.store.setup_open().await?;
     Ok(Reply::json(
         200,
         object(&[
@@ -82,6 +85,7 @@ pub async fn params(ctx: &Ctx) -> Result<Reply> {
                 Out::Int(i64::from(STRETCH_ITERATIONS)),
             ),
             ("turnstile_site_key", turnstile),
+            ("setup_required", Out::Bool(setup_required)),
         ]),
     ))
 }
@@ -572,4 +576,16 @@ pub async fn update_me(ctx: &Ctx, p: &Principal, body: &[u8]) -> Result<Reply> {
     check_current(ctx, user, &f).await?;
     let cookie = write_password(ctx, p, user, &f, Some(profile), "login").await?;
     Ok(user_reply(200, &ctx.store.get_user(user.id).await?).with_cookie(cookie))
+}
+
+#[cfg(test)]
+mod tests {
+    /// `blog setup` writes the key through the store crate's constant; the reader reads its own.
+    #[test]
+    fn setup_and_the_reader_name_the_same_language_key() {
+        assert_eq!(
+            plumblog_store::SITE_LANG_KEY,
+            crate::pages::reader_db::SITE_LANG_KEY
+        );
+    }
 }
