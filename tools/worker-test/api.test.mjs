@@ -44,6 +44,7 @@ const ROUTES = [
   "PATCH /api/v1/media/{id}",
   "DELETE /api/v1/media/{id}",
   "GET /api/v1/media/{id}/original",
+  "POST /api/v1/media/{id}/variants",
   "GET /api/v1/comments",
   "GET /api/v1/users",
   "GET /api/v1/redirects",

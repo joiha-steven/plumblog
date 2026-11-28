@@ -71,6 +71,29 @@ pub fn check_access(p: &Principal, m: &Method, path: &str) -> Result<()> {
     }
 }
 
+/// What must hold before a raw body is read: the route's access and, for a media item's new
+/// size, ownership of the item (one D1 read), so a caller refused either way never makes the
+/// Worker take the body in. `dispatch` repeats both.
+///
+/// # Errors
+///
+/// `Unauthenticated`, `Forbidden`, or `NotFound` for an unknown item.
+pub async fn check_before_body(ctx: &Ctx, p: &Principal, m: &Method, path: &str) -> Result<()> {
+    check_access(p, m, path)?;
+    let Some((route, values)) = method(m).and_then(|m| api::find(m, path).ok()) else {
+        return Ok(());
+    };
+    if route.id == RouteId::MediaVariant
+        && let Some(id) = values
+            .iter()
+            .find(|(k, _)| *k == "id")
+            .and_then(|(_, v)| v.parse().ok())
+    {
+        media::owned(ctx, p, plumblog_model::MediaId(id)).await?;
+    }
+    Ok(())
+}
+
 /// A content write in the system log: who, how (session or token), what.
 async fn changed(ctx: &Ctx, p: &Principal, action: &str, subject: &str) {
     ctx.syslog(
@@ -150,6 +173,7 @@ pub async fn dispatch(
         RouteId::MediaUpdate => media::update(ctx, p, &input).await,
         RouteId::MediaDelete => media::delete(ctx, p, &input).await,
         RouteId::MediaOriginal => media::original(ctx, &input).await,
+        RouteId::MediaVariant => media::add_variant(ctx, p, &input, body).await,
         RouteId::CommentList => export::comments(ctx, &input).await,
         RouteId::UserList => export::users(ctx, &input).await,
         RouteId::RedirectList => settings::redirects(ctx).await,
