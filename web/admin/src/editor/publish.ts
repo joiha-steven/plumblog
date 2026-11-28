@@ -29,6 +29,8 @@ export interface PubUi {
   draw?: (() => void) | undefined;
   /** A problem the panel shows (a taken slug). */
   slugError?: string | undefined;
+  /** A publish step is out: the panel's Unpublish and Trash wait for it. */
+  busy?: boolean | undefined;
 }
 
 export interface PubHost {
@@ -53,6 +55,8 @@ export interface PubHost {
   relabel(): void;
   /** The server copy's status moved on elsewhere: the editor adopts it (and stops autosave if live). */
   live(p: Post): void;
+  /** The post is in the trash: only Restore is offered. */
+  trashed(): boolean;
   /** The server copy moved on: the choice banner (index.ts serverChoice). */
   choose(p: Post): void;
 }
@@ -96,8 +100,18 @@ const oops = (e: ApiError, what: string): void => {
 
 const sameText = (a: [string, string], p: Post): boolean => a[0] === p.title && a[1] === p.markdown;
 
-/** The server copy moved on. Same text: take its version and go on (true); else the writer picks. */
-async function stale(host: PubHost, id: number): Promise<boolean> {
+/** One step at a time: the button and the panel's Unpublish and Trash are off while one is out. */
+function lock(host: PubHost, on: boolean): void {
+  host.ui.busy = on;
+  host.busy(on);
+  for (const b of host.ui.panel?.querySelectorAll<HTMLButtonElement>("[data-act]") ?? []) b.disabled = on;
+}
+
+/**
+ * The server copy moved on. Same text: take its version and go on (true); else the writer picks,
+ * and is told the step (`action`, its button's name) did not happen: they press it again after.
+ */
+async function stale(host: PubHost, id: number, action: string): Promise<boolean> {
   const { st } = host;
   st.hold = true;
   const r = await host.api.post(id);
@@ -121,24 +135,25 @@ async function stale(host: PubHost, id: number): Promise<boolean> {
     return false;
   }
   host.choose(p);
+  toast(t("admin.editor.pub.pick_then_again", { button: action }), 8000);
   return false;
 }
 
 /** Sends one update built by `build`, after sync has sent what waits. The saved post, or undefined (said). */
-async function commit(host: PubHost, build: () => PostUpdateInput): Promise<Post | undefined> {
+async function commit(host: PubHost, action: string, build: () => PostUpdateInput): Promise<Post | undefined> {
   // Autosave is held from the flush to the answer, so it never sends with the same version.
   const sync = host.sync();
   try {
-    return await send(host, sync, build);
+    return await send(host, sync, action, build);
   } finally {
     // A stopped sync (the post went live) stays stopped; a draft's goes on.
     sync?.resume();
   }
 }
 
-async function send(host: PubHost, sync: Sync | undefined, build: () => PostUpdateInput): Promise<Post | undefined> {
+async function send(host: PubHost, sync: Sync | undefined, action: string, build: () => PostUpdateInput): Promise<Post | undefined> {
   const { pub, st } = host;
-  host.busy(true);
+  lock(host, true);
   try {
     for (let n = 0; n < 2; n++) {
       const sent = await sync?.flush();
@@ -155,7 +170,7 @@ async function send(host: PubHost, sync: Sync | undefined, build: () => PostUpda
         return r.value;
       }
       if (r.error.field === "expected_version") {
-        if (await stale(host, pub.id)) continue;
+        if (await stale(host, pub.id, action)) continue;
         return undefined;
       }
       if (r.error.field === "slug") {
@@ -165,12 +180,19 @@ async function send(host: PubHost, sync: Sync | undefined, build: () => PostUpda
         openPanel(host);
         return undefined;
       }
+      if (r.error.field === "published_at") {
+        // The time passed (or went missing) between the check here and the server's.
+        console.warn(`admin editor: the server refused published_at: ${r.error.code}`);
+        toast(t("admin.editor.pub.time_past"), 6000);
+        openPanel(host, true);
+        return undefined;
+      }
       oops(r.error, "the update");
       return undefined;
     }
     return undefined;
   } finally {
-    host.busy(false);
+    lock(host, false);
   }
 }
 
@@ -252,7 +274,7 @@ async function publish(host: PubHost, plan: SlugPlan): Promise<void> {
   }
   const later = pub.later;
   const wasScheduled = pub.status === "scheduled";
-  const p = await commit(host, () => {
+  const p = await commit(host, label(pub), () => {
     const [title, markdown] = host.text();
     const input: PostUpdateInput = { expected_version: st.version ?? 0, title, markdown, status: later ? "scheduled" : "published" };
     // Now: the server keeps a live post's time; a scheduled one would keep its future time, so say now.
@@ -269,7 +291,7 @@ async function publish(host: PubHost, plan: SlugPlan): Promise<void> {
 
 async function unpublish(host: PubHost): Promise<void> {
   const { st } = host;
-  const p = await commit(host, () => ({ expected_version: st.version ?? 0, status: "draft", published_at: null }));
+  const p = await commit(host, t("admin.editor.pub.unpublish"), () => ({ expected_version: st.version ?? 0, status: "draft", published_at: null }));
   if (!p) return;
   adopt(host, p);
   toast(t("admin.editor.pub.unpublished"), 5000);
@@ -278,14 +300,36 @@ async function unpublish(host: PubHost): Promise<void> {
 async function trash(host: PubHost): Promise<void> {
   const { pub } = host;
   if (pub.id === undefined) return;
-  host.busy(true);
+  lock(host, true);
+  // Autosave is held like a publish: no PATCH races the trash.
+  const sync = host.sync();
+  await sync?.flush();
   const r = await host.api.call("POST", `/api/v1/posts/${pub.id}/trash`);
-  host.busy(false);
-  if (!r.ok) return oops(r.error, "moving to the trash");
+  lock(host, false);
+  if (!r.ok) {
+    sync?.resume();
+    return oops(r.error, "moving to the trash");
+  }
   // Nothing may save this post again; the local draft stays for a restore.
-  host.sync()?.stop();
+  sync?.stop();
   go(HREF.posts);
   toast(t("admin.editor.pub.trashed"), 5000);
+}
+
+/** Restore from the trash: the post comes back with the status it had; autosave follows it. */
+export async function restore(host: PubHost): Promise<void> {
+  const { pub, st } = host;
+  if (pub.id === undefined) return;
+  lock(host, true);
+  const r = await host.api.call<Post>("POST", `/api/v1/posts/${pub.id}/restore`);
+  lock(host, false);
+  if (!r.ok) return oops(r.error, "restoring from the trash");
+  const p = r.value;
+  // Restore changes only the status (version + 1): a text based on the trashed copy is based on
+  // this one. One based on an older copy keeps its version, so its first save asks (409).
+  if (st.version === p.version - 1) Object.assign(st, { base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
+  host.live(p);
+  toast(t("admin.editor.pub.restored"), 5000);
 }
 
 const ask = (anchor: HTMLElement, q: string, hint: string, text: string, then: () => void): void => {
@@ -396,7 +440,7 @@ function draw(host: PubHost): void {
     h("label", { class: "opt" }, h("input", { type: "radio", class: "rd", name: "pub-when", checked: pub.later === later, onchange: pick(later) }), text);
   const live = pub.status !== "draft";
   const danger = (key: "unpublish" | "trash", btn: string, q: string, hint: string, text: string, f: (h: PubHost) => Promise<void>) => {
-    const b = h("button", { class: "btn quiet danger", type: "button", "data-act": key, onclick: () => ask(b, q, hint, text, () => void f(host)) }, btn);
+    const b = h("button", { class: "btn quiet danger", type: "button", "data-act": key, disabled: !!ui.busy, onclick: () => ask(b, q, hint, text, () => void f(host)) }, btn);
     return h("div", {}, b);
   };
   panel.replaceChildren(
@@ -420,7 +464,7 @@ function draw(host: PubHost): void {
         at,
         timeNote,
       ),
-      pub.id === undefined
+      pub.id === undefined || host.trashed()
         ? null
         : h(
             "div",

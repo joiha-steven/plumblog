@@ -633,6 +633,10 @@ slug_taken = "Could not save to the site: posts with this title's address alread
 slow = "Still saving to the site. Your text is safe on this device."
 
 [admin.editor.pub]
+trashed_banner = "This post is in the trash. Your edits stay on this device until you restore it."
+restore = "Restore"
+restored = "Restored from the trash"
+pick_then_again = "Choose which text to keep, then press {button} again."
 publish = "Publish"
 update = "Update"
 schedule = "Schedule"

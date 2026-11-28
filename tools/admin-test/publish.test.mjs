@@ -160,6 +160,7 @@ function setup(api, p, text = ["Hello", "Body"]) {
       if (pub.status !== "draft") stopSync();
     },
     relabel: () => e.relabeled++,
+    trashed: () => e.trashed === true,
     live: (s) => {
       e.lived.push(s);
       m.fromPost?.(pub, s);
@@ -562,4 +563,93 @@ test("a failed create publishes nothing, and says why in the log", async () => {
   assert.deepEqual(api.calls.map((c) => c[0]), ["create"]);
   // Review item 7: the toast alone left nothing for the next person to find.
   assert.match(logged.join("\n"), /nothing to publish yet/);
+});
+
+// PR #91 review, item 4: no autosave PATCH races the trash.
+test("Trash holds autosave: a save waiting to go is not sent beside the trash request", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const api = fakeApi({ call: async () => (await gate, { ok: true, value: post(7, { status: "trashed" }) }) });
+  const e = setup(api, post(7));
+  e.text = ["Hello", "Typed just before"];
+  e.sync.changed(); // autosave due in 5 ms
+  m.openPanel(e.host);
+  document.querySelector('[data-act="trash"]').click();
+  clickIn(".confirm .btn.danger");
+  await quiet(60);
+  release();
+  await until(() => toastText() === tx("admin.editor.pub.trashed"));
+  await quiet(60);
+  assert.deepEqual(api.calls.map((c) => c[0]), ["call"], "no PATCH beside the trash");
+});
+
+// Item 5: Unpublish and Trash wait while an update is out.
+test("the panel's Unpublish and Trash are off while a publish step is out", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const api = fakeApi({
+    update: async (id, input) => {
+      await gate;
+      return { ok: true, value: post(id, { ...input, status: "published", published_at: 5000, version: input.expected_version + 1 }) };
+    },
+  });
+  const e = setup(api, post(7, { status: "published", published_at: 1000 }));
+  m.openPanel(e.host);
+  m.publishClick(e.host, e.anchor);
+  popup().querySelector(".btn.primary").click();
+  await until(() => updates(api).length === 1);
+  for (const act of ["unpublish", "trash"]) assert.equal(document.querySelector(`[data-act="${act}"]`).disabled, true, `${act} off while busy`);
+  release();
+  await until(() => e.applied === 1);
+  for (const act of ["unpublish", "trash"]) assert.equal(document.querySelector(`[data-act="${act}"]`).disabled, false, `${act} back on`);
+});
+
+// Item 6: the server's time refusal is the time message, with the time field open.
+test("a published_at refusal says the time is past and opens the time field", async () => {
+  const api = fakeApi({ update: () => ({ ok: false, error: { code: "validation.invalid", status: 422, field: "published_at" } }) });
+  const e = setup(api, post(7));
+  e.pub.later = true;
+  e.pub.at = m.localValue(Date.now() + 86_400_000);
+  const warn = console.warn;
+  console.warn = () => undefined;
+  try {
+    m.publishClick(e.host, e.anchor);
+    popup().querySelector(".btn.primary").click();
+    await until(() => toastText() === tx("admin.editor.pub.time_past"));
+  } finally {
+    console.warn = warn;
+  }
+  assert.ok(document.querySelector(".panel"), "panel open");
+  assert.equal(document.activeElement, document.querySelector("[data-at]"));
+});
+
+// Item 7: an Unpublish stopped by a text choice says so; it is not dropped silently.
+test("Unpublish that meets a 409 with other text shows the choice and says to press it again", async () => {
+  const server = post(7, { status: "published", published_at: 1000, markdown: "Theirs", version: 5 });
+  const api = fakeApi({ update: () => conflict("expected_version", 5), get: () => ({ ok: true, value: server }) });
+  const e = setup(api, post(7, { status: "published", published_at: 1000 }));
+  e.text = ["Hello", "Mine"];
+  m.openPanel(e.host);
+  document.querySelector('[data-act="unpublish"]').click();
+  clickIn(".confirm .btn.danger");
+  await until(() => e.chosen.length === 1);
+  const said = tx("admin.editor.pub.pick_then_again").replace("{button}", tx("admin.editor.pub.unpublish"));
+  assert.equal(toastText(), said);
+  assert.equal(e.pub.status, "published", "nothing unpublished yet");
+});
+
+// Items 1 and 3: a trashed post offers only Restore; Restore brings it back.
+test("a trashed post: the panel has no Trash; Restore calls the restore route and adopts the post", async () => {
+  const restored = post(7, { status: "draft", version: 4, updated_at: 300 });
+  const api = fakeApi({ call: () => ({ ok: true, value: restored }) });
+  const e = setup(api, post(7, { status: "trashed", version: 3 }));
+  e.trashed = true;
+  m.openPanel(e.host);
+  assert.equal(document.querySelector('[data-act="trash"]'), null);
+  assert.equal(typeof m.restore, "function");
+  await m.restore(e.host);
+  assert.deepEqual(api.calls, [["call", "POST", "/api/v1/posts/7/restore"]]);
+  assert.deepEqual(e.lived, [restored]);
+  assert.equal(e.st.version, 4, "based on the trashed copy: the restored version is the base");
+  assert.equal(toastText(), tx("admin.editor.pub.restored"));
 });

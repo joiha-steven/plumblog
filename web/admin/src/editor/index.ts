@@ -188,11 +188,14 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   const toolbar = h("div", { class: "tools", role: "toolbar", "aria-label": t("admin.editor.toolbar") });
   const toolsWrap = h("div", { class: "tools-wrap" }, toolbar);
   const choiceSlot = h("div", {});
+  /** The trashed state's banner, with Restore. */
+  const trashSlot = h("div", {});
   const note = h("div", {});
   const write = h(
     "div",
     { class: "pane ed-write" },
     toolsWrap,
+    trashSlot,
     choiceSlot,
     h(
       "div",
@@ -499,8 +502,8 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   };
   /* ---------- publishing (publish.ts, loaded on first use) ---------- */
   let working = false;
-  /** The server copy was trashed elsewhere: nothing is sent from here again. */
-  let trashed = false;
+  /** The post is in the trash (opened so, or trashed elsewhere): nothing is sent until Restore. */
+  let trashed = post?.status === "trashed";
   /** Nothing to publish yet, or a choice between two texts is waiting. */
   const pubState = () => {
     pubBtn.disabled = working || trashed || st.hold || st.paused || (!titleIn.value.trim() && view.state.doc.length === 0);
@@ -1165,17 +1168,32 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     // Only a draft autosaves; a live post's edits reach the server only by Update (publish.ts).
     if (pub.status !== "draft" || trashed) end();
     else begin();
+    trashSlot.replaceChildren(
+      ...(trashed
+        ? [
+            h(
+              "div",
+              { class: "banner choice", role: "status" },
+              icon("alert"),
+              h("div", { class: "grow" }, t("admin.editor.pub.trashed_banner")),
+              h("button", { type: "button", class: "btn", "data-act": "restore", onclick: () => loadPublish((m) => void m.restore(host)) }, t("admin.editor.pub.restore")),
+            ),
+          ]
+        : []),
+    );
     pubState();
   };
   /** The server copy's status moved on elsewhere (sync.ts learn, or a publish step's stale read). */
   function live(p: Post): void {
-    if (p.status === "trashed") trashed = true;
-    else fromPost(pub, p);
+    trashed = p.status === "trashed";
+    if (!trashed) fromPost(pub, p);
     restatus();
     line();
     ui.draw?.();
   }
-  if (pub.status === "draft") begin();
+  // A trashed post never autosaves: the server refuses edits until it is restored.
+  if (trashed) restatus();
+  else if (pub.status === "draft") begin();
   const applied = () => {
     restatus();
     line();
@@ -1201,6 +1219,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
       pubBtn.textContent = pubLabel(pub);
     },
     live,
+    trashed: () => trashed,
     choose: serverChoice,
   };
   const loadPublish = (f: (m: typeof import("./publish")) => void) =>

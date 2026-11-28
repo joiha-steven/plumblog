@@ -205,7 +205,8 @@ test("a draft autosaves; published, only Update sends; after a 409 and Keep mine
   const button = (name) => page.getByRole("button", { name, exact: true });
   const confirm = () => page.locator(".pubpop .btn.primary");
   const toast = (text) => page.locator(".toast", { hasText: text }).waitFor();
-  const line = (key) => page.locator(".ed-actions .saved", { hasText: tx(key) }).waitFor();
+  // Whole text: "Saved" must not match "Saved on this device".
+  const line = (key) => page.locator(".ed-actions .saved", { hasText: new RegExp(`^${tx(key).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) }).waitFor();
   const patches = () => sent.filter((r) => r.method === "PATCH");
   const typeAtEnd = async (text) => {
     await page.locator(".cm-content").click();
@@ -321,6 +322,49 @@ test("publish and unpublish before the sync code arrives start one autosave, not
     assert.equal(autosaves.length, 1, JSON.stringify(patches));
     assert.equal(w.query(`SELECT markdown FROM posts WHERE id = ${id}`)[0].markdown, "Start. Typed.");
     assert.equal(await page.getByRole("alert").filter({ hasText: tx("admin.editor.conflict.server_title") }).count(), 0, "no false conflict");
+  } finally {
+    await context.close();
+  }
+});
+
+// PR #91 review, items 1 and 3: a trashed post opens in a trashed state; Restore brings it back.
+test("a trashed post opens trashed: nothing autosaves, Publish is off, Restore brings it back and saving resumes", async () => {
+  const made = await api("POST", "/api/v1/posts", { lang: "en", slug: "in-the-trash", title: "In the trash", markdown: "Start." });
+  assert.equal(made.status, 201, JSON.stringify(made.json));
+  const id = made.json.id;
+  assert.equal((await api("POST", `/api/v1/posts/${id}/trash`)).status, 200);
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: "en-US" });
+  await context.addCookies(cookies);
+  const page = await context.newPage();
+  const problems = [];
+  const sent = [];
+  page.on("pageerror", (e) => problems.push(`page error: ${e}`));
+  page.on("console", (m) => m.type() === "error" && problems.push(`console: ${m.text()}`));
+  page.on("request", (r) => /\/api\/v1\/posts/.test(r.url()) && r.method() !== "GET" && sent.push(`${r.method()} ${new URL(r.url()).pathname}`));
+  const button = (name) => page.getByRole("button", { name, exact: true });
+  try {
+    await page.goto(at(`/admin/posts/${id}`));
+    await page.getByRole("toolbar", { name: tx("admin.editor.toolbar") }).waitFor();
+    assert.equal(await page.locator(".crumb .st").innerText(), tx("admin.status.trashed"));
+    await page.getByText(tx("admin.editor.pub.trashed_banner")).waitFor();
+    await page.locator(".cm-content").click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type(" Edited.");
+    await page.waitForTimeout(4000); // past a draft's autosave delay
+    assert.deepEqual(sent, [], "nothing is sent for a trashed post");
+    assert.equal(await button(tx("admin.editor.pub.publish")).isDisabled(), true);
+    await button(tx("admin.editor.pub.settings")).click();
+    assert.equal(await page.locator('[data-act="trash"], [data-act="unpublish"]').count(), 0, "no Trash for a trashed post");
+    await button(tx("admin.editor.pub.settings")).click();
+    await button(tx("admin.editor.pub.restore")).click();
+    await page.locator(".toast", { hasText: tx("admin.editor.pub.restored") }).waitFor();
+    assert.equal(await page.locator(".crumb .st").innerText(), tx("admin.status.draft"));
+    // Restored as a draft: the edit made while trashed autosaves now.
+    await page.locator(".ed-actions .saved", { hasText: new RegExp(`^${tx("admin.editor.saved")}$`) }).waitFor({ timeout: 10_000 });
+    const row = w.query(`SELECT status, markdown FROM posts WHERE id = ${id}`)[0];
+    assert.deepEqual(row, { status: "draft", markdown: "Start. Edited." });
+    assert.deepEqual(sent, [`POST /api/v1/posts/${id}/restore`, `PATCH /api/v1/posts/${id}`]);
+    assert.deepEqual(problems, []);
   } finally {
     await context.close();
   }

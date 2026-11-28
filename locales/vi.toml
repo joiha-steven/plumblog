@@ -618,6 +618,10 @@ slug_taken = "Chưa lưu được lên trang: địa chỉ theo tiêu đề này
 slow = "Vẫn đang lưu lên trang. Bài của bạn vẫn an toàn trên máy này."
 
 [admin.editor.pub]
+trashed_banner = "Bài này đang ở thùng rác. Những gì bạn sửa được giữ trên máy này cho tới khi bạn khôi phục bài."
+restore = "Khôi phục"
+restored = "Đã khôi phục khỏi thùng rác"
+pick_then_again = "Hãy chọn giữ bản nào, rồi bấm {button} lần nữa."
 publish = "Đăng"
 update = "Cập nhật"
 schedule = "Hẹn giờ"
