@@ -1,6 +1,6 @@
 //! Reader URLs, in one place: parsing a path and building the links pages point to.
 //!
-//! `/` and `/page/N` home, `/<slug>` post in the default language, `/<lang>/<slug>` in another, `/tag/<slug>` and `/archive/<year>` (each with
+//! `/` and `/page/N` home, `/<lang>/` and `/<lang>/page/N` a language's home, `/<slug>` post in the default language, `/<lang>/<slug>` in another, `/tag/<slug>` and `/archive/<year>` (each with
 //! `/page/N`). Redirect targets are always built here as `/`-rooted paths with no `//`, so a
 //! request path can never turn into an off-site `Location`.
 //! `/search?q=`. The names in [`RESERVED`] cannot be post slugs.
@@ -9,6 +9,16 @@
 pub enum Route {
     Home {
         page: usize,
+    },
+    /// `/<lang>/` and `/<lang>/page/N`. Whether `lang` is a site language, and not the default
+    /// (whose home is `/`), only the page knows.
+    LangHome {
+        lang: String,
+        page: usize,
+    },
+    /// `/<lang>/page/1`: a redirect to `/<lang>/` for a site language, else not a page.
+    LangFirstPage {
+        lang: String,
     },
     /// `lang` is `None` for `/<slug>` (the default language, which only the page knows).
     Post {
@@ -51,6 +61,13 @@ pub fn parse(path: &str) -> Route {
         return Route::NotFound;
     }
     if path != "/" && path.ends_with('/') {
+        let lang = &path[1..path.len() - 1];
+        if is_lang(lang) && !RESERVED.contains(&lang) {
+            return Route::LangHome {
+                lang: lang.to_owned(),
+                page: 1,
+            };
+        }
         // One trailing slash only (no `//` above), so the target is a non-empty `/x` path.
         return Route::Redirect(path[..path.len() - 1].to_owned());
     }
@@ -82,6 +99,16 @@ pub fn parse(path: &str) -> Route {
             (Some(year), Some(1)) => Route::Redirect(archive(year, 1)),
             (Some(year), Some(page)) => Route::Archive { year, page },
             _ => Route::NotFound,
+        },
+        [lang, "page", n] if is_lang(lang) && !RESERVED.contains(lang) => match page_number(n) {
+            Some(1) => Route::LangFirstPage {
+                lang: (*lang).to_owned(),
+            },
+            Some(page) => Route::LangHome {
+                lang: (*lang).to_owned(),
+                page,
+            },
+            None => Route::NotFound,
         },
         ["search"] => Route::Search,
         ["sitemap.xml"] => Route::Sitemap,
@@ -211,6 +238,25 @@ pub fn home_page(n: usize) -> String {
         "/".to_owned()
     } else {
         format!("/page/{n}")
+    }
+}
+
+/// A language's home: `/<lang>/`, then `/<lang>/page/N`. The default language's is
+/// [`home_page`]; see [`home_in`].
+pub fn lang_home(lang: &str, n: usize) -> String {
+    if n <= 1 {
+        format!("/{lang}/")
+    } else {
+        format!("/{lang}/page/{n}")
+    }
+}
+
+/// Page `n` of the home of `lang`: the root for the default language, else under `/<lang>/`.
+pub fn home_in(lang: &str, default_lang: &str, n: usize) -> String {
+    if lang == default_lang {
+        home_page(n)
+    } else {
+        lang_home(lang, n)
     }
 }
 

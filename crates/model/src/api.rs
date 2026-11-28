@@ -454,6 +454,9 @@ const INVITE_CREATE: &[Field] = &[req("role", Type::Str), opt("expires_at", Type
 pub const INVITE_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// The longest expiry an invite may have: an unused link is a standing way in.
 pub const INVITE_MAX_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// The most unused invites `GET /api/v1/invites` answers (the newest): far more than an owner
+/// keeps pending, and a bound on one answer however many accumulate.
+pub const INVITE_LIST_MAX: u32 = 500;
 
 /// A user-admin route: owner only and session only.
 const fn user_admin(

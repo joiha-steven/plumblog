@@ -793,3 +793,37 @@ pub async fn accept_invite_conflict_is_atomic<S: Store>(db: &S) -> Check {
     )
     .map(drop)
 }
+
+/// Unused invites only, newest first (`created_at`, id), expired ones included, at most the
+/// limit.
+pub async fn unused_invites_listed<S: Store>(db: &S) -> Check {
+    let o = owner_user(db).await?;
+    let mut made = Vec::new();
+    for (code, at, expires) in [("u1", T0, 2000), ("u2", T0 + 2, 2000), ("u3", T0 + 1, T0)] {
+        made.push(ok(
+            "create_invite",
+            db.create_invite(invite(o, code, Role::Writer, at, expires))
+                .await,
+        )?);
+    }
+    ok(
+        "accept_invite",
+        db.accept_invite("u1", new_user("joined"), 1500).await,
+    )?;
+    let ids = |v: Vec<crate::Invite>| v.iter().map(|i| i.id).collect::<Vec<_>>();
+    eq!(
+        "used left out, expired kept, newest first",
+        ids(ok("list_unused_invites", db.list_unused_invites(10).await)?),
+        vec![made[1], made[2]]
+    )?;
+    eq!(
+        "at most the limit, the newest",
+        ids(ok("list_unused_invites", db.list_unused_invites(1).await)?),
+        vec![made[1]]
+    )?;
+    eq!(
+        "limit 0",
+        ids(ok("list_unused_invites", db.list_unused_invites(0).await)?),
+        Vec::<i64>::new()
+    )
+}

@@ -384,6 +384,19 @@ impl InviteStore for D1Store {
         self.rows(s).await?.iter_mut().map(read_invite).collect()
     }
 
+    // 1 query.
+    async fn list_unused_invites(&self, limit: u32) -> Result<Vec<Invite>> {
+        let s = self.stmt(
+            "list_unused_invites",
+            &format!(
+                "SELECT {INVITE_COLS} FROM invites WHERE used_at IS NULL \
+                 ORDER BY created_at DESC, id DESC LIMIT ?"
+            ),
+            &[bound(i64::from(limit))],
+        )?;
+        self.rows(s).await?.iter_mut().map(read_invite).collect()
+    }
+
     async fn delete_invite(&self, by: &Admin, id: i64, now: i64) -> Result<()> {
         let s = self.stmt(
             "delete_invite",

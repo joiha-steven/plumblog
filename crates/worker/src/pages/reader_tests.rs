@@ -243,3 +243,151 @@ fn an_empty_feed_is_dated_by_a_real_time_or_not_at_all() {
     assert!(get(&db, "/rss.xml").1.contains("<lastBuildDate>"));
     assert!(!get(&db, "/sitemap.xml").1.contains("<lastmod>"));
 }
+
+/// A published post in `lang`, `at` ms after the epoch (the newest has the largest).
+fn publish(db: &MemoryStore, lang: &str, slug: &str, at: i64) {
+    let author = run(plumblog_store::UserStore::list_users(db)).unwrap()[0].id;
+    run(db.save_post(SavePost {
+        id: None,
+        expected_version: None,
+        translation_group: None,
+        kind: PostKind::Post,
+        lang: lang.to_owned(),
+        slug: slug.to_owned(),
+        status: PostStatus::Published,
+        published_at: Some(at),
+        author_id: author,
+        title: format!("Title {slug}"),
+        markdown: String::new(),
+        html: "<p>x</p>".to_owned(),
+        toc_json: "[]".to_owned(),
+        excerpt: String::new(),
+        word_count: 1,
+        reading_minutes: 1,
+        pinned: false,
+        comments_enabled: false,
+        cover_media_id: None,
+        series_id: None,
+        series_position: None,
+        tag_ids: Vec::new(),
+        media_ids: Vec::new(),
+        search_text: String::new(),
+        revision: None,
+        client_id: None,
+        now: at,
+    }))
+    .unwrap();
+}
+
+/// The sample site with 7 vi posts in all (5 per page: two pages).
+fn seeded_vi() -> MemoryStore {
+    let db = seeded();
+    for i in 0..6 {
+        publish(&db, "vi", &format!("vi-{i}"), 1_900_000_000_000 + i * 1000);
+    }
+    db
+}
+
+#[test]
+fn a_language_home_lists_its_language_with_paging_and_alternates() {
+    let db = seeded_vi();
+    let (status, p1) = get(&db, "/vi/");
+    assert_eq!(status, 200, "{p1}");
+    assert!(p1.contains("<html lang=\"vi\""));
+    assert!(p1.contains("href=\"/vi/vi-5\""));
+    assert!(!p1.contains("href=\"/first-post\""), "an en post on /vi/");
+    assert!(p1.contains("<link rel=\"canonical\" href=\"https://blog.test/vi/\">"));
+    // Its own feeds, not the default language's.
+    for f in ["feed.xml", "rss.xml", "feed.json"] {
+        assert!(p1.contains(&format!("href=\"/vi/{f}\"")), "{f}");
+        assert!(!p1.contains(&format!("href=\"/{f}\"")), "{f}");
+    }
+    assert!(p1.contains("href=\"/vi/page/2\" rel=\"next\""));
+    // Page 1 carries the alternates, back to the default home too.
+    assert!(p1.contains("hreflang=\"en\" href=\"https://blog.test/\""));
+    assert!(p1.contains("hreflang=\"vi\" href=\"https://blog.test/vi/\""));
+    assert!(p1.contains("hreflang=\"x-default\" href=\"https://blog.test/\""));
+
+    let (status, p2) = get(&db, "/vi/page/2");
+    assert_eq!(status, 200);
+    assert!(p2.contains("bai-viet-dau-tien"), "the oldest vi post");
+    assert!(!p2.contains("rel=\"alternate\" hreflang"), "only page 1");
+    assert!(p2.contains("<link rel=\"canonical\" href=\"https://blog.test/vi/page/2\">"));
+    assert!(p2.contains("href=\"/vi/\" rel=\"prev\""));
+    assert_eq!(get(&db, "/vi/page/3").0, 404);
+    assert_eq!(get(&db, "/vi/page/1"), (301, "/vi/".to_owned()));
+    assert_eq!(get(&db, "/vi/page/1001").0, 404, "past the offset cap");
+    assert_eq!(get(&db, "/vi/page/0").0, 404);
+
+    // The default home links to the language home.
+    let home = get(&db, "/").1;
+    assert!(home.contains("hreflang=\"vi\" href=\"https://blog.test/vi/\""));
+    assert!(home.contains("hreflang=\"en\" href=\"https://blog.test/\""));
+    assert!(!get(&db, "/page/2").1.contains("rel=\"alternate\" hreflang"));
+}
+
+#[test]
+fn the_default_language_home_has_one_url() {
+    let db = seeded_vi();
+    assert_eq!(get(&db, "/en/"), (301, "/".to_owned()));
+    assert_eq!(get(&db, "/en/page/2"), (301, "/page/2".to_owned()));
+    assert_eq!(get(&db, "/en/page/1"), (301, "/".to_owned()));
+}
+
+#[test]
+fn only_a_site_language_has_a_home() {
+    let db = seeded_vi();
+    assert_eq!(get(&db, "/xx/").0, 404);
+    assert_eq!(get(&db, "/xx/page/2").0, 404);
+    // `/fr/page/1` is not a language's first page: no redirect into a 404.
+    assert_eq!(get(&db, "/fr/page/1").0, 404);
+    assert_eq!(get(&db, "/vi/page/1"), (301, "/vi/".to_owned()));
+    assert_eq!(get(&db, "/fr/").0, 404);
+    // A segment the router owns is never a language, even when it looks like one.
+    assert_eq!(get(&db, "/api/"), (301, "/api".to_owned()));
+    // A trailing slash on a default-language post still redirects to the post.
+    publish(&db, "en", "abc", 5);
+    assert_eq!(get(&db, "/abc/"), (301, "/abc".to_owned()));
+}
+
+#[test]
+fn a_configured_language_with_no_posts_has_an_empty_home() {
+    let db = seeded();
+    run(db.put_setting("site_languages", "[\"en\",\"vi\",\"de\"]", 1)).unwrap();
+    let (status, html) = get(&db, "/de/");
+    assert_eq!(status, 200);
+    assert!(html.contains("<html lang=\"de\""));
+    assert_eq!(get(&db, "/de/page/2").0, 404);
+    let sitemap = get(&db, "/sitemap.xml").1;
+    assert!(
+        !sitemap.contains("blog.test/de/"),
+        "no posts: not in the sitemap"
+    );
+    assert!(sitemap.contains("<loc>https://blog.test/vi/</loc>"));
+    // No alternate points at the empty home, and it carries none of its own.
+    for path in ["/", "/vi/"] {
+        assert!(!get(&db, path).1.contains("hreflang=\"de\""), "{path}");
+    }
+    assert!(!sitemap.contains("hreflang=\"de\""));
+    assert!(!html.contains("rel=\"alternate\" hreflang"));
+    assert_eq!(get(&db, "/de/page/1"), (301, "/de/".to_owned()));
+    assert!(get(&db, "/").1.contains("hreflang=\"vi\""));
+}
+
+#[test]
+fn a_language_home_is_the_home_link_of_its_own_pages() {
+    let db = seeded_vi();
+    for path in ["/vi/", "/vi/page/2"] {
+        let html = get(&db, path).1;
+        assert!(
+            html.contains("class=\"site-name\" href=\"/vi/\""),
+            "{path}: the site name links to the vi home"
+        );
+        assert!(
+            html.contains("\"@type\":\"Blog\"")
+                && html.contains("\"url\":\"https://blog.test/vi/\""),
+            "{path}: Blog.url"
+        );
+    }
+    assert!(get(&db, "/").1.contains("class=\"site-name\" href=\"/\""));
+}

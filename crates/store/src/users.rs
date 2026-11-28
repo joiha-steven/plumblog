@@ -124,11 +124,15 @@ pub trait UserStore {
         now: i64,
     ) -> Result<i64>;
     /// `UserNotFound`; `LastOwner` when demoting the last active owner. Demoting (to a
-    /// non-owner role) also deletes their unused invites in the same write. No version bump.
+    /// non-owner role) also deletes their unused invites and revokes their unrevoked
+    /// owner-scope tokens (`revoked_at = now`) and deletes every owner reset key if the
+    /// pending code is bound to them, in the same write, so promoting them again brings none
+    /// back. No version bump.
     async fn set_role(&self, by: &Admin, id: UserId, role: Role, now: i64) -> Result<()>;
     /// `Some(at)` disables the account and, in the same atomic write, deletes all its
-    /// sessions and unused invites and revokes its unrevoked API tokens (`revoked_at = now`),
-    /// so re-enabling (`None`) brings back none of them. `UserNotFound`; `LastOwner` when
+    /// sessions and unused invites, revokes its unrevoked API tokens (`revoked_at = now`) and
+    /// deletes every owner reset key if the pending code is bound to it, so re-enabling
+    /// (`None`) brings back none of them. `UserNotFound`; `LastOwner` when
     /// disabling the last active owner (nothing written). No version bump.
     async fn set_disabled(
         &self,

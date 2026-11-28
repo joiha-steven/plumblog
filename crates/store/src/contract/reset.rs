@@ -465,23 +465,26 @@ pub async fn owner_reset_redeem_revokes_all_tokens<S: Store>(db: &S) -> Check {
     )
 }
 
-/// A code whose owner was demoted or disabled after the reset gives nothing and changes
-/// nothing; taking it then spends it.
+/// A code bound to an owner who is no longer an active owner (demoted or disabled before it
+/// was written) gives nothing and changes nothing; taking it then spends it.
 pub async fn owner_reset_needs_an_active_owner<S: Store>(db: &S) -> Check {
     let (o, _) = after_reset(db, true).await?;
     // Another owner, so `o` may be demoted or disabled.
     owner(db, "root", Role::Owner).await?;
     for (what, disable) in [("demoted", false), ("disabled", true)] {
-        ok(
-            "code",
-            db.put_owner_reset("code", o, LATER, true, RESET).await,
-        )?;
         if disable {
             ok("set_role", db.set_role(&ADMIN, o, Role::Owner, T0).await)?;
             ok("disable", db.set_disabled(&ADMIN, o, Some(T0), T0).await)?;
         } else {
             ok("demote", db.set_role(&ADMIN, o, Role::Writer, T0).await)?;
         }
+        // The code is written after: demoting or disabling deletes one already waiting
+        // (`demote_drops_owner_reset`, `disable_drops_owner_reset`), so this tests the
+        // redeem's own check.
+        ok(
+            "code",
+            db.put_owner_reset("code", o, LATER, true, RESET).await,
+        )?;
         fails(
             what,
             db.redeem_owner_reset(o, "pw-o2".into(), None, by_code(o, "code"), RESET + 20)
