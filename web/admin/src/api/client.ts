@@ -6,6 +6,9 @@
 import {
   ERROR_CODES,
   type ErrorCode,
+  type LogKind,
+  type LogLevel,
+  type LogPage,
   type Post,
   type PostCreateInput,
   type PostListQuery,
@@ -63,6 +66,20 @@ export interface Media {
   height: number;
 }
 
+/** `GET /api/v1/log` filters (owner only). `level` is a minimum; `from` is inclusive and `to` exclusive, in ms. */
+export interface LogQuery {
+  kind?: LogKind;
+  level?: LogLevel;
+  code?: ErrorCode;
+  actor?: number;
+  from?: number;
+  to?: number;
+  /** 1-100 characters: an exact request id, or text in a subject or field. */
+  q?: string;
+  cursor?: string;
+  limit?: number;
+}
+
 /**
  * One library item (`/api/v1/media`, crates/worker/src/api/v1/media.rs `media_json`). `usage`
  * (the ids of the posts that use it) comes only with a single item, never in a list.
@@ -101,6 +118,8 @@ export interface Api {
   /** One page of summaries; `next_cursor` goes back in as `cursor` for the next. */
   posts(q: PostListQuery): Promise<Result<PostPage>>;
   post(id: number): Promise<Result<Post>>;
+  /** One page of the system log, newest first; `next_cursor` goes back in as `cursor`. */
+  logList(q: LogQuery): Promise<Result<LogPage>>;
   /** 201 with the saved post. A taken slug or lang is 409 `store.conflict` with `field`. */
   createPost(input: PostCreateInput): Promise<Result<Post>>;
   /** Conditional on `expected_version`; a stale one is 409 `store.conflict` with `version`. */
@@ -335,6 +354,12 @@ export function httpApi(ms = REQUEST_MS): Api {
     },
     posts: (q) => getJson<PostPage>(`/api/v1/posts${queryOf(q)}`),
     post: (id) => getJson<Post>(`/api/v1/posts/${id}`),
+    logList(q) {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(q)) if (v !== undefined) qs.set(k, String(v));
+      const s = qs.toString();
+      return getJson<LogPage>(`/api/v1/log${s ? `?${s}` : ""}`);
+    },
     createPost: (input) => request<Post>("POST", "/api/v1/posts", bodyOf(input), false, 0),
     updatePost: (id, input) => request<Post>("PATCH", `/api/v1/posts/${id}`, bodyOf(input), false, ms),
     previewUrl: undefined,

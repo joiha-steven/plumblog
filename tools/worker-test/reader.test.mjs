@@ -139,6 +139,32 @@ test("another language lives under /<lang>/, with alternates both ways", async (
   assert.match(map, /hreflang="vi"/);
 });
 
+test("each language has its own home, with its own feed links and hreflang", async () => {
+  const vi = await text("/vi/");
+  assert.equal(vi.status, 200, vi.body);
+  assert.match(vi.body, /<html lang="vi"/);
+  assert.match(vi.body, /href="\/vi\/chao-the-gioi"/);
+  assert.doesNotMatch(vi.body, /hello-world/, "only vi posts");
+  assert.match(vi.body, /<link rel="canonical" href="https:\/\/blog\.test\/vi\/">/);
+  assert.match(vi.body, /href="\/vi\/feed\.xml"/);
+  assert.doesNotMatch(vi.body, /href="\/feed\.xml"/);
+  assert.match(vi.body, /hreflang="en" href="https:\/\/blog\.test\/"/);
+  assert.match(vi.body, /hreflang="vi" href="https:\/\/blog\.test\/vi\/"/);
+  assert.match(vi.body, /hreflang="x-default" href="https:\/\/blog\.test\/"/);
+  assert.match((await text("/")).body, /hreflang="vi" href="https:\/\/blog\.test\/vi\/"/);
+
+  // One URL per page; unknown languages and pages past the end are 404.
+  assert.equal((await text("/vi/page/1")).status, 301);
+  assert.equal((await text("/vi/page/2")).status, 404);
+  const en = await text("/en/");
+  assert.equal(en.status, 301);
+  assert.match(en.location, /^https?:\/\/[^/]+\/$/);
+  assert.equal((await text("/xx/")).status, 404);
+  assert.equal((await text("/fr/page/1")).status, 404, "not a language: no redirect into a 404");
+  assert.match(vi.body, /class="site-name" href="\/vi\/"/);
+  assert.match((await text("/sitemap.xml")).body, /<loc>https:\/\/blog\.test\/vi\/<\/loc>/);
+});
+
 test("pages past the end are 404 from the count, not errors", async () => {
   assert.equal((await text("/page/1")).status, 301);
   for (const path of ["/page/2", "/page/1001", "/page/999999", "/tag/none/page/2", "/archive/2026/page/1001"]) {
