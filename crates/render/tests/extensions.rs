@@ -1,6 +1,9 @@
 //! Theme options and declarative plugins: schema checks at load, stored values that do not
 //! fit, and the fixture plugin (tests/fixtures/plugins/hello) filling the minimal theme.
 
+mod common;
+
+use common::{Runtime, runtime};
 use plumblog_markdown::Rendered;
 use plumblog_render::{Body, PageInfo, Plugin, Post, Site, Theme};
 use std::path::Path;
@@ -34,11 +37,8 @@ fn hello() -> Vec<(String, String)> {
     dir_files(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins/hello"))
 }
 
-fn refs(files: &[(String, String)]) -> Vec<(&str, &str)> {
-    files
-        .iter()
-        .map(|(a, b)| (a.as_str(), b.as_str()))
-        .collect()
+fn refs(files: &[(String, String)]) -> Runtime {
+    runtime(files.iter().map(|(a, b)| (a, b)))
 }
 
 /// `files` with `path` replaced by `f(old text)`.
@@ -54,11 +54,11 @@ fn edit(
 }
 
 fn plugin(files: &[(String, String)]) -> Result<Plugin, String> {
-    Plugin::load("hello", &refs(files).as_slice(), "/plugin/hello").map_err(|e| e.detail)
+    Plugin::load("hello", &refs(files), "/plugin/hello").map_err(|e| e.detail)
 }
 
 fn theme_with(files: &[(String, String)], plugins: Vec<Plugin>) -> Result<Theme, String> {
-    Theme::load(&refs(files).as_slice(), None, plugins, "/theme/minimal").map_err(|e| e.detail)
+    Theme::load(&refs(files), None, plugins, "/theme/minimal").map_err(|e| e.detail)
 }
 
 fn site() -> Site {
@@ -367,9 +367,7 @@ fn bad_plugins_do_not_load_and_say_why() {
         assert!(err.contains(want), "want {want:?} in {err:?}");
         assert!(err.starts_with("plugins/hello/"), "names the folder: {err}");
     }
-    let err = Plugin::load("Hello", &refs(&hello()).as_slice(), "/p")
-        .err()
-        .unwrap();
+    let err = Plugin::load("Hello", &refs(&hello()), "/p").err().unwrap();
     assert!(err.detail.contains("lowercase letters"), "{}", err.detail);
 }
 
@@ -564,8 +562,7 @@ const CSS_RAW_CAP: usize = 40_000;
 
 /// Bytes of CSS the minimal theme inlines with plugin `name` enabled, or why it does not fit.
 fn css_with(name: &str, files: &[(String, String)]) -> Result<usize, String> {
-    let p = Plugin::load(name, &refs(files).as_slice(), &format!("/plugin/{name}"))
-        .map_err(|e| e.detail)?;
+    let p = Plugin::load(name, &refs(files), &format!("/plugin/{name}")).map_err(|e| e.detail)?;
     let theme = theme_with(&minimal(), vec![p])?;
     let (on, problems) = theme.with_options(&[], &[(name.to_owned(), Vec::new())]);
     if !problems.is_empty() {

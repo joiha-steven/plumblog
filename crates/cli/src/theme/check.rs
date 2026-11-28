@@ -9,7 +9,7 @@ use super::hardtext;
 use super::sample::Sample;
 use super::secrets;
 use plumblog_render::pushed::MAX_DOCUMENT;
-use plumblog_render::{Plugin, Theme, ThemeError, ThemeFiles};
+use plumblog_render::{Plugin, Theme, ThemeFiles};
 use std::collections::BTreeMap;
 
 /// Reader page CSS budget, compressed as it travels (docs/ARCHITECTURE.md, Budgets).
@@ -42,18 +42,43 @@ pub struct View<'a> {
     skip: Vec<String>,
 }
 
+impl View<'_> {
+    /// A file is hidden by its own name, and its JSON form by the TOML file's name.
+    fn hidden(&self, path: &str) -> bool {
+        let source = path.strip_suffix(".json").unwrap_or(path);
+        self.skip.iter().any(|s| s == path || s == source)
+    }
+}
+
 impl ThemeFiles for View<'_> {
     fn read(&self, path: &str) -> Option<&str> {
-        if self.skip.iter().any(|s| s == path) {
+        if self.hidden(path) {
             return None;
         }
         ThemeFiles::read(self.files, path)
     }
     fn paths(&self) -> Vec<&str> {
         let mut v = ThemeFiles::paths(self.files);
-        v.retain(|p| !self.skip.iter().any(|s| s == p));
+        v.retain(|p| !self.hidden(p));
         v
     }
+}
+
+/// TOML files the loader cannot read because they are not valid TOML (or, for a manifest, not
+/// the shape it expects): one finding each, naming the file. Files already hidden from the
+/// loader (stray, secret) are reported for that instead.
+fn conversion_findings(
+    files: &DirFiles,
+    skip: &[String],
+    kind: Kind,
+    plugin: &str,
+) -> Vec<Finding> {
+    files
+        .convert_errors
+        .iter()
+        .filter(|(path, _)| !skip.contains(path))
+        .map(|(_, msg)| load_failure(files, msg, kind, plugin))
+        .collect()
 }
 
 /// Layout and security findings shared by themes and plugins, and the paths to hide from
@@ -352,8 +377,8 @@ fn hard_text(path: &str, src: &str, level: Level) -> Vec<Finding> {
         .collect()
 }
 
-fn load_failure(files: &DirFiles, e: &ThemeError, kind: Kind, plugin: &str) -> Finding {
-    let (mut file, line) = locate_in(files, &e.detail);
+fn load_failure(files: &DirFiles, detail: &str, kind: Kind, plugin: &str) -> Finding {
+    let (mut file, line) = locate_in(files, detail);
     // Plugin errors name `plugins/<name>/<file>`.
     if let Some(rest) = file.strip_prefix(&format!("plugins/{plugin}/")) {
         file = rest.to_owned();
@@ -364,15 +389,24 @@ fn load_failure(files: &DirFiles, e: &ThemeError, kind: Kind, plugin: &str) -> F
         } else {
             kind
         };
-    Finding::new(Level::Error, kind, &file, line).arg("detail", e.detail.clone())
+    Finding::new(Level::Error, kind, &file, line).arg("detail", detail.to_owned())
 }
 
 /// Everything wrong with the theme folder in `files`.
 #[must_use]
 pub fn check_theme(files: &DirFiles) -> Vec<Finding> {
     let (mut out, skip) = files_findings(files, THEME_LAYOUT);
+    let broken = conversion_findings(files, &skip, Kind::ThemeLoad, "");
+    if !broken.is_empty() {
+        out.extend(broken);
+        return out;
+    }
     let view = View { files, skip };
-    let src = view.read("theme.toml").unwrap_or_default();
+    let src = if view.hidden("theme.toml") {
+        ""
+    } else {
+        files.text("theme.toml")
+    };
     let manifest: Option<toml::Table> = toml::from_str(src).ok();
     if let Some(m) = &manifest {
         let dark = dark_token_findings(src, m);
@@ -387,7 +421,7 @@ pub fn check_theme(files: &DirFiles) -> Vec<Finding> {
     let theme = match Theme::load(&view, Some(&default), Vec::new(), ASSETS_URL) {
         Ok(t) => t,
         Err(e) => {
-            out.push(load_failure(files, &e, Kind::ThemeLoad, ""));
+            out.push(load_failure(files, &e.detail, Kind::ThemeLoad, ""));
             return out;
         }
     };
@@ -433,10 +467,7 @@ fn asset_name_findings(files: &DirFiles) -> Vec<Finding> {
 /// `theme.json` over [`MAX_DOCUMENT`]: the Worker would not load it. Measured as a push
 /// writes it (the text files as JSON, plus about a line per asset), so check and push agree.
 fn document_size_finding(files: &DirFiles) -> Option<Finding> {
-    let text: BTreeMap<&str, &str> = files
-        .iter()
-        .filter(|(p, _)| !p.starts_with("assets/"))
-        .collect();
+    let text = files.document();
     let assets = files
         .sizes
         .keys()
@@ -647,7 +678,7 @@ fn render_findings(theme: &Theme, files: &DirFiles) -> Vec<Finding> {
         let (_, result) = sample.render(theme, &target, sample.lang());
         match result {
             Err(e) => {
-                let f = load_failure(files, &e, Kind::ThemeTemplate, "");
+                let f = load_failure(files, &e.detail, Kind::ThemeTemplate, "");
                 if seen.insert((f.file.clone(), f.line, e.detail.clone())) {
                     out.push(f.arg("page", target));
                 }
@@ -680,12 +711,17 @@ fn render_findings(theme: &Theme, files: &DirFiles) -> Vec<Finding> {
 #[must_use]
 pub fn check_plugin(files: &DirFiles, name: &str) -> Vec<Finding> {
     let (mut out, skip) = files_findings(files, PLUGIN_LAYOUT);
+    let broken = conversion_findings(files, &skip, Kind::PluginLoad, name);
+    if !broken.is_empty() {
+        out.extend(broken);
+        return out;
+    }
     let view = View { files, skip };
     let url = format!("/plugin/{name}");
     let plugin = match Plugin::load(name, &view, &url) {
         Ok(p) => p,
         Err(e) => {
-            out.push(load_failure(files, &e, Kind::PluginLoad, name));
+            out.push(load_failure(files, &e.detail, Kind::PluginLoad, name));
             return out;
         }
     };

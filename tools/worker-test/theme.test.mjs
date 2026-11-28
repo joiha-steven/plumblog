@@ -5,6 +5,7 @@
 // a pushed theme next to the embedded one.
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -28,16 +29,27 @@ function walk(dir) {
   );
 }
 
+// THEME_API 2 carries each TOML file as its JSON form under `<path>.json`; Node has no TOML
+// parser, so the same converter `blog theme push` uses prints them (once per run).
+const TOML_AS_JSON = JSON.parse(
+  execFileSync("cargo", ["run", "-q", "-p", "plumblog-render", "--example", "theme_json", "--", MINIMAL], {
+    cwd: ROOT,
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  }),
+);
+
 /** The minimal theme's text files (the set crates/worker build.rs embeds), renamed `name`, accent changed. */
 function pushedFiles(name) {
   const files = {};
   for (const p of walk(MINIMAL).sort()) {
     const rel = relative(MINIMAL, p).replaceAll("\\", "/");
-    const text = /\.(html|toml|css)$/.test(rel) && (!rel.startsWith("assets/") || rel === "assets/fonts/faces.css");
+    const text = /\.(html|css)$/.test(rel) && (!rel.startsWith("assets/") || rel === "assets/fonts/faces.css");
     if (text) files[rel] = readFileSync(p, "utf8");
   }
-  files["theme.toml"] = files["theme.toml"]
-    .replace('name = "minimal"', `name = "${name}"`)
+  Object.assign(files, TOML_AS_JSON);
+  files["theme.toml.json"] = files["theme.toml.json"]
+    .replace('"name":"minimal"', `"name":"${name}"`)
     .replaceAll(DEFAULT_ACCENT, MARKER_ACCENT);
   return files;
 }
@@ -56,7 +68,7 @@ function assetsWith(name, themeJson) {
 function themeJson(name, edit = (f) => f) {
   const files = edit(pushedFiles(name));
   const hash = sha256hex(JSON.stringify(files));
-  return JSON.stringify({ api: 1, name, version: "0.2.0", hash, files });
+  return JSON.stringify({ api: 2, name, version: "0.2.0", hash, files });
 }
 
 const tagOf = (json) => JSON.parse(json).hash.slice(0, 16);

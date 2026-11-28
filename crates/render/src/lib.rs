@@ -1,7 +1,9 @@
-//! Theme runtime: loads a theme (theme.toml, templates, locales, CSS) and renders reader pages
+//! Theme runtime: loads a theme (theme.toml as JSON, templates, locales, CSS) and renders reader pages
 //! from template data. No I/O: theme files come in through [`ThemeFiles`], so the Worker can
 //! feed embedded files today and R2 bundles later, and tests feed plain maps.
 
+#[cfg(feature = "toml")]
+pub mod convert;
 mod css;
 mod data;
 pub mod feeds;
@@ -20,10 +22,10 @@ pub use plugin::Plugin;
 pub use pushed::{PushedTheme, THEME_API};
 pub use theme::{Report, Theme, ThemeError, ThemeFiles};
 
-/// Flattens a locale TOML file into `section.key` strings (core `locales/` use the same shape).
+/// Flattens a locale file, as the JSON the runtime takes, into `section.key` strings (core `locales/` use the same shape).
 ///
 /// # Errors
-/// Invalid TOML or a value that is not text, naming the key.
+/// Invalid JSON or a value that is not text, naming the key.
 pub fn parse_locale(src: &str) -> Result<std::collections::HashMap<String, String>, String> {
     plumblog_i18n::parse(src).map_err(|e| e.detail)
 }

@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Version of the `theme.json` shape. Bumped only on an incompatible change; a Worker refuses
-/// any other value and keeps the embedded default theme.
-pub const THEME_API: u32 = 1;
+/// any other value and keeps the embedded default theme. 2 is the first released shape: its
+/// TOML files (`theme.toml`, `locales/*.toml`) are carried as JSON under `<path>.json`.
+pub const THEME_API: u32 = 2;
 
 /// `theme.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,7 +24,8 @@ pub struct PushedTheme {
     pub version: String,
     /// SHA-256 hex of the file map: the theme's identity in page cache keys.
     pub hash: String,
-    /// Relative path (`/`-separated) to UTF-8 text.
+    /// Relative path (`/`-separated) to UTF-8 text. TOML files appear as their JSON form under
+    /// `<path>.json` (`theme.toml.json`, `locales/en.toml.json`).
     pub files: BTreeMap<String, String>,
     /// Path below `assets/` to the SHA-256 hex of its bytes. Absent in documents written
     /// before it existed.
@@ -196,12 +198,13 @@ mod tests {
 
     #[test]
     fn parses_the_contract_and_refuses_anything_else() {
-        let ok = PushedTheme::parse(&doc(THEME_API, "paper", HASH, "theme.toml"), "paper").unwrap();
-        assert_eq!(ok.files["theme.toml"], "x");
+        let ok =
+            PushedTheme::parse(&doc(THEME_API, "paper", HASH, "theme.toml.json"), "paper").unwrap();
+        assert_eq!(ok.files["theme.toml.json"], "x");
         let bad = [
-            (doc(THEME_API + 1, "paper", HASH, "theme.toml"), "api"),
-            (doc(THEME_API, "other", HASH, "theme.toml"), "name"),
-            (doc(THEME_API, "paper", "ABC", "theme.toml"), "hash"),
+            (doc(THEME_API + 1, "paper", HASH, "theme.toml.json"), "api"),
+            (doc(THEME_API, "other", HASH, "theme.toml.json"), "name"),
+            (doc(THEME_API, "paper", "ABC", "theme.toml.json"), "hash"),
             (doc(THEME_API, "paper", &HASH.to_uppercase(), "a"), "hash"),
             (doc(THEME_API, "paper", HASH, "../x"), "path"),
             (doc(THEME_API, "paper", HASH, "/x"), "path"),

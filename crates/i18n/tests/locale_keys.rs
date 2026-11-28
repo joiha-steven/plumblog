@@ -23,7 +23,7 @@
 //! checked too: every English admin key exactly once, plurals in the language's own forms.
 
 use plumblog_i18n::admin::admin_text;
-use plumblog_i18n::{categories, parse};
+use plumblog_i18n::{categories, parse_toml as parse};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};

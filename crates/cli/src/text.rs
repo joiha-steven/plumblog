@@ -155,7 +155,7 @@ fn strings(lang: &str) -> HashMap<String, String> {
         .iter()
         .find(|(l, _)| *l == lang)
         // The locale check parses these files on every commit; a broken file falls back.
-        .and_then(|(_, src)| plumblog_i18n::parse(src).ok())
+        .and_then(|(_, src)| plumblog_i18n::parse_toml(src).ok())
         .unwrap_or_default()
 }
 
