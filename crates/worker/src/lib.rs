@@ -34,7 +34,7 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
     if let Some(res) = crypto_test::handle(&mut req, &env).await? {
         return Ok(res);
     }
-    if req.path().starts_with(api::PREFIX) {
+    if req.path().starts_with(api::PREFIX) || req.path() == api::MCP_PATH {
         return api::handle(req, &env).await;
     }
     let path = req.path();

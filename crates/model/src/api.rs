@@ -14,6 +14,11 @@ pub const MAX_POST_BODY: usize = 160 * 1024;
 /// memory, since the Worker holds the whole body to check its header (docs/ARCHITECTURE.md,
 /// Budgets).
 pub const MAX_MEDIA_BODY: usize = 20 * 1024 * 1024;
+/// Request body cap for `POST /mcp`: the largest JSON route body (a post) plus the JSON-RPC
+/// envelope around it (`jsonrpc`, `id`, `method`, `params.name`, `_meta`), about 150 bytes from
+/// real clients; 4 KiB leaves room for any sane id or progress token. The tool's own body is
+/// checked again against its route's cap once it is split out of the message.
+pub const MCP_MAX_BODY: usize = MAX_POST_BODY + 4 * 1024;
 /// Image types a media upload accepts (the upload's `mime` field).
 pub const MEDIA_MIMES: &[&str] = &[
     "image/avif",
@@ -91,6 +96,20 @@ impl Type {
             Self::IntOrNull => "integer|null",
             Self::IntList => "integer[]",
             Self::Json => "json",
+        }
+    }
+
+    /// JSON Schema of a value of this type, for MCP tool input schemas.
+    #[must_use]
+    pub const fn json_schema(self) -> &'static str {
+        match self {
+            Self::Str => r#"{"type":"string"}"#,
+            Self::Int => r#"{"type":"integer"}"#,
+            Self::Bool => r#"{"type":"boolean"}"#,
+            Self::IntOrNull => r#"{"type":["integer","null"]}"#,
+            Self::IntList => r#"{"type":"array","items":{"type":"integer"}}"#,
+            // Any JSON value: the empty schema.
+            Self::Json => "{}",
         }
     }
 }
@@ -801,6 +820,57 @@ pub const ROUTES: &[Route] = &[
     ),
 ];
 
+/// The MCP tool name of a route, or `None` when the route is not a tool (docs/ARCHITECTURE.md,
+/// MCP). Exhaustive on purpose: a route added to the table without this decision does not
+/// compile. Names are the id in snake case.
+#[must_use]
+pub const fn tool_name(id: RouteId) -> Option<&'static str> {
+    match id {
+        // Reference: `tools/list` already is the schema. MediaUpload: the body is raw image
+        // bytes, which a JSON-RPC message cannot carry.
+        // MediaOriginal: the answer is raw image bytes, not JSON.
+        RouteId::Reference | RouteId::MediaUpload | RouteId::MediaOriginal => None,
+        RouteId::Me => Some("me"),
+        RouteId::CommentList => Some("comment_list"),
+        RouteId::UserList => Some("user_list"),
+        RouteId::PostList => Some("post_list"),
+        RouteId::PostGet => Some("post_get"),
+        RouteId::PostCreate => Some("post_create"),
+        RouteId::PostUpdate => Some("post_update"),
+        RouteId::PostTrash => Some("post_trash"),
+        RouteId::PostRestore => Some("post_restore"),
+        RouteId::PostDelete => Some("post_delete"),
+        RouteId::TagList => Some("tag_list"),
+        RouteId::TagGet => Some("tag_get"),
+        RouteId::TagCreate => Some("tag_create"),
+        RouteId::TagUpdate => Some("tag_update"),
+        RouteId::TagDelete => Some("tag_delete"),
+        RouteId::SeriesList => Some("series_list"),
+        RouteId::SeriesGet => Some("series_get"),
+        RouteId::SeriesCreate => Some("series_create"),
+        RouteId::SeriesUpdate => Some("series_update"),
+        RouteId::SeriesDelete => Some("series_delete"),
+        RouteId::MediaList => Some("media_list"),
+        RouteId::MediaGet => Some("media_get"),
+        RouteId::MediaUpdate => Some("media_update"),
+        RouteId::MediaDelete => Some("media_delete"),
+        RouteId::RedirectList => Some("redirect_list"),
+        RouteId::RedirectPut => Some("redirect_put"),
+        RouteId::RedirectDelete => Some("redirect_delete"),
+        RouteId::SettingList => Some("setting_list"),
+        RouteId::SettingPut => Some("setting_put"),
+        RouteId::SettingDelete => Some("setting_delete"),
+        RouteId::ThemeOptions => Some("theme_options"),
+        RouteId::ThemeOptionPut => Some("theme_option_put"),
+        RouteId::ThemeOptionsDelete => Some("theme_options_delete"),
+        RouteId::PluginList => Some("plugin_list"),
+        RouteId::PluginPut => Some("plugin_put"),
+        RouteId::PluginOptions => Some("plugin_options"),
+        RouteId::PluginOptionPut => Some("plugin_option_put"),
+        RouteId::PluginOptionsDelete => Some("plugin_options_delete"),
+    }
+}
+
 /// Path field values of a matched route, in pattern order.
 pub type PathValues<'a> = Vec<(&'static str, &'a str)>;
 
@@ -850,7 +920,10 @@ pub fn find(method: Method, path: &str) -> Result<(&'static Route, PathValues<'_
 
 #[cfg(test)]
 mod tests {
-    use super::{Access, Body, In, MAX_POST_BODY, Method, ORIGINAL, ROUTES, find, match_path};
+    use super::{
+        Access, Body, In, MAX_POST_BODY, Method, ORIGINAL, ROUTES, RouteId, Type, find, match_path,
+        tool_name,
+    };
 
     #[test]
     fn table_is_consistent() {
@@ -922,5 +995,71 @@ mod tests {
         assert!(find(Method::Get, "/api/v1/posts/3").is_ok());
         assert_eq!(find(Method::Post, "/api/v1/posts/3").err(), Some(true));
         assert_eq!(find(Method::Get, "/api/v1/nope").err(), Some(false));
+    }
+
+    /// Every route is a tool but the decided exclusions (raw bytes either way, and the
+    /// reference); names are the id in snake case, unique, and valid MCP tool names.
+    #[test]
+    fn tool_names() {
+        let mut names = Vec::new();
+        for r in ROUTES {
+            // A JSON tool result cannot carry bytes.
+            assert!(
+                !(r.response == ORIGINAL && tool_name(r.id).is_some()),
+                "{:?} answers raw bytes",
+                r.id
+            );
+            let Some(name) = tool_name(r.id) else {
+                assert!(
+                    matches!(
+                        r.id,
+                        RouteId::Reference | RouteId::MediaUpload | RouteId::MediaOriginal
+                    ),
+                    "{:?} is not a tool",
+                    r.id
+                );
+                continue;
+            };
+            let mut snake = String::new();
+            for (i, c) in format!("{:?}", r.id).chars().enumerate() {
+                if c.is_ascii_uppercase() && i > 0 {
+                    snake.push('_');
+                }
+                snake.push(c.to_ascii_lowercase());
+            }
+            assert_eq!(name, snake);
+            assert!(name.len() <= 64, "{name}");
+            assert!(
+                name.starts_with(|c: char| c.is_ascii_lowercase())
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+                "{name}"
+            );
+            names.push(name);
+        }
+        assert_eq!(names.len(), ROUTES.len() - 3);
+        let mut dedup = names.clone();
+        dedup.sort_unstable();
+        dedup.dedup();
+        assert_eq!(dedup.len(), names.len());
+    }
+
+    #[test]
+    fn type_schemas() {
+        let cases = [
+            (Type::Str, r#"{"type":"string"}"#),
+            (Type::Int, r#"{"type":"integer"}"#),
+            (Type::Bool, r#"{"type":"boolean"}"#),
+            (Type::IntOrNull, r#"{"type":["integer","null"]}"#),
+            (
+                Type::IntList,
+                r#"{"type":"array","items":{"type":"integer"}}"#,
+            ),
+            (Type::Json, "{}"),
+        ];
+        for (ty, want) in cases {
+            assert_eq!(ty.json_schema(), want, "{ty:?}");
+        }
     }
 }
