@@ -24,6 +24,7 @@ with the defaults. A malformed value falls back to its default.
 
 Changing a setting changes the public site at once. Set `site_lang` before publishing:
 changing it moves that language's posts to `/<slug>` and breaks old links.
+The first `blog setup` sets `site_lang` from the CLI language (`--lang`, `PLUMBLOG_LANG`, OS locale, else `en`); later runs never touch it.
 
 ## Where a post is
 

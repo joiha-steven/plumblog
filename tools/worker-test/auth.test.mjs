@@ -171,7 +171,7 @@ describe("fresh site", () => {
   test("params: site id, stretch iterations, no Turnstile, no internal keys", async () => {
     const r = await api(fresh, "GET", "/api/auth/params");
     assert.equal(r.status, 200);
-    assert.deepEqual(r.json, { site_id: SITE_A, stretch_iterations: ITER, turnstile_site_key: null });
+    assert.deepEqual(r.json, { site_id: SITE_A, stretch_iterations: ITER, turnstile_site_key: null, setup_required: true });
     assert.equal(r.cache, "no-store");
     assert.doesNotMatch(r.text, /setup_code/);
   });
@@ -236,6 +236,12 @@ describe("fresh site", () => {
     assert.equal(me.setCookie, null, "a fresh session is not renewed");
     assert.deepEqual(fresh.query("SELECT key FROM settings WHERE key LIKE 'setup_code%'"), []);
     assertError(await api(fresh, "POST", "/api/auth/setup", { body }), 403, "setup.invalid");
+    // The sign-in page learns that setup is over, also when the only owner is later disabled
+    // (setup refuses while any user row exists).
+    assert.equal((await api(fresh, "GET", "/api/auth/params")).json.setup_required, false);
+    fresh.exec("UPDATE users SET disabled_at = 1");
+    assert.equal((await api(fresh, "GET", "/api/auth/params")).json.setup_required, false);
+    fresh.exec("UPDATE users SET disabled_at = NULL");
     // Only the hash of the session token is stored.
     const rows = fresh.query("SELECT token_hash FROM sessions");
     assert.deepEqual(rows, [{ token_hash: sha256hex(ownerCookie) }]);
@@ -446,7 +452,7 @@ describe("seeded site", () => {
 
   test("params offer the Turnstile site key when the secret is set", async () => {
     const r = await api(seeded, "GET", "/api/auth/params");
-    assert.deepEqual(r.json, { site_id: SITE_B, stretch_iterations: ITER, turnstile_site_key: TS_SITE_KEY });
+    assert.deepEqual(r.json, { site_id: SITE_B, stretch_iterations: ITER, turnstile_site_key: TS_SITE_KEY, setup_required: false });
   });
 
   test("Turnstile is required after 5 failures; a valid token lets a right password in", async () => {

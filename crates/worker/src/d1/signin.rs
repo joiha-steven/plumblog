@@ -312,6 +312,12 @@ impl SetupStore for D1Store {
             .map(drop)
     }
 
+    async fn setup_open(&self) -> Result<bool> {
+        // The same condition `create_first_owner`'s guard uses: no user row at all.
+        let s = self.stmt("setup_open", "SELECT 1 AS x FROM users LIMIT 1", &[])?;
+        Ok(self.row(s).await?.is_none())
+    }
+
     async fn create_first_owner(&self, code_hash: &str, user: NewUser, now: i64) -> Result<UserId> {
         // One batch: the guard checks every condition inside the transaction, so of two
         // setups racing only the first commits; the second finds a user and aborts. The
