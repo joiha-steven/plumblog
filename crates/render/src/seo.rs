@@ -138,6 +138,7 @@ pub fn build(
     body: &Body<'_>,
     list_title: Option<&str>,
     description: &str,
+    home_alternates: &[Alternate],
 ) -> Seo {
     let o = page.origin.as_str();
     let c = Ctx {
@@ -178,7 +179,16 @@ pub fn build(
             seo.published = Some(date);
             graph
         }
-        Body::Home { .. } => vec![c.blog()],
+        Body::Home { .. } => {
+            seo.alternates = home_alternates
+                .iter()
+                .map(|a| Alternate {
+                    lang: a.lang.clone(),
+                    url: abs(o, &a.url),
+                })
+                .collect();
+            vec![c.blog()]
+        }
         Body::Tag { .. } | Body::Archive { .. } => {
             let name = list_title.unwrap_or(&site.title);
             name.clone_into(&mut seo.title);

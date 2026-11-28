@@ -241,6 +241,7 @@ impl ReaderSource for SampleSource {
                         q.slug == p.slug || p.translations.iter().any(|(_, s)| *s == q.slug)
                     })
                     .map_or(0, |i| i64::try_from(i).unwrap_or(0) + 1),
+                is_page: p.is_page,
             })
             .collect())
     }
@@ -286,6 +287,18 @@ impl ReaderSource for SampleSource {
         years.sort_unstable_by(|a, b| b.cmp(a));
         years.dedup();
         Ok(years)
+    }
+
+    async fn post_exists(&self, lang: &str, slug: &str) -> Result<bool> {
+        Ok(self.posts.iter().any(|p| p.lang == lang && p.slug == slug))
+    }
+
+    async fn langs_with_posts(&self, langs: &[String]) -> Result<Vec<String>> {
+        Ok(langs
+            .iter()
+            .filter(|l| self.posts.iter().any(|p| !p.is_page && p.lang == **l))
+            .cloned()
+            .collect())
     }
 }
 

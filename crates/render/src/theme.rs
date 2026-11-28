@@ -1,8 +1,8 @@
 //! Loading a theme and rendering pages with it.
 
 use crate::data::{
-    Body, CommentItemData, Comments, CommentsData, EntryData, LinkData, PageInfo, Post, PostData,
-    Site, civil, cut_words,
+    Alternate, Body, CommentItemData, Comments, CommentsData, EntryData, LinkData, PageInfo, Post,
+    PostData, Site, civil, cut_words,
 };
 use crate::keys;
 use crate::options::{self, FieldType, Group, OptionDecl, Owner, Schema};
@@ -447,6 +447,22 @@ impl Theme {
         page: &PageInfo,
         body: &Body<'_>,
     ) -> Result<Report, ThemeError> {
+        self.render_reporting_with(site, page, body, &[])
+    }
+
+    /// [`Theme::render_reporting`] for a home page that has language versions:
+    /// `home_alternates` (site-relative hreflang set, this page included) go in its head.
+    /// Other pages take theirs from their post and ignore it.
+    ///
+    /// # Errors
+    /// A template error, with template name and line.
+    pub fn render_reporting_with(
+        &self,
+        site: &Site,
+        page: &PageInfo,
+        body: &Body<'_>,
+        home_alternates: &[Alternate],
+    ) -> Result<Report, ThemeError> {
         let lang = page.lang.as_str();
         let (kind, description, data) = self.body_data(site, body);
         let mut preload: Vec<&str> = self.shared.preload.iter().map(String::as_str).collect();
@@ -454,7 +470,14 @@ impl Theme {
             preload.extend(extra.iter().map(String::as_str));
         }
         let list_title = self.list_title(lang, body);
-        let seo = seo::build(site, page, body, list_title.as_deref(), &description);
+        let seo = seo::build(
+            site,
+            page,
+            body,
+            list_title.as_deref(),
+            &description,
+            home_alternates,
+        );
         let ctx = Context {
             site,
             page: PageData {
