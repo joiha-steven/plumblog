@@ -17,7 +17,7 @@ use crate::keys;
 use db::{Db, ExtSource};
 use plumblog_i18n::{Catalog, Key};
 use plumblog_model::VERSION;
-use plumblog_render::{Body, Link, PageInfo, Post, Site, Theme, ThemeError};
+use plumblog_render::{Alternate, Body, Link, PageInfo, Post, Site, Theme, ThemeError};
 use plumblog_store::{PostKind, PostStatus, PostStore, READER_MAX_OFFSET, SettingsStore, comment};
 use routes::Route;
 use search::SearchSource;
@@ -506,7 +506,28 @@ async fn route(
     };
     let page = match routes::parse(path) {
         Route::Redirect(to) => return Ok(Outcome::Redirect(to)),
-        Route::Home { page } => p.home(page).await?,
+        Route::Home { page } => p.home(&settings.lang, page).await?,
+        // The default language's home is the root, one URL.
+        Route::LangFirstPage { lang } if lang == settings.lang => {
+            return Ok(Outcome::Redirect(routes::home_page(1)));
+        }
+        Route::LangFirstPage { lang } if settings.languages.contains(&lang) => {
+            return Ok(Outcome::Redirect(routes::lang_home(&lang, 1)));
+        }
+        Route::LangHome { lang, page } if lang == settings.lang => {
+            return Ok(Outcome::Redirect(routes::home_page(page)));
+        }
+        Route::LangHome { lang, page } if settings.languages.contains(&lang) => {
+            p.home(&lang, page).await?
+        }
+        // Not a site language: `/abc/` may still be a default-language post with a trailing
+        // slash (the redirect it always had); anything else is a 404.
+        Route::LangHome { lang, page: 1 } => {
+            if src.post_exists(&settings.lang, &lang).await.map_err(err)? {
+                return Ok(Outcome::Redirect(routes::post(&lang)));
+            }
+            None
+        }
         // The default language lives at the root: its `/<lang>/` form has one URL, the root.
         Route::Post {
             lang: Some(l),
@@ -528,7 +549,8 @@ async fn route(
         Route::Sitemap => return Ok(doc(docs::XML, p.sitemap(&settings).await?)),
         Route::Robots => return Ok(doc(docs::TEXT, docs::robots(origin))),
         Route::Llms => return Ok(doc(docs::TEXT, p.llms(&settings).await?)),
-        Route::NotFound => None,
+        // A language home past page 1 of an unlisted language, or nothing at all.
+        Route::LangHome { .. } | Route::LangFirstPage { .. } | Route::NotFound => None,
     };
     let mut out = match page {
         Some(html) => doc(HTML, html),
@@ -626,23 +648,45 @@ impl<S: ReaderSource> Pages<'_, S> {
     /// the system log: this happens while serving a page view, and the system log never
     /// writes per view (docs/ARCHITECTURE.md, System log).
     fn render(&self, body: &Body<'_>) -> std::result::Result<String, String> {
-        let other = match body {
-            Body::Post { post, .. } if post.lang != self.info.lang => Some((
-                site(self.settings, &post.lang),
+        let lang = match body {
+            Body::Post { post, .. } => post.lang.as_str(),
+            _ => self.info.lang.as_str(),
+        };
+        self.render_in(lang, body, &[])
+    }
+
+    /// [`Pages::render`] in `lang`: the page's `lang`/`dir`, UI text and feed links follow it.
+    fn render_in(
+        &self,
+        lang: &str,
+        body: &Body<'_>,
+        alternates: &[Alternate],
+    ) -> std::result::Result<String, String> {
+        let other = (lang != self.info.lang).then(|| {
+            let mut site = site(self.settings, lang);
+            // A language's home is its own: the site name links there, and so does the
+            // Blog in the page's structured data.
+            if matches!(body, Body::Home { .. }) {
+                site.home_url = routes::lang_home(lang, 1);
+            }
+            (
+                site,
                 PageInfo {
-                    lang: post.lang.clone(),
+                    lang: lang.to_owned(),
                     ..self.info.clone()
                 },
-            )),
-            _ => None,
-        };
+            )
+        });
         let (site, info) = other
             .as_ref()
             .map_or((&self.site, &self.info), |(s, i)| (s, i));
-        let report = self.theme.render_reporting(site, info, body).map_err(|e| {
-            self.theme_failed.set(true);
-            err(e)
-        })?;
+        let report = self
+            .theme
+            .render_reporting_with(site, info, body, alternates)
+            .map_err(|e| {
+                self.theme_failed.set(true);
+                err(e)
+            })?;
         for (lang, key) in report.missing {
             warn(&format!("i18n.missing_key lang={lang} key={key}"));
         }
@@ -669,13 +713,16 @@ impl<S: ReaderSource> Pages<'_, S> {
         to_render(p, &self.settings.lang)
     }
 
-    async fn home(&self, n: usize) -> PageResult {
+    /// Page `n` of the home of `lang`: the default language's at `/`, another site
+    /// language's at `/<lang>/`.
+    async fn home(&self, lang: &str, n: usize) -> PageResult {
         let Some(offset) = self.offset(n) else {
             return Ok(None);
         };
+        let default = &self.settings.lang;
         let slice = self
             .src
-            .posts(Filter::Home(&self.settings.lang), offset, self.per)
+            .posts(Filter::Home(lang), offset, self.per)
             .await
             .map_err(err)?;
         // Decided from the count: a page past the last one is a 404 (page 1 of an empty
@@ -685,11 +732,44 @@ impl<S: ReaderSource> Pages<'_, S> {
         }
         let posts = self.render_posts(&slice.posts);
         let refs: Vec<&Post> = posts.iter().collect();
-        self.show(&Body::Home {
+        // Language versions of the home are linked from page 1 only: page 2 of one language
+        // is not a translation of page 2 of another.
+        let alternates = if n == 1 {
+            self.home_alternates(lang).await
+        } else {
+            Vec::new()
+        };
+        let body = Body::Home {
             posts: &refs,
-            older_url: (offset + slice.posts.len() < slice.total).then(|| routes::home_page(n + 1)),
-            newer_url: (n > 1).then(|| routes::home_page(n - 1)),
-        })
+            older_url: (offset + slice.posts.len() < slice.total)
+                .then(|| routes::home_in(lang, default, n + 1)),
+            newer_url: (n > 1).then(|| routes::home_in(lang, default, n - 1)),
+        };
+        self.render_in(lang, &body, &alternates).map(Some)
+    }
+
+    /// The hreflang set of page 1 of the home of `lang`: the site languages that have a
+    /// post (one batched query when the site lists more than one language). A failed read
+    /// leaves the head without alternates and the page uncached.
+    async fn home_alternates(&self, lang: &str) -> Vec<Alternate> {
+        let others: Vec<String> = self
+            .settings
+            .languages
+            .iter()
+            .filter(|l| **l != self.settings.lang)
+            .cloned()
+            .collect();
+        if others.is_empty() {
+            return Vec::new();
+        }
+        match self.src.langs_with_posts(&others).await {
+            Ok(with_posts) => home_alternates(self.settings, lang, &with_posts),
+            Err(e) => {
+                warn(&format!("home.alternates_failed lang={lang} detail={e}"));
+                self.complete.set(false);
+                Vec::new()
+            }
+        }
     }
 
     async fn post(&self, lang: &str, slug: &str, ext: &impl ExtSource) -> PageResult {
@@ -833,6 +913,30 @@ pub(crate) async fn comment_target<S: PostStore + SettingsStore>(
     }
     let site = comment::site_enabled(store).await.map_err(err)?;
     Ok(Some((post.id, comment::is_open(site, &post))))
+}
+
+/// The hreflang set of page 1 of the home of `lang` (site-relative), the same in a page head
+/// and in the sitemap: the default language's home and every other site language's that has
+/// a post (`with_posts`), this page first, then `x-default` = `/`. Empty when no other home
+/// exists, or when this page is an empty language's own (nothing points to an empty home).
+fn home_alternates(s: &Settings, lang: &str, with_posts: &[String]) -> Vec<Alternate> {
+    let homes: Vec<&str> = std::iter::once(s.lang.as_str())
+        .chain(with_posts.iter().map(String::as_str))
+        .collect();
+    if homes.len() < 2 || !homes.contains(&lang) {
+        return Vec::new();
+    }
+    let alt = |l: &str| Alternate {
+        lang: l.to_owned(),
+        url: routes::home_in(l, &s.lang, 1),
+    };
+    let mut all = vec![alt(lang)];
+    all.extend(homes.iter().filter(|l| **l != lang).map(|l| alt(l)));
+    all.push(Alternate {
+        lang: "x-default".to_owned(),
+        url: routes::home_page(1),
+    });
+    all
 }
 
 /// Site facts for a page in `lang`: its feed links are that language's feeds.

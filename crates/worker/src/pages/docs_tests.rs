@@ -321,7 +321,9 @@ fn x_default_points_at_the_default_language_version() {
     well_formed(&sitemap).unwrap();
     // Both versions carry the whole set: vi, en and x-default.
     assert_eq!(sitemap.matches(x_default).count(), 2);
-    assert_eq!(sitemap.matches("hreflang=\"vi\"").count(), 2);
+    // Two homes (`/` and `/vi/`) carry the vi version too.
+    assert_eq!(sitemap.matches("hreflang=\"vi\"").count(), 4);
+    assert!(sitemap.contains("<loc>https://blog.test/vi/</loc>"));
 }
 
 const PUBLIC_PATHS: [&str; 11] = [

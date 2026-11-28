@@ -45,9 +45,7 @@ pub struct Settings {
     /// pages trust it over the browser's language only then.
     pub lang_set: bool,
     pub per_page: usize,
-    /// Languages the site offers, the default first. Stored and parsed for the language
-    /// switcher (a theme feature, not built yet); no route is gated on it.
-    #[allow(dead_code, reason = "read by the language switcher, not built yet")]
+    /// Languages the site offers, the default first: `/<lang>/` is a home only for these.
     pub languages: Vec<String>,
     /// Public origin (`https://example.com`) for canonical URLs, feeds and the sitemap.
     /// Production must set it: otherwise the request's Host header decides public URLs.
@@ -78,6 +76,8 @@ pub struct SitemapPost {
     pub updated_at: i64,
     /// Posts sharing it are translations of each other.
     pub group: i64,
+    /// A static page, not a post: it makes no language home.
+    pub is_page: bool,
 }
 
 /// A post with its chronological neighbours.
@@ -108,6 +108,10 @@ pub trait ReaderSource {
     async fn tags(&self) -> Result<Vec<Tag>>;
     /// Years that have posts, newest first.
     async fn years(&self) -> Result<Vec<i32>>;
+    /// Whether a published post or page is at `/<lang>/<slug>`. 1 query.
+    async fn post_exists(&self, lang: &str, slug: &str) -> Result<bool>;
+    /// Which of `langs` have a published post, in order. 1 query (0 for none).
+    async fn langs_with_posts(&self, langs: &[String]) -> Result<Vec<String>>;
 }
 
 include!(concat!(env!("OUT_DIR"), "/embedded.rs"));

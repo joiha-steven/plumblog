@@ -145,11 +145,27 @@ pub(super) fn sitemap() -> String {
     let arm = |kind: &str| {
         format!(
             "SELECT * FROM (SELECT p.lang, p.slug, p.updated_at, p.translation_group, \
-             p.published_at, p.id FROM posts p WHERE p.status = 'published' \
+             p.published_at, p.id, p.kind = 'page' FROM posts p WHERE p.status = 'published' \
              AND p.kind = '{kind}' ORDER BY p.published_at DESC, p.id DESC LIMIT ?)"
         )
     };
     format!("{} UNION ALL {}", arm("post"), arm("page"))
+}
+
+/// A published post or page at `(lang, slug)`: the unique `posts_lang_slug` lookup, no columns.
+pub(super) fn post_exists() -> String {
+    "SELECT 1 FROM posts p WHERE p.lang = ? AND p.slug = ? AND p.status = 'published' LIMIT 1"
+        .to_owned()
+}
+
+/// Which of `n` languages have a published post: one `EXISTS` each on `posts_home`
+/// (status, kind, lang), a covering index search that stops at the first row.
+pub(super) fn langs_with_posts(n: usize) -> String {
+    let values = vec!["SELECT ? AS v"; n].join(" UNION ALL ");
+    format!(
+        "SELECT l.v FROM ({values}) l WHERE EXISTS (SELECT 1 FROM posts p \
+         WHERE {LISTED} AND p.lang = l.v)"
+    )
 }
 
 /// Tags with a published post: each tag stops at its first one (`post_tags_tag`, then the post).
@@ -304,6 +320,57 @@ mod plans {
         );
     }
 
+    /// A language home (`/vi/`) is the same statements as `/` with another bound language.
+    #[test]
+    fn a_language_home_uses_the_home_index() {
+        let c = db();
+        let home = listing_from(ReaderFilter::Home("en")).unwrap();
+        let vi_home = listing_from(ReaderFilter::Home("vi")).unwrap();
+        assert_eq!(vi_home, home, "one SQL text for every language's home");
+        check(
+            &c,
+            "rows vi home",
+            &rows(&vi_home, true),
+            &["posts_home"],
+            false,
+        );
+        check(
+            &c,
+            "count vi home",
+            &count(&vi_home),
+            &["COVERING INDEX posts_"],
+            false,
+        );
+    }
+
+    /// The language-home helpers: a point lookup, and one covering `EXISTS` per language.
+    #[test]
+    fn language_home_helpers_use_their_indexes() {
+        let c = db();
+        check(
+            &c,
+            "post exists",
+            &post_exists(),
+            &["posts_lang_slug"],
+            false,
+        );
+        for n in [1, 3] {
+            let sql = langs_with_posts(n);
+            assert_eq!(sql.matches('?').count(), n);
+            // Only the language list itself (constants) is scanned; posts are searched.
+            check_scans(
+                &c,
+                "langs with posts",
+                &sql,
+                &[
+                    "SEARCH p EXISTS USING COVERING INDEX posts_home (status=? AND kind=? AND lang=?)",
+                ],
+                false,
+                &["CONSTANT ROW", "l"],
+            );
+        }
+    }
+
     #[test]
     fn every_reader_query_uses_the_index_it_is_meant_to() {
         let c = db();
@@ -393,6 +460,8 @@ mod plans {
         );
         check_scans(&c, "tags", &tags(), &["post_tags_tag"], true, &["t"]);
         check(&c, "feed", &feed(), &["posts_listing"], false);
+        // The sitemap also reads each row's kind (language homes skip pages): same plan.
+        assert!(sitemap().contains("p.kind = 'page'"));
         check(&c, "sitemap", &sitemap(), &["posts_by_date"], false);
 
         // API pages of tags and series: a SEARCH on the slug's unique autoindex, no sort.

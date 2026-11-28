@@ -282,6 +282,7 @@ impl<S: SettingsStore + ReaderStore + TaxonomyStore> ReaderSource for Db<'_, S> 
                 slug: r.slug,
                 updated_at: r.updated_at.div_euclid(1000),
                 group: r.translation_group.0,
+                is_page: r.is_page,
             })
             .collect())
     }
@@ -313,6 +314,16 @@ impl<S: SettingsStore + ReaderStore + TaxonomyStore> ReaderSource for Db<'_, S> 
     // 1 query.
     async fn years(&self) -> Result<Vec<i32>> {
         self.0.reader_years().await
+    }
+
+    // 1 query.
+    async fn post_exists(&self, lang: &str, slug: &str) -> Result<bool> {
+        self.0.reader_post_exists(lang, slug).await
+    }
+
+    // 1 query.
+    async fn langs_with_posts(&self, langs: &[String]) -> Result<Vec<String>> {
+        self.0.reader_langs_with_posts(langs).await
     }
 }
 

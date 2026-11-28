@@ -95,6 +95,8 @@ pub struct ReaderSitemapRow {
     pub updated_at: i64,
     /// Rows sharing it are translations of each other.
     pub translation_group: PostId,
+    /// A static page (kind `page`), not a post.
+    pub is_page: bool,
 }
 
 /// The posts around one post in date order.
@@ -167,6 +169,13 @@ pub trait ReaderStore {
     /// Every published post and page, newest first (`published_at` DESC, id DESC), at most
     /// `limit` capped at [`READER_SITEMAP_MAX`]: the sitemap in one query, without bodies.
     async fn reader_sitemap(&self, limit: u32) -> Result<Vec<ReaderSitemapRow>>;
+    /// Whether a published post or page exists at `/<lang>/<slug>`, nothing else read.
+    /// 1 query.
+    async fn reader_post_exists(&self, lang: &str, slug: &str) -> Result<bool>;
+    /// The `langs` that have at least one published post (kind `post`), in the order given:
+    /// one `EXISTS` per language in a single statement, each stopping at its first row.
+    /// 1 query; none for an empty list.
+    async fn reader_langs_with_posts(&self, langs: &[String]) -> Result<Vec<String>>;
 }
 
 #[cfg(test)]
