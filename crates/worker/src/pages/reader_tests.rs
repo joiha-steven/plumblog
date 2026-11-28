@@ -133,6 +133,7 @@ fn commentable(db: &MemoryStore, kind: PostKind, slug: &str) {
         media_ids: Vec::new(),
         search_text: String::new(),
         revision: None,
+        client_id: None,
         now: 1_000,
     }))
     .unwrap();

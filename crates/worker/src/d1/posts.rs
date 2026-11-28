@@ -235,6 +235,20 @@ impl PostStore for D1Store {
         }
     }
 
+    // 1 query (a create carrying a client id; save_post after a lost race), on the
+    // posts_author_client index.
+    async fn find_client_post(&self, author: UserId, client_id: &str) -> Result<Option<PostId>> {
+        let s = self.stmt(
+            "find_client_post",
+            "SELECT id FROM posts WHERE author_id = ? AND client_id = ?",
+            &[bound(author.0), text(client_id)],
+        )?;
+        self.row(s)
+            .await?
+            .map(|mut r| r.int().map(PostId))
+            .transpose()
+    }
+
     // 1 query (reader post page /<lang>/<slug>): the post and its tag ids.
     async fn find_post(&self, lang: &str, slug: &str) -> Result<Option<Post>> {
         let s = self.stmt(

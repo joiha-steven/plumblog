@@ -91,6 +91,7 @@ fn live_post(author: UserId, slug: &str) -> SavePost {
         media_ids: Vec::new(),
         search_text: String::new(),
         revision: None,
+        client_id: None,
         now: 1_000,
     }
 }

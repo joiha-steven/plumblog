@@ -172,7 +172,55 @@ pub struct SavePost {
     pub search_text: String,
     /// `Some` keeps a revision of the new title and Markdown.
     pub revision: Option<NewRevision>,
+    /// Insert only, ignored on update: the client's request id ([`valid_client_id`]). An
+    /// insert repeating the `(author_id, client_id)` of a stored post writes nothing and
+    /// returns that post's id, so a create retried after a lost answer makes one post.
+    pub client_id: Option<String>,
     pub now: i64,
+}
+
+/// Longest client request id.
+pub const MAX_CLIENT_ID: usize = 64;
+
+/// A client request id is 1-64 of `A-Z a-z 0-9 - _` (a UUID fits).
+#[must_use]
+pub fn valid_client_id(v: &str) -> bool {
+    (1..=MAX_CLIENT_ID).contains(&v.len())
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+impl SavePost {
+    /// True when `stored` already holds every column this update would write: kind, address,
+    /// status, `published_at`, author, title, Markdown, rendering (html, toc, excerpt, counts),
+    /// flags, cover, series and the tag set. Body media and search text follow from the html.
+    /// Exact comparison: an update from a stale version that matches is a save that already
+    /// happened (its answer was lost), not another writer's change.
+    #[must_use]
+    pub fn matches(&self, stored: &Post) -> bool {
+        let mut tags = self.tag_ids.clone();
+        tags.sort_unstable();
+        tags.dedup();
+        self.kind == stored.kind
+            && self.lang == stored.lang
+            && self.slug == stored.slug
+            && self.status == stored.status
+            && self.published_at == stored.published_at
+            && self.author_id == stored.author_id
+            && self.title == stored.title
+            && self.markdown == stored.markdown
+            && self.html == stored.html
+            && self.toc_json == stored.toc_json
+            && self.excerpt == stored.excerpt
+            && self.word_count == stored.word_count
+            && self.reading_minutes == stored.reading_minutes
+            && self.pinned == stored.pinned
+            && self.comments_enabled == stored.comments_enabled
+            && self.cover_media_id == stored.cover_media_id
+            && self.series_id == stored.series_id
+            && self.series_position == stored.series_position
+            && tags == stored.tag_ids
+    }
 }
 
 /// Sort order of [`PostQuery`]; also says what [`PostCursor::key`] holds.
@@ -270,9 +318,14 @@ pub trait PostStore {
     /// One atomic write. Insert: `created_at = updated_at = now`, `version = 1`; the group is
     /// the given one (it must be the group of an existing post, else `InvalidInput`) or the
     /// new id.
+    /// Insert with a `client_id` that `(author_id, client_id)` of a stored post (any status)
+    /// already holds: `Ok` with that post's id and nothing written, whatever else differs;
+    /// two such inserts at once make one post (a UNIQUE index decides; the loser reads it).
     /// Update, checked in this order: `PostNotFound` if absent; a trashed post is
     /// `InvalidInput` (restore first), whatever the version; `expected_version` other than
-    /// the stored one is `Conflict`, with the stored version in the detail. Then keeps
+    /// the stored one is `Ok` with nothing written when the stored row already
+    /// [`SavePost::matches`] this save, else `Conflict`, with the stored version in the
+    /// detail. Then keeps
     /// `created_at` and the group; `updated_at = now`; `version + 1`.
     /// `InvalidInput` (checked before the row is read): status `Trashed`,
     /// scheduled/published without `published_at`, `expected_version` missing on update or
@@ -287,6 +340,8 @@ pub trait PostStore {
     async fn save_post(&self, post: SavePost) -> Result<PostId>;
     /// `PostNotFound`.
     async fn get_post(&self, id: PostId) -> Result<Post>;
+    /// The post `author` created with `client_id` (see [`SavePost::client_id`]), any status.
+    async fn find_client_post(&self, author: UserId, client_id: &str) -> Result<Option<PostId>>;
     /// Any status.
     async fn find_post(&self, lang: &str, slug: &str) -> Result<Option<Post>>;
     /// Every post of the group, any status, ordered by lang.

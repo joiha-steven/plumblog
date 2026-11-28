@@ -10,7 +10,7 @@ import { Window } from "happy-dom";
 import { RENDER_WARNINGS } from "../../web/admin/src/api/model.gen.ts";
 
 const win = new Window({ url: "http://localhost/admin/posts/new?draft=abcdefghijkl" });
-for (const k of ["document", "location", "history", "Node", "HTMLElement", "addEventListener", "removeEventListener"]) {
+for (const k of ["document", "location", "history", "Node", "HTMLElement", "addEventListener", "removeEventListener", "localStorage"]) {
   const v = typeof win[k] === "function" && !/^[A-Z]/.test(k) ? win[k].bind(win) : win[k];
   Object.defineProperty(globalThis, k, { value: v, configurable: true, writable: true });
 }
@@ -121,7 +121,7 @@ function editor(api, o = {}) {
     await job;
     e.sync.changed();
   };
-  e.sync = startSync(
+  e.sync = (o.startSync ?? startSync)(
     {
       api, user: 1, lang: "vi", st: e.st, id: o.post?.id, draft: (o.post?.status ?? "draft") === "draft",
       offline: () => !e.online, alive: () => e.alive, text: () => [e.title, e.body],
@@ -129,6 +129,8 @@ function editor(api, o = {}) {
     },
     DELAY,
     o.slow,
+    o.createMs,
+    o.retry ?? 1,
   );
   return e;
 }
@@ -177,7 +179,9 @@ test("a new post is created once, even with edits during a slow create; then upd
     api.calls.map((c) => c[0]),
     ["create", "update"],
   );
-  assert.deepEqual(api.calls[0][1], { lang: "vi", slug: "hello", title: "Hello", markdown: "first" });
+  const { client_id, ...sent } = api.calls[0][1];
+  assert.deepEqual(sent, { lang: "vi", slug: "hello", title: "Hello", markdown: "first" });
+  assert.match(client_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, "a UUID");
   assert.deepEqual(api.calls[1].slice(1), [7, { expected_version: 1, title: "Hello", markdown: "fourth" }]);
   assert.equal(e.st.version, 2);
 });
@@ -476,19 +480,27 @@ test("a failed save keeps the local draft, says so once, and retries on the next
   let down = true;
   const api = fakeApi({ create: (input) => (down ? { ok: false, error: { code: "network", status: 0 } } : { ok: true, value: post(9, input.title, input.markdown) }) });
   const e = editor(api);
-  await e.save("T", "a");
-  await settle();
-  assert.equal(e.said.at(-1), "admin.editor.not_saved");
-  assert.equal(document.querySelector(".toast")?.textContent, "admin.editor.sync.failed");
-  document.querySelector(".toast")?.remove();
-  await e.save("T", "ab");
-  await settle();
-  assert.equal(document.querySelector(".toast"), null, "one toast per run of failures");
-  assert.equal(rows.get(newKey()).body, "ab");
-  down = false;
-  await e.save("T", "abc");
-  await settle();
-  assert.equal(api.calls.length, 3);
+  const warn = console.warn;
+  console.warn = () => undefined;
+  try {
+    await e.save("T", "a");
+    await settle(80);
+    assert.equal(e.said.at(-1), "admin.editor.not_saved");
+    assert.equal(api.calls.length, 5, "a create with no answer is sent 4 more times, then given up");
+    assert.equal(document.querySelector(".toast")?.textContent, "admin.editor.sync.failed");
+    document.querySelector(".toast")?.remove();
+    await e.save("T", "ab");
+    await settle(80);
+    assert.equal(document.querySelector(".toast"), null, "one toast per run of failures");
+    assert.equal(rows.get(newKey()).body, "ab");
+    down = false;
+    await e.save("T", "abc");
+    await settle();
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(api.calls.length, 11);
+  assert.equal(new Set(api.calls.map((c) => c[1].client_id)).size, 1, "every attempt of one post, one client_id");
   assert.equal(e.said.at(-1), "admin.editor.saved");
   assert.equal(draftKeys().length, 0);
 });
@@ -618,4 +630,188 @@ test("a create that settles within the bound: the mount gets the post and its dr
   assert.equal(p?.id, 8);
   assert.deepEqual(draftKeys(), ["1:post-8"]);
   assert.equal(rows.get("1:post-8").version, 1);
+});
+
+/**
+ * A server in memory that keeps the API's rules for #86: a create repeating a `client_id`
+ * returns the post it made; a PATCH from a stale version the post already equals is a 200,
+ * any other stale one a 409. `lose` drops that many answers after the server acted (network),
+ * `hang` leaves that many unanswered for good, also after acting.
+ */
+function mockServer() {
+  const s = { posts: new Map(), keys: new Map(), calls: [], lose: 0, hang: 0, next: 20 };
+  const answer = (value) => {
+    if (s.hang > 0) {
+      s.hang--;
+      return new Promise(() => undefined);
+    }
+    if (s.lose > 0) {
+      s.lose--;
+      return { ok: false, error: { code: "network", status: 0 } };
+    }
+    return value.ok === false ? value : { ok: true, value: structuredClone(value) };
+  };
+  s.api = {
+    async createPost(input) {
+      s.calls.push(["create", input]);
+      let p = s.posts.get(s.keys.get(input.client_id));
+      if (!p) {
+        p = post(s.next++, input.title, input.markdown, 1);
+        s.posts.set(p.id, p);
+        if (input.client_id) s.keys.set(input.client_id, p.id);
+      }
+      return answer(p);
+    },
+    async updatePost(id, input) {
+      s.calls.push(["update", id, input]);
+      const p = s.posts.get(id);
+      const want = { title: input.title ?? p.title, markdown: input.markdown ?? p.markdown };
+      if (input.expected_version !== p.version) {
+        if (want.title === p.title && want.markdown === p.markdown) return answer(p);
+        return answer(conflict("expected_version", p.version));
+      }
+      const q = post(id, want.title, want.markdown, p.version + 1);
+      s.posts.set(id, q);
+      return answer(q);
+    },
+    async post(id) {
+      s.calls.push(["get", id]);
+      return answer(s.posts.get(id));
+    },
+  };
+  return s;
+}
+const quiet = async (f) => {
+  const warn = console.warn;
+  console.warn = () => undefined;
+  try {
+    return await f();
+  } finally {
+    console.warn = warn;
+  }
+};
+
+test("a create whose answer is lost is sent again with the same client_id: one post, adopted", async () => {
+  reset();
+  const s = mockServer();
+  s.lose = 2;
+  const e = editor(s.api);
+  const key = e.st.key;
+  await quiet(async () => {
+    await e.save("Lost", "text");
+    await settle(60);
+  });
+  assert.deepEqual(s.calls.map((c) => c[0]), ["create", "create", "create"]);
+  assert.equal(new Set(s.calls.map((c) => c[1].client_id)).size, 1);
+  assert.equal(s.posts.size, 1, "one post on the server");
+  assert.equal(e.made.length, 1);
+  assert.equal(e.st.key, `1:post-${[...s.posts.keys()][0]}`, "the draft moved to that post");
+  assert.equal(e.said.at(-1), "admin.editor.saved");
+  assert.equal(localStorage.getItem(`plumblog-create:${key}`), null, "the id goes once a create answered");
+});
+
+test("a create's id outlives the page while unanswered, so a reload sends it again", async () => {
+  reset();
+  const s = mockServer();
+  s.lose = 5;
+  const e = editor(s.api);
+  const key = e.st.key;
+  await quiet(async () => {
+    await e.save("Reload", "text");
+    await settle(80);
+  });
+  assert.equal(e.said.at(-1), "admin.editor.not_saved");
+  assert.equal(s.posts.size, 1, "the server made it; every answer was lost");
+  const id = s.calls[0][1].client_id;
+  assert.equal(localStorage.getItem(`plumblog-create:${key}`), id, "kept under the draft key");
+  // The reload: a fresh copy of the module (nothing in memory), the same localStorage.
+  e.alive = false;
+  const page2 = await import(`data:text/javascript;base64,${Buffer.from(`${out.outputFiles[0].text}\n// reload`).toString("base64")}`);
+  const again = editor(s.api, { key, startSync: page2.startSync });
+  await again.save("Reload", "text, more");
+  await settle(80);
+  assert.equal(s.calls.at(-2)[0], "create");
+  assert.equal(s.calls.at(-2)[1].client_id, id, "the same id after the reload");
+  assert.equal(s.posts.size, 1, "still one post");
+  assert.equal(s.calls.at(-1)[0], "update", "the newer text goes to that post");
+  assert.equal([...s.posts.values()][0].markdown, "text, more");
+});
+
+test("a hung create says so, is sent again after its bound, and the line clears when the retry lands", async () => {
+  reset();
+  const s = mockServer();
+  s.hang = 1;
+  const e = editor(s.api, { slow: 30, createMs: 60 });
+  await quiet(async () => {
+    await e.save("Hung", "text");
+    await settle(50);
+    assert.equal(e.said.at(-1), "admin.editor.sync.slow", "the status line says the create is out");
+    await settle(80);
+  });
+  assert.deepEqual(s.calls.map((c) => c[0]), ["create", "create"]);
+  assert.equal(s.calls[0][1].client_id, s.calls[1][1].client_id);
+  assert.equal(s.posts.size, 1);
+  assert.equal(e.said.at(-1), "admin.editor.saved", "the slow line is gone");
+  assert.equal(e.made.length, 1);
+});
+
+test("an update whose answer is lost: the same text again is a 200, no banner", async () => {
+  reset("/admin/posts/3");
+  const s = mockServer();
+  s.posts.set(3, post(3, "T", "base", 4));
+  const e = editor(s.api, { key: "1:post-3", post: post(3, "T", "base", 4), title: "T", body: "base" });
+  s.lose = 1;
+  await quiet(async () => {
+    await e.save("T", "one");
+    await settle();
+  });
+  assert.equal(e.said.at(-1), "admin.editor.not_saved");
+  assert.equal(s.posts.get(3).version, 5, "it landed");
+  // Undo and redo: the editor holds "one" again, from version 4.
+  await e.save("T", "base");
+  await e.save("T", "one");
+  await settle();
+  assert.deepEqual(s.calls.at(-1), ["update", 3, { expected_version: 4, title: "T", markdown: "one" }]);
+  assert.equal(e.chosen.length, 0, "no choice banner");
+  assert.equal(e.st.version, 5);
+  assert.equal(e.said.at(-1), "admin.editor.saved");
+});
+
+test("an update whose answer is lost, then more typing: the 409 against its own save asks nothing", async () => {
+  reset("/admin/posts/3");
+  const s = mockServer();
+  s.posts.set(3, post(3, "T", "base", 4));
+  const e = editor(s.api, { key: "1:post-3", post: post(3, "T", "base", 4), title: "T", body: "base" });
+  s.lose = 1;
+  await quiet(async () => {
+    await e.save("T", "one");
+    await settle();
+    await e.save("T", "one two");
+    await settle();
+  });
+  assert.deepEqual(
+    s.calls.map((c) => c[0]),
+    ["update", "update", "get", "update"],
+  );
+  assert.equal(e.chosen.length, 0, "no choice banner");
+  assert.equal(s.posts.get(3).markdown, "one two");
+  assert.equal(s.posts.get(3).version, 6);
+  assert.equal(e.said.at(-1), "admin.editor.saved");
+});
+
+test("a 409 from another writer's text still asks, even after a lost answer", async () => {
+  reset("/admin/posts/3");
+  const s = mockServer();
+  s.posts.set(3, post(3, "T", "base", 4));
+  const e = editor(s.api, { key: "1:post-3", post: post(3, "T", "base", 4), title: "T", body: "base" });
+  s.lose = 1;
+  await quiet(async () => {
+    await e.save("T", "one");
+    await settle();
+  });
+  s.posts.set(3, post(3, "T", "someone else", 6));
+  await e.save("T", "one two");
+  await settle();
+  assert.equal(e.chosen.length, 1, "the writer picks");
+  assert.equal(s.posts.get(3).markdown, "someone else", "nothing overwritten");
 });

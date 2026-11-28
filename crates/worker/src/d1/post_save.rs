@@ -1,7 +1,7 @@
 //! `save_post`: one batch per save, with every row the save touches.
 
 use plumblog_model::{Error, ErrorCode, PostId, Result};
-use plumblog_store::{PostStatus, SavePost, search};
+use plumblog_store::{PostStatus, PostStore, SavePost, search};
 use worker::wasm_bindgen::JsValue;
 
 use super::posts::post_not_found;
@@ -104,6 +104,11 @@ impl D1Store {
         for _ in 0..GUARD_RETRIES {
             let old = self.read_old(id).await?;
             if old.version != expected {
+                // The same save again (its answer was lost): nothing to write. One more
+                // query, only on this path.
+                if input.matches(&self.get_post(id).await?) {
+                    return Ok(id);
+                }
                 return Err(stale_version(id, old.version, expected));
             }
             match self.update_post(&input, id, &old).await {
@@ -156,14 +161,15 @@ impl D1Store {
         ];
         params.extend(post_values(p)?);
         params.extend([int(p.now)?, int(p.now)?]);
+        params.push(p.client_id.as_deref().map_or(JsValue::NULL, text));
         stmts.push(self.stmt(
             "save_post_insert",
             "INSERT INTO posts (translation_group, kind, lang, slug, status, trashed_from, \
              published_at, author_id, title, markdown, html, toc_json, excerpt, word_count, \
              reading_minutes, pinned, comments_enabled, cover_media_id, series_id, \
-             series_position, created_at, updated_at) \
+             series_position, created_at, updated_at, client_id) \
              VALUES (COALESCE(?, ?), ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-             ?, ?) RETURNING id",
+             ?, ?, ?) RETURNING id",
             &params,
         )?);
         if p.translation_group.is_none() {
@@ -191,7 +197,25 @@ impl D1Store {
                 "translation group {} does not exist",
                 p.translation_group.map_or(0, |g| g.0)
             ))),
-            Err(Failure::Error(e)) => Err(e),
+            Err(Failure::Error(e)) => self.replayed(p, e).await,
+        }
+    }
+
+    /// A refused insert that carries a client id: if that id is stored (an earlier request,
+    /// or one racing this one, won the `posts_author_client` index, or took the slug first
+    /// with the same id), it is that post; otherwise the original error. Without a pre-read,
+    /// a create costs no extra query; only a refused one reads.
+    async fn replayed(&self, p: &SavePost, e: Error) -> Result<PostId> {
+        let Some(key) = p
+            .client_id
+            .as_deref()
+            .filter(|_| e.code == ErrorCode::Conflict)
+        else {
+            return Err(e);
+        };
+        match self.find_client_post(p.author_id, key).await? {
+            Some(id) => Ok(id),
+            None => Err(e),
         }
     }
 
