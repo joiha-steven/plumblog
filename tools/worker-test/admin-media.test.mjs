@@ -993,7 +993,9 @@ test("on a phone, cancelling the queued files lets the duplicate open", async ()
     assert.equal(await page.locator(".insp-card").count(), 0, "not while another is still out");
     await second.continue();
     await page.locator(".insp-card").waitFor();
-    assert.equal(await page.locator(".insp-title b").innerText(), "pick-a.png");
+    // Which of the two went out second depends on which hash finished first.
+    const last = new URL(second.request().url()).searchParams.get("name");
+    assert.equal(await page.locator(".insp-title b").innerText(), last);
     assert.deepEqual(sent.sort(), ["pick-a.png", "pick-b.png"], "q-1 and q-2 never went out");
     assert.equal(media3().length, 11);
     assert.deepEqual(problems, []);
