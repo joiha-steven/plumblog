@@ -60,7 +60,7 @@ async function auth<T>(params: URLSearchParams, method: Method, path: string, bo
   const done = (value: unknown = {}): Result<T> => ({ ok: true, value: value as T });
   if (flag === "offline") return fail("network", 0);
   if (path === "/api/auth/params") {
-    return done({ site_id: "mock", stretch_iterations: 600000, turnstile_site_key: TEST_SITE_KEY });
+    return done({ site_id: "mock", stretch_iterations: 600000, turnstile_site_key: TEST_SITE_KEY, setup_required: params.get("setup") === "required" });
   }
   const user = { user: me.user };
   const signedIn = () => {
