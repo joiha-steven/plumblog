@@ -137,6 +137,24 @@ impl ReaderStore for MemoryStore {
         }))
     }
 
+    async fn reader_post_exists(&self, lang: &str, slug: &str) -> Result<bool> {
+        Ok(self.read(|s| {
+            s.posts
+                .values()
+                .any(|p| p.status == PostStatus::Published && p.lang == lang && p.slug == slug)
+        }))
+    }
+
+    async fn reader_langs_with_posts(&self, langs: &[String]) -> Result<Vec<String>> {
+        Ok(self.read(|s| {
+            langs
+                .iter()
+                .filter(|l| s.posts.values().any(|p| listed(p) && p.lang == **l))
+                .cloned()
+                .collect()
+        }))
+    }
+
     async fn reader_years(&self) -> Result<Vec<i32>> {
         Ok(self.read(|s| {
             let mut years: Vec<i32> = s
@@ -187,6 +205,7 @@ impl ReaderStore for MemoryStore {
                     slug: p.slug.clone(),
                     updated_at: p.updated_at,
                     translation_group: p.translation_group,
+                    is_page: p.kind == PostKind::Page,
                 })
                 .collect()
         }))
