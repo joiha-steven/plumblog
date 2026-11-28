@@ -27,6 +27,9 @@ pub const MEDIA_MIMES: &[&str] = &[
     "image/png",
     "image/gif",
 ];
+/// The `response` of a route that answers with a media item's stored original: the raw
+/// bytes, `Content-Type` the item's `mime`, not JSON (errors are JSON as everywhere).
+pub const ORIGINAL: &str = "original";
 /// Largest `limit` a list accepts.
 pub const MAX_LIMIT: u32 = 100;
 /// `limit` when none is given.
@@ -215,6 +218,9 @@ pub enum RouteId {
     MediaUpload,
     MediaUpdate,
     MediaDelete,
+    MediaOriginal,
+    CommentList,
+    UserList,
     RedirectList,
     RedirectPut,
     RedirectDelete,
@@ -283,7 +289,8 @@ pub struct Route {
     /// Set where derived files (image sizes) are not made by the API.
     pub variants: Option<Variants>,
     pub status: u16,
-    /// Name of the response shape; `none` for an empty 204.
+    /// Name of the response shape; `none` for an empty 204; [`ORIGINAL`] for the stored bytes
+    /// themselves.
     pub response: &'static str,
 }
 
@@ -360,6 +367,8 @@ const MEDIA_UPLOAD: &[Field] = &[
     query_req("height", Type::Int),
     query("alt", Type::Str),
 ];
+/// An id-ordered listing: `cursor` is the last id of the previous page.
+const BY_ID: &[Field] = &[query("cursor", Type::Str), query("limit", Type::Int)];
 const VALUE: &[Field] = &[path_name("key"), req("value", Type::Json)];
 const OWNER: &[Field] = &[path_name("name")];
 const OWNER_VALUE: &[Field] = &[
@@ -642,6 +651,35 @@ pub const ROUTES: &[Route] = &[
         204,
         "none",
     ),
+    // A read token sees drafts and the media list already, so it may read originals too.
+    route(
+        RouteId::MediaOriginal,
+        Method::Get,
+        "/api/v1/media/{id}/original",
+        Access::Read,
+        ID,
+        200,
+        ORIGINAL,
+    ),
+    // Every status, so spam and trash included: moderation data, not for a read token.
+    route(
+        RouteId::CommentList,
+        Method::Get,
+        "/api/v1/comments",
+        Access::Require(Permission::ModerateComments),
+        BY_ID,
+        200,
+        "comment_page",
+    ),
+    route(
+        RouteId::UserList,
+        Method::Get,
+        "/api/v1/users",
+        Access::Require(Permission::ManageUsers),
+        BY_ID,
+        200,
+        "user_page",
+    ),
     route(
         RouteId::RedirectList,
         Method::Get,
@@ -785,8 +823,11 @@ pub const fn tool_name(id: RouteId) -> Option<&'static str> {
     match id {
         // Reference: `tools/list` already is the schema. MediaUpload: the body is raw image
         // bytes, which a JSON-RPC message cannot carry.
-        RouteId::Reference | RouteId::MediaUpload => None,
+        // MediaOriginal: the answer is raw image bytes, not JSON.
+        RouteId::Reference | RouteId::MediaUpload | RouteId::MediaOriginal => None,
         RouteId::Me => Some("me"),
+        RouteId::CommentList => Some("comment_list"),
+        RouteId::UserList => Some("user_list"),
         RouteId::PostList => Some("post_list"),
         RouteId::PostGet => Some("post_get"),
         RouteId::PostCreate => Some("post_create"),
@@ -875,7 +916,8 @@ pub fn find(method: Method, path: &str) -> Result<(&'static Route, PathValues<'_
 #[cfg(test)]
 mod tests {
     use super::{
-        Access, Body, In, MAX_POST_BODY, Method, ROUTES, RouteId, Type, find, match_path, tool_name,
+        Access, Body, In, MAX_POST_BODY, Method, ORIGINAL, ROUTES, RouteId, Type, find, match_path,
+        tool_name,
     };
 
     #[test]
@@ -919,7 +961,7 @@ mod tests {
                 "{}",
                 r.path
             );
-            if r.access == Access::Read {
+            if r.access == Access::Read || r.response == ORIGINAL {
                 assert_eq!(r.method, Method::Get, "{}", r.path);
             }
             let names: Vec<_> = r.fields.iter().map(|f| f.name).collect();
@@ -950,15 +992,24 @@ mod tests {
         assert_eq!(find(Method::Get, "/api/v1/nope").err(), Some(false));
     }
 
-    /// Every route is a tool but the two decided exclusions; names are the id in snake case,
-    /// unique, and valid MCP tool names.
+    /// Every route is a tool but the decided exclusions (raw bytes either way, and the
+    /// reference); names are the id in snake case, unique, and valid MCP tool names.
     #[test]
     fn tool_names() {
         let mut names = Vec::new();
         for r in ROUTES {
+            // A JSON tool result cannot carry bytes.
+            assert!(
+                !(r.response == ORIGINAL && tool_name(r.id).is_some()),
+                "{:?} answers raw bytes",
+                r.id
+            );
             let Some(name) = tool_name(r.id) else {
                 assert!(
-                    matches!(r.id, RouteId::Reference | RouteId::MediaUpload),
+                    matches!(
+                        r.id,
+                        RouteId::Reference | RouteId::MediaUpload | RouteId::MediaOriginal
+                    ),
                     "{:?} is not a tool",
                     r.id
                 );
@@ -982,7 +1033,7 @@ mod tests {
             );
             names.push(name);
         }
-        assert_eq!(names.len(), ROUTES.len() - 2);
+        assert_eq!(names.len(), ROUTES.len() - 3);
         let mut dedup = names.clone();
         dedup.sort_unstable();
         dedup.dedup();

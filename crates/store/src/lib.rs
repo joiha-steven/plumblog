@@ -8,7 +8,8 @@
 //! - Read paths never write.
 //! - `site.content_version` is bumped inside the same write whenever the write can change
 //!   what a reader sees (rules on each method).
-//! - Page sizes (`limit`) are capped at [`MAX_PAGE`]; a limit of 0 returns nothing.
+//! - Page sizes (`limit`) are capped at [`MAX_PAGE`], one more for post and media lists (the
+//!   probe row, see [`probe_len`]); a limit of 0 returns nothing.
 
 mod auth;
 mod comments;
@@ -114,6 +115,15 @@ impl<T> Store for T where
         + plumblog_syslog::LogSink
         + ?Sized
 {
+}
+
+/// `limit` as a slice length for a list that is paged by a probe row: capped at
+/// [`MAX_PAGE`] + 1. A client page of `MAX_PAGE` asks for one more row to learn whether
+/// another page exists; clamping that request to `MAX_PAGE` would hide the row, so
+/// `next_cursor` would never be set. Still bounded: one row over a page, never a table.
+#[must_use]
+pub fn probe_len(limit: u32) -> usize {
+    usize::try_from(limit.min(MAX_PAGE + 1)).unwrap_or(0)
 }
 
 /// `limit` as a slice length, capped at [`MAX_PAGE`].

@@ -150,11 +150,11 @@ describe("mcp transport", () => {
 });
 
 describe("mcp tools", () => {
-  test("an owner sees every /api/v1 route but the reference and the raw upload", async () => {
+  test("an owner sees every /api/v1 route but the reference and the raw-bytes routes", async () => {
     const ref = await fetch(`${w.url}/api/v1/reference`, { headers: { authorization: `Bearer ${TOK.owner}` } }).then((r) => r.json());
     const want = ref.routes
       .map((r) => `${r.method} ${r.path}`)
-      .filter((k) => k !== "GET /api/v1/reference" && k !== "POST /api/v1/media")
+      .filter((k) => !["GET /api/v1/reference", "POST /api/v1/media", "GET /api/v1/media/{id}/original"].includes(k))
       .sort();
     const r = await rpc("tools/list");
     const tools = r.json.result.tools;

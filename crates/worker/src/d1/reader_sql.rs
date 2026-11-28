@@ -1,10 +1,13 @@
-//! The SQL of the reader reads, free of the Worker runtime so a test can run `EXPLAIN QUERY
-//! PLAN` on every statement against real SQLite with the migrations applied. Each doc line
-//! names the index the query is meant to use; the test fails when the plan drifts.
+//! The SQL of the reader reads (and of the admin and export listings), free of the Worker
+//! runtime so a test can run `EXPLAIN QUERY PLAN` on every statement against real SQLite with
+//! the migrations applied. Each doc line names the index the query is meant to use; the test
+//! fails when the plan drifts.
 
 use plumblog_store::{ReaderFilter, year_bounds};
 
+use super::comments::COMMENT_COLS;
 use super::posts::{POST_COLS, SUMMARY_COLS};
+use super::users::USER_COLS;
 
 /// Tags of `p` as JSON `[[id, slug, name], ...]`: names may hold any character, so no
 /// separator-joined list. JSON order is not relied on; `read_tags` sorts by id.
@@ -153,6 +156,18 @@ pub(super) fn tags() -> String {
          FROM post_tags pt CROSS JOIN posts p ON p.id = pt.post_id \
          WHERE pt.tag_id = t.id AND {LISTED}) ORDER BY t.name, t.id"
     )
+}
+
+/// Every comment by id after a cursor id (0 = from the start), for export: a range of the
+/// primary key, so a page reads its own rows plus one, however many are spam. No status
+/// filter: `status` leads no index that also orders by id.
+pub(super) fn comments_by_id() -> String {
+    format!("SELECT {COMMENT_COLS} FROM comments WHERE id > ? ORDER BY id LIMIT ?")
+}
+
+/// Every user by id after a cursor id (0 = from the start): a range of the primary key.
+pub(super) fn users_by_id() -> String {
+    format!("SELECT {USER_COLS} FROM users WHERE id > ? ORDER BY id LIMIT ?")
 }
 
 #[cfg(test)]
@@ -325,5 +340,24 @@ mod plans {
         check_scans(&c, "tags", &tags(), &["post_tags_tag"], true, &["t"]);
         check(&c, "feed", &feed(), &["posts_listing"], false);
         check(&c, "sitemap", &sitemap(), &["posts_by_date"], false);
+    }
+
+    /// The export listings: a primary-key range read in key order, nothing else.
+    #[test]
+    fn export_listings_are_primary_key_ranges() {
+        let c = db();
+        for (name, sql, table) in [
+            ("comments by id", comments_by_id(), "comments"),
+            ("users by id", users_by_id(), "users"),
+        ] {
+            check(&c, name, &sql, &[], false);
+            assert_eq!(
+                plan(&c, &sql),
+                [format!(
+                    "SEARCH {table} USING INTEGER PRIMARY KEY (rowid>?)"
+                )],
+                "{name}"
+            );
+        }
     }
 }

@@ -216,6 +216,7 @@ pub async fn handle(ctx: &Ctx, req: &mut Request) -> Result<Reply> {
                 status: 202,
                 body: None,
                 cookie: None,
+                raw: None,
             });
         }
         Err(e) => {

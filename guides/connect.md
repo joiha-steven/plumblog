@@ -28,7 +28,8 @@ environment variable, never in a file in git. A session cookie is not accepted: 
 - Tools: one per `/api/v1` route (`post_list`, `post_get`, `post_create`, `post_update`,
   `tag_create`, `setting_put`, ...), with the same fields, checks and error codes as the API
   (`blog guide api`). The list shows only what the token may do: a `read` token sees no
-  writes. Media upload is not a tool: upload over HTTP as in `blog guide write`.
+  writes. Media upload and reading an original are not tools (raw bytes): use HTTP as in
+  `blog guide write`.
 - Resources: every guide, as `plumblog://guides/<topic>`. Read `getting-started` first. Where
   a guide says `blog guide <topic>`, read `plumblog://guides/<topic>` instead; `blog guide api`
   is not a resource, as `tools/list` already gives every field.

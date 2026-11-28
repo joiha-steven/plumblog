@@ -247,7 +247,51 @@ pub async fn post_filters<S: Store>(db: &S) -> Check {
     )
 }
 
-/// A limit above [`MAX_PAGE`] returns [`MAX_PAGE`] rows.
+/// A client's page of [`MAX_PAGE`] rows plus the one probe row that tells whether another
+/// page exists must come back whole, for posts and media: with `MAX_PAGE + 1` rows stored,
+/// asking for `MAX_PAGE + 1` returns all of them and the next page holds exactly one.
+pub async fn probe_row_past_max_page<S: Store>(db: &S) -> Check {
+    let u = user(db, "alice").await?;
+    let probe = MAX_PAGE + 1;
+    for i in 0..probe {
+        let mut p = post(u, "vi", &format!("p{i}"), PostStatus::Published);
+        p.published_at = Some(i64::from(i));
+        save(db, p).await?;
+        ok(
+            "create_media",
+            db.create_media(media(&format!("k{i}"), i64::from(i))).await,
+        )?;
+    }
+    let mut q = PostQuery::new(PostOrder::PublishedDesc, probe);
+    let rows = ok("list_posts", db.list_posts(&q).await)?;
+    eq!("posts probe page", rows.len(), probe as usize)?;
+    q.limit = MAX_PAGE;
+    let first = ok("list_posts", db.list_posts(&q).await)?;
+    q.after = first.last().map(|p| q.order.cursor(p));
+    eq!(
+        "posts second page",
+        ok("list_posts", db.list_posts(&q).await)?.len(),
+        1
+    )?;
+
+    let m = |before, limit| MediaQuery {
+        before,
+        missing_alt_only: false,
+        unused_only: false,
+        limit,
+    };
+    let rows = ok("list_media", db.list_media(m(None, probe)).await)?;
+    eq!("media probe page", rows.len(), probe as usize)?;
+    let first = ok("list_media", db.list_media(m(None, MAX_PAGE)).await)?;
+    let last = first.last().map(|x| (x.created_at, x.id));
+    eq!(
+        "media second page",
+        ok("list_media", db.list_media(m(last, MAX_PAGE)).await)?.len(),
+        1
+    )
+}
+
+/// A limit above [`MAX_PAGE`] + 1 (the probe row) returns that many rows, no more.
 pub async fn limits_cap_at_max_page<S: Store>(db: &S) -> Check {
     let over = MAX_PAGE + 1;
     for i in 0..over {
@@ -271,7 +315,7 @@ pub async fn limits_cap_at_max_page<S: Store>(db: &S) -> Check {
         })
         .await,
     )?;
-    eq!("list_media capped", m.len(), crate::page_len(MAX_PAGE))?;
+    eq!("list_media capped", m.len(), crate::probe_len(MAX_PAGE + 1))?;
     let l = ok(
         "query_log",
         db.query_log(LogQuery {

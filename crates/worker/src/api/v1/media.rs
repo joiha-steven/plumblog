@@ -7,14 +7,14 @@
 //! left behind is logged with its key.
 
 use plumblog_auth::{Crypto, base64url};
-use plumblog_model::api::{DEFAULT_LIMIT, MAX_LIMIT, MEDIA_MIMES};
+use plumblog_model::api::{DEFAULT_LIMIT, MAX_LIMIT, MAX_MEDIA_BODY, MEDIA_MIMES};
 use plumblog_model::{Error, ErrorCode, MediaId, Permission, PostId, Result, image};
 use plumblog_store::{Media, MediaQuery, MediaStore, NewMedia};
 use worker::{Bucket, HttpMetadata};
 
 use super::{Input, Principal, changed, stored_json};
 use crate::api::body::{Out, object};
-use crate::api::{Ctx, Reply};
+use crate::api::{Ctx, Raw, Reply};
 
 const MAX_ALT: usize = 1000;
 /// Longest file name kept in the R2 key.
@@ -147,6 +147,69 @@ pub async fn get(ctx: &Ctx, input: &Input) -> Result<Reply> {
     let m = ctx.store.get_media(MediaId(input.id())).await?;
     let usage = ctx.store.media_usage(m.id).await?;
     Ok(Reply::json(200, media_json(ctx, &m, Some(&usage))))
+}
+
+/// `GET /api/v1/media/<id>/original`: the stored bytes, streamed from R2 to the client by the
+/// runtime. An object whose size is not the row's, or over the upload cap, is refused: it was
+/// not written by this API, so it is not served as if it were.
+pub async fn original(ctx: &Ctx, input: &Input) -> Result<Reply> {
+    let m = ctx.store.get_media(MediaId(input.id())).await?;
+    let rid = ctx.request_id.as_str();
+    // Uploads only accept raster types; a row holding anything else (SVG, HTML) was written
+    // around the API and must never be served from the site's origin.
+    if !MEDIA_MIMES.contains(&m.mime.as_str()) {
+        return Err(Error::new(
+            ErrorCode::Storage,
+            format!(
+                "media {}: stored mime {:?} is not an accepted image type",
+                m.id.0, m.mime
+            ),
+        ));
+    }
+    let obj = bucket(ctx)?
+        .get(m.r2_key.clone())
+        .execute()
+        .await
+        .map_err(|e| Error::new(ErrorCode::Storage, format!("R2 get {}: {e}", m.r2_key)))?;
+    let Some(obj) = obj else {
+        // The row points at bytes that are gone (removed outside the API): log the key so
+        // the next agent can find the object.
+        worker::console_error!(
+            "[{rid}] media {}: R2 object {} is missing",
+            m.id.0,
+            m.r2_key
+        );
+        return Err(Error::new(
+            ErrorCode::NotFound,
+            format!("media {} has no R2 object", m.id.0),
+        ));
+    };
+    let size = obj.size();
+    let cap = u64::try_from(MAX_MEDIA_BODY).unwrap_or(u64::MAX);
+    if u64::try_from(m.bytes).ok() != Some(size) || size > cap {
+        return Err(Error::new(
+            ErrorCode::Storage,
+            format!(
+                "media {}: R2 object {} is {size} bytes, row says {} (cap {cap})",
+                m.id.0, m.r2_key, m.bytes
+            ),
+        ));
+    }
+    let body = obj
+        .body()
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::Storage,
+                format!("media {}: R2 object {} has no body", m.id.0, m.r2_key),
+            )
+        })?
+        .response_body()
+        .map_err(|e| Error::new(ErrorCode::Storage, format!("R2 body {}: {e}", m.r2_key)))?;
+    Ok(Reply::raw(Raw {
+        body,
+        mime: m.mime,
+        length: size,
+    }))
 }
 
 /// `POST /api/v1/media`: the body is the original image; `mime` must be what its magic bytes

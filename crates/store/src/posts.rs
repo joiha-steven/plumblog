@@ -241,6 +241,7 @@ pub struct PostQuery {
     pub pinned: Option<bool>,
     pub order: PostOrder,
     pub after: Option<PostCursor>,
+    /// Capped at [`crate::MAX_PAGE`] + 1: a page plus the probe row for "is there more".
     pub limit: u32,
 }
 
@@ -327,6 +328,7 @@ pub trait PostStore {
 #[cfg(test)]
 mod tests {
     use super::{PostKind, PostStatus};
+    use crate::CommentStatus;
     use plumblog_model::shape;
 
     /// The model crate cannot see these enums, so it keeps copies for the admin's types.
@@ -337,5 +339,7 @@ mod tests {
         assert_eq!(shape::POST_STATUSES, statuses);
         assert_eq!(shape::POST_KINDS, kinds);
         assert_eq!(shape::RENDER_WARNINGS, plumblog_markdown::WARNING_CODES);
+        let comments: Vec<_> = CommentStatus::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(shape::COMMENT_STATUSES, comments);
     }
 }
