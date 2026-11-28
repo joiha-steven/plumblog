@@ -84,6 +84,7 @@ cases! {
     library::media_paging,
     library::media_usage_tracks_saves,
     library::media_in_use_cannot_be_deleted,
+    library::public_media_follows_live_posts,
     library::taxonomy_paging,
     library::tags_round_trip,
     library::tag_links_and_versions,

@@ -3,7 +3,7 @@ use std::cmp::Reverse;
 use plumblog_model::{MediaId, PostId, Result};
 
 use super::{MemoryStore, State, conflict, invalid, next_seq, not_found};
-use crate::{Media, MediaQuery, MediaStore, NewMedia, probe_len};
+use crate::{Media, MediaQuery, MediaStore, NewMedia, PostStatus, probe_len};
 
 #[expect(
     clippy::unused_async_trait_impl,
@@ -53,6 +53,21 @@ impl MediaStore for MemoryStore {
     async fn get_media(&self, id: MediaId) -> Result<Media> {
         self.read(|s| s.media.get(&id).cloned())
             .ok_or_else(|| not_found("media", id.0))
+    }
+
+    async fn public_media(&self, id: MediaId) -> Result<Option<Media>> {
+        Ok(self.read(|s| {
+            let live = |p: PostId| {
+                s.posts
+                    .get(&p)
+                    .is_some_and(|p| p.status == PostStatus::Published)
+            };
+            s.media_usage(id)
+                .into_iter()
+                .any(live)
+                .then(|| s.media.get(&id).cloned())
+                .flatten()
+        }))
     }
 
     async fn list_media(&self, query: MediaQuery) -> Result<Vec<Media>> {

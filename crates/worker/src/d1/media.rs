@@ -60,6 +60,26 @@ impl MediaStore for D1Store {
         }
     }
 
+    // 1 query: the row and the reader test together, by primary key, `post_media_media` and
+    // `posts_cover`.
+    async fn public_media(&self, id: MediaId) -> Result<Option<Media>> {
+        let s = self.stmt(
+            "public_media",
+            &format!(
+                "SELECT {MEDIA_COLS} FROM media WHERE id = ?1 AND (\
+                 EXISTS (SELECT 1 FROM post_media pm JOIN posts p ON p.id = pm.post_id \
+                 WHERE pm.media_id = ?1 AND p.status = 'published') \
+                 OR EXISTS (SELECT 1 FROM posts WHERE cover_media_id = ?1 \
+                 AND status = 'published'))"
+            ),
+            &[bound(id.0)],
+        )?;
+        self.row(s)
+            .await?
+            .map(|mut r| read_media(&mut r))
+            .transpose()
+    }
+
     // 1 query.
     async fn list_media(&self, q: MediaQuery) -> Result<Vec<Media>> {
         let (at, id) = match q.before {
