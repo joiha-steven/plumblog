@@ -30,7 +30,7 @@ impl Lookup {
 
 pub async fn get(key: &str) -> Lookup {
     match Cache::default().get(key, false).await {
-        Ok(Some(mut cached)) => match relabel(&mut cached).await {
+        Ok(Some(cached)) => match relabel(cached) {
             Ok(resp) => Lookup::Hit(resp),
             Err(e) => {
                 console_warn!("pages: cached copy unreadable, rendering: {e}");
@@ -46,8 +46,9 @@ pub async fn get(key: &str) -> Lookup {
 }
 
 /// Cached responses keep the headers of the render that stored them; mark this one a hit and
-/// drop the stored render timing, which no longer describes this request.
-async fn relabel(cached: &mut Response) -> worker::Result<Response> {
+/// drop the stored render timing, which no longer describes this request. The body stays the
+/// cache's stream: reading it into wasm and copying it back cost CPU on every hit.
+fn relabel(cached: Response) -> worker::Result<Response> {
     let headers = Headers::new();
     for (k, v) in cached.headers() {
         if k != "x-plumblog-cache" && k != "server-timing" {
@@ -55,11 +56,7 @@ async fn relabel(cached: &mut Response) -> worker::Result<Response> {
         }
     }
     headers.set("x-plumblog-cache", "hit")?;
-    let status = cached.status_code();
-    let body = cached.text().await?;
-    Ok(Response::ok(body)?
-        .with_status(status)
-        .with_headers(headers))
+    Ok(cached.with_headers(headers))
 }
 
 /// Stores after the response is sent, so a slow cache write never delays the reader.
