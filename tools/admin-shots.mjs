@@ -204,6 +204,45 @@ const STATES = [
   ["error", "/admin/?mock=error", "main [role=alert]"],
   ["offline", "/admin/?mock=offline", "main [role=alert]"],
   ["no-permission", "/admin/settings?role=writer"],
+  ["syslog", "/admin/settings/log", ".log-btn"],
+  [
+    "syslog-detail",
+    "/admin/settings/log",
+    ".log-btn",
+    async (page) => {
+      // The webhook failure: an error code, a very long value, a level mark.
+      const row = page.locator(".log-btn", { has: page.locator(".log-err") }).first();
+      await row.click();
+      await row.scrollIntoViewIfNeeded();
+    },
+  ],
+  [
+    "syslog-detail-redacted",
+    "/admin/settings/log?kind=auth.token_created",
+    ".log-btn",
+    async (page) => {
+      await page.locator(".log-btn").first().click();
+    },
+  ],
+  ["syslog-filtered", "/admin/settings/log?level=error&kind=job.run&range=24h&q=zzz", "main .empty"],
+  ["syslog-warnings", "/admin/settings/log?level=warning&range=7d", ".log-btn"],
+  ["syslog-empty", "/admin/settings/log?log=empty", "main .empty"],
+  ["syslog-loading", "/admin/settings/log?log=loading", ".rows[aria-busy]"],
+  ["syslog-error", "/admin/settings/log?log=error", "main [role=alert]"],
+  [
+    "syslog-offline",
+    "/admin/settings/log?log=offline",
+    "main [role=alert]",
+    async (page) => {
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, "onLine", { get: () => false });
+        dispatchEvent(new Event("offline"));
+      });
+      await page.waitForSelector(".banner");
+      await page.waitForSelector("main [role=alert]");
+    },
+  ],
+  ["syslog-writer", "/admin/settings/log?role=writer", ".empty"],
   ["not-found", "/admin/nope"],
   [
     "menu",
@@ -530,7 +569,7 @@ try {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const english = ["posts", "posts-strip", "pages", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow"];
+        const english = ["syslog", "syslog-detail", "syslog-filtered", "syslog-writer", "posts", "posts-strip", "pages", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow"];
         const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
         const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);

@@ -67,6 +67,7 @@
   --measure: 560px; --measure-wide: 960px; --pop-w: 200px; --pop-w-lg: 340px;
   --find-w: 420px; --msg-w: 400px; --kv-key: 88px; --caption-w: 60ch; --lb-side: 80px;
   --col-status: 96px; --col-date: 150px; --col-lang: 72px;
+  --col-level: 112px; --col-meta: 176px; --log-key: 128px;
   --theme-min: 150px; --theme-h: 88px;
   --bar-h: 60px; --bar-item: 52px; --bar-gap: 12px; --bar-max: 440px;
   --toast-y: 20px; --kb: 0px;

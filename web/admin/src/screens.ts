@@ -10,6 +10,7 @@ import { icon } from "./icons";
 import { t } from "./i18n";
 import { pagesList, postsList } from "./lists";
 import { HREF, type Screen } from "./router";
+import { syslogScreen } from "./syslog/load";
 import { empty, failed, head, loadingRows } from "./ui";
 
 /** In the header the label folds away on phones (`.new-label`); in an empty state it stays. */
@@ -52,6 +53,8 @@ export function screen(name: Screen, me: Me, api: Api): Child[] {
       return [head(t("admin.nav.pages")), pagesList(api)];
     case "media":
       return [head(t("admin.nav.media")), empty({ icon: "media", title: t("admin.media.empty"), hint: t("admin.media.empty_hint") })];
+    case "syslog":
+      return syslogScreen(me, api);
     case "settings":
       if (!PERMISSION_ROLES["settings.manage"].includes(me.role)) {
         return [
@@ -91,4 +94,10 @@ export function screen(name: Screen, me: Me, api: Api): Child[] {
 }
 
 const building = (): HTMLElement =>
-  empty({ icon: "settings", title: t("admin.state.building_title"), hint: t("admin.state.building_hint"), full: true });
+  empty({
+    icon: "settings",
+    title: t("admin.state.building_title"),
+    hint: t("admin.state.building_hint"),
+    action: h("a", { class: "btn", href: HREF.syslog }, t("admin.syslog.title")),
+    full: true,
+  });

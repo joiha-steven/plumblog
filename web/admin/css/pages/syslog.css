@@ -1,0 +1,44 @@
+/* System log: entries under day headings; each is a button that opens its detail in place. */
+.log-days { display: grid; gap: var(--sp-16); padding: 0 max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-16) max(var(--gutter), env(safe-area-inset-left, 0px)); }
+.log-day-h { padding-bottom: var(--sp-6); color: var(--muted); }
+.log-rows { display: grid; gap: var(--sp-2); margin: 0; padding: 0; list-style: none; }
+/* The row's surface reaches 12 px past the text so hover and open read as a key, while the button itself (and so the text) sits on the page gutter. */
+.log-item { min-width: 0; margin-inline: calc(-1 * var(--sp-12)); padding: var(--sp-12); border-radius: var(--r-12); background-color: var(--surface); transition: background-color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease); }
+.log-item:hover { background-color: rgb(var(--tint) / var(--a-hover)); }
+.log-item.open { background-color: var(--key); box-shadow: var(--sh-sel); }
+.log-item:has(.log-btn:focus-visible) { box-shadow: var(--focus-ring); }
+.log-btn { display: grid; grid-template-columns: var(--col-level) minmax(0, 1fr) var(--col-meta); gap: var(--sp-16); align-items: start; width: 100%; padding: 0; border: 0; border-radius: var(--r-12); background: transparent; color: inherit; font: var(--type-body); text-align: left; outline: none; }
+.log-item.open .log-subject { white-space: normal; overflow-wrap: anywhere; }
+.log-level { display: flex; align-items: center; min-height: var(--sw-h); }
+.log-info { font: var(--type-meta); color: var(--faint); }
+.log-main { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-2); }
+.log-kind { font: var(--type-item-strong); }
+.log-subject { font: var(--type-small); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-err { font: var(--type-small); color: var(--st-err); overflow-wrap: anywhere; }
+.log-meta { display: grid; gap: var(--sp-2); min-width: 0; font: var(--type-meta); color: var(--muted); }
+.log-time { font-variant-numeric: tabular-nums; }
+.log-who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-mono { font: var(--type-mono); overflow-wrap: anywhere; }
+.log-redacted { color: var(--faint); font-style: italic; }
+
+/* The opened entry sits under its row, inset to the row's text. */
+.log-detail { padding: var(--sp-12) 0 var(--sp-4) calc(var(--col-level) + var(--sp-16)); }
+.log-inner { display: grid; gap: var(--sp-16); max-width: var(--measure-wide); }
+.log-kv { grid-template-columns: var(--log-key) minmax(0, 1fr); align-items: center; }
+.log-kv dt { overflow-wrap: anywhere; }
+.log-copy { display: flex; align-items: center; gap: var(--sp-8); flex-wrap: wrap; }
+.log-hint { font: var(--type-small); color: var(--muted); max-width: var(--caption-w); }
+
+/* Phones and tablets: level and time share the first line, the text takes the full width below. */
+@media (max-width: 899px) {
+  .log-btn { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "level meta" "main main"; gap: var(--sp-8) var(--sp-12); align-items: center; }
+  .log-level { grid-area: level; }
+  .log-main { grid-area: main; }
+  .log-meta { grid-area: meta; display: flex; align-items: center; gap: var(--sp-8); justify-self: end; max-width: 100%; }
+  .log-meta > .log-who::before { content: "\00b7"; margin-inline-end: var(--sp-8); }
+  .log-detail { padding-left: 0; }
+}
+@media (max-width: 599px) {
+  .log-kv { grid-template-columns: minmax(0, 1fr); gap: var(--sp-2); }
+  .log-kv dd { margin-bottom: var(--sp-8); }
+}
