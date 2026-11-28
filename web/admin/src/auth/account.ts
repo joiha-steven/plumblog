@@ -1,5 +1,5 @@
 /**
- * The signed-in user's account: who they are, their passkeys (add, remove), and sign-out.
+ * The signed-in user's account: who they are, their passkeys (add, remove), API tokens (tokens.ts), and sign-out.
  * Its own chunk (with the sign-in screens it shares); the shell loads it on first use.
  * Every failure ends as one plain message in the form's alert region, never a raw code.
  */
@@ -12,6 +12,7 @@ import { icon } from "../icons";
 import { closePop, empty, failed, loadingRows, openPop, toast } from "../ui";
 import { type Passkey, type Reauth, addPasskey, listPasskeys, removePasskey, signOut } from "./flows";
 import { chars, field, message } from "./screens";
+import { mountTokens } from "./tokens";
 
 const MAX_NAME = 64;
 
@@ -206,6 +207,8 @@ export function mountAccount(box: HTMLElement, me: Me, api: Api): void {
     list.replaceChildren(flush(loadingRows(2), "flush"));
     addBox.hidden = true;
     const r = await listPasskeys(api);
+    // From here the passkeys list has its height: the tokens section below can show without moving.
+    tokens.hidden = false;
     if (!r.ok) {
       list.replaceChildren(failed(r.error, () => void load()));
       return;
@@ -299,6 +302,10 @@ export function mountAccount(box: HTMLElement, me: Me, api: Api): void {
   }
 
   addBox.append(addBtn);
+  // Loaded at once but out of the layout until the passkeys list above settles: two loading rows
+  // collapsing into "no passkeys" would otherwise push it up (Lighthouse CLS 0.03).
+  const tokens = mountTokens(me, api);
+  tokens.hidden = true;
   // i18n: admin.role.owner admin.role.writer
   const role = t(`admin.role.${me.role}`);
   box.replaceChildren(
@@ -321,6 +328,7 @@ export function mountAccount(box: HTMLElement, me: Me, api: Api): void {
       list,
       addBox,
     ),
+    tokens,
   );
   void load();
 }

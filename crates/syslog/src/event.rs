@@ -23,6 +23,9 @@ stable_codes! {
         TokenCreated => "auth.token_created",
         TokenRevoked => "auth.token_revoked",
         UserCreated => "user.created",
+        // An owner created or revoked an invite, or changed, disabled, enabled or deleted a
+        // user (`action` says which). Ids and roles only: never the invite code.
+        UserChanged => "user.changed",
         ContentChanged => "content.changed",
         SettingsChanged => "settings.changed",
         ThemeChanged => "theme.changed",
@@ -49,6 +52,26 @@ pub enum Severity {
     Error,
 }
 
+impl Severity {
+    /// Lowest first, as `plumblog_model::shape::LOG_LEVELS`.
+    pub const ALL: &[Severity] = &[Self::Info, Self::Warning, Self::Error];
+
+    /// The code the API and the admin use for the level.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(code: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|s| s.as_str() == code)
+    }
+}
+
 impl EventKind {
     /// Severity when the event carries no error code. An exhaustive match: a new kind must
     /// decide how loud it is.
@@ -64,6 +87,7 @@ impl EventKind {
             | Self::TokenCreated
             | Self::TokenRevoked
             | Self::UserCreated
+            | Self::UserChanged
             | Self::ContentChanged
             | Self::SettingsChanged
             | Self::ThemeChanged
@@ -239,7 +263,10 @@ impl Event {
     }
 }
 
-fn escape(s: &str) -> String {
+/// The stored form of one subject, key or value (see [`Event::detail`]); a text search over
+/// `detail` escapes its needle the same way.
+#[must_use]
+pub fn escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('\n', "\\n")
         .replace('\t', "\\t")
@@ -273,6 +300,16 @@ mod tests {
         RequestId::parse("8f2a1c3b9d-SIN").unwrap()
     }
 
+    /// The model crate cannot see these enums, so it keeps copies for the admin's types.
+    #[test]
+    fn model_code_lists_match_the_enums() {
+        let kinds: Vec<_> = EventKind::ALL.iter().map(|k| k.as_str()).collect();
+        assert_eq!(plumblog_model::shape::LOG_KINDS, kinds);
+        let levels: Vec<_> = Severity::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(plumblog_model::shape::LOG_LEVELS, levels);
+        assert!(Severity::ALL.is_sorted(), "lowest first");
+    }
+
     /// Pins every stored code: renaming one orphans existing D1 rows.
     #[test]
     fn event_kind_codes_are_pinned() {
@@ -293,6 +330,7 @@ mod tests {
                 (EventKind::TokenCreated, "auth.token_created"),
                 (EventKind::TokenRevoked, "auth.token_revoked"),
                 (EventKind::UserCreated, "user.created"),
+                (EventKind::UserChanged, "user.changed"),
                 (EventKind::ContentChanged, "content.changed"),
                 (EventKind::SettingsChanged, "settings.changed"),
                 (EventKind::ThemeChanged, "theme.changed"),

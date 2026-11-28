@@ -205,6 +205,77 @@ pub async fn media_round_trip<S: Store>(db: &S) -> Check {
     )
 }
 
+/// `replace_media_variants` is a compare and swap: two adds that read the same text cannot
+/// both win, so the loser re-reads and keeps the winner's size; a swap bumps the version once
+/// when a published post uses the item, else not at all, and a refused one never;
+/// `delete_media` hands back the text as it was at the delete.
+pub async fn media_variants_swap<S: Store>(db: &S) -> Check {
+    let id = ok("create_media", db.create_media(media("v.png", T0)).await)?;
+    let read = ok("get_media", db.get_media(id).await)?.variants_json;
+    let a = r#"[{"key":"a"}]"#;
+    let b = r#"[{"key":"b"}]"#;
+    let both = r#"[{"key":"a"},{"key":"b"}]"#;
+    let v = version(db).await?;
+    // Both requests read `read`; A swaps first.
+    ok("swap a", db.replace_media_variants(id, &read, a).await)?;
+    version_is(db, "a swap on unused media", v).await?;
+    fails(
+        "swap b from the stale read",
+        db.replace_media_variants(id, &read, b).await,
+        ErrorCode::Conflict,
+    )?;
+    version_is(db, "a refused swap", v).await?;
+    // Only a published post puts the item's sizes on a reader page.
+    let u = user(db, "vera").await?;
+    let used = ok("create_media", db.create_media(media("u.png", T0)).await)?;
+    let mut draft = post(u, "vi", "v-draft", PostStatus::Draft);
+    draft.media_ids = vec![used];
+    save(db, draft).await?;
+    ok(
+        "swap draft-used",
+        db.replace_media_variants(used, &read, a).await,
+    )?;
+    version_is(db, "a swap on draft-only media", v).await?;
+    let mut live = post(u, "vi", "v-live", PostStatus::Published);
+    live.cover_media_id = Some(used);
+    save(db, live).await?;
+    let v = version(db).await?;
+    ok(
+        "swap published",
+        db.replace_media_variants(used, a, both).await,
+    )?;
+    version_is(db, "a swap on published media", v + 1).await?;
+    fails(
+        "swap published from a stale read",
+        db.replace_media_variants(used, a, b).await,
+        ErrorCode::Conflict,
+    )?;
+    version_is(db, "a refused swap on published media", v + 1).await?;
+    eq!(
+        "the winner's size is kept",
+        ok("get_media", db.get_media(id).await)?.variants_json,
+        a.to_owned()
+    )?;
+    // B re-reads and appends.
+    ok("swap b again", db.replace_media_variants(id, a, both).await)?;
+    eq!(
+        "both sizes",
+        ok("get_media", db.get_media(id).await)?.variants_json,
+        both.to_owned()
+    )?;
+    fails(
+        "swap missing",
+        db.replace_media_variants(MediaId(id.0 + 1000), "[]", a)
+            .await,
+        ErrorCode::NotFound,
+    )?;
+    eq!(
+        "delete returns the stored variants",
+        ok("delete_media", db.delete_media(id).await)?,
+        both.to_owned()
+    )
+}
+
 /// `sha256` is unique per uploader and found again by (uploader, sha256); NULL never matches
 /// or collides, and another uploader's equal hash is their own item.
 pub async fn media_sha256_per_uploader<S: Store>(db: &S) -> Check {

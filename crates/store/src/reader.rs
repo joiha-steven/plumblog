@@ -5,7 +5,7 @@
 //! Admin and API lists stay keyset. The guards that keep OFFSET cheap are in
 //! [`ReaderStore::reader_posts`].
 
-use plumblog_model::{PostId, Result, TagId};
+use plumblog_model::{MediaId, PostId, Result, TagId};
 
 use crate::{Post, PostSummary, Tag};
 
@@ -55,11 +55,27 @@ pub struct ReaderPage {
     pub rows: Vec<ReaderRow>,
 }
 
+/// The cover media of a post page: what the head and the cover figure need, read in the
+/// post's own query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReaderCover {
+    pub id: MediaId,
+    pub r2_key: String,
+    pub width: i64,
+    pub height: i64,
+    /// `""` = no description.
+    pub alt: String,
+    /// JSON the store never parses.
+    pub variants_json: String,
+}
+
 /// A published post or page with its tags.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReaderPost {
     pub post: Post,
     pub tags: Vec<ReaderTag>,
+    /// `None` without a cover, and in feeds (they do not read it).
+    pub cover: Option<ReaderCover>,
 }
 
 /// Enough of a post to link to it.
@@ -79,6 +95,8 @@ pub struct ReaderSitemapRow {
     pub updated_at: i64,
     /// Rows sharing it are translations of each other.
     pub translation_group: PostId,
+    /// A static page (kind `page`), not a post.
+    pub is_page: bool,
 }
 
 /// The posts around one post in date order.
@@ -151,6 +169,13 @@ pub trait ReaderStore {
     /// Every published post and page, newest first (`published_at` DESC, id DESC), at most
     /// `limit` capped at [`READER_SITEMAP_MAX`]: the sitemap in one query, without bodies.
     async fn reader_sitemap(&self, limit: u32) -> Result<Vec<ReaderSitemapRow>>;
+    /// Whether a published post or page exists at `/<lang>/<slug>`, nothing else read.
+    /// 1 query.
+    async fn reader_post_exists(&self, lang: &str, slug: &str) -> Result<bool>;
+    /// The `langs` that have at least one published post (kind `post`), in the order given:
+    /// one `EXISTS` per language in a single statement, each stopping at its first row.
+    /// 1 query; none for an empty list.
+    async fn reader_langs_with_posts(&self, langs: &[String]) -> Result<Vec<String>>;
 }
 
 #[cfg(test)]

@@ -148,7 +148,7 @@ fn status(code: ErrorCode) -> u16 {
         | ErrorCode::UserNotFound
         | ErrorCode::NotFound
         | ErrorCode::RouteNotFound => 404,
-        ErrorCode::Conflict | ErrorCode::ThemeUnavailable => 409,
+        ErrorCode::Conflict | ErrorCode::ThemeUnavailable | ErrorCode::LastOwner => 409,
         ErrorCode::InviteInvalid => 410,
         ErrorCode::LengthRequired => 411,
         // A size cap like the byte cap: the client must send less, not fix a field.
@@ -378,7 +378,7 @@ pub async fn handle(mut req: Request, env: &Env) -> worker::Result<Response> {
         gate_cookie = cookie;
         if path.starts_with(v1::PREFIX) {
             let body = if raw {
-                v1::check_access(&principal, &method, &path)?;
+                v1::check_before_body(&ctx, &principal, &method, &path).await?;
                 read_body(&mut req, max).await?
             } else {
                 body

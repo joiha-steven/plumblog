@@ -490,6 +490,7 @@ pub fn run(
         state: st,
         secrets: Vec::new(),
     };
+    crate::restore::remind_reset(&mut run);
     let dir = opts.out.as_ref().map_or_else(
         || BACKUP_DIR.to_string(),
         |p| {

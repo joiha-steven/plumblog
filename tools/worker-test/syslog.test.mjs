@@ -1,7 +1,10 @@
 // System log on the real Worker and local D1: page views write nothing, and the daily cron
 // prunes by age and leaves one `job.run` entry tied to its Worker log line by request id.
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { after, before, describe, test } from "node:test";
+import { createHash, randomBytes } from "node:crypto";
+import * as gen from "../../web/admin/src/api/model.gen.ts";
+import { checkShape } from "../shape-check.mjs";
 import { d1Sql, startWorker } from "./harness.mjs";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -99,4 +102,133 @@ test("a backlog drains in bounded runs (Retention::per_run)", async () => {
   assert.equal(left, 0, "the second run finishes the backlog");
   // Each deleted row is written once per table and index (4 for system_log).
   assert.ok(runs[0] <= 2000 * 4, `first run wrote ${runs[0]} rows`);
+});
+
+// --- GET /api/v1/log, on its own Worker so the seeded rows are the whole log. ---
+describe("log read", () => {
+  const { SHAPES, ...rest } = gen;
+  const lists = Object.fromEntries(Object.entries(rest).filter(([, v]) => Array.isArray(v)));
+  const sha = (s) => createHash("sha256").update(s).digest("hex");
+  const T = Date.now();
+  const ownerSession = randomBytes(32).toString("base64url");
+  const writerSession = randomBytes(32).toString("base64url");
+  const as = (s) => ({ cookie: `__Host-plumblog_session=${s}` });
+  let lw;
+
+  before(async () => {
+    // Ids follow insertion order; three rows share at_ms 3000.
+    lw = await startWorker({
+      seedSql: [
+        `INSERT INTO users (id, login, slug, display_name, role, password_hash, disabled_at, created_at, updated_at) VALUES
+          (1, 'olga', 'olga', 'Olga', 'owner', NULL, NULL, ${T}, ${T}),
+          (2, 'will', 'will', 'Will', 'writer', NULL, NULL, ${T}, ${T});`,
+        `INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES
+          ('${sha(ownerSession)}', 1, ${T}, ${T + DAY_MS}), ('${sha(writerSession)}', 2, ${T}, ${T + DAY_MS});`,
+        `INSERT INTO system_log (at_ms, request_id, kind, actor_id, error_code, detail) VALUES
+          (1000, 'seed-a', 'auth.sign_in', 1, NULL, 'olga'),
+          (2000, 'seed-b', 'auth.sign_in_failed', NULL, NULL, 'login\nuser\tOlga'),
+          (3000, 'seed-c', 'error', NULL, 'store.failed', 'boom'),
+          (3000, 'seed-d', 'content.changed', 2, NULL, 'post-1\naction\tupdate'),
+          (3000, 'seed-e', 'system.deploy', NULL, NULL, '100% done_ok'),
+          (4000, 'seed-f', 'settings.changed', 1, 'store.conflict', 'title');`,
+      ].join("\n"),
+    });
+  });
+  after(async () => {
+    await lw?.stop();
+  });
+
+  async function get(query = "", who = as(ownerSession)) {
+    const res = await fetch(`${lw.url}/api/v1/log${query}`, { headers: { origin: lw.url, ...who } });
+    const text = await res.text();
+    return { status: res.status, json: text ? JSON.parse(text) : null, text };
+  }
+  async function ids(query) {
+    const r = await get(query);
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(checkShape(SHAPES, lists, "log_page", r.json), [], r.text);
+    return r.json.entries.map((e) => e.id);
+  }
+
+  test("newest first, in the log_page shape, with names, levels and fields", async () => {
+    const r = await get("?limit=100");
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(checkShape(SHAPES, lists, "log_page", r.json), [], r.text);
+    assert.deepEqual(r.json.entries.map((e) => e.id), [6, 5, 4, 3, 2, 1]);
+    assert.equal(r.json.next_cursor, null);
+    const by = Object.fromEntries(r.json.entries.map((e) => [e.id, e]));
+    assert.deepEqual(by[4], {
+      id: 4, at: 3000, request_id: "seed-d", kind: "content.changed", level: "info", actor_id: 2,
+      actor_name: "Will", error_code: null, subject: "post-1", fields: [{ key: "action", value: "update" }],
+    });
+    assert.equal(by[6].level, "warning", "an error code raises info to warning");
+    assert.equal(by[6].error_code, "store.conflict");
+    assert.equal(by[3].level, "error");
+    assert.equal(by[2].level, "warning");
+    assert.equal(by[5].actor_name, null);
+    assert.equal(by[1].actor_name, "Olga");
+  });
+
+  test("filters: kind, level, code, actor, q, from/to", async () => {
+    assert.deepEqual(await ids("?kind=auth.sign_in_failed"), [2]);
+    assert.deepEqual(await ids("?level=warning"), [6, 3, 2]);
+    assert.deepEqual(await ids("?level=error"), [3]);
+    assert.deepEqual(await ids("?level=info"), [6, 5, 4, 3, 2, 1]);
+    assert.deepEqual(await ids("?code=store.conflict"), [6]);
+    assert.deepEqual(await ids("?actor=2"), [4]);
+    assert.deepEqual(await ids("?q=seed-d"), [4], "request id");
+    assert.deepEqual(await ids("?q=seed"), [], "a request id matches whole");
+    assert.deepEqual(await ids("?q=OLGA"), [2, 1], "detail, any case");
+    assert.deepEqual(await ids(`?q=${encodeURIComponent("%")}`), [5], "% is literal");
+    assert.deepEqual(await ids(`?q=${encodeURIComponent("_ok")}`), [5], "_ is literal");
+    assert.deepEqual(await ids(`?q=${encodeURIComponent("d_n")}`), [], "_ is no wildcard");
+    assert.deepEqual(await ids("?from=2000&to=4000"), [5, 4, 3, 2], "from inclusive, to exclusive");
+    assert.deepEqual(await ids("?level=warning&from=3000&q=boom"), [3], "filters combine");
+  });
+
+  test("pages by cursor across equal times: no duplicates, none missing", async () => {
+    const seen = [];
+    let cursor = null;
+    let pages = 0;
+    do {
+      const r = await get(`?limit=2${cursor ? `&cursor=${cursor}` : ""}`);
+      assert.equal(r.status, 200, r.text);
+      assert.ok(r.json.entries.length <= 2);
+      seen.push(...r.json.entries.map((e) => e.id));
+      cursor = r.json.next_cursor;
+      pages++;
+    } while (cursor && pages < 10);
+    assert.deepEqual(seen, [6, 5, 4, 3, 2, 1]);
+    assert.equal(pages, 3);
+  });
+
+  test("a writer is 403, a signed-out caller 401", async () => {
+    const w = await get("", as(writerSession));
+    assert.equal(w.status, 403, w.text);
+    assert.deepEqual(w.json, { error: "auth.forbidden" });
+    const anon = await get("", {});
+    assert.equal(anon.status, 401, anon.text);
+    assert.deepEqual(anon.json, { error: "auth.unauthenticated" });
+  });
+
+  test("a bad filter is 400 input.invalid naming the field", async () => {
+    const long = "x".repeat(101);
+    for (const [query, field] of [
+      ["?kind=nope", "kind"],
+      ["?level=loud", "level"],
+      ["?code=nope", "code"],
+      ["?cursor=!!", "cursor"],
+      [`?cursor=${Buffer.from("9.x").toString("base64url")}`, "cursor"],
+      ["?limit=0", "limit"],
+      ["?limit=101", "limit"],
+      ["?q=", "q"],
+      [`?q=${long}`, "q"],
+      ["?from=-1", "from"],
+      ["?actor=abc", "actor"],
+    ]) {
+      const r = await get(query);
+      assert.equal(r.status, 400, `${query}: ${r.text}`);
+      assert.deepEqual(r.json, { error: "input.invalid", field }, query);
+    }
+  });
 });

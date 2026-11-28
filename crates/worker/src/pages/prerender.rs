@@ -108,12 +108,18 @@ fn rest_version(rest: &str) -> Option<u64> {
 /// newest marked; an id without a marker counts as oldest. `ids` may be only part of the
 /// bucket's ids: an id older than [`KEEP_OLD_IDS`] others seen is outside the newest overall.
 fn retired(current: &str, ids: &[(String, Option<u64>)]) -> Vec<String> {
-    let mut old: Vec<&(String, Option<u64>)> = ids.iter().filter(|(id, _)| id != current).collect();
-    // Newest first; `None` sorts last.
-    old.sort_by_key(|(_, seen)| std::cmp::Reverse(*seen));
-    old.iter()
+    // A counting pass instead of a sort: `ids` is at most INSPECT_MAX long, and each sort
+    // instance costs the wasm about 4 KB gzip. Ties go to the earlier id, as a stable sort would.
+    let newer = |i: usize, t: u64| {
+        ids.iter()
+            .enumerate()
+            .filter(|&(j, (id, s))| id != current && s.is_some_and(|s| s > t || (s == t && j < i)))
+            .count()
+    };
+    ids.iter()
         .enumerate()
-        .filter(|(i, (_, seen))| seen.is_none() || *i >= KEEP_OLD_IDS)
+        .filter(|(_, (id, _))| id != current)
+        .filter(|&(i, (_, seen))| seen.is_none_or(|t| newer(i, t) >= KEEP_OLD_IDS))
         .map(|(_, (id, _))| id.clone())
         .collect()
 }
@@ -139,7 +145,8 @@ struct Report {
 }
 
 impl Report {
-    fn fail(&mut self, what: &str, e: impl std::fmt::Display) {
+    // `&dyn`: one copy in the wasm instead of one per error type.
+    fn fail(&mut self, what: &str, e: &dyn std::fmt::Display) {
         self.unfinished = true;
         self.failed.push(what.to_owned());
         if self.error.is_none() {
@@ -184,18 +191,18 @@ async fn run(
 ) {
     let version = match Db(store).content_version().await {
         Ok(v) => v,
-        Err(e) => return pre.fail("content_version", e),
+        Err(e) => return pre.fail("content_version", &e),
     };
     let bucket = match env.bucket(&cache::bucket_name(env)) {
         Ok(bucket) => bucket,
-        Err(e) => return pre.fail("bucket", e),
+        Err(e) => return pre.fail("bucket", &e),
     };
     let done = done_key(id, version, crate::theme_runtime::cache_tag());
     crate::subrequests::count();
     match bucket.head(done.clone()).await {
         Ok(Some(_)) => return,
         Ok(None) => {}
-        Err(e) => return pre.fail(&done, e),
+        Err(e) => return pre.fail(&done, &e),
     }
     let deleted = cleanup(env, &bucket, id, version, b, clean).await;
     console_log!(
@@ -212,7 +219,7 @@ async fn run(
     if !pre.unfinished && !clean.unfinished {
         crate::subrequests::count();
         if let Err(e) = bucket.put(done.clone(), Vec::<u8>::new()).execute().await {
-            clean.fail(&done, e);
+            clean.fail(&done, &e);
         }
     }
 }
@@ -232,7 +239,7 @@ async fn prerender(
         return 0;
     }
     if let Err(e) = cache::mark_seen(bucket, id).await {
-        report.fail(&cache::seen_key(id), e);
+        report.fail(&cache::seen_key(id), &e);
     }
     let db = Db(store);
     let posts = match db.settings().await {
@@ -242,12 +249,12 @@ async fn prerender(
                 .map(|p| routes::post_in(&p.lang, &s.lang, &p.slug))
                 .collect(),
             Err(e) => {
-                report.fail("newest posts", e);
+                report.fail("newest posts", &e);
                 Vec::new()
             }
         },
         Err(e) => {
-            report.fail("settings", e);
+            report.fail("settings", &e);
             Vec::new()
         }
     };
@@ -276,7 +283,7 @@ async fn prerender(
             .collect(),
         Err(e) => {
             // Unfinished, so no done marker; the pages are only rendered once more.
-            report.fail(&skip, e);
+            report.fail(&skip, &e);
             Vec::new()
         }
     };
@@ -293,7 +300,7 @@ async fn prerender(
             Ok(Some(_)) => continue,
             Ok(None) => {}
             Err(e) => {
-                report.fail(path, e);
+                report.fail(path, &e);
                 continue;
             }
         }
@@ -309,19 +316,19 @@ async fn prerender(
                 let key = format!("{skip}{path}");
                 crate::subrequests::count();
                 if let Err(e) = bucket.put(key, Vec::<u8>::new()).execute().await {
-                    report.fail(path, e);
+                    report.fail(path, &e);
                 }
                 continue;
             }
             Err(e) => {
-                report.fail(path, e);
+                report.fail(path, &e);
                 continue;
             }
         };
         let body = std::mem::take(&mut page.body);
         match cache::put_r2(env, &page, body).await {
             Ok(()) => stored += 1,
-            Err(e) => report.fail(path, e),
+            Err(e) => report.fail(path, &e),
         }
     }
     stored
@@ -386,7 +393,7 @@ async fn cleanup(
             let listed = match q.execute().await {
                 Ok(o) => o,
                 Err(e) => {
-                    report.fail(p, e);
+                    report.fail(p, &e);
                     break;
                 }
             };
@@ -405,7 +412,7 @@ async fn cleanup(
     match bucket.delete_multiple(keys).await {
         Ok(()) => n,
         Err(e) => {
-            report.fail("delete", e);
+            report.fail("delete", &e);
             0
         }
     }
@@ -435,7 +442,7 @@ async fn plan(
     {
         Ok(o) => o,
         Err(e) => {
-            report.fail("pages/", e);
+            report.fail("pages/", &e);
             return None;
         }
     };
@@ -449,7 +456,11 @@ async fn plan(
         })
         .collect();
     // The running id first: its dead groups are the common case.
-    ids.sort_by_key(|id| id != current);
+    // Moved, not sorted (a sort instance costs the wasm about 2 KB gzip); the rest keep their order.
+    if let Some(i) = ids.iter().position(|id| id == current) {
+        let id = ids.remove(i);
+        ids.insert(0, id);
+    }
     if ids.len() > INSPECT_MAX {
         report.unfinished = true;
         ids.truncate(INSPECT_MAX);
@@ -472,7 +483,7 @@ async fn plan(
         {
             Ok(o) => o,
             Err(e) => {
-                report.fail(&base, e);
+                report.fail(&base, &e);
                 return None;
             }
         };

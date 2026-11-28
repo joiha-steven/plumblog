@@ -44,19 +44,30 @@ const ROUTES = [
   "PATCH /api/v1/media/{id}",
   "DELETE /api/v1/media/{id}",
   "GET /api/v1/media/{id}/original",
+  "POST /api/v1/media/{id}/variants",
   "GET /api/v1/comments",
   "GET /api/v1/users",
+  "GET /api/v1/log",
+  "PUT /api/v1/users/{id}/role",
+  "PUT /api/v1/users/{id}/disabled",
+  "DELETE /api/v1/users/{id}",
+  "GET /api/v1/invites",
+  "POST /api/v1/invites",
+  "DELETE /api/v1/invites/{id}",
   "GET /api/v1/redirects",
   "PUT /api/v1/redirects",
   "DELETE /api/v1/redirects",
   "GET /api/v1/settings",
   "PUT /api/v1/settings/{key}",
   "DELETE /api/v1/settings/{key}",
+  "GET /api/v1/themes",
+  "GET /api/v1/themes/{name}/declarations",
   "GET /api/v1/themes/{name}/options",
   "PUT /api/v1/themes/{name}/options/{key}",
   "DELETE /api/v1/themes/{name}/options",
   "GET /api/v1/plugins",
   "PUT /api/v1/plugins/{name}",
+  "GET /api/v1/plugins/{name}/declarations",
   "GET /api/v1/plugins/{name}/options",
   "PUT /api/v1/plugins/{name}/options/{key}",
   "DELETE /api/v1/plugins/{name}/options",
@@ -165,8 +176,8 @@ describe("api v1", () => {
   });
 
   // Reads a read token may not make: plugin options may hold a plugin's secrets; comments are
-  // moderation data (writer and owner); users are owner only.
-  const OWNER_READS = new Set(["GET /api/v1/plugins/{name}/options", "GET /api/v1/comments", "GET /api/v1/users"]);
+  // moderation data (writer and owner); users and invites are owner only (invites session only).
+  const OWNER_READS = new Set(["GET /api/v1/plugins/{name}/options", "GET /api/v1/plugins/{name}/declarations", "GET /api/v1/comments", "GET /api/v1/users", "GET /api/v1/log", "GET /api/v1/invites"]);
 
   test("read token: every read answers (owner-only reads aside), every write is 403 and changes nothing", async () => {
     const made = await api(w, "POST", "/api/v1/posts", { as: AS.ownerSession, body: newPost("read-target") });

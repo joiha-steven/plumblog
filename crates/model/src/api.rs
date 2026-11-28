@@ -14,6 +14,9 @@ pub const MAX_POST_BODY: usize = 160 * 1024;
 /// memory, since the Worker holds the whole body to check its header (docs/ARCHITECTURE.md,
 /// Budgets).
 pub const MAX_MEDIA_BODY: usize = 20 * 1024 * 1024;
+/// Request body cap for one size of an item (`POST /api/v1/media/{id}/variants`): an AVIF or
+/// WebP of at most 2400 px wide, or the original's width, stays far under it.
+pub const MAX_VARIANT_BODY: usize = 8 * 1024 * 1024;
 /// Request body cap for `POST /mcp`: the largest JSON route body (a post) plus the JSON-RPC
 /// envelope around it (`jsonrpc`, `id`, `method`, `params.name`, `_meta`), about 150 bytes from
 /// real clients; 4 KiB leaves room for any sane id or progress token. The tool's own body is
@@ -219,19 +222,30 @@ pub enum RouteId {
     MediaUpdate,
     MediaDelete,
     MediaOriginal,
+    MediaVariant,
     CommentList,
     UserList,
+    LogList,
+    UserRole,
+    UserDisabled,
+    UserDelete,
+    InviteList,
+    InviteCreate,
+    InviteRevoke,
     RedirectList,
     RedirectPut,
     RedirectDelete,
     SettingList,
     SettingPut,
     SettingDelete,
+    ThemeList,
+    ThemeDeclarations,
     ThemeOptions,
     ThemeOptionPut,
     ThemeOptionsDelete,
     PluginList,
     PluginPut,
+    PluginDeclarations,
     PluginOptions,
     PluginOptionPut,
     PluginOptionsDelete,
@@ -318,6 +332,9 @@ pub struct Route {
     pub also: &'static [Permission],
     /// Values of the `key` path field only a session may use (see [`SESSION_ONLY_SETTINGS`]).
     pub session_only_keys: &'static [&'static str],
+    /// Only a signed-in session may call it: an API token, even an owner one, gets 403
+    /// `auth.forbidden` (user admin: a leaked token must not mint owners or lock them out).
+    pub session_only: bool,
     pub fields: &'static [Field],
     pub max_body: usize,
     pub body: Body,
@@ -408,10 +425,59 @@ const MEDIA_UPLOAD: &[Field] = &[
     query("alt", Type::Str),
     query("sha256", Type::Str),
 ];
+/// One size the admin encoder made (issue #13). `sha256` is required: R2 verifies it, and a
+/// repeat of the same (mime, width) is told apart from a different encoding by it.
+const MEDIA_VARIANT: &[Field] = &[
+    path("id"),
+    query_req("mime", Type::Str),
+    query_req("width", Type::Int),
+    query_req("height", Type::Int),
+    query_req("sha256", Type::Str),
+];
 /// An id-ordered listing: `cursor` is the last id of the previous page.
 const BY_ID: &[Field] = &[query("cursor", Type::Str), query("limit", Type::Int)];
+const LOG: &[Field] = &[
+    query("kind", Type::Str),
+    query("level", Type::Str),
+    query("code", Type::Str),
+    query("actor", Type::Int),
+    query("from", Type::Int),
+    query("to", Type::Int),
+    query("q", Type::Str),
+    query("cursor", Type::Str),
+    query("limit", Type::Int),
+];
 const VALUE: &[Field] = &[path_name("key"), req("value", Type::Json)];
+const USERS: Access = Access::Require(Permission::ManageUsers);
+const USER_ROLE: &[Field] = &[path("id"), req("role", Type::Str)];
+const USER_DISABLED: &[Field] = &[path("id"), req("disabled", Type::Bool)];
+/// `expires_at`: UTC ms; absent = [`INVITE_TTL_MS`] from now, at most [`INVITE_MAX_TTL_MS`].
+const INVITE_CREATE: &[Field] = &[req("role", Type::Str), opt("expires_at", Type::Int)];
+/// How long an invite stays usable when the owner names no expiry.
+pub const INVITE_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// The longest expiry an invite may have: an unused link is a standing way in.
+pub const INVITE_MAX_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// The most unused invites `GET /api/v1/invites` answers (the newest): far more than an owner
+/// keeps pending, and a bound on one answer however many accumulate.
+pub const INVITE_LIST_MAX: u32 = 500;
+
+/// A user-admin route: owner only and session only.
+const fn user_admin(
+    id: RouteId,
+    method: Method,
+    path: &'static str,
+    fields: &'static [Field],
+    status: u16,
+    response: &'static str,
+) -> Route {
+    Route {
+        session_only: true,
+        ..route(id, method, path, USERS, fields, status, response)
+    }
+}
 const OWNER: &[Field] = &[path_name("name")];
+/// `lang`: the language of labels and help (`vi`, `vi-VN`); English when absent or unknown.
+const DECLARATIONS: &[Field] = &[path_name("name"), query("lang", Type::Str)];
 const OWNER_VALUE: &[Field] = &[
     path_name("name"),
     path_name("key"),
@@ -434,6 +500,7 @@ const fn route(
         access,
         also: &[],
         session_only_keys: &[],
+        session_only: false,
         fields,
         max_body: MAX_BODY,
         body: Body::Json,
@@ -707,6 +774,21 @@ pub const ROUTES: &[Route] = &[
         200,
         ORIGINAL,
     ),
+    // Same ownership rule as delete: the caller's own upload, else `media.delete_any`.
+    Route {
+        also: &[Permission::DeleteAnyMedia],
+        max_body: MAX_VARIANT_BODY,
+        body: Body::Original,
+        ..route(
+            RouteId::MediaVariant,
+            Method::Post,
+            "/api/v1/media/{id}/variants",
+            MEDIA,
+            MEDIA_VARIANT,
+            201,
+            "media",
+        )
+    },
     // Every status, so spam and trash included: moderation data, not for a read token.
     route(
         RouteId::CommentList,
@@ -725,6 +807,65 @@ pub const ROUTES: &[Route] = &[
         BY_ID,
         200,
         "user_page",
+    ),
+    // Newest first. `level` is a minimum (`warning` or `error`; `info` is no filter); `q`
+    // matches a request id exactly or text of the entry's subject and fields.
+    route(
+        RouteId::LogList,
+        Method::Get,
+        "/api/v1/log",
+        Access::Require(Permission::ViewSystemLog),
+        LOG,
+        200,
+        "log_page",
+    ),
+    user_admin(
+        RouteId::UserRole,
+        Method::Put,
+        "/api/v1/users/{id}/role",
+        USER_ROLE,
+        200,
+        "user",
+    ),
+    user_admin(
+        RouteId::UserDisabled,
+        Method::Put,
+        "/api/v1/users/{id}/disabled",
+        USER_DISABLED,
+        200,
+        "user",
+    ),
+    user_admin(
+        RouteId::UserDelete,
+        Method::Delete,
+        "/api/v1/users/{id}",
+        ID,
+        204,
+        "none",
+    ),
+    user_admin(
+        RouteId::InviteList,
+        Method::Get,
+        "/api/v1/invites",
+        &[],
+        200,
+        "invite_list",
+    ),
+    user_admin(
+        RouteId::InviteCreate,
+        Method::Post,
+        "/api/v1/invites",
+        INVITE_CREATE,
+        201,
+        "invite_created",
+    ),
+    user_admin(
+        RouteId::InviteRevoke,
+        Method::Delete,
+        "/api/v1/invites/{id}",
+        ID,
+        204,
+        "none",
     ),
     route(
         RouteId::RedirectList,
@@ -787,6 +928,25 @@ pub const ROUTES: &[Route] = &[
         )
     },
     route(
+        RouteId::ThemeList,
+        Method::Get,
+        "/api/v1/themes",
+        Access::Read,
+        &[],
+        200,
+        "theme_list",
+    ),
+    // Read like theme option values: what a theme declares shows on reader pages anyway.
+    route(
+        RouteId::ThemeDeclarations,
+        Method::Get,
+        "/api/v1/themes/{name}/declarations",
+        Access::Read,
+        DECLARATIONS,
+        200,
+        "option_declarations",
+    ),
+    route(
         RouteId::ThemeOptions,
         Method::Get,
         "/api/v1/themes/{name}/options",
@@ -831,6 +991,17 @@ pub const ROUTES: &[Route] = &[
         204,
         "none",
     ),
+    // Gated like the plugin's option values, which only the same callers may read or write:
+    // the declarations are the form for them.
+    route(
+        RouteId::PluginDeclarations,
+        Method::Get,
+        "/api/v1/plugins/{name}/declarations",
+        PLUGINS,
+        DECLARATIONS,
+        200,
+        "option_declarations",
+    ),
     // Plugin options may hold a plugin's secrets: read like they are written.
     route(
         RouteId::PluginOptions,
@@ -869,11 +1040,23 @@ pub const fn tool_name(id: RouteId) -> Option<&'static str> {
     match id {
         // Reference: `tools/list` already is the schema. MediaUpload: the body is raw image
         // bytes, which a JSON-RPC message cannot carry.
-        // MediaOriginal: the answer is raw image bytes, not JSON.
-        RouteId::Reference | RouteId::MediaUpload | RouteId::MediaOriginal => None,
+        // MediaOriginal: the answer is raw image bytes, not JSON. MediaVariant: raw image
+        // bytes in the body, like MediaUpload.
+        // User admin is session only, and MCP is token only: no tool could ever be allowed.
+        RouteId::Reference
+        | RouteId::MediaUpload
+        | RouteId::MediaOriginal
+        | RouteId::MediaVariant
+        | RouteId::UserRole
+        | RouteId::UserDisabled
+        | RouteId::UserDelete
+        | RouteId::InviteList
+        | RouteId::InviteCreate
+        | RouteId::InviteRevoke => None,
         RouteId::Me => Some("me"),
         RouteId::CommentList => Some("comment_list"),
         RouteId::UserList => Some("user_list"),
+        RouteId::LogList => Some("log_list"),
         RouteId::PostList => Some("post_list"),
         RouteId::PostGet => Some("post_get"),
         RouteId::PostCreate => Some("post_create"),
@@ -901,11 +1084,14 @@ pub const fn tool_name(id: RouteId) -> Option<&'static str> {
         RouteId::SettingList => Some("setting_list"),
         RouteId::SettingPut => Some("setting_put"),
         RouteId::SettingDelete => Some("setting_delete"),
+        RouteId::ThemeList => Some("theme_list"),
+        RouteId::ThemeDeclarations => Some("theme_declarations"),
         RouteId::ThemeOptions => Some("theme_options"),
         RouteId::ThemeOptionPut => Some("theme_option_put"),
         RouteId::ThemeOptionsDelete => Some("theme_options_delete"),
         RouteId::PluginList => Some("plugin_list"),
         RouteId::PluginPut => Some("plugin_put"),
+        RouteId::PluginDeclarations => Some("plugin_declarations"),
         RouteId::PluginOptions => Some("plugin_options"),
         RouteId::PluginOptionPut => Some("plugin_option_put"),
         RouteId::PluginOptionsDelete => Some("plugin_options_delete"),
@@ -1001,7 +1187,7 @@ mod tests {
                 // A raw body carries no JSON fields; its metadata is in the query.
                 assert!(r.fields.iter().all(|f| f.at != In::Body), "{}", r.path);
             }
-            // Only the media upload takes more than the post cap, and only as raw bytes.
+            // Only media bytes (upload, variants) take more than the post cap, and only raw.
             assert!(
                 r.max_body <= MAX_POST_BODY || r.body == Body::Original,
                 "{}",
@@ -1015,6 +1201,11 @@ mod tests {
             dedup.sort_unstable();
             dedup.dedup();
             assert_eq!(dedup.len(), names.len(), "{}", r.path);
+            // Every user-admin write is session only (a leaked token must not mint owners
+            // or lock them out); the user list stays readable by an owner token for export.
+            if r.access == Access::Require(crate::Permission::ManageUsers) {
+                assert!(r.session_only || r.id == RouteId::UserList, "{}", r.path);
+            }
             // Session-only keys name values of a `key` path field.
             assert!(
                 r.session_only_keys.is_empty() || segs.contains(&"key"),
@@ -1050,12 +1241,22 @@ mod tests {
                 "{:?} answers raw bytes",
                 r.id
             );
+            // MCP is token only, so a session-only route can never be a tool.
+            assert!(
+                !(r.session_only && tool_name(r.id).is_some()),
+                "{:?} is session only",
+                r.id
+            );
             let Some(name) = tool_name(r.id) else {
                 assert!(
-                    matches!(
-                        r.id,
-                        RouteId::Reference | RouteId::MediaUpload | RouteId::MediaOriginal
-                    ),
+                    r.session_only
+                        || matches!(
+                            r.id,
+                            RouteId::Reference
+                                | RouteId::MediaUpload
+                                | RouteId::MediaOriginal
+                                | RouteId::MediaVariant
+                        ),
                     "{:?} is not a tool",
                     r.id
                 );
@@ -1079,7 +1280,8 @@ mod tests {
             );
             names.push(name);
         }
-        assert_eq!(names.len(), ROUTES.len() - 3);
+        let session_only = ROUTES.iter().filter(|r| r.session_only).count();
+        assert_eq!(names.len(), ROUTES.len() - 4 - session_only);
         let mut dedup = names.clone();
         dedup.sort_unstable();
         dedup.dedup();

@@ -86,6 +86,6 @@ time: here removing 60 KB of unused font preloads moved LCP 1.8 s to 1.2 s, more
 - localhost is HTTP/1.1 (6 connections per origin); production is HTTP/2. Scores can differ there.
 - Editor FCP is noisy (1.1 s or 2.2 s between identical runs); judge it over 3+ runs.
 - Run only one `scripts/worker-test` or `scripts/check` at a time (shared ports and target dirs).
-- Shut the server down afterwards: `kill $(pgrep -f "wrangler dev --config tools/wrangler.dev.toml --persist-to target/worker-dev")`.
-  Do not `pkill wrangler`: other sessions may run theirs.
+- Shut the server down afterwards by the PID you started it with (`kill $!` right after the `&`).
+  Never a `pgrep`/`pkill` pattern: other sessions run the same command line.
 - Rebuild the Worker after changing `PLUMBLOG_ADMIN_PRELOAD` or the admin: the list is embedded at compile time.

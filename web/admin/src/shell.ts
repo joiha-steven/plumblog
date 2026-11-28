@@ -5,7 +5,7 @@ import { PERMISSION_ROLES } from "./api/model.gen";
 import { h } from "./dom";
 import { type IconName, icon } from "./icons";
 import { t } from "./i18n";
-import { HREF, type Screen } from "./router";
+import { HREF, type Screen, inSettings } from "./router";
 import { langSwitch, seg } from "./seg";
 import { THEMES, type ThemeChoice, applyTheme, storedTheme } from "./theme";
 import { closePop, openPop } from "./ui";
@@ -16,7 +16,7 @@ export function shell(root: HTMLElement, screen: Screen, site: string, me: Me | 
   const link = (to: keyof typeof HREF, ic: IconName, label: string) =>
     h(
       "a",
-      { href: HREF[to], "aria-current": screen === to || (to === "posts" && (screen === "new" || screen === "edit")) ? "page" : null },
+      { href: HREF[to], "aria-current": screen === to || (to === "settings" && inSettings(screen)) || (to === "posts" && (screen === "new" || screen === "edit")) ? "page" : null },
       icon(ic),
       h("span", { class: "lbl" }, label),
     );

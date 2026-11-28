@@ -92,6 +92,9 @@ stable_codes! {
         // The right owner reset code, used after it expired: not a guess, so not counted;
         // the owner runs `blog admin reset` again.
         ResetExpired => "auth.reset_expired",
+        // A demote, disable or delete that would leave no active (not disabled) owner:
+        // make another user owner first.
+        LastOwner => "user.last_owner",
         // A rendered page could not be copied to R2 (system log only): it was served, and
         // other data centres render it until a later miss stores it.
         PageStoreFailed => "pages.store_failed",
@@ -355,6 +358,7 @@ mod tests {
                 (ErrorCode::CommentRateLimited, "comments.rate_limited"),
                 (ErrorCode::ThemeUnavailable, "theme.unavailable"),
                 (ErrorCode::ResetExpired, "auth.reset_expired"),
+                (ErrorCode::LastOwner, "user.last_owner"),
                 (ErrorCode::PageStoreFailed, "pages.store_failed"),
                 (ErrorCode::PagePrerenderFailed, "pages.prerender_failed"),
                 (ErrorCode::PageCleanupFailed, "pages.cleanup_failed"),

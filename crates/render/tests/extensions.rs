@@ -646,3 +646,61 @@ fn one_value_is_checked_against_the_theme_or_plugin_declaration() {
     assert!(matches!(ok(Some("hello"), "greeting", &long), Some(Err(_))));
     assert!(matches!(ok(Some("hello"), "greeting", "42"), Some(Err(_))));
 }
+
+/// What the admin builds Appearance and plugin tabs from: every declared option with its
+/// text in the asked language, English behind a missing key, English for an unknown language.
+#[test]
+fn declarations_carry_text_in_the_asked_language_with_english_behind() {
+    let hello_vi = edit(&hello(), "locales/vi.toml", |t| {
+        t.replace("cover = \"Anh bia\"\n", "")
+    });
+    let theme = theme_with(&minimal(), vec![plugin(&hello_vi).unwrap()]).unwrap();
+    let decls = |p: Option<&str>, lang: &str| -> serde_json::Value {
+        serde_json::from_str(&theme.declarations(p, lang).expect("exists").unwrap()).unwrap()
+    };
+    let option = |d: &serde_json::Value, key: &str| -> serde_json::Value {
+        d["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["key"] == key)
+            .cloned()
+            .unwrap_or_else(|| panic!("{key} missing"))
+    };
+
+    let vi = decls(None, "vi");
+    assert_eq!(vi["name"], "minimal");
+    assert_eq!(vi["version"], "0.2.0");
+    assert_eq!(vi["lang"], "vi");
+    let style = option(&vi, "style");
+    assert_eq!(style["type"], "choice");
+    assert_eq!(style["label"], "Ki\u{1ec3}u");
+    assert_eq!(style["label_key"], "options.style");
+    assert_eq!(style["group"], "look");
+    // Drafts are refused on write, so they are not offered.
+    let values: Vec<_> = style["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["value"].clone())
+        .collect();
+    assert_eq!(values, ["writer"]);
+    assert_eq!(vi["groups"][0]["key"], "look");
+    assert_eq!(vi["groups"][0]["label"], "Giao di\u{1ec7}n");
+    assert_eq!(vi["groups"][0]["icon"], "palette");
+
+    // A region tag finds its language; an unknown language gets English and says so.
+    assert_eq!(decls(None, "vi-VN")["lang"], "vi");
+    let fr = decls(None, "fr");
+    assert_eq!(fr["lang"], "en");
+    assert_eq!(option(&fr, "sidenotes")["label"], "Notes beside the text");
+
+    let hello = decls(Some("hello"), "vi");
+    assert_eq!(hello["name"], "hello");
+    assert_eq!(hello["version"], "0.1.0");
+    assert_eq!(option(&hello, "greeting")["label"], "Loi chao");
+    assert_eq!(option(&hello, "greeting")["max_len"], 40);
+    // vi.toml lacks `cover`: that one label falls back to English.
+    assert_eq!(option(&hello, "cover")["label"], "Cover");
+    assert!(theme.declarations(Some("nope"), "en").is_none());
+}

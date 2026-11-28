@@ -49,6 +49,13 @@ fn int_text(s: &str) -> Option<i64> {
     if ok { s.parse().ok() } else { None }
 }
 
+/// A path id: `NotFound` unless a positive integer (the resource cannot exist).
+pub(super) fn path_id(name: &str, raw: &str) -> Result<i64> {
+    int_text(raw)
+        .filter(|n| *n > 0)
+        .ok_or_else(|| Error::new(ErrorCode::NotFound, format!("{name}: {raw:?} is not an id")))
+}
+
 fn type_ok(ty: Type, v: &Value) -> bool {
     match (ty, v) {
         (Type::Str, Value::Str(_))
@@ -83,10 +90,7 @@ impl Input {
                 values.push((name, Value::Str((*raw).to_owned())));
                 continue;
             }
-            let id = int_text(raw).filter(|n| *n > 0).ok_or_else(|| {
-                Error::new(ErrorCode::NotFound, format!("{name}: {raw:?} is not an id"))
-            })?;
-            values.push((name, Value::Int(id)));
+            values.push((name, Value::Int(path_id(name, raw)?)));
         }
         for (name, raw) in query {
             let f = field(name, In::Query).ok_or_else(|| invalid(name, "unknown field"))?;

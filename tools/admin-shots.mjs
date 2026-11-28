@@ -11,6 +11,7 @@
 import { chromium } from "playwright-core";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { crc32, deflateSync } from "node:zlib";
 
 const [base, out, auditFile] = process.argv.slice(2);
 if (!base || !out) {
@@ -78,6 +79,26 @@ const addForm = async (page) => {
 };
 const removeConfirm = async (page) => {
   await page.click(".pk .btn");
+  await page.waitForSelector(".confirm");
+  await settle(page, ".pop");
+};
+const TOKENS = ".tok";
+const toTokens = (page) => page.evaluate(() => document.querySelector("#acct-tok").scrollIntoView({ block: "start" }));
+const tokForm = async (page) => {
+  await page.click(".tok-add button");
+  await page.waitForSelector("#tok-name");
+  await toTokens(page);
+};
+const tokCreate = async (page) => {
+  await tokForm(page);
+  await page.fill("#tok-name", "Claude agent for the blog");
+  await page.click(".tok-add button[type=submit]");
+  await page.waitForSelector(".tok-secret");
+  await toTokens(page);
+};
+const tokRevoke = async (page) => {
+  await toTokens(page);
+  await page.click(".tok .btn.danger");
   await page.waitForSelector(".confirm");
   await settle(page, ".pop");
 };
@@ -171,6 +192,38 @@ const DOCS_HTML =
   "<ul><li><p><span>Tr\u00e0 n\u00f3ng</span></p></li><li><p><span>\u00c1o m\u01b0a</span></p></li></ul>" +
   "<table><tr><td><p>Ng\u00e0y</p></td><td><p>N\u01a1i</p></td></tr><tr><td><p>1</p></td><td><p>Ch\u1ee3 s\u1edbm</p></td></tr></table></b>";
 
+// The media library: every picture has loaded before the shot; `openDetails(n)` clicks the nth tile.
+const MEDIA_GRID = ".media .tile";
+const mediaLoaded = (page) => page.waitForFunction(() => [...document.querySelectorAll(".media img")].every((i) => i.complete));
+const openDetails = (n) => async (page) => {
+  await mediaLoaded(page);
+  await page.locator(".tile").nth(n).click();
+  await page.waitForSelector(".insp-card .kv dd");
+  await mediaLoaded(page);
+  // Where it is used arrives with its own request (the mock answers in 150 ms).
+  await page.waitForTimeout(500);
+};
+// Upload states of the library, on the mock API: `?upload=slow` holds each file for seconds, `dup`
+// answers with a picture the caller already has, `refuse` is a server 400 on a field.
+const solidPng = (w, h, [r, g, b]) => {
+  const chunk = (type, data) => {
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(data.length);
+    head.write(type, 4, "latin1");
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), data])));
+    return Buffer.concat([head, data, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr.set([8, 2, 0, 0, 0], 8);
+  const row = Buffer.concat([Buffer.from([0]), Buffer.from(Array.from({ length: w }, () => [r, g, b]).flat())]);
+  const raw = Buffer.concat(Array.from({ length: h }, () => row));
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
+};
+const pic = (name, rgb) => ({ name, mimeType: "image/png", buffer: solidPng(64, 48, rgb) });
+const pick = (page, ...files) => page.locator(".up-add input[type=file]").setInputFiles(files);
 const STATES = [
   ["posts", "/admin/", ROWS],
   ["posts-draft", "/admin/?status=draft", ROWS],
@@ -199,11 +252,155 @@ const STATES = [
   ],
   ["pages", "/admin/pages", ROWS],
   ["pages-empty", "/admin/pages?mock=empty", "main .empty"],
+  ["media", "/admin/media", MEDIA_GRID, mediaLoaded],
+  ["media-nodesc", "/admin/media?show=missing_alt", MEDIA_GRID, mediaLoaded],
+  ["media-unused", "/admin/media?show=unused", MEDIA_GRID, mediaLoaded],
+  ["media-empty", "/admin/media?mock=empty", ".media .empty"],
+  ["media-error", "/admin/media?media=error", ".media [role=alert]"],
+  ["media-details", "/admin/media", MEDIA_GRID, openDetails(0)],
+  ["media-details-nodesc", "/admin/media", MEDIA_GRID, openDetails(1)],
+  ["media-viewer", "/admin/media", MEDIA_GRID, async (page) => {
+    await mediaLoaded(page);
+    await page.locator(".peek").first().click();
+    await page.waitForSelector(".lb img");
+    await settle(page, ".lb");
+  }],
+  ["media-delete-confirm", "/admin/media", MEDIA_GRID, async (page) => {
+    await openDetails(1)(page);
+    await page.locator(".insp-card .btn.danger").click();
+    await page.waitForSelector(".confirm");
+    await settle(page, ".pop");
+  }],
+  ["media-in-use", "/admin/media", MEDIA_GRID, async (page) => {
+    await openDetails(0)(page);
+    await page.locator(".insp-card .btn.danger").click();
+    await page.waitForSelector(".confirm");
+    await page.locator(".confirm .btn.danger").click();
+    await page.waitForSelector(".del-note .chip");
+  }],
+  ["media-writer", "/admin/media?role=writer", MEDIA_GRID, openDetails(1)],
+  ["media-upload-progress", "/admin/media?upload=slow", MEDIA_GRID, async (page) => {
+    await mediaLoaded(page);
+    await pick(page, pic("harbour-at-dawn.png", [196, 86, 31]), pic("quiet-street.png", [95, 122, 98]), pic("lamp.png", [154, 166, 173]));
+    // Two are out, the third waits; the bars have moved a little.
+    await page.waitForFunction(() => [...document.querySelectorAll(".up-state")].filter((s) => s.textContent.includes("%")).length === 2 && document.querySelectorAll(".up-row").length === 3);
+    await page.waitForTimeout(3600);
+  }],
+  ["media-upload-drop", "/admin/media", MEDIA_GRID, async (page) => {
+    await mediaLoaded(page);
+    await page.evaluate(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array(4)], "x.png", { type: "image/png" }));
+      document.querySelector(".media-main").dispatchEvent(new DragEvent("dragenter", { dataTransfer: dt, bubbles: true, cancelable: true }));
+    });
+    await page.waitForSelector(".media-main.over");
+  }],
+  ["media-upload-exists", "/admin/media?upload=dup", MEDIA_GRID, async (page) => {
+    await mediaLoaded(page);
+    await pick(page, pic("harbour.png", [196, 86, 31]));
+    // On a phone the details cover the row, and the toast says it.
+    await page.waitForSelector(".up-row.is-dup", { state: "attached" });
+    await page.waitForSelector(".toast");
+    await page.waitForSelector(".insp-card .kv dd");
+    await mediaLoaded(page);
+    await page.waitForTimeout(500);
+  }],
+  ["media-upload-error", "/admin/media?upload=refuse", MEDIA_GRID, async (page) => {
+    await mediaLoaded(page);
+    await pick(page, pic("lies.png", [196, 86, 31]), { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hello") });
+    await page.waitForFunction(() => document.querySelectorAll(".up-row.is-err").length === 2);
+  }],
   ["empty", "/admin/?mock=empty", "main .empty"],
   ["loading", "/admin/?mock=loading"],
   ["error", "/admin/?mock=error", "main [role=alert]"],
   ["offline", "/admin/?mock=offline", "main [role=alert]"],
   ["no-permission", "/admin/settings?role=writer"],
+  ["settings", "/admin/settings", "#set-site_title"],
+  ["settings-empty", "/admin/settings?mock=empty", "#set-site_title"],
+  ["settings-loading", "/admin/settings?mock=loading"],
+  ["settings-error", "/admin/settings?mock=error", "main [role=alert]"],
+  [
+    "settings-offline",
+    "/admin/settings",
+    "#set-site_title",
+    async (page) => {
+      await page.context().setOffline(true);
+      await page.waitForSelector(".banner");
+      await page.waitForSelector("#set-site_title");
+      await page.context().setOffline(false);
+    },
+  ],
+  [
+    "settings-saved",
+    "/admin/settings",
+    "#set-site_title",
+    async (page) => {
+      await page.fill("#set-site_title", "B\u1ebfp nh\u00e0 Lan");
+      await page.fill("#set-site_per_page", "20");
+      await page.click("button[type=submit]");
+      await page.waitForFunction(() => document.querySelector("[role=status]")?.textContent?.trim());
+      await page.waitForTimeout(900);
+    },
+  ],
+  [
+    "settings-field-error",
+    "/admin/settings?settings=invalid",
+    "#set-site_title",
+    async (page) => {
+      await page.fill("#set-site_per_page", "30");
+      await page.click("button[type=submit]");
+      await page.waitForSelector("#set-site_per_page-err:not([hidden])");
+    },
+  ],
+  [
+    "settings-invalid",
+    "/admin/settings",
+    "#set-site_title",
+    async (page) => {
+      await page.fill("#set-site_per_page", "99");
+      await page.click("button[type=submit]");
+      await page.waitForSelector("#set-site_per_page-err:not([hidden])");
+    },
+  ],
+  ["syslog", "/admin/settings/log", ".log-btn"],
+  [
+    "syslog-detail",
+    "/admin/settings/log",
+    ".log-btn",
+    async (page) => {
+      // The webhook failure: an error code, a very long value, a level mark.
+      const row = page.locator(".log-btn", { has: page.locator(".log-err") }).first();
+      await row.click();
+      await row.scrollIntoViewIfNeeded();
+    },
+  ],
+  [
+    "syslog-detail-redacted",
+    "/admin/settings/log?kind=auth.token_created",
+    ".log-btn",
+    async (page) => {
+      await page.locator(".log-btn").first().click();
+    },
+  ],
+  ["syslog-filtered", "/admin/settings/log?level=error&kind=job.run&range=24h&q=zzz", "main .empty"],
+  ["syslog-warnings", "/admin/settings/log?level=warning&range=7d", ".log-btn"],
+  ["syslog-empty", "/admin/settings/log?log=empty", "main .empty"],
+  ["syslog-loading", "/admin/settings/log?log=loading", ".rows[aria-busy]"],
+  ["syslog-error", "/admin/settings/log?log=error", "main [role=alert]"],
+  [
+    "syslog-offline",
+    "/admin/settings/log?log=offline",
+    "main [role=alert]",
+    async (page) => {
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, "onLine", { get: () => false });
+        dispatchEvent(new Event("offline"));
+      });
+      await page.waitForSelector(".banner");
+      await page.waitForSelector("main [role=alert]");
+    },
+  ],
+  ["syslog-writer", "/admin/settings/log?role=writer", ".empty"],
   ["not-found", "/admin/nope"],
   [
     "menu",
@@ -456,6 +653,36 @@ const STATES = [
       await send(".acct-panel")(page);
     },
   ],
+  ["account-tokens", "/admin/account", TOKENS, toTokens],
+  ["account-tokens-empty", "/admin/account?tokens=0", ".sec:has(#acct-tok) .empty", toTokens],
+  ["account-tokens-error", "/admin/account?tokens=error", ".sec:has(#acct-tok) [role=alert]", toTokens],
+  [
+    "account-tokens-invalid",
+    "/admin/account",
+    TOKENS,
+    async (page) => {
+      await tokForm(page);
+      await page.click(".tok-add button[type=submit]");
+      await page.waitForSelector("#tok-name[aria-invalid=true]");
+    },
+  ],
+  ["account-tokens-secret", "/admin/account", TOKENS, tokCreate],
+  ["account-tokens-revoke", "/admin/account", TOKENS, tokRevoke],
+  ["account-tokens-writer", "/admin/account?role=writer", TOKENS, tokForm],
+  [
+    "account-tokens-offline",
+    "/admin/account",
+    TOKENS,
+    async (page) => {
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, "onLine", { get: () => false });
+        dispatchEvent(new Event("offline"));
+      });
+      // The shell redraws the page when the network changes; wait for the redrawn list.
+      await page.waitForSelector(".tok-add button:disabled");
+      await toTokens(page);
+    },
+  ],
   [
     "signout-confirm",
     "/admin/account",
@@ -530,7 +757,7 @@ try {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const english = ["posts", "posts-strip", "pages", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow"];
+        const english = ["syslog", "syslog-detail", "syslog-filtered", "syslog-writer", "posts", "posts-strip", "pages", "media", "media-details", "media-in-use", "media-upload-progress", "media-upload-drop", "media-upload-exists", "media-upload-error", "no-permission", "settings", "settings-saved", "settings-field-error", "settings-offline", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow", "account-tokens", "account-tokens-secret", "account-tokens-writer"];
         const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
         const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);
@@ -541,7 +768,7 @@ try {
         page.on("pageerror", (e) => errors.push(String(e)));
         for (const [state, path, ready, act] of states) {
           await page.goto(base + path, { waitUntil: "networkidle" });
-          if (state !== "loading") await page.waitForSelector(ready ?? "main h1, main [role=alert]", { timeout: 5000 });
+          if (!state.endsWith("loading")) await page.waitForSelector(ready ?? "main h1, main [role=alert]", { timeout: 5000 });
           // Popovers and bubbles fade in: actions wait until their animations are over.
           if (act) await act(page);
           const name = `${state}-${w}-${theme}-${lang}.png`;

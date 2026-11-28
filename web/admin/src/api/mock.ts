@@ -8,12 +8,22 @@
  * Adding or removing a passkey (account screen): `reauth_wrong|reauth|conflict|origin|unsupported|turnstile`
  * fail as the server does (`turnstile`: removing only; adding sends its token after the browser prompt), before any browser prompt (no real WebAuthn runs in shots); `?passkeys=0`
  * starts with none. Removing works on a list kept in memory. `?upload=fail` makes uploads fail
- * halfway and `?upload=slow` takes 20 s.
+ * halfway and `?upload=slow` takes 20 s. API tokens (`/api/auth/tokens`, account screen): `?tokens=0|error|forbidden`.
  *
  * Publishing: a post update with `status` follows the server's rules (a draft carries no time, a
  * scheduled time must be in the future); `?slug=taken` makes the first publish fail once with a
  * taken slug; trash and restore work on the same list. `?create=slow` leaves every create
  * unanswered (the editor's "still saving" message).
+ *
+ * The system log (`logList`) answers as `GET /api/v1/log` does: filters, opaque cursor, newest first,
+ * `auth.forbidden` for a writer. fixtures/log.json holds fixed times; the mock shifts them so the
+ * newest entry is 20 minutes old, which keeps "Last 24 hours" and the day headings meaningful.
+ * `?log=loading|error|offline|empty` forces a state on the log alone.
+ * The media library lives in memory too (fixtures/media.json; `?mock=empty` empties it, `?media=error`
+ * fails only its list; delete answers 403 for another's picture to a writer and 409 with the posts while in use).
+ * Settings (`/api/v1/settings`): a map kept in memory from fixtures/settings.json (`?mock=empty`: every key
+ * absent, so the defaults show). Writes need the owner (`?role=writer` gets 403 `auth.forbidden`);
+ * `?settings=invalid` makes writing `site_per_page` fail with 400 `input.invalid`, as a refused value would.
  *
  * Posts live in memory, from fixtures/posts.json, and reset on page load; the long post (id 1)
  * keeps its body in post-1.txt, so its `markdown` in the JSON is empty and is filled in here.
@@ -24,10 +34,14 @@
  */
 
 import me from "../../fixtures/me.json";
+import logEntries from "../../fixtures/log.json";
+import mediaFixtures from "../../fixtures/media.json";
 import posts from "../../fixtures/posts.json";
+import settingsFixture from "../../fixtures/settings.json";
+import tokenFixtures from "../../fixtures/tokens.json";
 import longPost from "../../fixtures/post-1.txt";
-import { type Api, type JsonBody, type Me, type Media, type Method, type Result, fail } from "./client";
-import type { Post, PostCreateInput, PostPage, PostUpdateInput, RenderWarning } from "./model.gen";
+import { type Api, type JsonBody, type LogQuery, type Me, type MediaItem, type MediaPage, type Method, type Result, fail } from "./client";
+import { LOG_KINDS, LOG_LEVELS, type LogEntry, type LogPage, type Post, type PostCreateInput, type PostPage, type PostUpdateInput, type RenderWarning } from "./model.gen";
 
 /** Cloudflare's public always-pass Turnstile key: the real widget works in dev. */
 const TEST_SITE_KEY = "1x00000000000000000000AA";
@@ -52,6 +66,44 @@ const keyList = (params: URLSearchParams): Key[] =>
           { id: 1, name: "MacBook Pro", created_at: Date.UTC(2026, 8, 3), last_used_at: Date.UTC(2026, 10, 24) },
           { id: 2, name: "iPhone 16", created_at: Date.UTC(2026, 10, 12), last_used_at: null },
         ]);
+
+interface MockToken {
+  id: number;
+  name: string;
+  scope: string;
+  created_at: number;
+  expires_at: number | null;
+  revoked_at: number | null;
+}
+/** The mock's API tokens; `?tokens=0` starts with none. The token text is made up and never listed. */
+let tokens: MockToken[] | undefined;
+const tokenList = (params: URLSearchParams): MockToken[] => (tokens ??= params.get("tokens") === "0" ? [] : structuredClone(tokenFixtures));
+
+/** `/api/auth/tokens`: `?tokens=error` fails the list, `?tokens=forbidden` refuses a create; `?role=writer` cannot make an owner token. */
+function tokenRoutes<T>(params: URLSearchParams, method: Method, path: string, body: Body): Result<T> | undefined {
+  const done = (value: unknown = {}): Result<T> => ({ ok: true, value: value as T });
+  if (path === "/api/auth/tokens" && method === "GET") {
+    return params.get("tokens") === "error" ? fail("bad_response", 500) : done({ tokens: tokenList(params) });
+  }
+  if (path === "/api/auth/tokens" && method === "POST") {
+    const name = String(body?.["name"] ?? "");
+    const scope = String(body?.["scope"] ?? "");
+    if (!name || [...name].length > 64 || !["read", "writer", "owner"].includes(scope)) return fail("input.invalid", 400);
+    if (params.get("tokens") === "forbidden" || (scope === "owner" && params.get("role") === "writer")) return fail("auth.forbidden", 403);
+    const list = tokenList(params);
+    const made = { id: Math.max(0, ...list.map((k) => k.id)) + 1, name, scope, created_at: Date.now(), expires_at: body?.["expires_at"] ? Number(body["expires_at"]) : null, revoked_at: null };
+    list.push(made);
+    return done({ ...made, token: "plb_mockMockMockMockMockMockMockMockMockMockMoc" });
+  }
+  const del = /^\/api\/auth\/tokens\/(\d+)$/.exec(path);
+  if (del && method === "DELETE") {
+    const at = tokenList(params).find((k) => k.id === Number(del[1]));
+    if (!at) return fail("store.not_found", 404);
+    at.revoked_at = Date.now();
+    return done();
+  }
+  return undefined;
+}
 
 /** The mock's auth routes; the failure each `?auth=` value forces is the one the real route gives. */
 async function auth<T>(params: URLSearchParams, method: Method, path: string, body: Body): Promise<Result<T>> {
@@ -122,11 +174,54 @@ async function auth<T>(params: URLSearchParams, method: Method, path: string, bo
     keys = keyList(params).filter((k) => k.id !== Number(del[1]));
     return done();
   }
+  const tok = tokenRoutes<T>(params, method, path, body);
+  if (tok) return tok;
   console.warn(`mock: ${method} ${path} is not served`);
   return fail("bad_response", 501);
 }
 
 const PAGE = 20;
+const LOG_PAGE = 50;
+const LOG_LEVEL_RANK: Record<string, number> = Object.fromEntries(LOG_LEVELS.map((l, i) => [l, i]));
+const LOG_NEWEST_AGO = 20 * 60_000;
+
+/** Whether an entry passes the filters, as the server applies them (`level` is a minimum). */
+function logMatches(e: LogEntry, q: LogQuery): boolean {
+  if (q.kind !== undefined && e.kind !== q.kind) return false;
+  if (q.level !== undefined && (LOG_LEVEL_RANK[e.level] ?? 0) < (LOG_LEVEL_RANK[q.level] ?? 0)) return false;
+  if (q.code !== undefined && e.error_code !== q.code) return false;
+  if (q.actor !== undefined && e.actor_id !== q.actor) return false;
+  if (q.from !== undefined && e.at < q.from) return false;
+  if (q.to !== undefined && e.at >= q.to) return false;
+  if (q.q !== undefined) {
+    const needle = q.q.toLowerCase();
+    const hit = e.request_id === q.q || e.subject.toLowerCase().includes(needle) || e.fields.some((f) => f.value.toLowerCase().includes(needle));
+    if (!hit) return false;
+  }
+  return true;
+}
+
+/** The mock's settings; reset by a page load, like the rest of the mock. */
+let settings: Record<string, unknown> | undefined;
+
+async function settingsCall<T>(params: URLSearchParams, method: Method, key: string | undefined, body: Body): Promise<Result<T>> {
+  const mode = params.get("mock");
+  if (mode === "loading") await new Promise(() => undefined);
+  await new Promise((r) => setTimeout(r, 250));
+  if (mode === "error") return fail("internal", 500);
+  if (mode === "offline") return fail("network", 0);
+  settings ??= mode === "empty" ? {} : structuredClone(settingsFixture);
+  if (method === "GET" && key === undefined) return { ok: true, value: { settings: structuredClone(settings) } as T };
+  if (key === undefined) return fail("api.not_found", 404);
+  if (params.get("role") === "writer") return fail("auth.forbidden", 403);
+  if (method === "PUT") {
+    if (body?.["value"] === undefined) return fail("input.invalid", 400, { field: "value" });
+    if (params.get("settings") === "invalid" && key === "site_per_page") return fail("input.invalid", 400, { field: "value" });
+    settings[key] = body["value"];
+  } else if (method === "DELETE") delete settings[key];
+  else return fail("api.not_found", 404);
+  return { ok: true, value: undefined as T };
+}
 
 /** An approximation: the server warns on TeX that does not render (`$\notacommand$`); the mock
  * only knows a `$$` that never closes, enough to show a warning. */
@@ -141,6 +236,10 @@ export function mockApi(params: URLSearchParams): Api {
   let mediaId = 100;
   const role = params.get("role") === "writer" ? "writer" : "owner";
   const store: Post[] = (posts as Post[]).map((p) => structuredClone(p));
+  // Fixed times in the fixture, shifted once so the newest entry is 20 minutes old.
+  const newest = Math.max(...(logEntries as LogEntry[]).map((e) => e.at));
+  const logStore: LogEntry[] = (logEntries as LogEntry[]).map((e) => ({ ...structuredClone(e), at: e.at + Date.now() - LOG_NEWEST_AGO - newest }));
+  const library: MediaItem[] = (mediaFixtures as MediaItem[]).map((m) => structuredClone(m));
   const first = store.find((p) => p.id === 1);
   if (first) first.markdown = longPost;
   /** The first update fails once with the server's newer version when `?conflict=1`. */
@@ -196,6 +295,32 @@ export function mockApi(params: URLSearchParams): Api {
       if (mode === "offline") return fail("network", 0);
       const p = store.find((x) => x.id === id);
       return p ? { ok: true, value: structuredClone(p) } : fail("post.not_found", 404);
+    },
+    async logList(q) {
+      // `?log=loading|error|offline|empty` forces a state on the log alone (`?mock=` also stops `me`, so the shell fails first).
+      const state = params.get("log") ?? mode;
+      if (state === "loading") await new Promise(() => undefined);
+      await new Promise((r) => setTimeout(r, 150));
+      if (state === "error") return fail("internal", 500);
+      if (state === "offline") return fail("network", 0);
+      if (role !== "owner") return fail("auth.forbidden", 403);
+      if (q.kind !== undefined && !(LOG_KINDS as readonly string[]).includes(q.kind)) return fail("input.invalid", 400, { field: "kind" });
+      if (q.q !== undefined && (q.q.length < 1 || q.q.length > 100)) return fail("input.invalid", 400, { field: "q" });
+      const limit = q.limit ?? LOG_PAGE;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) return fail("input.invalid", 400, { field: "limit" });
+      let offset = 0;
+      if (q.cursor !== undefined) {
+        try {
+          offset = Number(atob(q.cursor));
+        } catch {
+          offset = -1;
+        }
+        if (!Number.isInteger(offset) || offset < 0) return fail("input.invalid", 400, { field: "cursor" });
+      }
+      const all = state === "empty" ? [] : logStore.filter((e) => logMatches(e, q)).map((e) => structuredClone(e));
+      all.sort((a, b) => b.at - a.at || b.id - a.id);
+      const next = offset + limit < all.length ? btoa(String(offset + limit)) : null;
+      return { ok: true, value: { entries: all.slice(offset, offset + limit), next_cursor: next } };
     },
     async createPost(input: PostCreateInput) {
       await settle();
@@ -275,6 +400,8 @@ export function mockApi(params: URLSearchParams): Api {
     // The dev Worker's real renderer (crates/worker/src/contract.rs, test builds only).
     previewUrl: "/__preview",
     async call<T>(method: Method, path: string, body?: Body): Promise<Result<T>> {
+      const sm = /^\/api\/v1\/settings(?:\/([a-z0-9_-]+))?$/.exec(path);
+      if (sm) return settingsCall<T>(params, method, sm[1], body);
       const m = /^\/api\/v1\/posts\/(\d+)\/(trash|restore)$/.exec(path);
       if (method !== "POST" || !m) return auth<T>(params, method, path, body);
       await settle();
@@ -289,6 +416,57 @@ export function mockApi(params: URLSearchParams): Api {
       p.version += 1;
       p.updated_at = Date.now();
       return { ok: true, value: structuredClone(p) as T };
+    },
+    // The library lives in memory like the posts; `usage` is kept beside each item and sent only with one.
+    async media(q) {
+      await settle();
+      // `?media=error`: the library fails while the rest of the admin works.
+      if (params.get("media") === "error") return fail("internal", 500);
+      const bad = down<MediaPage>();
+      if (bad) return bad;
+      // Keyset like the server: newest first, the cursor is the last item's "created_at.id".
+      let before: [number, number] | undefined;
+      if (q.cursor !== undefined) {
+        const [at, id] = atob(q.cursor).split(".").map(Number);
+        if (!Number.isInteger(at) || !Number.isInteger(id)) return fail("input.invalid", 400, { field: "cursor" });
+        before = [at as number, id as number];
+      }
+      const limit = q.limit ?? PAGE;
+      const all = (mode === "empty" ? [] : library)
+        .filter((m) => (!q.missing_alt || m.alt === "") && (!q.unused || !m.usage?.length))
+        .sort((a, b) => b.created_at - a.created_at || b.id - a.id)
+        .filter((m) => !before || m.created_at < before[0] || (m.created_at === before[0] && m.id < before[1]));
+      const page = all.slice(0, limit);
+      const last = page[page.length - 1];
+      const media = page.map(({ usage: _u, ...m }) => m);
+      return { ok: true, value: { media, next_cursor: all.length > limit && last ? btoa(`${last.created_at}.${last.id}`) : null } };
+    },
+    async mediaItem(id) {
+      await settle();
+      const bad = down<MediaItem>();
+      if (bad) return bad;
+      const m = library.find((x) => x.id === id);
+      return m ? { ok: true, value: structuredClone(m) } : fail("store.not_found", 404);
+    },
+    async setMediaAlt(id, alt) {
+      await settle();
+      const bad = down<MediaItem>();
+      if (bad) return bad;
+      const m = library.find((x) => x.id === id);
+      if (!m) return fail("store.not_found", 404);
+      m.alt = alt;
+      return { ok: true, value: structuredClone(m) };
+    },
+    async deleteMedia(id) {
+      await settle();
+      const bad = down<undefined>();
+      if (bad) return bad;
+      const m = library.find((x) => x.id === id);
+      if (!m) return fail("store.not_found", 404);
+      if (m.uploaded_by !== me.user.id && role !== "owner") return fail("auth.forbidden", 403);
+      if (m.usage?.length) return fail("store.conflict", 409, { posts: [...m.usage] });
+      library.splice(library.indexOf(m), 1);
+      return { ok: true, value: undefined };
     },
     // Sends nothing: progress over a second or two, then the picture from this browser.
     async upload(file, progress, signal) {
@@ -310,8 +488,13 @@ export function mockApi(params: URLSearchParams): Api {
         img.onerror = () => resolve([0, 0]);
         img.src = url;
       });
-      const media: Media = { id: ++mediaId, url, width: size[0], height: size[1] };
-      return { ok: true, value: media };
+      if (up === "refuse") return fail("input.invalid", 400, { field: "sha256" });
+      // `?upload=dup`: the caller's own first picture answers, as the server does for a known hash.
+      const known = up === "dup" ? library[0] : undefined;
+      if (known) return { ok: true, value: { id: known.id, url: known.src, width: known.width, height: known.height, item: known, existing: true } };
+      const item: MediaItem = { id: ++mediaId, src: url, mime: file.type, bytes: file.size, width: size[0], height: size[1], alt: "", uploaded_by: me.user.id, created_at: Date.now() };
+      library.unshift(item);
+      return { ok: true, value: { id: item.id, url, width: size[0], height: size[1], item, existing: false } };
     },
   };
 }

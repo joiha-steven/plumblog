@@ -1,15 +1,17 @@
 //! `/api/v1`: the content API for the admin, the CLI and AI clients (docs/ARCHITECTURE.md,
 //! AI surface). Routes come from [`plumblog_model::api::ROUTES`]: this module finds the
 //! route, checks its access and input against the table, then calls the handler. Session
-//! cookie or API token alike.
+//! cookie or API token alike, except routes marked `session_only` (user admin).
 
 mod export;
 mod input;
+mod log;
 mod media;
 mod post_body;
 mod posts;
 mod settings;
 mod taxonomy;
+mod users;
 
 use plumblog_auth::json;
 use plumblog_model::api::{self, Access, Body, Field, Method as M, ROUTES, Route, RouteId};
@@ -56,6 +58,9 @@ pub(super) fn access(p: &Principal, route: &Route) -> Result<()> {
         Access::Read => p.require_read()?,
         Access::Require(perm) => p.require(perm)?,
     };
+    if route.session_only {
+        p.session_user()?;
+    }
     Ok(())
 }
 
@@ -68,6 +73,35 @@ pub fn check_access(p: &Principal, m: &Method, path: &str) -> Result<()> {
     match method(m).and_then(|m| api::find(m, path).ok()) {
         Some((route, _)) => access(p, route),
         None => Ok(()),
+    }
+}
+
+/// What must hold before a raw body is read: the route's access and, for a media item's new
+/// size, ownership of the item (one D1 read), so a caller refused either way never makes the
+/// Worker take the body in. `dispatch` repeats both.
+///
+/// # Errors
+///
+/// `Unauthenticated`, `Forbidden`, or `NotFound` for an unknown item or a path id that is not
+/// one.
+pub async fn check_before_body(ctx: &Ctx, p: &Principal, m: &Method, path: &str) -> Result<()> {
+    check_access(p, m, path)?;
+    if let Some(id) = owned_before_body(m, path)? {
+        media::owned(ctx, p, plumblog_model::MediaId(id)).await?;
+    }
+    Ok(())
+}
+
+/// The media item a raw body would be added to (a new size), whose ownership is checked
+/// before the body is read; `NotFound` when its path id is not one, so that body is not read.
+fn owned_before_body(m: &Method, path: &str) -> Result<Option<i64>> {
+    match method(m).and_then(|m| api::find(m, path).ok()) {
+        Some((route, values)) if route.id == RouteId::MediaVariant => values
+            .iter()
+            .find(|(k, _)| *k == "id")
+            .map(|(k, v)| input::path_id(k, v))
+            .transpose(),
+        _ => Ok(None),
     }
 }
 
@@ -150,19 +184,30 @@ pub async fn dispatch(
         RouteId::MediaUpdate => media::update(ctx, p, &input).await,
         RouteId::MediaDelete => media::delete(ctx, p, &input).await,
         RouteId::MediaOriginal => media::original(ctx, &input).await,
+        RouteId::MediaVariant => media::add_variant(ctx, p, &input, body).await,
         RouteId::CommentList => export::comments(ctx, &input).await,
         RouteId::UserList => export::users(ctx, &input).await,
+        RouteId::LogList => log::list(ctx, &input).await,
+        RouteId::UserRole => users::set_role(ctx, p, &input).await,
+        RouteId::UserDisabled => users::set_disabled(ctx, p, &input).await,
+        RouteId::UserDelete => users::delete(ctx, p, &input).await,
+        RouteId::InviteList => users::invite_list(ctx).await,
+        RouteId::InviteCreate => users::invite_create(ctx, p, &input).await,
+        RouteId::InviteRevoke => users::invite_revoke(ctx, p, &input).await,
         RouteId::RedirectList => settings::redirects(ctx).await,
         RouteId::RedirectPut => settings::redirect_put(ctx, p, &input).await,
         RouteId::RedirectDelete => settings::redirect_delete(ctx, p, &input).await,
         RouteId::SettingList => settings::list(ctx).await,
         RouteId::SettingPut => settings::put(ctx, p, &input).await,
         RouteId::SettingDelete => settings::delete(ctx, p, &input).await,
+        RouteId::ThemeList => settings::themes(ctx).await,
+        RouteId::ThemeDeclarations => settings::declarations(ctx, p, theme, &input).await,
         RouteId::ThemeOptions => settings::options(ctx, p, theme, &input).await,
         RouteId::ThemeOptionPut => settings::option_put(ctx, p, theme, &input).await,
         RouteId::ThemeOptionsDelete => settings::options_delete(ctx, p, theme, &input).await,
         RouteId::PluginList => settings::plugins(ctx).await,
         RouteId::PluginPut => settings::plugin_put(ctx, p, &input).await,
+        RouteId::PluginDeclarations => settings::declarations(ctx, p, plugin, &input).await,
         RouteId::PluginOptions => settings::options(ctx, p, plugin, &input).await,
         RouteId::PluginOptionPut => settings::option_put(ctx, p, plugin, &input).await,
         RouteId::PluginOptionsDelete => settings::options_delete(ctx, p, plugin, &input).await,
@@ -199,6 +244,7 @@ fn route_json(r: &Route) -> String {
             "session_only_keys",
             list(r.session_only_keys.iter().map(|k| quote(k)).collect()),
         ),
+        ("session_only", Out::Bool(r.session_only)),
         ("fields", list(r.fields.iter().map(field_json).collect())),
         (
             "max_body",
@@ -271,8 +317,27 @@ fn me(p: &Principal) -> Result<Reply> {
 
 #[cfg(test)]
 mod tests {
-    use super::reference;
+    use super::{owned_before_body, reference};
+    use plumblog_model::ErrorCode;
     use plumblog_model::api::ROUTES;
+    use worker::Method;
+
+    /// A new size's item is known before its body is read; a path id that is not one is 404
+    /// then too, never a body read first.
+    #[test]
+    fn owned_before_the_body() {
+        let at = |m: Method, p: &str| owned_before_body(&m, p);
+        assert_eq!(
+            at(Method::Post, "/api/v1/media/7/variants").unwrap(),
+            Some(7)
+        );
+        for bad in ["abc", "0", "-1", "07"] {
+            let e = at(Method::Post, &format!("/api/v1/media/{bad}/variants")).unwrap_err();
+            assert_eq!(e.code, ErrorCode::NotFound, "{bad}");
+        }
+        assert_eq!(at(Method::Post, "/api/v1/media").unwrap(), None);
+        assert_eq!(at(Method::Delete, "/api/v1/media/7").unwrap(), None);
+    }
 
     /// The served reference lists every route of the table, and only those.
     #[test]

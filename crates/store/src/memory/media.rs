@@ -77,14 +77,7 @@ impl MediaStore for MemoryStore {
 
     async fn public_media(&self, id: MediaId) -> Result<Option<Media>> {
         Ok(self.read(|s| {
-            let live = |p: PostId| {
-                s.posts
-                    .get(&p)
-                    .is_some_and(|p| p.status == PostStatus::Published)
-            };
-            s.media_usage(id)
-                .into_iter()
-                .any(live)
+            s.on_published(id)
                 .then(|| s.media.get(&id).cloned())
                 .flatten()
         }))
@@ -123,7 +116,27 @@ impl MediaStore for MemoryStore {
         Ok(self.read(|s| s.media_usage(id)))
     }
 
-    async fn delete_media(&self, id: MediaId) -> Result<()> {
+    async fn replace_media_variants(&self, id: MediaId, expected: &str, new: &str) -> Result<()> {
+        self.write(|s| {
+            let m = s
+                .media
+                .get_mut(&id)
+                .ok_or_else(|| not_found("media", id.0))?;
+            if m.variants_json != expected {
+                return Err(conflict(format!(
+                    "media {} variants changed since read",
+                    id.0
+                )));
+            }
+            new.clone_into(&mut m.variants_json);
+            if s.on_published(id) {
+                s.bump();
+            }
+            Ok(())
+        })
+    }
+
+    async fn delete_media(&self, id: MediaId) -> Result<String> {
         self.write(|s| {
             if !s.media.contains_key(&id) {
                 return Err(not_found("media", id.0));
@@ -133,8 +146,10 @@ impl MediaStore for MemoryStore {
             if !users.is_empty() {
                 return Err(media_in_use(id, &users));
             }
-            s.media.remove(&id);
-            Ok(())
+            Ok(s.media
+                .remove(&id)
+                .map(|m| m.variants_json)
+                .unwrap_or_default())
         })
     }
 }
@@ -157,6 +172,15 @@ impl State {
         ids.sort_unstable();
         ids.dedup();
         ids
+    }
+
+    /// Whether a published post uses `id` (its bytes and sizes are on reader pages).
+    fn on_published(&self, id: MediaId) -> bool {
+        self.media_usage(id).into_iter().any(|p| {
+            self.posts
+                .get(&p)
+                .is_some_and(|p| p.status == PostStatus::Published)
+        })
     }
 }
 

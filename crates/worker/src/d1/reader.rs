@@ -1,10 +1,10 @@
 //! Reader reads (`ReaderStore`): published posts only. The SQL is in `reader_sql`, where a test
 //! checks the plan of each query against the index it is meant to use.
 
-use plumblog_model::{PostId, Result, TagId};
+use plumblog_model::{MediaId, PostId, Result, TagId};
 use plumblog_store::{
-    READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage,
-    ReaderPost, ReaderRow, ReaderSitemapRow, ReaderStore, ReaderTag, Tag, year_bounds,
+    READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderCover, ReaderFilter, ReaderLink, ReaderNeighbours,
+    ReaderPage, ReaderPost, ReaderRow, ReaderSitemapRow, ReaderStore, ReaderTag, Tag, year_bounds,
 };
 use worker::js_sys::{Array, JSON};
 use worker::wasm_bindgen::{JsCast, JsValue};
@@ -30,6 +30,25 @@ fn read_tags(name: &'static str, r: &mut Row) -> Result<Vec<ReaderTag>> {
     }
     tags.sort_by(|a, b| a.0.total_cmp(&b.0));
     Ok(tags.into_iter().map(|(_, t)| t).collect())
+}
+
+/// The cover columns of [`sql::post`]; all NULL (so `None`) without a cover.
+fn read_cover(r: &mut Row) -> Result<Option<ReaderCover>> {
+    let Some(id) = r.opt_int()? else {
+        // Still consume the other five columns of the join.
+        for _ in 0..5 {
+            r.opt_text()?;
+        }
+        return Ok(None);
+    };
+    Ok(Some(ReaderCover {
+        id: MediaId(id),
+        r2_key: r.text()?,
+        width: r.int()?,
+        height: r.int()?,
+        alt: r.text()?,
+        variants_json: r.text()?,
+    }))
 }
 
 fn read_link(r: &mut Row) -> Result<ReaderLink> {
@@ -103,13 +122,14 @@ impl ReaderStore for D1Store {
         Ok(ReaderPage { total, rows })
     }
 
-    // 1 query (post page): the post, its tag ids and its tags.
+    // 1 query (post page): the post, its tag ids, its tags and its cover (media by primary key).
     async fn reader_post(&self, lang: &str, slug: &str) -> Result<Option<ReaderPost>> {
         let s = self.stmt("reader_post", &sql::post(), &[text(lang), text(slug)])?;
         match self.row(s).await? {
             Some(mut r) => Ok(Some(ReaderPost {
                 post: read_post(&mut r)?,
                 tags: read_tags("reader_post", &mut r)?,
+                cover: read_cover(&mut r)?,
             })),
             None => Ok(None),
         }
@@ -149,6 +169,41 @@ impl ReaderStore for D1Store {
         Ok(out)
     }
 
+    // 1 query: the unique (lang, slug) lookup.
+    async fn reader_post_exists(&self, lang: &str, slug: &str) -> Result<bool> {
+        let s = self.stmt(
+            "reader_post_exists",
+            &sql::post_exists(),
+            &[text(lang), text(slug)],
+        )?;
+        Ok(!self.rows(s).await?.is_empty())
+    }
+
+    // 1 query (none for an empty list): an EXISTS on posts_home per language.
+    async fn reader_langs_with_posts(&self, langs: &[String]) -> Result<Vec<String>> {
+        if langs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let params: Vec<JsValue> = langs.iter().map(|l| text(l)).collect();
+        let s = self.stmt(
+            "reader_langs_with_posts",
+            &sql::langs_with_posts(langs.len()),
+            &params,
+        )?;
+        let found: Vec<String> = self
+            .rows(s)
+            .await?
+            .iter_mut()
+            .map(Row::text)
+            .collect::<Result<_>>()?;
+        // Back in the caller's order, whatever order the engine answered in.
+        Ok(langs
+            .iter()
+            .filter(|l| found.contains(l))
+            .cloned()
+            .collect())
+    }
+
     // 1 query: a covering scan of posts_by_date. '%Y' of ms / 1000.0 is the UTC year,
     // agreeing with plumblog_store::year_of at the Jan 1 edges (contract case). Posts outside
     // years 1..=9999 are left out (strftime answers NULL there), as ReaderFilter::Year does.
@@ -176,6 +231,7 @@ impl ReaderStore for D1Store {
                 Ok(ReaderPost {
                     post: read_post(r)?,
                     tags: read_tags("reader_feed", r)?,
+                    cover: None,
                 })
             })
             .collect()
@@ -192,13 +248,16 @@ impl ReaderStore for D1Store {
         )?;
         let mut rows = Vec::new();
         for r in &mut self.rows(s).await? {
-            let row = ReaderSitemapRow {
+            let mut row = ReaderSitemapRow {
                 lang: r.text()?,
                 slug: r.text()?,
                 updated_at: r.int()?,
                 translation_group: PostId(r.int()?),
+                is_page: false,
             };
-            rows.push((r.int()?, r.int()?, row));
+            let (at, id) = (r.int()?, r.int()?);
+            row.is_page = r.int()? == 1;
+            rows.push((at, id, row));
         }
         // Newest first, like every reader list: published_at DESC, id DESC.
         rows.sort_by_key(|(at, id, _)| std::cmp::Reverse((*at, *id)));

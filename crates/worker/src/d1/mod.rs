@@ -13,6 +13,7 @@
 mod auth;
 mod comments;
 mod log;
+mod log_sql;
 mod media;
 mod post_save;
 mod posts;

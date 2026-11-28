@@ -101,6 +101,12 @@ impl ReaderSource for Fixture {
     async fn years(&self) -> Result<Vec<i32>> {
         self.posts.years().await
     }
+    async fn post_exists(&self, lang: &str, slug: &str) -> Result<bool> {
+        self.posts.post_exists(lang, slug).await
+    }
+    async fn langs_with_posts(&self, langs: &[String]) -> Result<Vec<String>> {
+        self.posts.langs_with_posts(langs).await
+    }
 }
 
 /// Every first path segment the Worker or its assets answer is never a post.
@@ -115,6 +121,54 @@ fn router_owned_segments_are_not_posts() {
         );
         assert!(super::routes::RESERVED.contains(&owned), "{owned}");
     }
+}
+
+#[test]
+fn language_home_routes() {
+    let lh = |lang: &str, page| Route::LangHome {
+        lang: lang.into(),
+        page,
+    };
+    assert_eq!(parse("/vi/"), lh("vi", 1));
+    assert_eq!(parse("/pt-br/"), lh("pt-br", 1));
+    assert_eq!(parse("/vi/page/2"), lh("vi", 2));
+    assert_eq!(
+        parse("/vi/page/1"),
+        Route::LangFirstPage { lang: "vi".into() }
+    );
+    assert_eq!(parse("/vi/page/02"), Route::NotFound);
+    assert_eq!(parse("/vi/page/2/"), Route::Redirect("/vi/page/2".into()));
+    // Not languages: reserved words, slugs, other shapes.
+    assert_eq!(parse("/api/"), Route::Redirect("/api".into()));
+    assert_eq!(
+        parse("/hello-world/"),
+        Route::Redirect("/hello-world".into())
+    );
+    assert_eq!(parse("/tag/page/2"), Route::NotFound);
+    assert_eq!(parse("/vi/tag/x"), Route::NotFound);
+    // `/vi` stays a post slug.
+    assert_eq!(
+        parse("/vi"),
+        Route::Post {
+            lang: None,
+            slug: "vi".into()
+        }
+    );
+}
+
+#[test]
+fn search_routes() {
+    assert_eq!(parse("/search"), Route::Search { lang: None });
+    assert_eq!(
+        parse("/vi/search"),
+        Route::Search {
+            lang: Some("vi".into())
+        }
+    );
+    assert_eq!(parse("/vi/search/"), Route::Redirect("/vi/search".into()));
+    // Reserved first segments are not languages.
+    assert_eq!(parse("/api/search"), Route::NotFound);
+    assert_eq!(parse("/vi/search/x"), Route::NotFound);
 }
 
 #[test]

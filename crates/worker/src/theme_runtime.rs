@@ -67,14 +67,25 @@ pub fn cache_tag() -> &'static str {
     }
 }
 
+/// The pushed theme, when [`prepare`] loaded one.
+pub fn pushed() -> Option<&'static Theme> {
+    match PUSHED.get() {
+        Some(Some(p)) => Some(&p.theme),
+        _ => None,
+    }
+}
+
+/// The theme name `PLUMBLOG_THEME` binds, trimmed; empty for the embedded default.
+pub fn bound(env: &Env) -> String {
+    env.var(THEME_VAR)
+        .map(|v| v.to_string().trim().to_owned())
+        .unwrap_or_default()
+}
+
 /// The binding names `name` as the pushed theme, but it did not load (missing, invalid, too
 /// large, or not fetched yet): its option declarations are unknown. Call after [`prepare`].
 pub fn unavailable(env: &Env, name: &str) -> bool {
-    let bound = env
-        .var(THEME_VAR)
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-    bound.trim() == name && !matches!(PUSHED.get(), Some(Some(p)) if p.theme.name() == name)
+    bound(env) == name && pushed().is_none_or(|t| t.name() != name)
 }
 
 /// `x-plumblog-theme` for a page the pushed theme rendered (`None` for the default).

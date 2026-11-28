@@ -8,7 +8,7 @@
 //! - Read paths never write.
 //! - `site.content_version` is bumped inside the same write whenever the write can change
 //!   what a reader sees (rules on each method).
-//! - Page sizes (`limit`) are capped at [`MAX_PAGE`], one more for post and media lists (the
+//! - Page sizes (`limit`) are capped at [`MAX_PAGE`], one more for post, media and log lists (the
 //!   probe row, see [`probe_len`]); a limit of 0 returns nothing.
 
 mod auth;
@@ -40,15 +40,16 @@ pub mod comment {
         site_enabled, submit,
     };
 }
-pub use log::{LogEntry, LogQuery, LogStore, RETENTION_JOB, retention_job};
+pub use log::{LogEntry, LogQuery, LogStore, RETENTION_JOB, kinds_at_least, retention_job};
 pub use media::{Media, MediaQuery, MediaStore, NewMedia};
 pub use posts::{
     NewRevision, Post, PostCounts, PostCursor, PostKind, PostOrder, PostQuery, PostStatus,
     PostStore, PostSummary, Revision, SavePost, Saved, valid_client_id,
 };
 pub use reader::{
-    READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage,
-    ReaderPost, ReaderRow, ReaderSitemapRow, ReaderStore, ReaderTag, year_bounds, year_of,
+    READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderCover, ReaderFilter, ReaderLink, ReaderNeighbours,
+    ReaderPage, ReaderPost, ReaderRow, ReaderSitemapRow, ReaderStore, ReaderTag, year_bounds,
+    year_of,
 };
 pub use redirects::{Redirect, RedirectStore};
 pub use settings::{OptionOwner, PluginState, SettingsStore};
@@ -61,7 +62,7 @@ pub use signin::{
     public_settings, setup_hash_json,
 };
 pub use taxonomy::{NewSeries, Series, Tag, TaxonomyStore};
-pub use users::{NewUser, ProfileUpdate, SiteStore, User, UserStore};
+pub use users::{Admin, NewUser, ProfileUpdate, SiteStore, User, UserStore};
 pub use webhooks::{
     AttemptResult, Delivery, DeliveryStore, NewDelivery, NewWebhook, Webhook, WebhookStore,
 };

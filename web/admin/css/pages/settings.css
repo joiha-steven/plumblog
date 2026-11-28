@@ -11,8 +11,8 @@
   /* The strip plays the role of the filter row on other pages, so it sits flush under the header like they do. */
 }
 
-/* Account: the page gutter around plain sections; one passkey per row; the add form is a quiet panel. */
-.acct { padding: var(--stack) max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-32) max(var(--gutter), env(safe-area-inset-left, 0px)); }
+/* Account and settings: the page gutter around plain sections; one passkey per row; the add form is a quiet panel. */
+.acct, .settings-box { padding: var(--stack) max(var(--gutter), env(safe-area-inset-right, 0px)) var(--sp-32) max(var(--gutter), env(safe-area-inset-left, 0px)); }
 .acct-kv { display: grid; gap: var(--sp-12); }
 .acct .prow .v { min-width: 0; overflow-wrap: anywhere; }
 .pk-list { display: grid; }
