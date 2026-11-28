@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { after, before, test } from "node:test";
-import { startWorker, wrangler } from "./harness.mjs";
+import { d1Sql, startWorker } from "./harness.mjs";
 
 const TOKEN = "pass";
 const SITE_KEY = "1x00000000000000000000AA";
@@ -64,10 +64,7 @@ after(async () => {
 });
 
 function sql(command, w = worker) {
-  const out = wrangler(["d1", "execute", "DB", "--local", "--persist-to", w.state, "--json", "--command", command]);
-  const start = out.indexOf("[");
-  assert.ok(start >= 0, `no JSON in wrangler output:\n${out}`);
-  return JSON.parse(out.slice(start)).at(-1).results ?? [];
+  return d1Sql(w.state, command);
 }
 const count = () => sql("SELECT count(*) AS n FROM comments")[0].n;
 /** Everything a refused post must leave alone: comment rows, system log rows, content version. */

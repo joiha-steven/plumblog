@@ -43,7 +43,13 @@ async function api(w, method, path, { body, cookie, ip } = {}) {
   const h = { "cf-connecting-ip": ip ?? nextIp(), origin: w.url };
   if (cookie) h.cookie = `${COOKIE}=${cookie}`;
   if (body !== undefined) h["content-type"] = "application/json";
-  const res = await fetch(w.url + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) });
+  let res;
+  try {
+    res = await fetch(w.url + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) });
+  } catch (e) {
+    // A bare "fetch failed" hid the cause twice on CI (#57): name the socket error.
+    throw new Error(`${method} ${path}: ${e.message}: ${e.cause?.code ?? ""} ${e.cause?.message ?? e.cause ?? ""}`, { cause: e });
+  }
   const text = await res.text();
   return { status: res.status, text, json: text ? JSON.parse(text) : null };
 }

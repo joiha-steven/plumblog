@@ -5,7 +5,7 @@
   "license": "AGPL-3.0-only",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "scripts": {
     "test:worker": "node --test \"worker-test/*.test.mjs\""

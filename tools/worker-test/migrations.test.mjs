@@ -9,7 +9,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { makeStateDir, wrangler } from "./harness.mjs";
+import { d1Exec, d1QueryEach, makeStateDir, wrangler } from "./harness.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const MIGRATIONS = join(ROOT, "migrations");
@@ -52,21 +52,14 @@ function expectedSchema() {
   return { tables, indexes, virtual };
 }
 
-/** Rows of each statement, in order, from ONE wrangler call: each call costs about a
- *  second, so per-table calls would push the Worker tests past their time budget. */
-function queryEach(dir, sqls) {
-  const out = wrangler(["d1", "execute", "DB", "--local", "--persist-to", dir, "--json", "--command", sqls.join(";\n")]);
-  const start = out.indexOf("[");
-  assert.ok(start >= 0, `no JSON in wrangler output:\n${out}`);
-  const results = JSON.parse(out.slice(start)).map((r) => r.results ?? []);
-  assert.equal(results.length, sqls.length, "one result per statement");
-  return results;
-}
+/** Rows of each statement, in order, on one connection to the state dir's D1 file (reads go to SQLite directly, not through wrangler). */
+const queryEach = (dir, sqls) => d1QueryEach(dir, sqls);
 
 /** Rows of a single statement. */
 const query = (dir, sql) => queryEach(dir, [sql])[0];
 
 function executeFile(dir, path) {
+  // Stays on wrangler: this is how each migration file reaches a fresh D1, and it creates the file.
   wrangler(["d1", "execute", "DB", "--local", "--persist-to", dir, "--file", path]);
 }
 
@@ -237,7 +230,7 @@ test("api_tokens after every migration: scopes, unique hash, user cascade, index
   const db = makeStateDir();
   try {
     wrangler(["d1", "migrations", "apply", "DB", "--local", "--persist-to", db.dir]);
-    const run = (sql) => queryEach(db.dir, [sql]);
+    const run = (sql) => d1Exec(db.dir, sql);
     run(`INSERT INTO users (id, login, slug, display_name, role, created_at, updated_at) VALUES
       (1, 'a', 'a', 'A', 'owner', 1, 1), (2, 'b', 'b', 'B', 'writer', 1, 1)`);
     run(`INSERT INTO api_tokens (user_id, name, token_hash, scope, created_at) VALUES
