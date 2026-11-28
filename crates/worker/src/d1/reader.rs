@@ -1,10 +1,10 @@
 //! Reader reads (`ReaderStore`): published posts only. The SQL is in `reader_sql`, where a test
 //! checks the plan of each query against the index it is meant to use.
 
-use plumblog_model::{PostId, Result, TagId};
+use plumblog_model::{MediaId, PostId, Result, TagId};
 use plumblog_store::{
-    READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage,
-    ReaderPost, ReaderRow, ReaderSitemapRow, ReaderStore, ReaderTag, Tag, year_bounds,
+    READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderCover, ReaderFilter, ReaderLink, ReaderNeighbours,
+    ReaderPage, ReaderPost, ReaderRow, ReaderSitemapRow, ReaderStore, ReaderTag, Tag, year_bounds,
 };
 use worker::js_sys::{Array, JSON};
 use worker::wasm_bindgen::{JsCast, JsValue};
@@ -30,6 +30,25 @@ fn read_tags(name: &'static str, r: &mut Row) -> Result<Vec<ReaderTag>> {
     }
     tags.sort_by(|a, b| a.0.total_cmp(&b.0));
     Ok(tags.into_iter().map(|(_, t)| t).collect())
+}
+
+/// The cover columns of [`sql::post`]; all NULL (so `None`) without a cover.
+fn read_cover(r: &mut Row) -> Result<Option<ReaderCover>> {
+    let Some(id) = r.opt_int()? else {
+        // Still consume the other five columns of the join.
+        for _ in 0..5 {
+            r.opt_text()?;
+        }
+        return Ok(None);
+    };
+    Ok(Some(ReaderCover {
+        id: MediaId(id),
+        r2_key: r.text()?,
+        width: r.int()?,
+        height: r.int()?,
+        alt: r.text()?,
+        variants_json: r.text()?,
+    }))
 }
 
 fn read_link(r: &mut Row) -> Result<ReaderLink> {
@@ -103,13 +122,14 @@ impl ReaderStore for D1Store {
         Ok(ReaderPage { total, rows })
     }
 
-    // 1 query (post page): the post, its tag ids and its tags.
+    // 1 query (post page): the post, its tag ids, its tags and its cover (media by primary key).
     async fn reader_post(&self, lang: &str, slug: &str) -> Result<Option<ReaderPost>> {
         let s = self.stmt("reader_post", &sql::post(), &[text(lang), text(slug)])?;
         match self.row(s).await? {
             Some(mut r) => Ok(Some(ReaderPost {
                 post: read_post(&mut r)?,
                 tags: read_tags("reader_post", &mut r)?,
+                cover: read_cover(&mut r)?,
             })),
             None => Ok(None),
         }
@@ -176,6 +196,7 @@ impl ReaderStore for D1Store {
                 Ok(ReaderPost {
                     post: read_post(r)?,
                     tags: read_tags("reader_feed", r)?,
+                    cover: None,
                 })
             })
             .collect()

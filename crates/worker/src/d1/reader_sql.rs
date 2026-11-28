@@ -84,10 +84,13 @@ pub(super) fn rows(from: &str, all: bool) -> String {
     )
 }
 
-/// A post page: `posts_lang_slug`, then the tags through the `post_tags` primary key.
+/// A post page: `posts_lang_slug`, then the tags through the `post_tags` primary key and the
+/// cover through the `media` primary key (LEFT JOIN: no cover is all NULL).
 pub(super) fn post() -> String {
     format!(
-        "SELECT {POST_COLS}, {TAGS_COL} FROM posts p \
+        "SELECT {POST_COLS}, {TAGS_COL}, \
+         m.id, m.r2_key, m.width, m.height, m.alt, m.variants_json \
+         FROM posts p LEFT JOIN media m ON m.id = p.cover_media_id \
          WHERE p.lang = ? AND p.slug = ? AND p.status = 'published'"
     )
 }
@@ -362,7 +365,14 @@ mod plans {
             false,
         );
 
-        check(&c, "post", &post(), &["posts_lang_slug"], false);
+        // The cover is one primary-key lookup, not a scan of `media`.
+        check(
+            &c,
+            "post",
+            &post(),
+            &["posts_lang_slug", "SEARCH m USING INTEGER PRIMARY KEY"],
+            false,
+        );
         // The D1 engine chose posts_admin (status) here and read every published row; the
         // SQLite bundled for tests does not, so the pin itself is asserted as well.
         assert!(TRANSLATIONS.contains("INDEXED BY posts_group_lang"));

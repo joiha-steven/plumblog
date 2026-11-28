@@ -3,10 +3,18 @@
 // prefix, and an empty site renders with defaults. Runs against an empty database: no seed.
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { deflateSync } from "node:zlib";
 import { after, before, test } from "node:test";
 import { startWorker } from "./harness.mjs";
 
 const T = Date.now();
+const COVER_VARIANTS = JSON.stringify([
+  { key: "media/1/cover-480.webp", width: 480, height: 240, bytes: 1, mime: "image/webp" },
+  { key: "media/1/cover-960.webp", width: 960, height: 480, bytes: 1, mime: "image/webp" },
+  { key: "media/1/cover-1600.webp", width: 1600, height: 800, bytes: 1, mime: "image/webp" },
+  { key: "media/1/cover-960.avif", width: 960, height: 480, bytes: 1, mime: "image/avif" },
+]);
 const DAY = 86_400_000;
 const TOKEN = `plb_${randomBytes(32).toString("base64url")}`;
 const hash = createHash("sha256").update(TOKEN).digest("hex");
@@ -17,7 +25,8 @@ before(async () => {
   worker = await startWorker({
     seedSql: `INSERT INTO users (id, login, slug, display_name, role, password_hash, disabled_at, created_at, updated_at) VALUES (1, 'olga', 'olga', 'Olga', 'owner', NULL, NULL, ${T}, ${T});
       INSERT INTO api_tokens (id, user_id, name, token_hash, scope, created_at, expires_at, revoked_at) VALUES (1, 1, 'boss', '${hash}', 'owner', ${T}, NULL, NULL);
-      INSERT INTO settings (key, value_json, updated_at) VALUES ('origin', '"https://blog.test"', ${T});`,
+      INSERT INTO settings (key, value_json, updated_at) VALUES ('origin', '"https://blog.test"', ${T});
+      INSERT INTO media (id, r2_key, mime, bytes, width, height, alt, variants_json, uploaded_by, created_at) VALUES (1, 'media/1/cover.png', 'image/png', 100, 3000, 1500, 'A "plum" tree', '${COVER_VARIANTS}', 1, ${T});`,
   });
 });
 after(async () => {
@@ -154,4 +163,76 @@ test("unpublishing makes the post a 404 and removes it from every listing", asyn
   assert.doesNotMatch((await text("/")).body, /hello-world/);
   assert.doesNotMatch((await text("/feed.xml")).body, /hello-world/);
   assert.doesNotMatch((await text("/sitemap.xml")).body, /hello-world/);
+});
+
+test("a cover is the social card: absolute og:image and twitter:image with real size and alt", async () => {
+  await create({ lang: "en", slug: "with-cover", title: "With cover", status: "published", cover_media_id: 1 });
+  await create({ lang: "en", slug: "without-cover", title: "Without cover", status: "published" });
+  const img = "https://blog.test/media/1/cover-960.webp";
+  const { body } = await text("/with-cover");
+  for (const tag of [
+    `<meta property="og:image" content="${img}">`,
+    '<meta property="og:image:width" content="960">',
+    '<meta property="og:image:height" content="480">',
+    '<meta property="og:image:alt" content="A &quot;plum&quot; tree">',
+    '<meta name="twitter:card" content="summary_large_image">',
+    `<meta name="twitter:image" content="${img}">`,
+    '<meta name="twitter:image:alt" content="A &quot;plum&quot; tree">',
+    `"image":["${img}"]`,
+  ]) {
+    assert.ok(body.includes(tag), `missing ${tag}`);
+  }
+  const plain = (await text("/without-cover")).body;
+  assert.doesNotMatch(plain, /og:image|twitter:image/);
+  assert.match(plain, /<meta name="twitter:card" content="summary">/);
+});
+
+// A PNG header of 1600x1200 (the fixture size's aspect) over a tiny body; no binary fixture is added.
+const crcTable = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+const crc32 = (buf) => {
+  let c = 0xffffffff;
+  for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+};
+const be32 = (n) => Buffer.from([n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]);
+const pngChunk = (type, data) => {
+  const td = Buffer.concat([Buffer.from(type), data]);
+  return Buffer.concat([be32(data.length), td, be32(crc32(td))]);
+};
+const PNG = Buffer.concat([
+  Buffer.from("\x89PNG\r\n\x1a\n", "latin1"),
+  pngChunk("IHDR", Buffer.concat([be32(1600), be32(1200), Buffer.from([8, 6, 0, 0, 0])])),
+  pngChunk("IDAT", deflateSync(Buffer.from([0, 1, 2, 3, 255]))),
+  pngChunk("IEND", Buffer.alloc(0)),
+]);
+
+test("the og:image URL of an uploaded cover is served: 200, image/webp, the stored bytes", async () => {
+  const headers = { authorization: `Bearer ${TOKEN}`, origin: worker.url, "content-type": "application/octet-stream" };
+  const up = await fetch(`${worker.url}/api/v1/media?${new URLSearchParams({ name: "real.png", mime: "image/png", width: 1600, height: 1200 })}`, {
+    method: "POST",
+    headers,
+    body: PNG,
+  });
+  assert.equal(up.status, 201, await up.clone().text());
+  const { id } = await up.json();
+  const webp = readFileSync(new URL("./fixtures/variant-480.webp", import.meta.url));
+  const q = new URLSearchParams({ mime: "image/webp", width: 480, height: 360, sha256: createHash("sha256").update(webp).digest("hex") });
+  const v = await fetch(`${worker.url}/api/v1/media/${id}/variants?${q}`, { method: "POST", headers, body: webp });
+  assert.equal(v.status, 201, await v.clone().text());
+  await create({ lang: "en", slug: "real-cover", title: "Real cover", status: "published", cover_media_id: id });
+
+  const { body } = await text("/real-cover");
+  const url = body.match(/<meta property="og:image" content="([^"]+)">/)?.[1];
+  assert.ok(url?.startsWith(`https://blog.test/media/${id}/`), url);
+  assert.match(body, /<meta property="og:image:width" content="480">/);
+  assert.match(body, /<meta property="og:image:height" content="360">/);
+  // The origin is a made-up host; the path is what this Worker serves.
+  const res = await get(new URL(url).pathname);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("content-type"), "image/webp");
+  assert.deepEqual(Buffer.from(await res.arrayBuffer()), webp);
 });
