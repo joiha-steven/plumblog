@@ -12,7 +12,8 @@
  *
  * Publishing: a post update with `status` follows the server's rules (a draft carries no time, a
  * scheduled time must be in the future); `?slug=taken` makes the first publish fail once with a
- * taken slug; trash and restore work on the same list.
+ * taken slug; trash and restore work on the same list. `?create=slow` leaves every create
+ * unanswered (the editor's "still saving" message).
  *
  * Posts live in memory, from fixtures/posts.json, and reset on page load; the long post (id 1)
  * keeps its body in post-1.txt, so its `markdown` in the JSON is empty and is filled in here.
@@ -187,6 +188,7 @@ export function mockApi(params: URLSearchParams): Api {
     },
     async createPost(input: PostCreateInput) {
       await settle();
+      if (params.get("create") === "slow") await new Promise(() => undefined);
       const bad = down<Post>();
       if (bad) return bad;
       if (store.some((p) => p.slug === input.slug && p.lang === input.lang)) return fail("store.conflict", 409, { field: "slug" });
