@@ -14,6 +14,9 @@ pub const MAX_POST_BODY: usize = 160 * 1024;
 /// memory, since the Worker holds the whole body to check its header (docs/ARCHITECTURE.md,
 /// Budgets).
 pub const MAX_MEDIA_BODY: usize = 20 * 1024 * 1024;
+/// Request body cap for one size of an item (`POST /api/v1/media/{id}/variants`): an AVIF or
+/// WebP of at most 2400 px wide, or the original's width, stays far under it.
+pub const MAX_VARIANT_BODY: usize = 8 * 1024 * 1024;
 /// Request body cap for `POST /mcp`: the largest JSON route body (a post) plus the JSON-RPC
 /// envelope around it (`jsonrpc`, `id`, `method`, `params.name`, `_meta`), about 150 bytes from
 /// real clients; 4 KiB leaves room for any sane id or progress token. The tool's own body is
@@ -737,7 +740,7 @@ pub const ROUTES: &[Route] = &[
     // Same ownership rule as delete: the caller's own upload, else `media.delete_any`.
     Route {
         also: &[Permission::DeleteAnyMedia],
-        max_body: MAX_MEDIA_BODY,
+        max_body: MAX_VARIANT_BODY,
         body: Body::Original,
         ..route(
             RouteId::MediaVariant,
