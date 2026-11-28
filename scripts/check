@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+ENTRY_GZIP_BUDGET_BYTES=2048
 WASM_GZIP_BUDGET_BYTES=$((1024 * 1024)) # Workers free plan allows 3 MiB gzipped; keep headroom.
 
 fail() { echo "check: FAIL: $1" >&2; exit 1; }
@@ -60,6 +61,11 @@ WASM_FILE=target/worker-release/index_bg.wasm
 size=$(gzip -9 -c "$WASM_FILE" | wc -c | tr -d ' ')
 echo "check: worker.wasm gzip = $size bytes (budget $WASM_GZIP_BUDGET_BYTES; deployed form, after wasm-opt)"
 [ "$size" -le "$WASM_GZIP_BUDGET_BYTES" ] || fail "worker wasm gzip $size > budget $WASM_GZIP_BUDGET_BYTES"
+# The JS entry is what every fresh isolate parses before the wasm loads: keep it tiny.
+scripts/worker-entry target/worker-release || fail "worker entry (above)"
+size=$(gzip -9 -c target/worker-release/entry.mjs | wc -c | tr -d ' ')
+echo "check: entry.mjs gzip = $size bytes (budget $ENTRY_GZIP_BUDGET_BYTES)"
+[ "$size" -le "$ENTRY_GZIP_BUDGET_BYTES" ] || fail "entry.mjs gzip $size > budget $ENTRY_GZIP_BUDGET_BYTES"
 
 # --- crate dependency graph (issue #1) ---
 step "crate dependency graph"
