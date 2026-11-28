@@ -6,6 +6,7 @@
 import type { Api, ApiError } from "../api/client";
 import type { OptionDeclarations, ThemeList } from "../api/model.gen";
 import { h } from "../dom";
+import { getOnce } from "../early";
 import { lang, t } from "../i18n";
 import { seg } from "../seg";
 import { empty, failed, loadingRows } from "../ui";
@@ -43,7 +44,7 @@ export function mountAppearance(box: HTMLElement, api: Api, offline: () => boole
   const load = (): void => {
     box.replaceChildren(loadingRows(3));
     void (async () => {
-      const list = await api.call<ThemeList>("GET", "/api/v1/themes");
+      const list = await getOnce<ThemeList>(api, "/api/v1/themes");
       if (!list.ok) return box.replaceChildren(failed(list.error, load));
       // A bound theme that did not load: the default renders, but its options are not the owner's to edit.
       const bad = list.value.themes.find((x) => !x.available);
@@ -69,7 +70,7 @@ export function mountAppearance(box: HTMLElement, api: Api, offline: () => boole
 export function mountPlugins(box: HTMLElement, api: Api, offline: () => boolean): void {
   const load = (): void => {
     box.replaceChildren(loadingRows(3));
-    void api.call<{ plugins: Plugin[] }>("GET", "/api/v1/plugins").then((r) => {
+    void getOnce<{ plugins: Plugin[] }>(api, "/api/v1/plugins").then((r) => {
       if (!r.ok) return box.replaceChildren(failed(r.error, load));
       const top = header(t("admin.settings.plugins"), t("admin.options.plugins_hint"));
       if (r.value.plugins.length === 0) {
