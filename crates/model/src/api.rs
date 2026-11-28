@@ -228,11 +228,14 @@ pub enum RouteId {
     SettingList,
     SettingPut,
     SettingDelete,
+    ThemeList,
+    ThemeDeclarations,
     ThemeOptions,
     ThemeOptionPut,
     ThemeOptionsDelete,
     PluginList,
     PluginPut,
+    PluginDeclarations,
     PluginOptions,
     PluginOptionPut,
     PluginOptionsDelete,
@@ -424,6 +427,8 @@ const LOG: &[Field] = &[
 ];
 const VALUE: &[Field] = &[path_name("key"), req("value", Type::Json)];
 const OWNER: &[Field] = &[path_name("name")];
+/// `lang`: the language of labels and help (`vi`, `vi-VN`); English when absent or unknown.
+const DECLARATIONS: &[Field] = &[path_name("name"), query("lang", Type::Str)];
 const OWNER_VALUE: &[Field] = &[
     path_name("name"),
     path_name("key"),
@@ -810,6 +815,25 @@ pub const ROUTES: &[Route] = &[
         )
     },
     route(
+        RouteId::ThemeList,
+        Method::Get,
+        "/api/v1/themes",
+        Access::Read,
+        &[],
+        200,
+        "theme_list",
+    ),
+    // Read like theme option values: what a theme declares shows on reader pages anyway.
+    route(
+        RouteId::ThemeDeclarations,
+        Method::Get,
+        "/api/v1/themes/{name}/declarations",
+        Access::Read,
+        DECLARATIONS,
+        200,
+        "option_declarations",
+    ),
+    route(
         RouteId::ThemeOptions,
         Method::Get,
         "/api/v1/themes/{name}/options",
@@ -853,6 +877,17 @@ pub const ROUTES: &[Route] = &[
         &[path_name("name"), req("enabled", Type::Bool)],
         204,
         "none",
+    ),
+    // Gated like the plugin's option values, which only the same callers may read or write:
+    // the declarations are the form for them.
+    route(
+        RouteId::PluginDeclarations,
+        Method::Get,
+        "/api/v1/plugins/{name}/declarations",
+        PLUGINS,
+        DECLARATIONS,
+        200,
+        "option_declarations",
     ),
     // Plugin options may hold a plugin's secrets: read like they are written.
     route(
@@ -925,11 +960,14 @@ pub const fn tool_name(id: RouteId) -> Option<&'static str> {
         RouteId::SettingList => Some("setting_list"),
         RouteId::SettingPut => Some("setting_put"),
         RouteId::SettingDelete => Some("setting_delete"),
+        RouteId::ThemeList => Some("theme_list"),
+        RouteId::ThemeDeclarations => Some("theme_declarations"),
         RouteId::ThemeOptions => Some("theme_options"),
         RouteId::ThemeOptionPut => Some("theme_option_put"),
         RouteId::ThemeOptionsDelete => Some("theme_options_delete"),
         RouteId::PluginList => Some("plugin_list"),
         RouteId::PluginPut => Some("plugin_put"),
+        RouteId::PluginDeclarations => Some("plugin_declarations"),
         RouteId::PluginOptions => Some("plugin_options"),
         RouteId::PluginOptionPut => Some("plugin_option_put"),
         RouteId::PluginOptionsDelete => Some("plugin_options_delete"),

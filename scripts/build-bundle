@@ -22,5 +22,6 @@ export PLUMBLOG_ADMIN_PRELOAD="$PWD/target/admin.preload"
 # The release profile with wasm-opt, as scripts/check's size budget (which builds without the
 # preload list, a few hundred bytes smaller).
 (cd crates/worker && "$wb" --release --out-dir "$out/worker") >&2 || fail "worker-build failed"
+scripts/worker-entry "$out/worker" || fail "worker entry (above)"
 scripts/assemble-assets "$out/assets" target/admin || fail "assembling assets (above)"
 cp -R migrations "$out/migrations"

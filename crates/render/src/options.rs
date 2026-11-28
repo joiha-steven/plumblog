@@ -4,14 +4,14 @@
 //! (`extension_options.value_json`); a value that fails its declaration falls back to the
 //! default and is reported, never breaking a page.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 /// The admin's fixed field types. Unknown types fail to parse, so a theme or plugin with one
 /// fails to load instead of rendering half its options.
-#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldType {
     ShortText,
@@ -106,44 +106,54 @@ pub const COMMON_KEYS: &[(&str, &str)] = &[
     ),
 ];
 
-/// `[options.<key>]`.
-#[derive(Deserialize, Debug)]
+/// `[options.<key>]`. Serialised for the admin's generated forms ([`Schema::declarations`]):
+/// locale keys go out as `*_key` beside their text, and the fields whose effective value
+/// differs from the declared one (default, limits, choices) are written by the view instead.
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OptionDecl {
     #[serde(rename = "type")]
     pub kind: FieldType,
+    #[serde(rename(serialize = "label_key"))]
     pub label: String,
+    #[serde(rename(serialize = "help_key"))]
     pub help: Option<String>,
     pub group: Option<String>,
     pub icon: Option<String>,
+    #[serde(skip_serializing)]
     pub default: Json,
     /// `color` in a theme: the token it overrides (the option key when absent).
     pub token: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub choices: Vec<Choice>,
     pub min: Option<f64>,
     pub max: Option<f64>,
     pub step: Option<f64>,
+    #[serde(skip_serializing)]
     pub max_len: Option<usize>,
+    #[serde(skip_serializing)]
     pub max_items: Option<usize>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Choice {
     pub value: String,
+    #[serde(rename(serialize = "label_key"))]
     pub label: String,
     /// Theme styles: one stylesheet shipped after `style.css` when this value is chosen.
+    #[serde(skip_serializing)]
     pub css: Option<String>,
     /// Not offered to owners; a stored draft value falls back to the default.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub draft: bool,
 }
 
 /// `[groups.<key>]`.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Group {
+    #[serde(rename(serialize = "label_key"))]
     pub label: String,
     pub icon: Option<String>,
 }
@@ -152,7 +162,51 @@ pub(crate) struct Group {
 #[derive(Debug, Default)]
 pub(crate) struct Schema {
     pub decls: BTreeMap<String, OptionDecl>,
+    groups: BTreeMap<String, Group>,
     defaults: BTreeMap<String, Json>,
+}
+
+/// What `GET /api/v1/{themes,plugins}/<name>/declarations` answers (shape
+/// `option_declarations` in `crates/model`): every key always present, `null` when it does
+/// not apply, so the admin's shape check holds the Worker to it key for key.
+#[derive(Serialize)]
+struct DeclarationsView<'a> {
+    name: &'a str,
+    version: Option<&'a str>,
+    lang: &'a str,
+    groups: Vec<GroupView<'a>>,
+    options: Vec<OptionView<'a>>,
+}
+
+#[derive(Serialize)]
+struct GroupView<'a> {
+    key: &'a str,
+    label: String,
+    #[serde(flatten)]
+    group: &'a Group,
+}
+
+#[derive(Serialize)]
+struct OptionView<'a> {
+    key: &'a str,
+    label: String,
+    help: Option<String>,
+    #[serde(flatten)]
+    decl: &'a OptionDecl,
+    /// As checked at load (a whole number declared as `10.0` is `10`).
+    default: &'a Json,
+    /// Offered choices only: a draft is refused on write, so the admin never shows it.
+    choices: Vec<ChoiceView<'a>>,
+    /// The limits [`check_value`] applies, declared or not.
+    max_len: Option<usize>,
+    max_items: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct ChoiceView<'a> {
+    label: String,
+    #[serde(flatten)]
+    choice: &'a Choice,
 }
 
 /// Who declares the options, for messages and the rules that differ.
@@ -169,7 +223,7 @@ impl Schema {
     pub fn check(
         file: &str,
         decls: BTreeMap<String, OptionDecl>,
-        groups: &BTreeMap<String, Group>,
+        groups: BTreeMap<String, Group>,
         strings: &HashMap<String, String>,
         owner: Owner<'_>,
     ) -> Result<Self, String> {
@@ -188,7 +242,7 @@ impl Schema {
             )),
             _ => Ok(()),
         };
-        for (key, g) in groups {
+        for (key, g) in &groups {
             key_exists(&format!("groups.{key}.label"), &g.label)?;
             icon_ok(&format!("groups.{key}.icon"), g.icon.as_ref())?;
         }
@@ -262,7 +316,63 @@ impl Schema {
                 check_value(d, &d.default).map_err(|e| format!("{file}: {at}.default: {e}"))?;
             defaults.insert(key.clone(), default);
         }
-        Ok(Self { decls, defaults })
+        Ok(Self {
+            decls,
+            groups,
+            defaults,
+        })
+    }
+
+    /// Every group and declaration as JSON for the admin, locale keys turned into text by
+    /// `text` (one language, English behind it; `lang` names it). Keys exist in English:
+    /// [`Self::check`] made sure at load.
+    ///
+    /// # Errors
+    /// Only if serialising fails, which these types cannot make it do.
+    pub fn declarations(
+        &self,
+        name: &str,
+        version: Option<&str>,
+        lang: &str,
+        text: &dyn Fn(&str) -> String,
+    ) -> Result<String, String> {
+        let view = DeclarationsView {
+            name,
+            version,
+            lang,
+            groups: self
+                .groups
+                .iter()
+                .map(|(key, group)| GroupView {
+                    key,
+                    label: text(&group.label),
+                    group,
+                })
+                .collect(),
+            options: self
+                .decls
+                .iter()
+                .map(|(key, decl)| OptionView {
+                    key,
+                    label: text(&decl.label),
+                    help: decl.help.as_deref().map(text),
+                    decl,
+                    default: self.defaults.get(key).unwrap_or(&decl.default),
+                    choices: decl
+                        .choices
+                        .iter()
+                        .filter(|c| !c.draft)
+                        .map(|choice| ChoiceView {
+                            label: text(&choice.label),
+                            choice,
+                        })
+                        .collect(),
+                    max_len: max_len(decl),
+                    max_items: max_items(decl),
+                })
+                .collect(),
+        };
+        serde_json::to_string(&view).map_err(|e| format!("declarations of {name}: {e}"))
     }
 
     /// One value (JSON as stored) against its declaration, the check [`Self::resolve`]
@@ -379,6 +489,21 @@ fn check_keys(d: &OptionDecl) -> Result<(), String> {
 }
 
 /// Checks one value against its declaration; returns it as kept (an empty image is `""`).
+/// The text-length cap `check_value` applies (per item for a list): the declarations show the
+/// same function's answer, so the admin's form and the write check cannot drift apart.
+fn max_len(d: &OptionDecl) -> Option<usize> {
+    match d.kind {
+        FieldType::ShortText | FieldType::List => Some(d.max_len.unwrap_or(SHORT_TEXT_MAX)),
+        FieldType::LongText => Some(d.max_len.unwrap_or(LONG_TEXT_MAX)),
+        _ => None,
+    }
+}
+
+/// The item cap `check_value` applies to a list; see [`max_len`].
+fn max_items(d: &OptionDecl) -> Option<usize> {
+    (d.kind == FieldType::List).then(|| d.max_items.unwrap_or(LIST_MAX_ITEMS))
+}
+
 pub(crate) fn check_value(d: &OptionDecl, v: &Json) -> Result<Json, String> {
     let line = |s: &str, max: usize| -> Result<(), String> {
         if s.contains(['\n', '\r']) {
@@ -392,11 +517,11 @@ pub(crate) fn check_value(d: &OptionDecl, v: &Json) -> Result<Json, String> {
     match d.kind {
         FieldType::ShortText => {
             let s = v.as_str().ok_or("expected text")?;
-            line(s, d.max_len.unwrap_or(SHORT_TEXT_MAX))?;
+            line(s, max_len(d).unwrap_or(SHORT_TEXT_MAX))?;
         }
         FieldType::LongText => {
             let s = v.as_str().ok_or("expected text")?;
-            let max = d.max_len.unwrap_or(LONG_TEXT_MAX);
+            let max = max_len(d).unwrap_or(LONG_TEXT_MAX);
             if s.chars().count() > max {
                 return Err(format!("longer than {max} characters"));
             }
@@ -464,14 +589,14 @@ pub(crate) fn check_value(d: &OptionDecl, v: &Json) -> Result<Json, String> {
         },
         FieldType::List => {
             let items = v.as_array().ok_or("expected a list")?;
-            let max = d.max_items.unwrap_or(LIST_MAX_ITEMS);
+            let max = max_items(d).unwrap_or(LIST_MAX_ITEMS);
             if items.len() > max {
                 return Err(format!("more than {max} items"));
             }
             for item in items {
                 line(
                     item.as_str().ok_or("list items are text")?,
-                    d.max_len.unwrap_or(SHORT_TEXT_MAX),
+                    max_len(d).unwrap_or(SHORT_TEXT_MAX),
                 )?;
             }
         }
@@ -596,6 +721,137 @@ mod tests {
         );
         assert!(check_value(&text, &json!("abcd")).is_err());
         assert!(check_value(&text, &json!("a\nb")).is_err());
+    }
+
+    /// One option of each field type, in key order, with a group and a theme color token.
+    const EVERY_TYPE: &str = r##"
+[groups.g]
+label = "g"
+icon = "palette"
+[options.a_short]
+type = "short_text"
+label = "l"
+help = "h"
+group = "g"
+icon = "pen"
+default = "hi"
+max_len = 40
+[options.b_long]
+type = "long_text"
+label = "l"
+default = ""
+[options.c_number]
+type = "number"
+label = "l"
+min = 0
+max = 1
+step = 0.25
+default = 1.0
+[options.d_toggle]
+type = "toggle"
+label = "l"
+default = true
+[options.e_choice]
+type = "choice"
+label = "l"
+default = "a"
+choices = [{ value = "a", label = "ca", css = "a.css" }, { value = "b", label = "cb", draft = true }]
+[options.f_color]
+type = "color"
+label = "l"
+token = "accent"
+default = { light = "#fff", dark = "#000" }
+[options.g_image]
+type = "image"
+label = "l"
+default = ""
+[options.h_list]
+type = "list"
+label = "l"
+default = ["x"]
+max_items = 3
+"##;
+
+    /// Every field type goes out with its effective limits (declared or the checker's own),
+    /// its checked default and every key present, `null` where it does not apply.
+    #[test]
+    fn declarations_serialise_every_type_with_its_limits() {
+        #[derive(serde::Deserialize)]
+        struct Src {
+            groups: std::collections::BTreeMap<String, super::Group>,
+            options: std::collections::BTreeMap<String, OptionDecl>,
+        }
+        let src: Src =
+            serde_json::from_str(&plumblog_i18n::toml_to_json(EVERY_TYPE).unwrap()).unwrap();
+        let strings = ["g", "l", "h", "ca", "cb"]
+            .map(|k| (k.to_owned(), String::new()))
+            .into_iter()
+            .collect();
+        let tokens = std::iter::once("accent".to_owned()).collect();
+        let schema = super::Schema::check(
+            "t",
+            src.options,
+            src.groups,
+            &strings,
+            super::Owner::Theme(&tokens),
+        )
+        .unwrap();
+        let out = schema
+            .declarations("t", Some("1.0"), "vi", &|k| format!("vi:{k}"))
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            (&v["name"], &v["version"], &v["lang"]),
+            (&json!("t"), &json!("1.0"), &json!("vi"))
+        );
+        assert_eq!(
+            v["groups"],
+            json!([{"key": "g", "label": "vi:g", "label_key": "g", "icon": "palette"}])
+        );
+        let opts = v["options"].as_array().unwrap();
+        let types: Vec<_> = opts.iter().map(|o| o["type"].as_str().unwrap()).collect();
+        let all: Vec<_> = FieldType::ALL.iter().map(|t| t.name()).collect();
+        assert_eq!(types, all, "one option per type, in key order");
+        // The wire order is the struct order (`Value` sorts keys): the admin's shape check
+        // holds the Worker to it, so pin it here too.
+        assert!(
+            out.starts_with(
+                r#"{"name":"t","version":"1.0","lang":"vi","groups":[{"key":"g","label":"vi:g","label_key":"g","icon":"palette"}],"options":[{"key":"a_short","label":"vi:l","help":"vi:h","type":"short_text","label_key":"l","help_key":"h","group":"g","icon":"pen","token":null,"min":null,"max":null,"step":null,"default":"hi","choices":[],"max_len":40,"max_items":null},"#
+            ),
+            "{out}"
+        );
+        assert!(opts.iter().all(|o| o.as_object().unwrap().len() == 16));
+        assert_eq!(
+            opts[0],
+            json!({"key": "a_short", "label": "vi:l", "help": "vi:h", "type": "short_text",
+                "label_key": "l", "help_key": "h", "group": "g", "icon": "pen", "token": null,
+                "min": null, "max": null, "step": null, "default": "hi", "choices": [],
+                "max_len": 40, "max_items": null})
+        );
+        assert_eq!(opts[1]["max_len"], 5000, "long text: the checker's own cap");
+        assert_eq!(opts[1]["help"], json!(null));
+        assert_eq!(
+            (&opts[2]["min"], &opts[2]["max"], &opts[2]["step"]),
+            (&json!(0.0), &json!(1.0), &json!(0.25))
+        );
+        assert_eq!(opts[2]["default"], json!(1), "the default as checked");
+        assert_eq!(opts[3]["default"], json!(true));
+        assert_eq!(
+            opts[4]["choices"],
+            json!([{"label": "vi:ca", "value": "a", "label_key": "ca"}]),
+            "drafts and stylesheets stay out"
+        );
+        assert_eq!(opts[5]["token"], "accent");
+        assert_eq!(opts[5]["default"], json!({"light": "#fff", "dark": "#000"}));
+        assert_eq!(opts[6]["default"], "");
+        assert_eq!(
+            (&opts[7]["max_items"], &opts[7]["max_len"]),
+            (&json!(3), &json!(200))
+        );
+        assert!(
+            opts.iter()
+                .all(|o| o.get("css").is_none() && o.get("draft").is_none())
+        );
     }
 
     #[test]
