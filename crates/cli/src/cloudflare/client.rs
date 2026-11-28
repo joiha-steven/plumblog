@@ -393,6 +393,24 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
+/// An R2 object read through the API.
+#[derive(Debug)]
+pub struct Object {
+    pub bytes: Vec<u8>,
+    /// The `ETag` header without quotes, if the reply had one.
+    pub etag: Option<String>,
+}
+
+/// What one object-read attempt produced.
+enum ObjectAttempt {
+    Reply(u16, Vec<u8>, Option<String>),
+    Failed(String),
+    TooBig,
+}
+
+/// Cloudflare's R2 error code for a bucket that does not exist (a 404 that is not a missing object).
+const NO_SUCH_BUCKET: i64 = 10006;
+
 /// What one attempt produced, before deciding on a retry.
 enum Attempt {
     Reply(u16, String),
@@ -503,6 +521,31 @@ impl Client {
                 path.push_str(seg);
                 continue;
             };
+            if name == "object_key" {
+                // An R2 key keeps its slashes; every segment is encoded, so no value can add
+                // a segment of its own, a query or `..`.
+                let key = call
+                    .params
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, v)| v.as_str())
+                    .ok_or_else(|| usage(format!("{} needs {{{name}}}", spec.path)))?;
+                if key.is_empty()
+                    || key
+                        .split('/')
+                        .any(|p| p.is_empty() || p == "." || p == "..")
+                {
+                    return Err(usage(format!(
+                        "refusing {{{name}}} = {:?} in {}",
+                        self.scrub(key, &call.secret_refs()),
+                        spec.path
+                    )));
+                }
+                used += 1;
+                let encoded: Vec<String> = key.split('/').map(percent_encode).collect();
+                path.push_str(&encoded.join("/"));
+                continue;
+            }
             let value = if name == "account_id" {
                 self.account_id
                     .as_deref()
@@ -633,6 +676,99 @@ impl Client {
             ),
             tries: 1,
         })
+    }
+
+    /// A GET whose reply is the object's own bytes, not an envelope (R2 object read). `None`
+    /// for a 404, as wrangler's `getR2Object` treats it, unless Cloudflare says the bucket
+    /// is missing. Tried up to 3 times on 5xx or network errors, like any GET. The body is
+    /// held in memory: more than `max_bytes` is an error, so a wrong size cannot fill it.
+    ///
+    /// # Errors
+    /// As [`Client::call_page`]; `Usage` for a call that is not a GET; `Malformed` for a
+    /// body over `max_bytes`.
+    pub fn get_object(&self, call: &Call, max_bytes: usize) -> Result<Option<Object>, ApiError> {
+        let endpoint = call.endpoint;
+        let spec = endpoint.spec();
+        if spec.method != Method::Get
+            || spec.auth != Auth::ApiToken
+            || !matches!(call.body, Body::None)
+        {
+            return Err(ApiError::usage(
+                Some(endpoint),
+                format!("{} is not a plain GET", spec.path),
+            ));
+        }
+        let url = self.url(call, &[])?;
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            let outcome = self.attempt_object(&url, max_bytes);
+            let retryable = match &outcome {
+                ObjectAttempt::Reply(status, _, _) => *status >= 500,
+                ObjectAttempt::Failed(_) => true,
+                ObjectAttempt::TooBig => false,
+            };
+            if retryable && tries < GET_TRIES {
+                sleep(self.retry_delay * 2u32.pow(tries - 1));
+                continue;
+            }
+            return match outcome {
+                ObjectAttempt::Reply(200, body, etag) => Ok(Some(Object { bytes: body, etag })),
+                ObjectAttempt::Reply(status, body, _) => {
+                    let text = String::from_utf8_lossy(&body);
+                    match self.envelope(call, status, &text, tries) {
+                        Err(e) if status == 404 && !e.has_code(NO_SUCH_BUCKET) => Ok(None),
+                        Err(e) => Err(e),
+                        Ok(_) => Err(Self::malformed(
+                            call,
+                            "an unexpected reply to an object read",
+                        )),
+                    }
+                }
+                ObjectAttempt::TooBig => Err(Self::malformed(
+                    call,
+                    &format!("the object is larger than {max_bytes} bytes"),
+                )),
+                ObjectAttempt::Failed(detail) => Err(ApiError {
+                    kind: ApiErrorKind::Network,
+                    endpoint: Some(endpoint),
+                    status: None,
+                    errors: Vec::new(),
+                    detail: self.scrub(&detail, &call.secret_refs()),
+                    tries,
+                }),
+            };
+        }
+    }
+
+    fn attempt_object(&self, url: &str, max_bytes: usize) -> ObjectAttempt {
+        let sent = self
+            .agent
+            .get(url)
+            .header("Authorization", &format!("Bearer {}", self.token.expose()))
+            .call();
+        let resp = match sent {
+            Ok(r) => r,
+            Err(e) => return ObjectAttempt::Failed(e.to_string()),
+        };
+        let status = resp.status().as_u16();
+        let etag = resp
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.trim_start_matches("W/").trim_matches('"').to_string());
+        // Error replies are small envelopes; a good one is capped by the caller.
+        let cap = if status == 200 { max_bytes } else { 64 * 1024 };
+        match resp
+            .into_body()
+            .with_config()
+            .limit(cap as u64 + 1)
+            .read_to_vec()
+        {
+            Ok(b) if b.len() > cap && status == 200 => ObjectAttempt::TooBig,
+            Ok(b) => ObjectAttempt::Reply(status, b, etag),
+            Err(e) => ObjectAttempt::Failed(format!("reading the reply: {e}")),
+        }
     }
 
     /// Every item of a paged GET list, following `cursor` or `page` until the last page.
@@ -925,6 +1061,31 @@ mod tests {
         // An account id holding the token is refused without echoing it.
         let err = c.set_account("tok_abc/").unwrap_err();
         assert!(!err.detail.contains("tok_abc"), "{}", err.detail);
+    }
+
+    #[test]
+    fn an_object_key_keeps_its_slashes_and_nothing_else() {
+        let mut c = Client::new(
+            ApiToken::new("tok_abc").unwrap(),
+            Some("http://127.0.0.1:9"),
+        )
+        .unwrap();
+        c.set_account("acc1").unwrap();
+        let url = |key: &str| {
+            c.url(
+                &Call::new(Endpoint::R2ObjectGet)
+                    .param("bucket_name", "site-media")
+                    .param("object_key", key),
+                &[],
+            )
+        };
+        assert_eq!(
+            url("media/Xy_-1/a b?#.png").unwrap(),
+            "http://127.0.0.1:9/accounts/acc1/r2/buckets/site-media/objects/media/Xy_-1/a%20b%3F%23.png"
+        );
+        for bad in ["", "/a", "a//b", "a/../b", "a/./b", ".."] {
+            assert_eq!(url(bad).unwrap_err().kind, ApiErrorKind::Usage, "{bad}");
+        }
     }
 
     #[test]
