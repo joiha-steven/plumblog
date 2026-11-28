@@ -106,6 +106,7 @@ pub async fn sample_posts<S: UserStore + PostStore + SettingsStore + TaxonomySto
                 media_ids: Vec::new(),
                 search_text: text_of(&p.body.html),
                 revision: None,
+                client_id: None,
                 now: at,
             })
             .await
@@ -178,6 +179,7 @@ pub async fn copies<S: UserStore + PostStore>(db: &S, word: &str, n: usize) -> R
             media_ids: Vec::new(),
             search_text: word.to_owned(),
             revision: None,
+            client_id: None,
             now: at,
         })
         .await

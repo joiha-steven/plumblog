@@ -365,6 +365,7 @@ const POST_CREATE: &[Field] = &[
     opt("series_position", Type::IntOrNull),
     opt("tags", Type::IntList),
     opt("translation_of", Type::Int),
+    opt("client_id", Type::Str),
 ];
 
 const POST_UPDATE: &[Field] = &[

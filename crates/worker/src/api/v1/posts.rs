@@ -8,7 +8,7 @@ use plumblog_model::{
 };
 use plumblog_store::{
     NewRevision, Post, PostCursor, PostKind, PostOrder, PostQuery, PostStatus, PostStore,
-    PostSummary, SavePost, SettingsStore,
+    PostSummary, SavePost, Saved, SettingsStore, valid_client_id,
 };
 use plumblog_syslog::EventKind;
 
@@ -389,9 +389,9 @@ fn render(markdown: &str) -> plumblog_markdown::Rendered {
 
 /// Saves and maps a refused save: `Conflict` names `slug` or `lang` (the pair another post
 /// holds), and a bad reference (tag, series, cover, body media) stays `InvalidInput`.
-async fn save(ctx: &Ctx, post: SavePost) -> Result<PostId> {
+async fn save(ctx: &Ctx, post: SavePost) -> Result<Saved> {
     let (lang_v, slug_v, id) = (post.lang.clone(), post.slug.clone(), post.id);
-    match ctx.store.save_post(post).await {
+    match ctx.store.save_post_outcome(post).await {
         Err(e) if e.code == ErrorCode::Conflict => {
             let other = ctx.store.find_post(&lang_v, &slug_v).await.ok().flatten();
             let field = match other {
@@ -419,14 +419,26 @@ async fn log(ctx: &Ctx, p: &Principal, action: &str, post: &Post) {
     .await;
 }
 
-/// `POST /api/v1/posts`: 201 with the saved post and the renderer's warnings.
+/// `POST /api/v1/posts`: 201 with the saved post and the renderer's warnings. With a
+/// `client_id` this user already created a post with, the same 201 with that post as stored
+/// now, whatever the body says, and nothing written or logged: the client retried a create
+/// whose answer it lost, and may have edited the text since (its next PATCH sends that).
 pub async fn create(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
     let user = p.require(Permission::WritePost)?;
-    let c = common(input)?;
     let status = status(input)?.unwrap_or(PostStatus::Draft);
     if status != PostStatus::Draft {
         p.require(Permission::PublishPost)?;
     }
+    let client_id = input.str("client_id");
+    if let Some(k) = client_id {
+        if !valid_client_id(k) {
+            return Err(invalid("client_id", "1-64 of A-Z, a-z, 0-9, - and _"));
+        }
+        if let Some(id) = ctx.store.find_client_post(user.id, k).await? {
+            return replay(ctx, id, input.str("title")).await;
+        }
+    }
+    let c = common(input)?;
     let at = published_at(
         status,
         input.int_or_null("published_at").or(None),
@@ -462,7 +474,7 @@ pub async fn create(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
         input.str("slug").unwrap_or_default(),
     )
     .await?;
-    let id = save(
+    let saved = save(
         ctx,
         SavePost {
             id: None,
@@ -496,12 +508,43 @@ pub async fn create(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
                 author_id: Some(user.id),
                 created_at: ctx.now,
             }),
+            client_id: client_id.map(str::to_owned),
             now: ctx.now,
         },
     )
     .await?;
-    let post = ctx.store.get_post(id).await?;
+    // Not inserted by this request: it lost a race to a create with the same client id, and
+    // the store returned the winner.
+    if !saved.wrote {
+        return replay(ctx, saved.id, input.str("title")).await;
+    }
+    let post = ctx.store.get_post(saved.id).await?;
     log(ctx, p, "post.create", &post).await;
+    Ok(Reply::json(201, post_json(&post, &warning_codes(&r))))
+}
+
+/// The answer to a repeated `client_id`: the post as the first create's 201 would show it
+/// now, its warnings from its stored Markdown. `title`: the request's, to spot a client that
+/// reused an id for another post (it gets the old post back, never a new one).
+async fn replay(ctx: &Ctx, id: PostId, title: Option<&str>) -> Result<Reply> {
+    let post = ctx.store.get_post(id).await?;
+    if title.is_some_and(|t| t != post.title) {
+        worker::console_warn!(
+            "[{}] POST post: client_id repeated with another title; answering post {} \
+             (version {}) as stored. A client reusing an id for a new post gets this one back",
+            ctx.request_id.as_str(),
+            id.0,
+            post.version
+        );
+    } else {
+        worker::console_log!(
+            "[{}] POST post: client_id repeated, answering post {} (version {})",
+            ctx.request_id.as_str(),
+            id.0,
+            post.version
+        );
+    }
+    let r = render(&post.markdown);
     Ok(Reply::json(201, post_json(&post, &warning_codes(&r))))
 }
 
@@ -651,37 +694,52 @@ pub async fn update(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
             author_id: Some(user.id),
             created_at: ctx.now,
         }),
+        client_id: None,
         now: ctx.now,
     };
     match save(ctx, save_post).await {
-        Ok(_) => {}
-        Err(e) if e.code == ErrorCode::Conflict => {
-            // A stale version (another save won, maybe at the same moment): tell the client
-            // the version to merge against. Otherwise the slug or lang is taken.
-            let current = ctx.store.get_post(id).await?;
-            if current.version == expected {
-                return Err(e);
-            }
-            worker::console_warn!(
-                "[{}] PATCH post {}: version {expected} is stale, stored {}",
+        // Stale but equal: this same update landed before and its answer was lost (or another
+        // save of the same content won meanwhile); the store wrote nothing, so nothing to log.
+        Ok(s) if !s.wrote => {
+            worker::console_log!(
+                "[{}] PATCH post {}: version {expected} is stale, but the stored post already \
+                 holds this update",
                 ctx.request_id.as_str(),
-                id.0,
-                current.version
+                id.0
             );
-            return Ok(Reply::json(
-                409,
-                object(&[
-                    ("error", Out::Str(ErrorCode::Conflict.as_str().to_owned())),
-                    ("field", Out::Str("expected_version".to_owned())),
-                    ("version", Out::Int(current.version)),
-                ]),
-            ));
+            let post = ctx.store.get_post(id).await?;
+            return Ok(Reply::json(200, post_json(&post, &warnings)));
         }
+        Ok(_) => {}
+        Err(e) if e.code == ErrorCode::Conflict => return conflict(ctx, id, expected, e).await,
         Err(e) => return Err(e),
     }
     let post = ctx.store.get_post(id).await?;
     log(ctx, p, "post.update", &post).await;
     Ok(Reply::json(200, post_json(&post, &warnings)))
+}
+
+/// A refused update: a stale version (another save won, maybe at the same moment) is a 409
+/// with the version to merge against; otherwise the slug or lang is taken (`e`).
+async fn conflict(ctx: &Ctx, id: PostId, expected: i64, e: Error) -> Result<Reply> {
+    let current = ctx.store.get_post(id).await?;
+    if current.version == expected {
+        return Err(e);
+    }
+    worker::console_warn!(
+        "[{}] PATCH post {}: version {expected} is stale, stored {}",
+        ctx.request_id.as_str(),
+        id.0,
+        current.version
+    );
+    Ok(Reply::json(
+        409,
+        object(&[
+            ("error", Out::Str(ErrorCode::Conflict.as_str().to_owned())),
+            ("field", Out::Str("expected_version".to_owned())),
+            ("version", Out::Int(current.version)),
+        ]),
+    ))
 }
 
 /// The post a trash, restore or delete acts on; another author's needs `post.delete_any`.

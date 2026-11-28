@@ -44,8 +44,12 @@ pub fn parse_settings(rows: &[(String, String)]) -> Settings {
             s
         })
     };
+    let mut lang_set = false;
     let lang = match text(SITE_LANG_KEY) {
-        Some(l) if is_lang(&l) => l,
+        Some(l) if is_lang(&l) => {
+            lang_set = true;
+            l
+        }
         Some(l) => {
             warn(&format!(
                 "settings.bad_value key={SITE_LANG_KEY} value={l:?}"
@@ -84,6 +88,7 @@ pub fn parse_settings(rows: &[(String, String)]) -> Settings {
         description: text(SITE_DESCRIPTION_KEY).unwrap_or_default(),
         footer: text(SITE_FOOTER_KEY).unwrap_or_default(),
         lang,
+        lang_set,
         languages,
         per_page,
         origin: text(ORIGIN_KEY).filter(|o| !o.is_empty()),

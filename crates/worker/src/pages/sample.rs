@@ -174,6 +174,7 @@ impl ReaderSource for SampleSource {
             description: SAMPLE_SITE.description.to_owned(),
             footer: SAMPLE_SITE.footer.to_owned(),
             lang: SAMPLE_SITE.lang.to_owned(),
+            lang_set: false,
             languages: SAMPLE_SITE
                 .languages
                 .iter()

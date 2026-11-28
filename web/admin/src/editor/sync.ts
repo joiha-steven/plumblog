@@ -8,15 +8,24 @@
  *
  * A new post becomes a server post on its first save: its URL and its draft key move to the
  * post's id. Every update is conditional on the version the text is based on; a stale one
- * stops saving and asks the writer which text to keep, never a silent pick. The local draft
- * is dropped once the server holds exactly the text still in the editor.
+ * stops saving and asks the writer which text to keep, never a silent pick, unless the server
+ * copy is this editor's text already or exactly an update of its own that got no answer. The
+ * local draft is dropped once the server holds exactly the text still in the editor.
  *
  * A mount redrawn (online/offline) while the create is out waits for it up to 8 s and opens
  * the post; past that it shows the local draft, sends nothing and adopts the post when the
- * create settles (`settled`, `adopt`). A reload while the create request is out: the browser asks first (beforeunload). If the
- * page goes anyway and the create had reached the server, the reloaded editor still holds
- * the local draft under its new-post key and creates a second server draft (slug `-2`):
- * the text is never lost, and the extra draft shows in the posts list to delete.
+ * create settles (`settled`, `adopt`).
+ *
+ * Every create of one new post carries the same `client_id` (`createId`, kept in localStorage
+ * under the draft key until a create answers), so the server returns the post an earlier
+ * attempt made instead of making a second one (#86). A create with no answer (a network error,
+ * or none within `createMs`; the API client sets creates no bound) is sent again with it, a few
+ * times with growing waits, and so is the next one after a reload. A reload while the create
+ * is out still asks first (beforeunload). Only without localStorage (the id then lives in this
+ * page) can a reload after a lost answer make a second server draft (slug `-2`). That post may
+ * have been edited elsewhere meanwhile (version above 1): then the writer picks, never an
+ * overwrite. The stored id is left behind when a new draft is dropped without a create
+ * (drafts.ts and index.ts drop drafts; only an unused UUID remains).
  */
 
 import type { Api, ApiError, Result } from "../api/client";
@@ -76,6 +85,52 @@ export interface Sync {
 
 const MAX_SLUG = 100;
 const SLUG_TRIES = 5;
+/** Sends of a create with no answer after the first, waiting `retry`, 2x, 4x... in between. */
+const CREATE_RETRIES = 4;
+/** Unanswered update texts kept for telling our own 409 from another writer's. */
+const LOST_MAX = 20;
+
+/** The new post's `client_id` by draft key, for this page; localStorage keeps it over a reload. */
+const createIds = new Map<string, string>();
+const createIdKey = (key: string): string => `plumblog-create:${key}`;
+
+/** The request id every create of the new post under draft key `key` sends (crypto.randomUUID). */
+export function createId(key: string): string {
+  let id = createIds.get(key);
+  if (id) return id;
+  try {
+    id = localStorage.getItem(createIdKey(key)) ?? undefined;
+  } catch (e) {
+    console.warn("admin editor: localStorage unreadable; a create's id lasts this page only", e);
+  }
+  if (!id) {
+    id = crypto.randomUUID();
+    try {
+      localStorage.setItem(createIdKey(key), id);
+    } catch (e) {
+      console.warn("admin editor: localStorage unwritable; a create's id lasts this page only", e);
+    }
+  }
+  createIds.set(key, id);
+  return id;
+}
+
+/**
+ * Whether a create's failure says the server refused this body, so no attempt with its id made
+ * a post. No answer, a server error, or a refusal of the session (401, 403, 429: checked before
+ * the id is looked up, so an earlier attempt may still have made the post) keep the id.
+ */
+const refusesContent = (status: number): boolean => status >= 400 && status < 500 && ![401, 403, 429].includes(status);
+
+/** A create answered (a post, or a refusal that made none): the next post gets a new id. */
+function forgetCreateId(key: string): void {
+  createIds.delete(key);
+  try {
+    localStorage.removeItem(createIdKey(key));
+  } catch (e) {
+    console.warn("admin editor: localStorage unwritable; a used create id stays", e);
+  }
+}
 
 /** A URL slug from a title: diacritics folded, `a-z 0-9` and inner hyphens, at most 100. */
 export const slugify = (title: string, n = 1): string => {
@@ -100,8 +155,17 @@ export const slugify = (title: string, n = 1): string => {
 const creates = new Map<string, Promise<Post | undefined>>();
 
 /** Moves a new post's draft to the created post's key, based on its version. Resolves to its rev. */
-const moveTo = (key: string, user: number, p: Post): Promise<number> =>
-  moveDraft(key, draftKey(user, p.id, ""), { base: p.updated_at, version: p.version });
+const moveTo = (key: string, user: number, p: Post, based: Based = basedOn(p)): Promise<number> =>
+  moveDraft(key, draftKey(user, p.id, ""), { base: based.base, version: based.version });
+
+/** The server copy a draft's text is based on (`Draft.base`, `Draft.version`). */
+interface Based {
+  base: number;
+  version: number;
+}
+const basedOn = (p: Post): Based => ({ base: p.updated_at, version: p.version });
+/** The post as its create made it: what a draft edited since that create is based on. */
+const asCreated = (p: Post): Based => ({ base: p.created_at, version: 1 });
 
 /**
  * For a mount of a new post's editor: the post an earlier mount's create made of this draft
@@ -141,8 +205,12 @@ export async function accept(st: EdState, p: Post, text: () => [string, string])
   });
 }
 
-/** `slow`: a create still out after this long says so on the status line (it has no timeout). */
-export function startSync(o: SyncHost, delay = 3000, slow = 20_000): Sync {
+/**
+ * `slow`: a create still out after this long (its retries included) says so on the status line.
+ * `createMs`: a create with no answer by then is sent again (the first stays out; same id).
+ * `retry`: the first wait before a create with no answer is sent again.
+ */
+export function startSync(o: SyncHost, delay = 3000, slow = 20_000, createMs = 20_000, retry = 1000): Sync {
   if (!o.draft) return { changed: () => undefined, flush: async () => undefined, resume: () => undefined, id: () => o.id, stop: () => undefined };
   const st = o.st;
   let id = o.id;
@@ -161,6 +229,8 @@ export function startSync(o: SyncHost, delay = 3000, slow = 20_000): Sync {
   let failing = false;
   /** The server copy turned out not to be a draft: this editor never sends again. */
   let stopped = false;
+  /** Texts of updates that got no answer since the last one answered: any may have landed, so a 409 may be our own. */
+  const lost: [string, string][] = [];
 
   /**
    * Every server copy this editor learns of passes here. One that is not a draft stops the
@@ -196,12 +266,41 @@ export function startSync(o: SyncHost, delay = 3000, slow = 20_000): Sync {
   };
 
   const hold = (e: BeforeUnloadEvent) => e.preventDefault();
+  /** One send of a create; no answer within `createMs` reads as a network failure. */
+  const sendCreate = async (input: PostCreateInput): Promise<Result<Post>> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const none = new Promise<Result<Post>>((ok) => {
+      timer = setTimeout(() => {
+        console.warn(`admin editor: the create of ${input.slug} has no answer within ${createMs} ms`);
+        ok({ ok: false, error: { code: "network", status: 0 } });
+      }, createMs);
+    });
+    try {
+      return await Promise.race([o.api.createPost(input), none]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  /** A create, sent again with the same body and id while it gets no answer (bounded). */
+  const createOnce = async (input: PostCreateInput): Promise<Result<Post>> => {
+    let r = await sendCreate(input);
+    for (let i = 0; i < CREATE_RETRIES && !r.ok && r.error.code === "network"; i++) {
+      if (stopped || !o.alive() || o.offline()) break;
+      const wait = retry * 2 ** i;
+      console.warn(`admin editor: sending the create of ${input.slug} again in ${wait} ms`);
+      await new Promise((ok) => setTimeout(ok, wait));
+      if (stopped || !o.alive() || o.offline()) break;
+      r = await sendCreate(input);
+    }
+    return r;
+  };
   const create = async (title: string, markdown: string): Promise<Result<Post>> => {
     addEventListener("beforeunload", hold);
     try {
+      const client_id = createId(st.key);
       for (let n = 1; n <= SLUG_TRIES; n++) {
-        const input: PostCreateInput = { lang: o.lang, slug: slugify(title, n), title, markdown };
-        const r = await o.api.createPost(input);
+        const input: PostCreateInput = { lang: o.lang, slug: slugify(title, n), title, markdown, client_id };
+        const r = await createOnce(input);
         if (r.ok || r.error.field !== "slug") return r;
       }
       console.error(`admin editor: slug ${slugify(title)} and ${SLUG_TRIES - 1} variants are taken`);
@@ -216,18 +315,19 @@ export function startSync(o: SyncHost, delay = 3000, slow = 20_000): Sync {
    * for): the draft, then the URL, now name it. An editor no longer on the page leaves the move
    * to the next mount (`settled` or its own `adopt`), so two never move one draft.
    */
-  const adopt = (p: Post) =>
+  /** `based`: what this text is based on, when not `p` itself (a replay edited elsewhere). */
+  const adopt = (p: Post, based: Based = basedOn(p)) =>
     serial(st, async () => {
       if (!o.alive() || st.key.includes(":post-")) return;
       id = p.id;
       last = p;
       o.made(p);
-      const rev = await moveTo(st.key, o.user, p);
+      const rev = await moveTo(st.key, o.user, p, based);
       st.key = draftKey(o.user, p.id, "");
       // Moved already (nothing here): read it. Another tab's rev is kept apart: the next save here then asks.
       if (!rev) st.rev = (await loadDraft(st.key))?.rev ?? 0;
       else if (rev !== st.rev) console.warn(`admin editor: draft moved at rev ${rev}, this tab had ${st.rev}`);
-      Object.assign(st, { base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
+      Object.assign(st, { base: based.base, version: based.version, server: [p.title, p.markdown] });
       history.replaceState(history.state, "", editHref(p.id));
     });
 
@@ -253,10 +353,19 @@ export function startSync(o: SyncHost, delay = 3000, slow = 20_000): Sync {
     }
     const p = r.value;
     const draft = learn(p);
+    const ours = lost.splice(0);
     if (same(o.text(), [p.title, p.markdown])) {
       Object.assign(st, { hold: false, base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
       o.say(draft ? t("admin.editor.saved") : t("admin.editor.saved_here"));
       return tidy(st.rev);
+    }
+    // The server copy is exactly an update of ours whose answer was lost, typed on since: no
+    // one else's text to keep, so the newer text goes out on that version.
+    if (draft && ours.some((b) => same([p.title, p.markdown], b))) {
+      console.warn(`admin editor: post ${p.id} version ${p.version} is this editor's unanswered save; sending the newer text`);
+      Object.assign(st, { hold: false, base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
+      again = true;
+      return;
     }
     // Not a draft: either pick only keeps the text on this device (learn stopped the sync).
     o.say(draft ? t("admin.editor.not_saved") : t("admin.editor.saved_here"));
@@ -325,12 +434,37 @@ export function startSync(o: SyncHost, delay = 3000, slow = 20_000): Sync {
         clearTimeout(late);
         lagging = false;
       }
+      if (r.ok || refusesContent(r.error.status)) forgetCreateId(key);
+      // An earlier attempt's post (same id) that was edited since (another device, while this
+      // one had no answer): its text is not ours to overwrite, so the writer picks.
+      const elsewhere = r.ok && r.value.version > 1 && !same(text, [r.value.title, r.value.markdown]);
       if (r.ok) {
         id = r.value.id;
-        await adopt(r.value);
+        await adopt(r.value, elsewhere ? asCreated(r.value) : basedOn(r.value));
+        // Its older text, not edited since: this text goes as an update.
+        if (!elsewhere && !same(text, [r.value.title, r.value.markdown])) again = true;
       } else creates.delete(key);
       done(r.ok ? r.value : undefined);
-    } else r = await o.api.updatePost(id, { expected_version: st.version ?? 0, title, markdown });
+      if (r.ok && elsewhere && !stopped) {
+        const p = r.value;
+        console.warn(`admin editor: post ${p.id} was made by an earlier attempt and is at version ${p.version}; asking`);
+        last = p;
+        if (!learn(p)) return;
+        st.hold = true;
+        if (o.alive()) {
+          o.say(t("admin.editor.not_saved"));
+          o.choose(p);
+        }
+        return;
+      }
+    } else {
+      r = await o.api.updatePost(id, { expected_version: st.version ?? 0, title, markdown });
+      // Bounded: past a few, the oldest could not be what the server holds without a newer one.
+      if (!r.ok && r.error.code === "network") {
+        lost.push([title, markdown]);
+        if (lost.length > LOST_MAX) lost.shift();
+      } else if (r.ok) lost.length = 0;
+    }
     // Stopped while the request was out (trashed, or not a draft any more): its answer changes nothing here.
     if (stopped) {
       console.warn(`admin editor: a save answered after this sync stopped (${r.ok ? `version ${r.value.version}` : r.error.code})`);
