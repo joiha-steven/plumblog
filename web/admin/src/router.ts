@@ -1,6 +1,6 @@
 /** History routing under /admin/; the Worker answers every admin path with the same shell. */
 
-export type Screen = "posts" | "pages" | "media" | "settings" | "account" | "new" | "edit" | "missing" | AuthScreen;
+export type Screen = "posts" | "pages" | "media" | "settings" | "syslog" | "account" | "new" | "edit" | "missing" | AuthScreen;
 
 /** The signed-out pages: a full page load each (their CSP differs), never client-side routing. */
 export type AuthScreen = "signin" | "setup" | "invite" | "reset";
@@ -11,12 +11,13 @@ export const HREF = {
   pages: "/admin/pages",
   media: "/admin/media",
   settings: "/admin/settings",
+  syslog: "/admin/settings/log",
   account: "/admin/account",
   new: "/admin/posts/new",
 } as const satisfies Record<Exclude<Screen, "missing" | "edit" | AuthScreen>, string>;
 
 /** The screens that live under Settings: the top-nav item stays current on each. */
-const SETTINGS_SCREENS: readonly Screen[] = ["settings"];
+const SETTINGS_SCREENS: readonly Screen[] = ["settings", "syslog"];
 export const inSettings = (s: Screen): boolean => SETTINGS_SCREENS.includes(s);
 
 /** Sections drawn by the settings screen itself, at /admin/settings/<id> ("general" is /admin/settings). */

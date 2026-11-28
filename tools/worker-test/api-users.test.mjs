@@ -396,3 +396,128 @@ describe("the last active owner", () => {
     assert.equal(trio.query("SELECT COUNT(*) AS n FROM invites WHERE created_by = 2")[0].n, 0);
   });
 });
+
+describe("owner tokens, reset codes, no-ops and self-removal", () => {
+  const BEA = { session: rnd(), owner: plb(), writer: plb() };
+  const bea = { cookie: `${COOKIE}=${BEA.session}` };
+  const beaOwnerToken = { authorization: `Bearer ${BEA.owner}` };
+  const beaWriterToken = { authorization: `Bearer ${BEA.writer}` };
+  const logCount = () => w.query("SELECT COUNT(*) AS n FROM system_log WHERE kind = 'user.changed'")[0].n;
+  before(() => {
+    w.exec(`INSERT INTO users (id, login, slug, display_name, role, created_at, updated_at) VALUES (50, 'bea', 'bea', 'bea', 'owner', ${T}, ${T});
+      ${sessions([[BEA.session, 50]])}
+      INSERT INTO api_tokens (user_id, name, token_hash, scope, created_at) VALUES
+        (50, 'all', '${sha(BEA.owner)}', 'owner', ${T}), (50, 'ci', '${sha(BEA.writer)}', 'writer', ${T});`);
+  });
+
+  test("demoting an owner revokes their owner tokens; promoting again does not bring them back", async () => {
+    assert.equal((await api(w, "GET", "/api/v1/me", { as: beaOwnerToken })).status, 200);
+    shaped("user", await api(w, "PUT", "/api/v1/users/50/role", { as: as.olga, body: { role: "writer" } }), 200);
+    assertError(await api(w, "GET", "/api/v1/me", { as: beaOwnerToken }), 401, "auth.unauthenticated");
+    assert.equal((await api(w, "GET", "/api/v1/me", { as: beaWriterToken })).status, 200, "the writer token stays");
+    shaped("user", await api(w, "PUT", "/api/v1/users/50/role", { as: as.olga, body: { role: "owner" } }), 200);
+    assertError(await api(w, "GET", "/api/v1/me", { as: beaOwnerToken }), 401, "auth.unauthenticated");
+    assertError(await api(w, "GET", "/api/v1/invites", { as: beaOwnerToken }), 401, "auth.unauthenticated");
+    const [row] = w.query(`SELECT revoked_at FROM api_tokens WHERE token_hash = '${sha(BEA.owner)}'`);
+    assert.equal(typeof row.revoked_at, "number");
+  });
+
+  test("a role change logs the old and the new role", async () => {
+    shaped("user", await api(w, "PUT", "/api/v1/users/4/role", { as: as.olga, body: { role: "owner" } }), 200);
+    const [last] = w.query("SELECT detail FROM system_log WHERE kind = 'user.changed' AND detail LIKE '%user 4%' ORDER BY id DESC LIMIT 1");
+    assert.match(last.detail, /(?:^|\n)from\twriter(?:\n|$)/, last.detail);
+    assert.match(last.detail, /(?:^|\n)to\towner(?:\n|$)/, last.detail);
+    shaped("user", await api(w, "PUT", "/api/v1/users/4/role", { as: as.olga, body: { role: "writer" } }), 200);
+  });
+
+  test("a no-op role change or disable is 204: nothing written, nothing logged", async () => {
+    const before = w.query("SELECT id, role, disabled_at, updated_at FROM users WHERE id IN (1, 3, 4) ORDER BY id");
+    const n = logCount();
+    for (const [path, body] of [
+      ["/api/v1/users/1/role", { role: "owner" }],
+      ["/api/v1/users/4/role", { role: "writer" }],
+      ["/api/v1/users/4/disabled", { disabled: false }],
+    ]) {
+      const r = await api(w, "PUT", path, { as: as.olga, body });
+      assert.equal(r.status, 204, `${path} ${r.text}`);
+      assert.equal(r.text, "");
+    }
+    assert.deepEqual(w.query("SELECT id, role, disabled_at, updated_at FROM users WHERE id IN (1, 3, 4) ORDER BY id"), before);
+    assert.equal(logCount(), n, "no-op logged");
+    // Disabling a disabled user: the first disable time stays.
+    shaped("user", await api(w, "PUT", "/api/v1/users/3/disabled", { as: as.olga, body: { disabled: true } }), 200);
+    const [off] = w.query("SELECT disabled_at, updated_at FROM users WHERE id = 3");
+    const m = logCount();
+    const again = await api(w, "PUT", "/api/v1/users/3/disabled", { as: as.olga, body: { disabled: true } });
+    assert.equal(again.status, 204, again.text);
+    assert.deepEqual(w.query("SELECT disabled_at, updated_at FROM users WHERE id = 3"), [off]);
+    assert.equal(logCount(), m, "no-op disable logged");
+    shaped("user", await api(w, "PUT", "/api/v1/users/3/disabled", { as: as.olga, body: { disabled: false } }), 200);
+    // A no-op on a missing user is still 404.
+    assertError(await api(w, "PUT", "/api/v1/users/999/role", { as: as.olga, body: { role: "owner" } }), 404, "user.not_found");
+  });
+
+  test("disabling an owner deletes their pending reset code; re-enabled, the code is refused", async () => {
+    const code = rnd();
+    const now = Date.now();
+    w.exec(`INSERT INTO settings (key, value_json, updated_at) VALUES
+      ('owner_reset_hash', '${JSON.stringify(sha(code))}', ${now}), ('owner_reset_user', '50', ${now}),
+      ('owner_reset_expires_at', '${now + 3_600_000}', ${now}), ('owner_reset_at', '${now}', ${now}),
+      ('owner_reset_keep_tokens', 'false', ${now});`);
+    shaped("user", await api(w, "PUT", "/api/v1/users/50/disabled", { as: as.olga, body: { disabled: true } }), 200);
+    assert.deepEqual(w.query("SELECT key FROM settings WHERE key LIKE 'owner_reset%'"), []);
+    shaped("user", await api(w, "PUT", "/api/v1/users/50/disabled", { as: as.olga, body: { disabled: false } }), 200);
+    const r = await api(w, "POST", "/api/auth/reset", { as: { "cf-connecting-ip": "203.0.113.50" }, body: { code, login: "bea", password: rnd() } });
+    assertError(r, 403, "setup.invalid");
+    assert.equal(w.query("SELECT password_hash FROM users WHERE id = 50")[0].password_hash, null);
+  });
+
+  test("demoting an owner deletes their pending reset code; promoted again, the code is refused", async () => {
+    const code = rnd();
+    const now = Date.now();
+    w.exec(`INSERT INTO settings (key, value_json, updated_at) VALUES
+      ('owner_reset_hash', '${JSON.stringify(sha(code))}', ${now}), ('owner_reset_user', '50', ${now}),
+      ('owner_reset_expires_at', '${now + 3_600_000}', ${now}), ('owner_reset_at', '${now}', ${now}),
+      ('owner_reset_keep_tokens', 'false', ${now});`);
+    shaped("user", await api(w, "PUT", "/api/v1/users/50/role", { as: as.olga, body: { role: "writer" } }), 200);
+    assert.deepEqual(w.query("SELECT key FROM settings WHERE key LIKE 'owner_reset%'"), []);
+    shaped("user", await api(w, "PUT", "/api/v1/users/50/role", { as: as.olga, body: { role: "owner" } }), 200);
+    const r = await api(w, "POST", "/api/auth/reset", { as: { "cf-connecting-ip": "203.0.113.51" }, body: { code, login: "bea", password: rnd() } });
+    assertError(r, 403, "setup.invalid");
+    assert.equal(w.query("SELECT password_hash FROM users WHERE id = 50")[0].password_hash, null);
+  });
+
+  test("an owner disabling or deleting themself gets the sign-out cookie; acting on another does not", async () => {
+    const clear = (await api(w, "POST", "/api/auth/logout")).setCookie;
+    assert.match(clear, /^__Host-plumblog_session=;/, clear);
+    const [s1, s2] = [rnd(), rnd()];
+    w.exec(`INSERT INTO users (id, login, slug, display_name, role, created_at, updated_at) VALUES
+        (51, 'sid', 'sid', 'sid', 'owner', ${T}, ${T}), (52, 'sue', 'sue', 'sue', 'owner', ${T}, ${T});
+      ${sessions([[s1, 51], [s2, 52]])}`);
+    const other = await api(w, "PUT", "/api/v1/users/4/disabled", { as: as.olga, body: { disabled: true } });
+    assert.equal(other.status, 200, other.text);
+    assert.equal(other.setCookie, null);
+    await api(w, "PUT", "/api/v1/users/4/disabled", { as: as.olga, body: { disabled: false } });
+    const off = await api(w, "PUT", "/api/v1/users/51/disabled", { as: { cookie: `${COOKIE}=${s1}` }, body: { disabled: true } });
+    shaped("user", off, 200);
+    assert.equal(off.setCookie, clear);
+    const del = await api(w, "DELETE", "/api/v1/users/52", { as: { cookie: `${COOKIE}=${s2}` } });
+    assert.equal(del.status, 204, del.text);
+    assert.equal(del.setCookie, clear);
+  });
+
+  test("the invite list holds at most 500 unused invites, newest first", async () => {
+    // Later than every invite the earlier tests made, so these are the newest.
+    const at = Date.now() + DAY;
+    const rows = Array.from({ length: 501 }, (_, i) => `('bulk-${i}', 'writer', 1, ${at + i}, ${at + DAY})`);
+    w.exec(`INSERT INTO invites (code_hash, role, created_by, created_at, expires_at) VALUES ${rows.join(", ")};
+      INSERT INTO invites (code_hash, role, created_by, created_at, expires_at, used_at, used_by) VALUES ('bulk-used', 'writer', 1, ${at + 1000}, ${at + DAY}, ${at + 1000}, 1);`);
+    const list = shaped("invite_list", await api(w, "GET", "/api/v1/invites", { as: as.olga }), 200);
+    assert.equal(list.invites.length, 500);
+    // The used one, though newest, is left out; the oldest bulk one is past the bound.
+    assert.equal(list.invites[0].created_at, at + 500);
+    assert.equal(list.invites.at(-1).created_at, at + 1);
+    assert.ok(list.invites.every((i, k) => k === 0 || list.invites[k - 1].created_at >= i.created_at));
+    w.exec("DELETE FROM invites WHERE code_hash LIKE 'bulk-%'");
+  });
+});

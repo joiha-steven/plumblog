@@ -306,6 +306,20 @@ impl InviteStore for MemoryStore {
         }))
     }
 
+    async fn list_unused_invites(&self, limit: u32) -> Result<Vec<Invite>> {
+        Ok(self.read(|s| {
+            let mut unused: Vec<Invite> = s
+                .invites
+                .values()
+                .filter(|i| i.used_at.is_none())
+                .cloned()
+                .collect();
+            unused.sort_by_key(|i| Reverse((i.created_at, i.id)));
+            unused.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+            unused
+        }))
+    }
+
     async fn delete_invite(&self, by: &crate::Admin, id: i64, now: i64) -> Result<()> {
         self.write(|s| {
             s.require_admin(by, now)?;

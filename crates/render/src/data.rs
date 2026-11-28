@@ -57,6 +57,10 @@ pub struct NavItem {
     pub current: bool,
 }
 
+/// The origin a site without one configured uses: not a real site, so no page offers an
+/// image URL on it (a social card needs an absolute URL the networks can reach).
+pub const UNSET_ORIGIN: &str = "http://localhost";
+
 /// Per-request page facts only the router knows.
 #[derive(Clone, Debug)]
 pub struct PageInfo {

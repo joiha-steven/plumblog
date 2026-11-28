@@ -408,11 +408,20 @@ fn create(run: &mut Run, db: &Database, c: &Create, checked: &Checked) -> Result
             ("expires", expiry(run, expires)),
         ],
     );
-    // Shown once; never written to the state file or a log.
-    run.line(
+    // Shown once; never written to the state file or a log. Unlike other lines, a failed
+    // write is an error: a token made but not seen must be revoked, so say which.
+    let line = run.t(
         key!("cli.token.secret"),
         &[("token", secret.as_str().to_string())],
     );
+    if let Err(e) = writeln!(run.out, "{line}").and_then(|()| run.out.flush()) {
+        return Err(fail(
+            run,
+            Code::TokenNotShown,
+            key!("cli.error.token_not_shown"),
+            &[("id", made.to_string()), ("error", e.to_string())],
+        ));
+    }
     run.line(key!("cli.token.keep"), &[]);
     Ok(())
 }
@@ -443,19 +452,37 @@ fn list(run: &mut Run, db: &Database, login: Option<&str>) -> Result<(), Failure
     }
     .map_err(|e| run.api(&e))?;
     if rows.is_empty() {
+        if let Some(l) = login {
+            // A typo in the login must not read as "this user has no token".
+            let known = db
+                .rows("SELECT id FROM users WHERE login = ?", &[l])
+                .map_err(|e| run.api(&e))?;
+            if known.is_empty() {
+                return Err(fail(
+                    run,
+                    Code::TokenNoUser,
+                    key!("cli.error.token_no_user"),
+                    &[("login", printable(l))],
+                ));
+            }
+        }
         run.line(key!("cli.token.list_none"), &[]);
         return Ok(());
     }
     for r in &rows {
-        let revoked = int(r, "revoked_at").map_or_else(
-            || run.t(key!("cli.token.list_active"), &[]),
-            |at| {
-                run.t(
-                    key!("cli.token.list_revoked"),
-                    &[("date", deploy::utc(at).0)],
-                )
-            },
-        );
+        // Revoked wins over expired; expired as the Worker's lookup decides it (`expires_at > now`
+        // still works).
+        let revoked = match (int(r, "revoked_at"), int(r, "expires_at")) {
+            (Some(at), _) => run.t(
+                key!("cli.token.list_revoked"),
+                &[("date", deploy::utc(at).0)],
+            ),
+            (None, Some(at)) if at <= run.cx.now_ms => run.t(
+                key!("cli.token.list_expired"),
+                &[("date", deploy::utc(at).0)],
+            ),
+            _ => run.t(key!("cli.token.list_active"), &[]),
+        };
         let line = run.t(
             key!("cli.token.list_item"),
             &[

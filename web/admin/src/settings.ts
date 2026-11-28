@@ -22,6 +22,7 @@ interface Entry {
 const ENTRIES: readonly Entry[] = [
   { key: "general", href: HREF.settings, label: () => t("admin.settings.general"), permission: "settings.manage" },
   { key: "users", href: "/admin/settings/users", label: () => t("admin.settings.users"), permission: "user.manage" },
+  { key: "log", href: HREF.syslog, label: () => t("admin.syslog.title"), permission: "syslog.view" },
 ];
 
 export interface SettingsOptions {

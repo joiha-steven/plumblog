@@ -910,3 +910,209 @@ pub async fn invites_die_with_their_owner<S: Store>(db: &S) -> Check {
     )
     .map(drop)
 }
+
+/// Demoting an owner revokes their owner-scope tokens in the same write, so promoting them
+/// again does not bring those back; their read and writer tokens, and others', stay.
+pub async fn demote_revokes_owner_tokens<S: Store>(db: &S) -> Check {
+    let root = owner(db, "root").await?;
+    let b = owner(db, "bea").await?;
+    let scoped = |user, hash: &str, scope| NewToken {
+        scope,
+        ..token(user, hash, None)
+    };
+    let tbo = ok(
+        "create_token",
+        db.create_token(scoped(b, "tbo", TokenScope::Owner)).await,
+    )?;
+    let tbw = ok(
+        "create_token",
+        db.create_token(scoped(b, "tbw", TokenScope::Writer)).await,
+    )?;
+    let tbr = ok(
+        "create_token",
+        db.create_token(scoped(b, "tbr", TokenScope::Read)).await,
+    )?;
+    let troot = ok(
+        "create_token",
+        db.create_token(scoped(root, "tro", TokenScope::Owner))
+            .await,
+    )?;
+    ok("demote", db.set_role(&ADMIN, b, Role::Writer, T0 + 5).await)?;
+    ok(
+        "promote again",
+        db.set_role(&ADMIN, b, Role::Owner, T0 + 6).await,
+    )?;
+    let revoked =
+        |list: &[crate::ApiToken], id: i64| list.iter().find(|t| t.id == id).map(|t| t.revoked_at);
+    let mine = ok("list_tokens", db.list_tokens(b).await)?;
+    eq!(
+        "owner token revoked at the demote time",
+        revoked(&mine, tbo),
+        Some(Some(T0 + 5))
+    )?;
+    eq!("writer token stays", revoked(&mine, tbw), Some(None))?;
+    eq!("read token stays", revoked(&mine, tbr), Some(None))?;
+    eq!(
+        "revoked owner token does not resolve after re-promotion",
+        ok("find_token", db.find_token("tbo", T0 + 7).await)?.map(|t| t.id),
+        None
+    )?;
+    let theirs = ok("list_tokens", db.list_tokens(root).await)?;
+    eq!(
+        "the acting owner's token stays",
+        revoked(&theirs, troot),
+        Some(None)
+    )?;
+    // Promoting (to owner) revokes nothing.
+    let tb2 = ok(
+        "create_token",
+        db.create_token(scoped(b, "tb2", TokenScope::Owner)).await,
+    )?;
+    ok(
+        "set_role owner to owner",
+        db.set_role(&ADMIN, b, Role::Owner, T0 + 8).await,
+    )?;
+    let after = ok("list_tokens", db.list_tokens(b).await)?;
+    eq!(
+        "promote keeps owner tokens",
+        revoked(&after, tb2),
+        Some(None)
+    )
+}
+
+/// Disabling an owner deletes a pending owner reset bound to them in the same write, so a
+/// disable then enable within the hour cannot reuse that code; one bound to another owner
+/// stays.
+pub async fn disable_drops_owner_reset<S: Store>(db: &S) -> Check {
+    let root = owner(db, "root").await?;
+    let b = owner(db, "bea").await?;
+    let later = T0 + 3_600_000;
+    ok(
+        "put_owner_reset for root",
+        db.put_owner_reset("rc-root", root, later, false, T0).await,
+    )?;
+    ok(
+        "disable bea",
+        db.set_disabled(&ADMIN, b, Some(T0 + 1), T0 + 1).await,
+    )?;
+    eq!(
+        "another owner's reset stays",
+        ok(
+            "take_owner_reset",
+            db.take_owner_reset("rc-root", T0 + 2).await
+        )?,
+        Some(root)
+    )?;
+    ok("enable bea", db.set_disabled(&ADMIN, b, None, T0 + 2).await)?;
+    ok(
+        "put_owner_reset for bea",
+        db.put_owner_reset("rc-bea", b, later, false, T0 + 3).await,
+    )?;
+    ok(
+        "disable bea",
+        db.set_disabled(&ADMIN, b, Some(T0 + 4), T0 + 4).await,
+    )?;
+    ok("enable bea", db.set_disabled(&ADMIN, b, None, T0 + 5).await)?;
+    fails(
+        "redeem after disable and enable",
+        db.redeem_owner_reset(
+            b,
+            "new".into(),
+            None,
+            NewSession {
+                token_hash: "sr".into(),
+                user_id: b,
+                created_at: T0 + 6,
+                expires_at: T0 + 1000,
+                proof: crate::Proof::ResetCode("rc-bea".into()),
+            },
+            T0 + 6,
+        )
+        .await,
+        ErrorCode::SetupInvalid,
+    )?;
+    eq!(
+        "the code is gone",
+        ok(
+            "take_owner_reset",
+            db.take_owner_reset("rc-bea", T0 + 6).await
+        )?,
+        None
+    )?;
+    eq!(
+        "password unchanged",
+        get(db, b).await?.password_hash,
+        Some("old".into())
+    )
+}
+
+/// Demoting an owner deletes a pending owner reset bound to them in the same write, so a
+/// demote then re-promote within the hour cannot reuse that code; promoting deletes nothing.
+pub async fn demote_drops_owner_reset<S: Store>(db: &S) -> Check {
+    let root = owner(db, "root").await?;
+    let b = owner(db, "bea").await?;
+    let later = T0 + 3_600_000;
+    ok(
+        "put_owner_reset for root",
+        db.put_owner_reset("rc-root", root, later, false, T0).await,
+    )?;
+    ok(
+        "demote bea",
+        db.set_role(&ADMIN, b, Role::Writer, T0 + 1).await,
+    )?;
+    eq!(
+        "another owner's reset stays",
+        ok(
+            "take_owner_reset",
+            db.take_owner_reset("rc-root", T0 + 2).await
+        )?,
+        Some(root)
+    )?;
+    ok(
+        "put_owner_reset for bea",
+        db.put_owner_reset("rc-bea", b, later, false, T0 + 3).await,
+    )?;
+    ok(
+        "promote bea",
+        db.set_role(&ADMIN, b, Role::Owner, T0 + 3).await,
+    )?;
+    ok(
+        "demote bea",
+        db.set_role(&ADMIN, b, Role::Writer, T0 + 4).await,
+    )?;
+    ok(
+        "promote bea",
+        db.set_role(&ADMIN, b, Role::Owner, T0 + 5).await,
+    )?;
+    fails(
+        "redeem after demote and re-promote",
+        db.redeem_owner_reset(
+            b,
+            "new".into(),
+            None,
+            NewSession {
+                token_hash: "sr".into(),
+                user_id: b,
+                created_at: T0 + 6,
+                expires_at: T0 + 1000,
+                proof: crate::Proof::ResetCode("rc-bea".into()),
+            },
+            T0 + 6,
+        )
+        .await,
+        ErrorCode::SetupInvalid,
+    )?;
+    eq!(
+        "the code is gone",
+        ok(
+            "take_owner_reset",
+            db.take_owner_reset("rc-bea", T0 + 6).await
+        )?,
+        None
+    )?;
+    eq!(
+        "password unchanged",
+        get(db, b).await?.password_hash,
+        Some("old".into())
+    )
+}

@@ -7,7 +7,6 @@
 //! the object if the row fails; delete removes the row first and the object after. Any object
 //! left behind is logged with its key.
 
-use plumblog_auth::json::{self, Value};
 use plumblog_auth::{Crypto, base64url};
 use plumblog_model::api::{DEFAULT_LIMIT, MAX_LIMIT, MAX_MEDIA_BODY, MEDIA_MIMES};
 use plumblog_model::{Error, ErrorCode, MediaId, Permission, PostId, Result, image};
@@ -19,6 +18,7 @@ use worker::{Bucket, HttpMetadata};
 use super::{Input, Principal, changed, stored_json};
 use crate::api::body::{Out, object};
 use crate::api::{Ctx, Raw, Reply};
+use crate::media::variants;
 
 const MAX_ALT: usize = 1000;
 /// Longest file name kept in the R2 key.
@@ -299,41 +299,8 @@ async fn existing(ctx: &Ctx, m: &Media) -> Result<Reply> {
 const MAX_VARIANTS: usize = 8;
 /// The types a size may be, with the extension its R2 key gets.
 const VARIANT_TYPES: &[(&str, &str)] = &[("image/avif", "avif"), ("image/webp", "webp")];
-
-/// An item's stored sizes, `(mime, width, sha256)` each, or why `variants_json` is unreadable.
-/// `{}` is what older rows and fixtures hold: no sizes.
-fn variant_list(text: &str) -> std::result::Result<Vec<(String, i64, String, String)>, String> {
-    let wrapped = format!("{{\"v\":{text}}}");
-    let mut doc = json::parse_document(wrapped.as_bytes(), usize::MAX)
-        .map_err(|e| format!("variants_json is not JSON: {e:?}"))?;
-    let items = match doc.pop() {
-        Some((_, Value::Arr(items))) => items,
-        Some((_, Value::Obj(o))) if o.is_empty() => Vec::new(),
-        _ => return Err("variants_json is not an array".to_owned()),
-    };
-    items
-        .into_iter()
-        .map(|item| {
-            let Value::Obj(fields) = item else {
-                return Err("a variant is not an object".to_owned());
-            };
-            let (mut key, mut mime, mut width, mut sha) = (None, None, None, String::new());
-            for (k, v) in fields {
-                match (k.as_str(), v) {
-                    ("key", Value::Str(t)) => key = Some(t),
-                    ("mime", Value::Str(t)) => mime = Some(t),
-                    ("width", Value::Int(n)) => width = Some(n),
-                    ("sha256", Value::Str(t)) => sha = t,
-                    _ => {}
-                }
-            }
-            match (key, mime, width) {
-                (Some(key), Some(mime), Some(width)) => Ok((mime, width, sha, key)),
-                _ => Err("a variant has no key, mime or width".to_owned()),
-            }
-        })
-        .collect()
-}
+/// The widths the admin encoder makes (docs/ARCHITECTURE.md, Images).
+const VARIANT_WIDTHS: [i64; 4] = [480, 960, 1600, 2400];
 
 /// Where a new size would go in an item's list.
 #[derive(Debug, PartialEq, Eq)]
@@ -349,9 +316,13 @@ enum Slot {
 
 /// Where `entry` (one encoded JSON object) for (mime, width, sha256) goes in `text`.
 fn slot(text: &str, mime: &str, width: i64, sha: &str, entry: &str) -> Result<Slot> {
-    let list = variant_list(text).map_err(|why| Error::new(ErrorCode::Storage, why))?;
-    if let Some((_, _, had, _)) = list.iter().find(|(m, w, _, _)| m == mime && *w == width) {
-        return Ok(if had == sha { Slot::Same } else { Slot::Taken });
+    let list = variants(text).map_err(|why| Error::new(ErrorCode::Storage, why))?;
+    if let Some(v) = list.iter().find(|v| v.mime == mime && v.width == width) {
+        return Ok(if v.sha256 == sha {
+            Slot::Same
+        } else {
+            Slot::Taken
+        });
     }
     if list.len() >= MAX_VARIANTS {
         return Ok(Slot::Full);
@@ -363,8 +334,9 @@ fn slot(text: &str, mime: &str, width: i64, sha: &str, entry: &str) -> Result<Sl
     }))
 }
 
-/// `media/<random>/heron.jpg` -> `media/<random>/heron-480-<sha8>.avif`. The hash part keeps
-/// two encodings of one (mime, width) in separate objects, so a lost race removes only its own.
+/// `media/<random>/heron.jpg` -> `media/<random>/heron-480-<sha256>.avif`. The full hash keeps
+/// two encodings of one (mime, width) in separate objects, so a lost race removes only its own
+/// (a shorter prefix can be made to collide).
 fn variant_key(original: &str, width: i64, sha: &str, ext: &str) -> String {
     let (dir, name) = original.rsplit_once('/').unwrap_or(("", original));
     let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
@@ -373,7 +345,7 @@ fn variant_key(original: &str, width: i64, sha: &str, ext: &str) -> String {
     } else {
         format!("{dir}/")
     };
-    format!("{dir}{stem}-{width}-{}.{ext}", sha.get(..8).unwrap_or(sha))
+    format!("{dir}{stem}-{width}-{sha}.{ext}")
 }
 
 /// The item, when the caller may change it (delete it, add a size): their own upload, else
@@ -418,7 +390,7 @@ struct NewVariant {
 }
 
 /// The input checks of a new size: an upload's (type, magic bytes, header size, `sha256`),
-/// then never wider than the original and in its aspect within one pixel of rounding.
+/// then in the original's aspect within one pixel of rounding, at a width it allows.
 fn new_variant(m: &Media, input: &Input, body: &[u8]) -> Result<NewVariant> {
     let want = input.str("mime").unwrap_or_default();
     let (mime, ext) = *VARIANT_TYPES
@@ -439,17 +411,27 @@ fn new_variant(m: &Media, input: &Input, body: &[u8]) -> Result<NewVariant> {
     if !image::size_matches(mime, body, width, height) {
         return Err(invalid("width", "not the size in the image header"));
     }
-    // JPEG and AVIF originals may be stored in header order, turned a quarter from the
-    // display order the browser encodes in: either orientation's aspect, within 1 px, and
-    // never wider than that orientation (equal width is a format conversion).
+    // A JPEG or AVIF original (EXIF orientation, `irot`) may be stored in header order, a
+    // quarter turn from the display order the browser encodes in: either orientation's
+    // aspect then, within 1 px. The width is a standard one no wider than that orientation,
+    // or exactly its width (a format conversion).
+    let turns = if matches!(m.mime.as_str(), "image/jpeg" | "image/avif") {
+        2
+    } else {
+        1
+    };
     let max = [(m.width, m.height), (m.height, m.width)]
         .into_iter()
+        .take(turns)
         .filter(|&(w, h)| (height * w - h * width).abs() <= w)
         .map(|(w, _)| w)
         .max()
         .ok_or_else(|| invalid("height", "not the original's aspect"))?;
-    if width > max {
-        return Err(invalid("width", "wider than the original"));
+    if width > max || (width != max && !VARIANT_WIDTHS.contains(&width)) {
+        return Err(invalid(
+            "width",
+            "480, 960, 1600 or 2400, at most the original's width, or exactly it",
+        ));
     }
     let key = variant_key(&m.r2_key, width, &hex, ext);
     let bytes = i64::try_from(body.len()).unwrap_or(i64::MAX);
@@ -472,10 +454,9 @@ fn new_variant(m: &Media, input: &Input, body: &[u8]) -> Result<NewVariant> {
 }
 
 /// `POST /api/v1/media/<id>/variants`: one smaller AVIF or WebP of the original, made by the
-/// admin's encoder. Checked like an upload (magic bytes, header size, R2-verified `sha256`),
-/// never wider than the original and in its aspect within 1 px. One size per (mime, width):
-/// the same bytes again answer 200 with the item, other bytes 409. The key is the original's
-/// with `-<width>.<ext>`, so a retry overwrites its own object with the same bytes.
+/// admin's encoder, checked by [`new_variant`]. One size per (mime, width): the same bytes
+/// again answer 200 with the item, other bytes 409. The key is the original's with
+/// `-<width>-<sha256>.<ext>`, so a retry overwrites its own object with the same bytes.
 ///
 /// R2 first, then the row by compare and swap ([`MediaStore::replace_media_variants`]), so two
 /// sizes added at once are both kept. An object is removed only when no row can name it.
@@ -529,8 +510,8 @@ pub async fn add_variant(ctx: &Ctx, p: &Principal, input: &Input, body: Vec<u8>)
             // A retry of these bytes won the race: the object holds them either way.
             Slot::Same => return answer(ctx, &cur, 200).await,
             // Other bytes won this (mime, width), or the list filled up. Entries are never
-            // removed while the item exists, and the key holds this request's hash, so no row
-            // can come to name this object.
+            // removed while the item exists, and the key holds this request's full hash, which
+            // the winner's other bytes cannot share, so no row can come to name this object.
             Slot::Taken => {
                 remove().await;
                 return Err(taken());
@@ -727,8 +708,8 @@ pub async fn delete(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
     // The sizes as the delete found them, so one added after the read above goes too.
     let mut keys = vec![m.r2_key.clone()];
     let mut left = Vec::new();
-    match variant_list(&variants) {
-        Ok(list) => keys.extend(list.into_iter().map(|(_, _, _, key)| key)),
+    match crate::media::variants(&variants) {
+        Ok(list) => keys.extend(list.into_iter().map(|v| v.key)),
         Err(why) => left.push(format!("its sizes ({why}): {variants}")),
     }
     match bucket(ctx) {
@@ -777,17 +758,32 @@ mod tests {
         let h = "0123456789abcdef";
         assert_eq!(
             variant_key("media/abc/heron.jpg", 480, h, "avif"),
-            "media/abc/heron-480-01234567.avif"
+            "media/abc/heron-480-0123456789abcdef.avif"
         );
         assert_eq!(
             variant_key("media/abc/a.b.png", 960, h, "webp"),
-            "media/abc/a.b-960-01234567.webp"
+            "media/abc/a.b-960-0123456789abcdef.webp"
         );
         assert_eq!(
             variant_key("media/abc/raw", 480, h, "avif"),
-            "media/abc/raw-480-01234567.avif"
+            "media/abc/raw-480-0123456789abcdef.avif"
         );
-        assert_eq!(variant_key("o/1.jpg", 2, h, "avif"), "o/1-2-01234567.avif");
+        assert_eq!(
+            variant_key("o/1.jpg", 2, h, "avif"),
+            "o/1-2-0123456789abcdef.avif"
+        );
+    }
+
+    /// The loser of a race for one (mime, width) removes its own object, so its key must
+    /// never be the winner's: hashes sharing a prefix (made to, or by chance) still differ.
+    #[test]
+    fn keys_of_other_bytes_never_collide() {
+        let a = format!("deadbeef{}", "0".repeat(56));
+        let b = format!("deadbeef{}", "1".repeat(56));
+        assert_ne!(
+            variant_key("media/abc/heron.jpg", 480, &a, "avif"),
+            variant_key("media/abc/heron.jpg", 480, &b, "avif")
+        );
     }
 
     #[test]

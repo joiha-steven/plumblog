@@ -54,11 +54,18 @@ fn slug(v: &str) -> Result<()> {
 }
 
 /// Refuses a slug the router owns (`pages::routes::RESERVED`) in the site's default language,
-/// where posts live at `/<slug>`; another language's posts are at `/<lang>/<slug>`. Reads the
+/// where posts live at `/<slug>`; another language's posts are at `/<lang>/<slug>`. `search`
+/// is refused in every language: `/<lang>/search` is that language's search page. Reads the
 /// default language only for such a slug.
 async fn not_reserved(ctx: &Ctx, post_lang: &str, post_slug: &str) -> Result<()> {
     if !RESERVED.contains(&post_slug) {
         return Ok(());
+    }
+    if post_slug == "search" {
+        return Err(invalid(
+            "slug",
+            "reserved: the site uses this address for something else",
+        ));
     }
     let default = ctx
         .store

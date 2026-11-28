@@ -182,6 +182,9 @@ pub trait InviteStore {
     async fn create_invite(&self, invite: NewInvite) -> Result<i64>;
     /// Newest first (`created_at` DESC, id DESC), used ones included.
     async fn list_invites(&self) -> Result<Vec<Invite>>;
+    /// Unused ones only (`used_at` NULL, expired included), in the same order, at most
+    /// `limit`: the filter and bound are in the query, so used invites are never read.
+    async fn list_unused_invites(&self, limit: u32) -> Result<Vec<Invite>>;
     /// Deletes an unused invite in one conditional write, `by` checked in it as
     /// [`crate::Admin`]. `NotFound` if absent or used: a used invite is the record of how its
     /// user joined.

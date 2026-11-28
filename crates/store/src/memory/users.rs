@@ -1,6 +1,6 @@
 use std::ops::Bound;
 
-use plumblog_model::{Result, Role, UserId};
+use plumblog_model::{Result, Role, TokenScope, UserId};
 
 use super::{MemoryStore, State, conflict, invalid, next_rowid, next_seq, user_not_found};
 use crate::{
@@ -42,6 +42,19 @@ impl State {
     fn drop_unused_invites(&mut self, id: UserId) {
         self.invites
             .retain(|_, i| i.created_by != id || i.used_at.is_some());
+    }
+
+    /// Deletes the pending owner reset if it names `id`, compared as text like D1 does.
+    fn drop_owner_reset(&mut self, id: UserId) {
+        let names = self
+            .settings
+            .get(crate::OWNER_RESET_USER_KEY)
+            .is_some_and(|(v, _)| *v == id.0.to_string());
+        if names {
+            for &k in crate::OWNER_RESET_KEYS {
+                self.settings.remove(k);
+            }
+        }
     }
 
     /// Exists and is not disabled.
@@ -237,6 +250,16 @@ impl UserStore for MemoryStore {
             if role != Role::Owner {
                 s.check_not_last_owner(id)?;
                 s.drop_unused_invites(id);
+                // The scope is capped by the role only when read, and a redeem only checks
+                // the role: a re-promotion would bring these and the reset code back.
+                for t in s
+                    .tokens
+                    .values_mut()
+                    .filter(|t| t.user_id == id && t.scope == TokenScope::Owner)
+                {
+                    t.revoked_at.get_or_insert(now);
+                }
+                s.drop_owner_reset(id);
             }
             let u = s.user_mut(id)?;
             u.role = role;
@@ -264,6 +287,7 @@ impl UserStore for MemoryStore {
                 for t in s.tokens.values_mut().filter(|t| t.user_id == id) {
                     t.revoked_at.get_or_insert(now);
                 }
+                s.drop_owner_reset(id);
             }
             let u = s.user_mut(id)?;
             u.disabled_at = disabled_at;

@@ -17,6 +17,7 @@ mod theme;
 
 pub use data::{
     Alternate, Body, CommentItem, Comments, Image, Link, NavItem, PageInfo, Post, Site,
+    UNSET_ORIGIN,
 };
 pub use plugin::Plugin;
 pub use pushed::{PushedTheme, THEME_API};

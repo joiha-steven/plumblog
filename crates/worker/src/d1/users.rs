@@ -1,5 +1,9 @@
+use plumblog_model::TokenScope;
 use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
-use plumblog_store::{Admin, NewSession, NewUser, ProfileUpdate, SiteStore, User, UserStore};
+use plumblog_store::{
+    Admin, NewSession, NewUser, OWNER_RESET_AT_KEY, OWNER_RESET_EXPIRES_KEY, OWNER_RESET_HASH_KEY,
+    OWNER_RESET_KEEP_TOKENS_KEY, OWNER_RESET_USER_KEY, ProfileUpdate, SiteStore, User, UserStore,
+};
 
 use super::{
     D1Store, Failure, Row, Stmt, bound, bump, bump_if, guard, int, invalid, opt_text,
@@ -103,7 +107,10 @@ impl D1Store {
     }
 
     /// The `set_role` batch for a non-owner `role`: the guards, then the write at index 2.
-    /// Separate so `selftest` can run it after the owners changed under it.
+    /// Separate so `selftest` can run it after the owners changed under it. Their owner-scope
+    /// tokens are revoked and a reset code bound to them is deleted in the same batch: a
+    /// token's scope is capped by the role only while it is read, and a redeem only checks
+    /// that they are an owner, so a later re-promotion would otherwise bring both back.
     pub(super) fn demote_stmts(
         &self,
         by: &Admin,
@@ -111,11 +118,47 @@ impl D1Store {
         role: Role,
         now: i64,
     ) -> Result<Vec<Stmt>> {
-        Ok(vec![
+        let mut stmts = vec![
             self.admin_guard(by, now)?,
             self.not_last_owner("set_role_guard", id)?,
             self.role_stmt(id, role, now)?,
             self.drop_unused_invites("set_role_invites", id)?,
+            self.stmt(
+                "set_role_tokens",
+                "UPDATE api_tokens SET revoked_at = ? WHERE user_id = ? AND scope = ? \
+                 AND revoked_at IS NULL",
+                &[int(now)?, bound(id.0), text(TokenScope::Owner.as_str())],
+            )?,
+        ];
+        stmts.extend(self.drop_owner_reset(id)?);
+        Ok(stmts)
+    }
+
+    /// Deletes the pending owner reset if it names `id` (`value_json` exactly as
+    /// `put_owner_reset` and `blog admin reset` write it). Two statements, the user key last,
+    /// so the first can still see which user the code names; the hash goes first, so the code
+    /// is dead from the first statement on.
+    fn drop_owner_reset(&self, id: UserId) -> Result<[Stmt; 2]> {
+        let user = id.0.to_string();
+        Ok([
+            self.stmt(
+                "drop_owner_reset",
+                "DELETE FROM settings WHERE key IN (?, ?, ?, ?) \
+                 AND EXISTS (SELECT 1 FROM settings WHERE key = ? AND value_json = ?)",
+                &[
+                    text(OWNER_RESET_HASH_KEY),
+                    text(OWNER_RESET_EXPIRES_KEY),
+                    text(OWNER_RESET_AT_KEY),
+                    text(OWNER_RESET_KEEP_TOKENS_KEY),
+                    text(OWNER_RESET_USER_KEY),
+                    text(&user),
+                ],
+            )?,
+            self.stmt(
+                "drop_owner_reset_user",
+                "DELETE FROM settings WHERE key = ? AND value_json = ?",
+                &[text(OWNER_RESET_USER_KEY), text(&user)],
+            )?,
         ])
     }
 
@@ -456,7 +499,7 @@ impl UserStore for D1Store {
                 .guarded_user_write("set_disabled", by, id, stmts, 1, now)
                 .await;
         };
-        let stmts = vec![
+        let mut stmts = vec![
             self.admin_guard(by, now)?,
             self.not_last_owner("set_disabled_guard", id)?,
             self.stmt(
@@ -478,6 +521,8 @@ impl UserStore for D1Store {
                 &[int(now)?, bound(id.0)],
             )?,
         ];
+        // Nor a reset code that works again once they are re-enabled.
+        stmts.extend(self.drop_owner_reset(id)?);
         self.guarded_user_write("set_disabled", by, id, stmts, 2, now)
             .await
     }

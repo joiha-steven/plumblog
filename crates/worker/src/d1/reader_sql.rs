@@ -84,10 +84,13 @@ pub(super) fn rows(from: &str, all: bool) -> String {
     )
 }
 
-/// A post page: `posts_lang_slug`, then the tags through the `post_tags` primary key.
+/// A post page: `posts_lang_slug`, then the tags through the `post_tags` primary key and the
+/// cover through the `media` primary key (LEFT JOIN: no cover is all NULL).
 pub(super) fn post() -> String {
     format!(
-        "SELECT {POST_COLS}, {TAGS_COL} FROM posts p \
+        "SELECT {POST_COLS}, {TAGS_COL}, \
+         m.id, m.r2_key, m.width, m.height, m.alt, m.variants_json \
+         FROM posts p LEFT JOIN media m ON m.id = p.cover_media_id \
          WHERE p.lang = ? AND p.slug = ? AND p.status = 'published'"
     )
 }
@@ -142,11 +145,40 @@ pub(super) fn sitemap() -> String {
     let arm = |kind: &str| {
         format!(
             "SELECT * FROM (SELECT p.lang, p.slug, p.updated_at, p.translation_group, \
-             p.published_at, p.id FROM posts p WHERE p.status = 'published' \
+             p.published_at, p.id, p.kind = 'page' FROM posts p WHERE p.status = 'published' \
              AND p.kind = '{kind}' ORDER BY p.published_at DESC, p.id DESC LIMIT ?)"
         )
     };
     format!("{} UNION ALL {}", arm("post"), arm("page"))
+}
+
+/// Reader search: FTS5 `MATCH` first, then each hit's post by its integer primary key, with
+/// the status and language filter on that row. CROSS JOIN fixes the order: without it the
+/// planner (no ANALYZE on D1) drives from `posts_admin` and runs one MATCH per published post.
+/// The only TEMP B-TREE is the sort of the hits
+/// (a wide query is cut to `LIMIT` after it); there is no index on `published_at` to avoid it.
+pub(super) fn search() -> String {
+    format!(
+        "SELECT {SUMMARY_COLS} FROM posts_fts CROSS JOIN posts p ON p.id = posts_fts.rowid \
+         WHERE posts_fts MATCH ? AND p.status = 'published' AND p.lang = ? \
+         ORDER BY p.published_at DESC, p.id DESC LIMIT ?"
+    )
+}
+
+/// A published post or page at `(lang, slug)`: the unique `posts_lang_slug` lookup, no columns.
+pub(super) fn post_exists() -> String {
+    "SELECT 1 FROM posts p WHERE p.lang = ? AND p.slug = ? AND p.status = 'published' LIMIT 1"
+        .to_owned()
+}
+
+/// Which of `n` languages have a published post: one `EXISTS` each on `posts_home`
+/// (status, kind, lang), a covering index search that stops at the first row.
+pub(super) fn langs_with_posts(n: usize) -> String {
+    let values = vec!["SELECT ? AS v"; n].join(" UNION ALL ");
+    format!(
+        "SELECT l.v FROM ({values}) l WHERE EXISTS (SELECT 1 FROM posts p \
+         WHERE {LISTED} AND p.lang = l.v)"
+    )
 }
 
 /// Tags with a published post: each tag stops at its first one (`post_tags_tag`, then the post).
@@ -301,6 +333,82 @@ mod plans {
         );
     }
 
+    /// A language home (`/vi/`) is the same statements as `/` with another bound language.
+    #[test]
+    fn a_language_home_uses_the_home_index() {
+        let c = db();
+        let home = listing_from(ReaderFilter::Home("en")).unwrap();
+        let vi_home = listing_from(ReaderFilter::Home("vi")).unwrap();
+        assert_eq!(vi_home, home, "one SQL text for every language's home");
+        check(
+            &c,
+            "rows vi home",
+            &rows(&vi_home, true),
+            &["posts_home"],
+            false,
+        );
+        check(
+            &c,
+            "count vi home",
+            &count(&vi_home),
+            &["COVERING INDEX posts_"],
+            false,
+        );
+    }
+
+    /// The language-home helpers: a point lookup, and one covering `EXISTS` per language.
+    /// Search reads the FTS5 hits, then their posts by primary key: no scan of `posts`.
+    #[test]
+    fn search_matches_first_then_reads_posts_by_primary_key() {
+        let c = db();
+        let lines = plan(&c, &search());
+        let all = lines.join("\n");
+        assert_eq!(
+            lines[0], "SCAN posts_fts VIRTUAL TABLE INDEX 0:M2",
+            "MATCH first:\n{all}"
+        );
+        assert!(
+            all.contains("SEARCH p USING INTEGER PRIMARY KEY (rowid=?)"),
+            "posts by rowid:\n{all}"
+        );
+        assert!(
+            !lines.iter().any(|l| l == "SCAN p"),
+            "no scan of posts:\n{all}"
+        );
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("TEMP B-TREE")).count(),
+            1,
+            "one sort of the hits:\n{all}"
+        );
+    }
+
+    #[test]
+    fn language_home_helpers_use_their_indexes() {
+        let c = db();
+        check(
+            &c,
+            "post exists",
+            &post_exists(),
+            &["posts_lang_slug"],
+            false,
+        );
+        for n in [1, 3] {
+            let sql = langs_with_posts(n);
+            assert_eq!(sql.matches('?').count(), n);
+            // Only the language list itself (constants) is scanned; posts are searched.
+            check_scans(
+                &c,
+                "langs with posts",
+                &sql,
+                &[
+                    "SEARCH p EXISTS USING COVERING INDEX posts_home (status=? AND kind=? AND lang=?)",
+                ],
+                false,
+                &["CONSTANT ROW", "l"],
+            );
+        }
+    }
+
     #[test]
     fn every_reader_query_uses_the_index_it_is_meant_to() {
         let c = db();
@@ -362,7 +470,14 @@ mod plans {
             false,
         );
 
-        check(&c, "post", &post(), &["posts_lang_slug"], false);
+        // The cover is one primary-key lookup, not a scan of `media`.
+        check(
+            &c,
+            "post",
+            &post(),
+            &["posts_lang_slug", "SEARCH m USING INTEGER PRIMARY KEY"],
+            false,
+        );
         // The D1 engine chose posts_admin (status) here and read every published row; the
         // SQLite bundled for tests does not, so the pin itself is asserted as well.
         assert!(TRANSLATIONS.contains("INDEXED BY posts_group_lang"));
@@ -383,6 +498,8 @@ mod plans {
         );
         check_scans(&c, "tags", &tags(), &["post_tags_tag"], true, &["t"]);
         check(&c, "feed", &feed(), &["posts_listing"], false);
+        // The sitemap also reads each row's kind (language homes skip pages): same plan.
+        assert!(sitemap().contains("p.kind = 'page'"));
         check(&c, "sitemap", &sitemap(), &["posts_by_date"], false);
 
         // API pages of tags and series: a SEARCH on the slug's unique autoindex, no sort.

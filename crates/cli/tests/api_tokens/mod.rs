@@ -451,15 +451,6 @@ fn list_shows_every_token_but_never_the_hash() {
     );
     ok(&r);
     assert_eq!(r.out.lines().count(), 1, "{}", r.out);
-    let r = run(
-        &fake,
-        &dir,
-        &Action::List {
-            login: Some("nobody".into()),
-        },
-    );
-    ok(&r);
-    assert_eq!(r.out.trim(), "No API token.");
 }
 
 #[test]
@@ -608,4 +599,131 @@ fn the_worker_test_fixture_is_the_create_sql() {
         "{} is stale: run `BLESS=1 cargo test -p plumblog-cli --test cloudflare api_tokens::` after changing the create SQL",
         path.display()
     );
+}
+
+/// Accepts output until the token line, then fails like a closed pipe: on the write, or
+/// (`on_flush`) only when flushed.
+struct ClosedAtToken {
+    seen: Vec<u8>,
+    on_flush: bool,
+    pending: bool,
+}
+
+impl std::io::Write for ClosedAtToken {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let has_token = String::from_utf8_lossy(buf).contains("plb_");
+        if has_token && !self.on_flush {
+            return Err(std::io::ErrorKind::BrokenPipe.into());
+        }
+        self.pending |= has_token;
+        self.seen.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.pending {
+            return Err(std::io::ErrorKind::BrokenPipe.into());
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_token_that_cannot_be_shown_is_a_failure_naming_its_revoke() {
+    for on_flush in [false, true] {
+        let (fake, dir) = set_up();
+        let migs = migrations::bundled();
+        let text = en();
+        let cx = Context {
+            dir: &dir.0,
+            migrations: &migs,
+            now_ms: NOW,
+            text: &text,
+        };
+        let mut out = ClosedAtToken {
+            seen: Vec::new(),
+            on_flush,
+            pending: false,
+        };
+        let r = token::run(
+            &mut client(&fake, GOOD),
+            None,
+            &Action::Create(create("agent")),
+            &cx,
+            &mut out,
+        );
+        let id = tokens(&fake).last().unwrap()["id"].as_i64().unwrap();
+        let e = r.expect_err("a token nobody saw is not a success");
+        assert_eq!(e.code, Code::TokenNotShown, "on_flush {on_flush}");
+        assert!(
+            e.message.contains(&format!("blog token revoke {id} --yes")),
+            "{}",
+            e.message
+        );
+        assert!(!e.message.contains("plb_"), "{}", e.message);
+    }
+}
+
+#[test]
+fn list_shows_expired_tokens_and_revoked_wins() {
+    let (fake, dir) = set_up();
+    fake.exec(
+        DB,
+        &format!(
+            "UPDATE api_tokens SET expires_at = {} WHERE token_hash = 't1'; \
+             UPDATE api_tokens SET expires_at = {}, revoked_at = 5 WHERE token_hash = 't2'",
+            NOW - 1,
+            NOW - 1
+        ),
+    );
+    let r = run(&fake, &dir, &Action::List { login: None });
+    ok(&r);
+    let lines: Vec<&str> = r.out.lines().collect();
+    assert!(
+        lines[0].ends_with("expired 2026-09-21T14:13:19Z"),
+        "{}",
+        r.out
+    );
+    assert!(
+        lines[1].ends_with("revoked 1970-01-01T00:00:00Z"),
+        "{}",
+        r.out
+    );
+    fake.exec(
+        DB,
+        &format!("UPDATE api_tokens SET expires_at = {NOW} + 1 WHERE token_hash = 't1'"),
+    );
+    let r = run(&fake, &dir, &Action::List { login: None });
+    assert!(
+        r.out.lines().next().unwrap().ends_with("active"),
+        "{}",
+        r.out
+    );
+}
+
+#[test]
+fn list_for_an_unknown_login_is_refused() {
+    let (fake, dir) = set_up();
+    let r = run(
+        &fake,
+        &dir,
+        &Action::List {
+            login: Some("nobody".into()),
+        },
+    );
+    assert_eq!(code(&r), Code::TokenNoUser);
+    // A user with no token is not an error.
+    fake.exec(
+        DB,
+        "INSERT INTO users (id, login, slug, display_name, role, password_hash, created_at, \
+         updated_at) VALUES (3, 'empty', 'empty', 'E', 'writer', 'pw', 1, 1)",
+    );
+    let r = run(
+        &fake,
+        &dir,
+        &Action::List {
+            login: Some("EMPTY".into()),
+        },
+    );
+    ok(&r);
+    assert_eq!(r.out.trim(), "No API token.");
 }

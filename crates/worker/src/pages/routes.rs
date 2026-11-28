@@ -1,14 +1,24 @@
 //! Reader URLs, in one place: parsing a path and building the links pages point to.
 //!
-//! `/` and `/page/N` home, `/<slug>` post in the default language, `/<lang>/<slug>` in another, `/tag/<slug>` and `/archive/<year>` (each with
+//! `/` and `/page/N` home, `/<lang>/` and `/<lang>/page/N` a language's home, `/<slug>` post in the default language, `/<lang>/<slug>` in another, `/tag/<slug>` and `/archive/<year>` (each with
 //! `/page/N`). Redirect targets are always built here as `/`-rooted paths with no `//`, so a
 //! request path can never turn into an off-site `Location`.
-//! `/search?q=`. The names in [`RESERVED`] cannot be post slugs.
+//! `/search?q=` and `/<lang>/search?q=`. The names in [`RESERVED`] cannot be post slugs.
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Route {
     Home {
         page: usize,
+    },
+    /// `/<lang>/` and `/<lang>/page/N`. Whether `lang` is a site language, and not the default
+    /// (whose home is `/`), only the page knows.
+    LangHome {
+        lang: String,
+        page: usize,
+    },
+    /// `/<lang>/page/1`: a redirect to `/<lang>/` for a site language, else not a page.
+    LangFirstPage {
+        lang: String,
     },
     /// `lang` is `None` for `/<slug>` (the default language, which only the page knows).
     Post {
@@ -28,8 +38,12 @@ pub enum Route {
         lang: Option<String>,
         format: FeedFormat,
     },
-    /// `/search?q=`: the query string is read by the caller, not routed.
-    Search,
+    /// `/search?q=` (`lang` `None`: the default language) and `/<lang>/search?q=`: the query
+    /// string is read by the caller, not routed. Whether `lang` is a site language, and not the
+    /// default (whose search is `/search`), only the page knows.
+    Search {
+        lang: Option<String>,
+    },
     Sitemap,
     Robots,
     Llms,
@@ -51,6 +65,13 @@ pub fn parse(path: &str) -> Route {
         return Route::NotFound;
     }
     if path != "/" && path.ends_with('/') {
+        let lang = &path[1..path.len() - 1];
+        if is_lang(lang) && !RESERVED.contains(&lang) {
+            return Route::LangHome {
+                lang: lang.to_owned(),
+                page: 1,
+            };
+        }
         // One trailing slash only (no `//` above), so the target is a non-empty `/x` path.
         return Route::Redirect(path[..path.len() - 1].to_owned());
     }
@@ -83,7 +104,20 @@ pub fn parse(path: &str) -> Route {
             (Some(year), Some(page)) => Route::Archive { year, page },
             _ => Route::NotFound,
         },
-        ["search"] => Route::Search,
+        [lang, "page", n] if is_lang(lang) && !RESERVED.contains(lang) => match page_number(n) {
+            Some(1) => Route::LangFirstPage {
+                lang: (*lang).to_owned(),
+            },
+            Some(page) => Route::LangHome {
+                lang: (*lang).to_owned(),
+                page,
+            },
+            None => Route::NotFound,
+        },
+        ["search"] => Route::Search { lang: None },
+        [lang, "search"] if is_lang(lang) && !RESERVED.contains(lang) => Route::Search {
+            lang: Some((*lang).to_owned()),
+        },
         ["sitemap.xml"] => Route::Sitemap,
         ["robots.txt"] => Route::Robots,
         ["llms.txt"] => Route::Llms,
@@ -130,8 +164,17 @@ pub(crate) const RESERVED: &[&str] = &[
     "page", "tag", "archive", "search", "theme", "plugin", "media", "admin", "api", "healthz",
 ];
 
-/// The search page; results are `?q=` on it.
+/// The default language's search page; results are `?q=` on it.
 pub const SEARCH: &str = "/search";
+
+/// A language's search page: the default language's at the root, any other under `/<lang>/`.
+pub fn search_in(lang: &str, default_lang: &str) -> String {
+    if lang == default_lang {
+        SEARCH.to_owned()
+    } else {
+        format!("/{lang}{SEARCH}")
+    }
+}
 
 /// Slugs are lowercase ASCII letters, digits and dashes; anything else is a 404 without a
 /// storage lookup.
@@ -211,6 +254,25 @@ pub fn home_page(n: usize) -> String {
         "/".to_owned()
     } else {
         format!("/page/{n}")
+    }
+}
+
+/// A language's home: `/<lang>/`, then `/<lang>/page/N`. The default language's is
+/// [`home_page`]; see [`home_in`].
+pub fn lang_home(lang: &str, n: usize) -> String {
+    if n <= 1 {
+        format!("/{lang}/")
+    } else {
+        format!("/{lang}/page/{n}")
+    }
+}
+
+/// Page `n` of the home of `lang`: the root for the default language, else under `/<lang>/`.
+pub fn home_in(lang: &str, default_lang: &str, n: usize) -> String {
+    if lang == default_lang {
+        home_page(n)
+    } else {
+        lang_home(lang, n)
     }
 }
 

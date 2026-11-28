@@ -189,6 +189,7 @@ describe("embedded theme", () => {
     const reqs = [
       ["/search?q=plum"],
       ["/search?q=plum"],
+      ["/vi/search?q=plum"],
       ["/admin/"],
       ["/admin"],
       ["/api/v1/site"],

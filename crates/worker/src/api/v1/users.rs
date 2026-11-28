@@ -3,10 +3,12 @@
 //! these run, and again by the store inside each write ([`Admin`]), so an owner demoted or
 //! disabled while their request runs writes nothing. The last active owner is kept by the store inside the same write
 //! (`user.last_owner`), so two owners demoting each other at once cannot both succeed. Log
-//! entries carry ids and roles only, never an invite code.
+//! entries carry ids and roles only, never an invite code. A role change or disable that
+//! would not change anything answers 204 and neither writes nor logs. An owner who disables
+//! or deletes themself gets the sign-out cookie with the answer, since their session is gone.
 
-use plumblog_auth::{Crypto, base64url};
-use plumblog_model::api::{INVITE_MAX_TTL_MS, INVITE_TTL_MS};
+use plumblog_auth::{Crypto, base64url, session};
+use plumblog_model::api::{INVITE_LIST_MAX, INVITE_MAX_TTL_MS, INVITE_TTL_MS};
 use plumblog_model::{Error, ErrorCode, Result, Role, UserId};
 use plumblog_store::{Admin, Invite, InviteStore, NewInvite, UserStore};
 use plumblog_syslog::EventKind;
@@ -48,34 +50,51 @@ async fn log(ctx: &Ctx, p: &Principal, subject: &str, action: &str, extra: &[(&s
     ctx.syslog(e).await;
 }
 
-/// `PUT /api/v1/users/{id}/role` `{role}`: 200 with the user. The caller may change their
-/// own role; only an owner gets here, so it can only ever go down.
+/// `PUT /api/v1/users/{id}/role` `{role}`: 200 with the user, or 204 if they already have
+/// that role. The caller may change their own role; only an owner gets here, so it can only
+/// ever go down. Logs `from` and `to`.
 pub async fn set_role(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
     let id = UserId(input.id());
     let role = role(input)?;
+    // Read before the write: a change racing this one lands either way, as if ordered.
+    let from = ctx.store.get_user(id).await?.role;
+    if from == role {
+        return Ok(Reply::empty());
+    }
     ctx.store.set_role(&admin(p)?, id, role, ctx.now).await?;
     log(
         ctx,
         p,
         &format!("user {}", id.0),
         "role",
-        &[("role", role.as_str())],
+        &[("from", from.as_str()), ("to", role.as_str())],
     )
     .await;
     Ok(Reply::json(200, user_json(&ctx.store.get_user(id).await?)))
 }
 
-/// `PUT /api/v1/users/{id}/disabled` `{disabled}`: 200 with the user. Disabling ends their
-/// sessions and revokes their API tokens in the same write; enabling brings neither back.
+/// `PUT /api/v1/users/{id}/disabled` `{disabled}`: 200 with the user, or 204 if they are
+/// already in that state (a disabled user keeps their first `disabled_at`). Disabling ends
+/// their sessions, revokes their API tokens and deletes an owner reset code bound to them in
+/// the same write; enabling brings none back.
 pub async fn set_disabled(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
     let id = UserId(input.id());
     let disabled = input.bool("disabled").unwrap_or(false);
+    if ctx.store.get_user(id).await?.disabled_at.is_some() == disabled {
+        return Ok(Reply::empty());
+    }
+    let by = admin(p)?;
     ctx.store
-        .set_disabled(&admin(p)?, id, disabled.then_some(ctx.now), ctx.now)
+        .set_disabled(&by, id, disabled.then_some(ctx.now), ctx.now)
         .await?;
     let action = if disabled { "disable" } else { "enable" };
     log(ctx, p, &format!("user {}", id.0), action, &[]).await;
-    Ok(Reply::json(200, user_json(&ctx.store.get_user(id).await?)))
+    let reply = Reply::json(200, user_json(&ctx.store.get_user(id).await?));
+    Ok(if disabled && by.id == id {
+        reply.with_cookie(session::clear_cookie())
+    } else {
+        reply
+    })
 }
 
 /// `DELETE /api/v1/users/{id}`: 204. Refused (`store.conflict`) while they author any post;
@@ -95,6 +114,9 @@ pub async fn delete(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Reply> {
         e = e.actor(None).field("actor", &id.0.to_string());
     }
     ctx.syslog(e).await;
+    if by.id == id {
+        return Ok(Reply::empty().with_cookie(session::clear_cookie()));
+    }
     Ok(Reply::empty())
 }
 
@@ -172,14 +194,14 @@ pub async fn invite_create(ctx: &Ctx, p: &Principal, input: &Input) -> Result<Re
 }
 
 /// `GET /api/v1/invites`: unused invites, newest first, expired ones included (the admin
-/// shows them as expired until revoked). Never the code or its hash.
+/// shows them as expired until revoked), at most [`INVITE_LIST_MAX`]. Never the code or its
+/// hash.
 pub async fn invite_list(ctx: &Ctx) -> Result<Reply> {
     let items: Vec<String> = ctx
         .store
-        .list_invites()
+        .list_unused_invites(INVITE_LIST_MAX)
         .await?
         .iter()
-        .filter(|i| i.used_at.is_none())
         .map(|i| invite_json(i, None))
         .collect();
     Ok(Reply::json(
