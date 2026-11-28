@@ -133,6 +133,9 @@ pub(crate) const RESERVED: &[&str] = &[
 /// The search page; results are `?q=` on it.
 pub const SEARCH: &str = "/search";
 
+/// The sitemap (`Route::Sitemap`).
+pub const SITEMAP: &str = "/sitemap.xml";
+
 /// Slugs are lowercase ASCII letters, digits and dashes; anything else is a 404 without a
 /// storage lookup.
 fn is_slug(s: &str) -> bool {

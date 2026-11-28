@@ -95,6 +95,12 @@ stable_codes! {
         // A rendered page could not be copied to R2 (system log only): it was served, and
         // other data centres render it until a later miss stores it.
         PageStoreFailed => "pages.store_failed",
+        // The cron could not pre-render pages into R2 (system log only): readers render them
+        // on their first visit instead, so the site is only slower.
+        PagePrerenderFailed => "pages.prerender_failed",
+        // The cron could not delete retired pages from R2 (system log only): readers are not
+        // affected; old objects stay until a later run deletes them.
+        PageCleanupFailed => "pages.cleanup_failed",
     }
 }
 
@@ -350,6 +356,8 @@ mod tests {
                 (ErrorCode::ThemeUnavailable, "theme.unavailable"),
                 (ErrorCode::ResetExpired, "auth.reset_expired"),
                 (ErrorCode::PageStoreFailed, "pages.store_failed"),
+                (ErrorCode::PagePrerenderFailed, "pages.prerender_failed"),
+                (ErrorCode::PageCleanupFailed, "pages.cleanup_failed"),
             ]
         );
     }

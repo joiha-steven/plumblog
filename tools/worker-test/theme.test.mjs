@@ -13,6 +13,7 @@ import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { ASSETS_DIR, startWorker } from "./harness.mjs";
+import { contentVersion, pageKeys, versionId } from "./r2.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const MINIMAL = join(ROOT, "themes/minimal");
@@ -249,6 +250,20 @@ describe("pushed theme", () => {
     const log = w.log();
     assert.equal(count(log, "theme.pushed_render_failed"), 1, log);
     assert.match(log, /theme\.pushed_render_failed name=paper path=\/real-post/);
+  });
+
+  test("the cron never stores a page the pushed theme fails to render (readers get the uncached default)", async () => {
+    const w = workers.fragile;
+    const res = await fetch(`${w.url}/__scheduled?cron=${encodeURIComponent("*/10 * * * *")}`);
+    assert.equal(res.status, 200, await res.text());
+    const keys = pageKeys(w);
+    const group = `pages/${await versionId(w)}/v${contentVersion(w)}-t${tagOf(FRAGILE)}`;
+    assert.ok(keys.includes(`${group}/`), `home pre-rendered with the push: ${keys.join(", ")}`);
+    assert.ok(keys.includes(`${group}/feed.xml`), keys.join(", "));
+    assert.ok(!keys.includes(`${group}/real-post`), keys.join(", "));
+    // Marked handled, so later runs do not render it again.
+    const skip = `pages/${await versionId(w)}/.skip-v${contentVersion(w)}-t${tagOf(FRAGILE)}/real-post`;
+    assert.ok(keys.includes(skip), keys.join(", "));
   });
 
   test("a theme.json that was never pushed falls back to the default", async () => {

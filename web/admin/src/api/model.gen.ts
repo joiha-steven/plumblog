@@ -39,6 +39,8 @@ export const ERROR_CODES = [
   "theme.unavailable",
   "auth.reset_expired",
   "pages.store_failed",
+  "pages.prerender_failed",
+  "pages.cleanup_failed",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 

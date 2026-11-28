@@ -1,6 +1,7 @@
 //! Scheduled jobs. One cron trigger, every 10 minutes (the free plan allows few triggers),
 //! dispatched here by the scheduled time: every run publishes due posts and sends due
-//! webhook deliveries; the run scheduled 03:10-03:19 UTC also prunes the system log and old
+//! webhook deliveries, then pre-renders reader pages into R2 and deletes retired ones
+//! (`pages::prerender`); the run scheduled 03:10-03:19 UTC also prunes the system log and old
 //! deliveries. Each job stands alone: one failing never skips the others.
 
 use plumblog_store::{RETENTION_JOB, retention_job};
@@ -39,6 +40,9 @@ pub fn is_daily(scheduled_ms: f64) -> bool {
 /// Runs the jobs due at `scheduled_ms`. Failures go to the Worker log and, where storage
 /// works, to the system log with an error code; a cron handler has no one to return them to.
 pub async fn run(env: &Env, scheduled_ms: f64) {
+    // Test builds: count only this run's calls (`crate::subrequests`).
+    #[cfg(feature = "contract-tests")]
+    crate::subrequests::take();
     let scope = Scope::new(request_id(None, job_id), None);
     let prefix = scope.log_prefix();
     let store = match env.d1("DB") {
@@ -50,6 +54,9 @@ pub async fn run(env: &Env, scheduled_ms: f64) {
     };
     // Subrequests used so far (see webhooks::SUBREQUESTS); deliveries get what is left.
     let mut used = webhooks::publish_job(&store, &scope).await;
+    // Test builds: the publish job alone too, so a test can measure its calls per post.
+    #[cfg(feature = "contract-tests")]
+    let publish = (crate::subrequests::counted(), used);
     let daily = is_daily(scheduled_ms);
     if daily {
         let now = worker::Date::now().as_millis();
@@ -65,7 +72,7 @@ pub async fn run(env: &Env, scheduled_ms: f64) {
         }
         used += webhooks::DAILY_JOBS;
     }
-    webhooks::deliver_job(
+    used += webhooks::deliver_job(
         env,
         &store,
         &scope,
@@ -74,6 +81,26 @@ pub async fn run(env: &Env, scheduled_ms: f64) {
         daily,
     )
     .await;
+    // Last: a CPU cut-off then loses only this work, which the next run redoes.
+    let pages = crate::pages::store_cron(
+        env,
+        &store,
+        &scope,
+        webhooks::SUBREQUESTS.saturating_sub(used),
+    )
+    .await;
+    // Test builds: the calls this run made next to the jobs' own count, which
+    // tools/worker-test/r2cron.test.mjs holds to webhooks::SUBREQUESTS.
+    #[cfg(feature = "contract-tests")]
+    console_log!(
+        "{prefix} job.run subrequests counted={} budgeted={} publish_counted={} publish_budgeted={}",
+        crate::subrequests::take(),
+        used + pages,
+        publish.0,
+        publish.1
+    );
+    #[cfg(not(feature = "contract-tests"))]
+    let _ = pages;
 }
 
 #[cfg(test)]

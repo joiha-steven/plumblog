@@ -277,6 +277,7 @@ async fn fetch(env: &Env, name: &str) -> Fetched {
     };
     // The host is ignored by the assets binding; only the path picks the file.
     let url = format!("https://assets.invalid/_theme/{name}/theme.json");
+    crate::subrequests::count();
     let mut resp = match assets.fetch(url, None).await {
         Ok(r) => r,
         Err(e) => return Fetched::Failed(format!("fetch: {e}")),
