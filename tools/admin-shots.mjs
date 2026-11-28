@@ -276,6 +276,138 @@ const STATES = [
   ],
   ["preview", "/admin/posts/1", EDITOR, (page) => previewIn(page, () => page.click(".seg button:last-child"))],
   ["new", "/admin/posts/new", EDITOR],
+  // Publishing: a live post's Update button, the confirm, and the settings panel (a sheet over the text on phones).
+  // Post 4, not 2: the "posts-strip" state leaves a kept draft for post 2, which asks first.
+  ["editor-published", "/admin/posts/4", EDITOR, pictures],
+  [
+    "publish-confirm",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await page.click(".ed-actions .btn.primary");
+      await page.waitForSelector(".pubpop");
+      await settle(page, ".pop");
+    },
+  ],
+  [
+    "publish-confirm-update",
+    "/admin/posts/4",
+    EDITOR,
+    async (page) => {
+      await page.click(".ed-actions .btn.primary");
+      await page.waitForSelector(".pubpop");
+      await settle(page, ".pop");
+    },
+  ],
+  [
+    "settings-now",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await settle(page, ".panel");
+    },
+  ],
+  [
+    "settings-later",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await page.check('.panel input[name="pub-when"] >> nth=1');
+      await page.waitForSelector("[data-at]:not([hidden])");
+      await settle(page, ".panel");
+      // The radio's fill eases in; the shot waits for it.
+      await page.waitForTimeout(400);
+    },
+  ],
+  [
+    "settings-published",
+    "/admin/posts/4",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await settle(page, ".panel");
+    },
+  ],
+  [
+    "settings-scheduled",
+    "/admin/posts/3",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await settle(page, ".panel");
+    },
+  ],
+  [
+    "publish-confirm-later",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await page.check('.panel input[name="pub-when"] >> nth=1');
+      // Close the panel (a sheet over the text on phones): the choice stays.
+      await page.click(".panel-head .ib");
+      await page.waitForSelector(".panel .panel-body", { state: "hidden" });
+      await page.click(".ed-actions .btn.primary");
+      await page.waitForSelector(".pubpop");
+      await settle(page, ".pop");
+    },
+  ],
+  [
+    "publish-offline",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await page.evaluate(() => Object.defineProperty(navigator, "onLine", { get: () => false }));
+      await page.click(".ed-actions .btn.primary");
+      await page.waitForSelector(".pubpop");
+      await settle(page, ".pop");
+    },
+  ],
+  ...["unpublish", "trash"].map((act) => [
+    `confirm-${act}`,
+    "/admin/posts/4",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await settle(page, ".panel");
+      await page.click(`.panel [data-act=${act}]`);
+      await page.waitForSelector(".confirm");
+      await settle(page, ".pop");
+    },
+  ]),
+  [
+    "unpublished-changes",
+    "/admin/posts/4",
+    EDITOR,
+    async (page) => {
+      await pictures(page);
+      await page.click(EDITOR);
+      await page.keyboard.press("End");
+      await page.keyboard.type(" Edited.");
+      await page.waitForFunction(() => [...document.querySelectorAll(".saved")].some((e) => e.textContent?.trim()));
+      await page.waitForTimeout(500);
+    },
+  ],
+  [
+    "sync-slow",
+    "/admin/posts/new?create=slow",
+    EDITOR,
+    async (page) => {
+      await page.click(EDITOR);
+      await page.keyboard.type("A first line that never reaches the server.");
+      // Autosave starts after 3 s and the create is called slow after 20 s more.
+      await page.waitForTimeout(24000);
+    },
+  ],
+  ["trashed", "/admin/posts/5", EDITOR, async (page) => void (await page.waitForSelector(".banner [data-act=restore]"))],
   ["signin", "/admin/signin"],
   ["signin-wrong", "/admin/signin?auth=wrong", null, submitWith(SIGN)],
   ["signin-locked", "/admin/signin?auth=locked", null, submitWith(SIGN)],
@@ -393,7 +525,7 @@ try {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const english = ["posts", "posts-strip", "pages", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "account", "account-wrong-password", "signout-confirm"];
+        const english = ["posts", "posts-strip", "pages", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow"];
         const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
         const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);

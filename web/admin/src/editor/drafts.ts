@@ -211,6 +211,8 @@ export async function saveDraft(key: string, d: Omit<Draft, "rev">, expectRev: n
       const req = s.get(key);
       req.onsuccess = () => {
         const cur: unknown = req.result;
+        // The post was created from this key by another page: never write a second draft here.
+        if (isMoved(cur)) return done("conflict");
         const rev = isDraft(cur) ? cur.rev : 0;
         if (rev !== expectRev) return done("conflict");
         s.put({ ...d, rev: expectRev + 1 }, key).onsuccess = () => done("saved");
@@ -258,6 +260,10 @@ export async function dropDraft(key: string, expectRev: number): Promise<boolean
  * Moves the draft at `from` to `to` with `patch` applied, in one transaction, so a new post's
  * draft becomes the saved post's without a moment where both or neither exist. Resolves to
  * the moved draft's `rev` (0: nothing stored at `from`, or a storage failure, logged).
+ *
+ * A new post's key keeps a note of where it went (`Moved`): a page that dies mid-create can
+ * leave its side copy under the old key, and opening that key then leads to the post (index.ts)
+ * instead of creating it a second time. A save to the old key meets it as a conflict.
  */
 export async function moveDraft(from: string, to: string, patch: Partial<Draft>): Promise<number> {
   try {
@@ -267,11 +273,80 @@ export async function moveDraft(from: string, to: string, patch: Partial<Draft>)
         const cur: unknown = req.result;
         if (!isDraft(cur)) return done(0);
         s.put({ ...cur, ...patch }, to);
-        s.delete(from).onsuccess = () => done(cur.rev);
+        if (isNewKey(from)) s.put({ movedTo: to, at: Date.now() } satisfies Moved, from).onsuccess = () => done(cur.rev);
+        else s.delete(from).onsuccess = () => done(cur.rev);
       };
     });
   } catch (e) {
     console.error(`admin drafts: moving ${from} to ${to} failed`, e);
+    return 0;
+  }
+}
+
+/** Where a new post's draft went once the post was created (moveDraft). */
+interface Moved {
+  movedTo: string;
+  /** When the post was created (ms). */
+  at: number;
+}
+/**
+ * How long a note is kept: a page still open on the old key (another tab, typing) needs it to
+ * find the post; past this it is swept (`sweepMoved`), not dropped on first use.
+ */
+const MOVED_KEEP_MS = 86_400_000;
+const isNewKey = (key: string): boolean => /^\d+:new-[a-z0-9]+$/.test(key);
+const isMoved = (v: unknown): v is Moved => typeof (v as Moved | undefined)?.movedTo === "string";
+
+/**
+ * The post a new post's key became (moveDraft), with every side copy left under that key moved
+ * along to the post's key, or undefined. A storage failure is logged and reads as none.
+ */
+export async function followMoved(key: string): Promise<number | undefined> {
+  try {
+    const to = await run<string | undefined>("readwrite", (s, done) => {
+      const req = s.get(key);
+      req.onsuccess = () => {
+        const cur: unknown = req.result;
+        if (!isMoved(cur)) return done(undefined);
+        const sides = s.openCursor(IDBKeyRange.bound(`${key}~`, `${key}~\uffff`));
+        sides.onsuccess = () => {
+          const c = sides.result;
+          if (!c) return done(cur.movedTo);
+          // A copy already there under the same tab name is newer: it stays.
+          s.add(c.value, `${cur.movedTo}${String(c.key).slice(key.length)}`).onerror = (e) => e.preventDefault();
+          c.delete();
+          c.continue();
+        };
+      };
+    });
+    const id = to === undefined ? undefined : /:post-(\d+)$/.exec(to)?.[1];
+    return id === undefined ? undefined : Number(id);
+  } catch (e) {
+    console.error(`admin drafts: following ${key} to its post failed`, e);
+    return undefined;
+  }
+}
+
+/** Removes `user`'s notes older than a day (moveDraft); the editor calls it on mount. Failures are logged. */
+export async function sweepMoved(user: number, now = Date.now()): Promise<number> {
+  try {
+    return await run<number>("readwrite", (s, done) => {
+      let n = 0;
+      const req = s.openCursor(IDBKeyRange.bound(`${user}:new-`, `${user}:new-\uffff`));
+      req.onsuccess = () => {
+        const c = req.result;
+        if (!c) return done(n);
+        const v: unknown = c.value;
+        // A note without a time is from a build before notes had one: stale.
+        if (isMoved(v) && !(now - (v.at ?? 0) < MOVED_KEEP_MS)) {
+          c.delete();
+          n++;
+        }
+        c.continue();
+      };
+    });
+  } catch (e) {
+    console.error(`admin drafts: sweeping old notes of user ${user} failed`, e);
     return 0;
   }
 }
