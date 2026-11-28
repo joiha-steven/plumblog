@@ -272,6 +272,41 @@ impl Variants {
     }
 }
 
+/// A create that may answer an item that already exists instead of making a second one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dedupe {
+    /// The caller's item with the same `sha256` query field (lowercase hex SHA-256 of the
+    /// body, which R2 verifies on the put): answered unchanged with [`Self::status`], nothing
+    /// written. Another uploader's identical bytes make their own item; no `sha256`, no dedupe.
+    UploaderSha256,
+}
+
+impl Dedupe {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UploaderSha256 => "uploader_sha256",
+        }
+    }
+
+    /// The optional field the match is on; R2 verifies it against the body on the put.
+    #[must_use]
+    pub const fn field(self) -> &'static str {
+        match self {
+            Self::UploaderSha256 => "sha256",
+        }
+    }
+
+    /// The status of an answer that found the existing item (the route's own `status` is
+    /// the one for a new item).
+    #[must_use]
+    pub const fn status(self) -> u16 {
+        match self {
+            Self::UploaderSha256 => 200,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Route {
     pub id: RouteId,
@@ -288,6 +323,8 @@ pub struct Route {
     pub body: Body,
     /// Set where derived files (image sizes) are not made by the API.
     pub variants: Option<Variants>,
+    /// Set where an existing item may be answered instead of a new one.
+    pub dedupe: Option<Dedupe>,
     pub status: u16,
     /// Name of the response shape; `none` for an empty 204; [`ORIGINAL`] for the stored bytes
     /// themselves.
@@ -328,6 +365,7 @@ const POST_CREATE: &[Field] = &[
     opt("series_position", Type::IntOrNull),
     opt("tags", Type::IntList),
     opt("translation_of", Type::Int),
+    opt("client_id", Type::Str),
 ];
 
 const POST_UPDATE: &[Field] = &[
@@ -368,6 +406,7 @@ const MEDIA_UPLOAD: &[Field] = &[
     query_req("width", Type::Int),
     query_req("height", Type::Int),
     query("alt", Type::Str),
+    query("sha256", Type::Str),
 ];
 /// An id-ordered listing: `cursor` is the last id of the previous page.
 const BY_ID: &[Field] = &[query("cursor", Type::Str), query("limit", Type::Int)];
@@ -399,6 +438,7 @@ const fn route(
         max_body: MAX_BODY,
         body: Body::Json,
         variants: None,
+        dedupe: None,
         status,
         response,
     }
@@ -625,6 +665,7 @@ pub const ROUTES: &[Route] = &[
         max_body: MAX_MEDIA_BODY,
         body: Body::Original,
         variants: Some(Variants::AdminEncoder),
+        dedupe: Some(Dedupe::UploaderSha256),
         ..route(
             RouteId::MediaUpload,
             Method::Post,

@@ -5,7 +5,7 @@ use plumblog_model::{
 };
 use plumblog_store::{
     Post, PostCounts, PostCursor, PostKind, PostOrder, PostQuery, PostStatus, PostStore,
-    PostSummary, Revision, SavePost, search,
+    PostSummary, Revision, SavePost, Saved, search,
 };
 use worker::wasm_bindgen::JsValue;
 
@@ -218,7 +218,7 @@ async fn explain_miss(store: &D1Store, id: PostId, wrong_state: &str) -> Error {
 }
 
 impl PostStore for D1Store {
-    async fn save_post(&self, post: SavePost) -> Result<PostId> {
+    async fn save_post_outcome(&self, post: SavePost) -> Result<Saved> {
         self.save_post_impl(post).await
     }
 
@@ -233,6 +233,20 @@ impl PostStore for D1Store {
             Some(mut r) => read_post(&mut r),
             None => Err(post_not_found(id)),
         }
+    }
+
+    // 1 query (a create carrying a client id; save_post after a lost race), on the
+    // posts_author_client index.
+    async fn find_client_post(&self, author: UserId, client_id: &str) -> Result<Option<PostId>> {
+        let s = self.stmt(
+            "find_client_post",
+            "SELECT id FROM posts WHERE author_id = ? AND client_id = ?",
+            &[bound(author.0), text(client_id)],
+        )?;
+        self.row(s)
+            .await?
+            .map(|mut r| r.int().map(PostId))
+            .transpose()
     }
 
     // 1 query (reader post page /<lang>/<slug>): the post and its tag ids.

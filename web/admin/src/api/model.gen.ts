@@ -208,6 +208,7 @@ export interface PostCreateInput {
   series_position?: number | null;
   tags?: number[];
   translation_of?: number;
+  client_id?: string;
 }
 export interface PostUpdateInput {
   expected_version: number;

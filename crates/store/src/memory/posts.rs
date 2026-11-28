@@ -1,11 +1,12 @@
 use std::cmp::Reverse;
 
-use plumblog_model::{PostId, Result, RevisionId};
+use plumblog_model::{PostId, Result, RevisionId, UserId};
 
 use super::post_save::post_path;
 use super::{MemoryStore, invalid, not_found, post_not_found};
 use crate::{
     Post, PostCounts, PostKind, PostQuery, PostStatus, PostStore, PostSummary, Revision, SavePost,
+    Saved,
 };
 
 #[expect(
@@ -13,13 +14,17 @@ use crate::{
     reason = "in-memory stand-in for async D1 storage"
 )]
 impl PostStore for MemoryStore {
-    async fn save_post(&self, post: SavePost) -> Result<PostId> {
+    async fn save_post_outcome(&self, post: SavePost) -> Result<Saved> {
         self.write(|s| s.save_post(post))
     }
 
     async fn get_post(&self, id: PostId) -> Result<Post> {
         self.read(|s| s.posts.get(&id).cloned())
             .ok_or_else(|| post_not_found(id))
+    }
+
+    async fn find_client_post(&self, author: UserId, client_id: &str) -> Result<Option<PostId>> {
+        Ok(self.read(|s| s.client_post(author, client_id)))
     }
 
     async fn find_post(&self, lang: &str, slug: &str) -> Result<Option<Post>> {
@@ -113,6 +118,7 @@ impl PostStore for MemoryStore {
             }
             s.posts.remove(&id);
             s.fts.remove(&id);
+            s.client_ids.remove(&id);
             // ON DELETE CASCADE: post_tags (inside the post), post_media, revisions, comments.
             s.post_media.retain(|(p, _)| *p != id);
             s.revisions.retain(|_, r| r.post_id != id);

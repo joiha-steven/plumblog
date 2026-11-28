@@ -69,6 +69,8 @@ struct State {
     post_media: BTreeSet<(PostId, MediaId)>,
     /// `posts_fts`: folded `(title, body)` per post.
     fts: BTreeMap<PostId, (String, String)>,
+    /// `posts.client_id` of the posts that have one.
+    client_ids: BTreeMap<PostId, String>,
     revisions: BTreeMap<RevisionId, Revision>,
     redirects: BTreeMap<String, Redirect>,
     comments: BTreeMap<CommentId, Comment>,
@@ -102,6 +104,7 @@ impl Default for State {
             posts: BTreeMap::new(),
             post_media: BTreeSet::new(),
             fts: BTreeMap::new(),
+            client_ids: BTreeMap::new(),
             revisions: BTreeMap::new(),
             redirects: BTreeMap::new(),
             comments: BTreeMap::new(),

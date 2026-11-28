@@ -3,11 +3,11 @@ use plumblog_store::{Media, MediaQuery, MediaStore, NewMedia};
 
 use super::{
     D1Store, Failure, GUARD_RETRIES, Row, bound, bump_if, changed_concurrently, flag, guard, int,
-    not_found, opt_int, probe_limit, text,
+    not_found, opt_int, opt_text, probe_limit, text,
 };
 
 const MEDIA_COLS: &str =
-    "id, r2_key, mime, bytes, width, height, alt, variants_json, uploaded_by, created_at";
+    "id, r2_key, mime, bytes, width, height, alt, variants_json, uploaded_by, created_at, sha256";
 
 fn read_media(r: &mut Row) -> Result<Media> {
     Ok(Media {
@@ -21,6 +21,7 @@ fn read_media(r: &mut Row) -> Result<Media> {
         variants_json: r.text()?,
         uploaded_by: r.opt_int()?.map(UserId),
         created_at: r.int()?,
+        sha256: r.opt_text()?,
     })
 }
 
@@ -30,7 +31,7 @@ impl MediaStore for D1Store {
         let s = self.stmt(
             "create_media",
             "INSERT INTO media (r2_key, mime, bytes, width, height, alt, variants_json, \
-             uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             uploaded_by, created_at, sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             &[
                 text(&media.r2_key),
                 text(&media.mime),
@@ -41,10 +42,24 @@ impl MediaStore for D1Store {
                 text(&media.variants_json),
                 opt_int(media.uploaded_by.map(|u| u.0))?,
                 int(media.created_at)?,
+                opt_text(media.sha256.as_deref()),
             ],
         )?;
-        let r = self.exec(s).await?;
+        let r = self.exec(s).await.map_err(sha256_conflict)?;
         Self::last_row_id("create_media", &r).map(MediaId)
+    }
+
+    // 1 query, on media_uploader_sha256.
+    async fn find_media_by_sha256(&self, uploader: UserId, sha256: &str) -> Result<Option<Media>> {
+        let s = self.stmt(
+            "find_media_by_sha256",
+            &format!("SELECT {MEDIA_COLS} FROM media WHERE uploaded_by = ? AND sha256 = ?"),
+            &[bound(uploader.0), text(sha256)],
+        )?;
+        match self.row(s).await? {
+            Some(mut r) => read_media(&mut r).map(Some),
+            None => Ok(None),
+        }
     }
 
     // 1 query.
@@ -192,4 +207,14 @@ fn media_in_use(id: MediaId, users: &[PostId]) -> Error {
             list.join(", ")
         ),
     )
+}
+
+/// The uploader already has these bytes: `Conflict` on `sha256`, so the upload can tell it
+/// from the (random, practically never repeated) `r2_key` clash and answer the winner.
+fn sha256_conflict(e: Error) -> Error {
+    if e.code == ErrorCode::Conflict && e.detail.contains("media.sha256") {
+        e.at("sha256")
+    } else {
+        e
+    }
 }

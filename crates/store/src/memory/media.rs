@@ -1,6 +1,6 @@
 use std::cmp::Reverse;
 
-use plumblog_model::{MediaId, PostId, Result};
+use plumblog_model::{MediaId, PostId, Result, UserId};
 
 use super::{MemoryStore, State, conflict, invalid, next_seq, not_found};
 use crate::{Media, MediaQuery, MediaStore, NewMedia, PostStatus, probe_len};
@@ -30,6 +30,16 @@ impl MediaStore for MemoryStore {
                     media.r2_key
                 )));
             }
+            // UNIQUE (uploaded_by, sha256): NULL in either column never collides.
+            if let (Some(u), Some(h)) = (media.uploaded_by, media.sha256.as_deref())
+                && s.media
+                    .values()
+                    .any(|m| m.uploaded_by == Some(u) && m.sha256.as_deref() == Some(h))
+            {
+                return Err(
+                    conflict(format!("uploader {} already has sha256 {h}", u.0)).at("sha256")
+                );
+            }
             let id = MediaId(next_seq(&mut s.seq.media));
             s.media.insert(
                 id,
@@ -44,10 +54,20 @@ impl MediaStore for MemoryStore {
                     variants_json: media.variants_json,
                     uploaded_by: media.uploaded_by,
                     created_at: media.created_at,
+                    sha256: media.sha256,
                 },
             );
             Ok(id)
         })
+    }
+
+    async fn find_media_by_sha256(&self, uploader: UserId, sha256: &str) -> Result<Option<Media>> {
+        Ok(self.read(|s| {
+            s.media
+                .values()
+                .find(|m| m.uploaded_by == Some(uploader) && m.sha256.as_deref() == Some(sha256))
+                .cloned()
+        }))
     }
 
     async fn get_media(&self, id: MediaId) -> Result<Media> {
