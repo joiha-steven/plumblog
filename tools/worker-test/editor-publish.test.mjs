@@ -103,7 +103,7 @@ test("publish, update, schedule, unpublish and trash from the editor", async () 
     assert.match(await page.locator(".pubpop").innerText(), /\/en\/publish-me/);
     await page.locator(".pubpop .btn.primary", { hasText: tx("admin.editor.pub.publish_now") }).click();
     await toast(tx("admin.editor.pub.published_toast"));
-    // Read now: the toast leaves after a few seconds, and D1 queries are slow.
+    // Read now: the toast leaves after a few seconds.
     const viewHref = await page.locator(".toast a").getAttribute("href");
     await button(tx("admin.editor.pub.update")).waitFor();
     const all = w.query("SELECT id FROM posts");
@@ -125,8 +125,11 @@ test("publish, update, schedule, unpublish and trash from the editor", async () 
     await page.getByText(tx("admin.editor.pub.unpublished_changes")).first().waitFor();
     await page.waitForTimeout(3600); // longer than the autosave delay of a draft
     assert.equal(row(id).markdown, "First version.", "not sent before Update");
+    // The publish toast above may still be up, so it does not prove this save ended: wait for its answer.
+    const saved1 = page.waitForResponse((r) => /\/api\/v1\/posts\/\d+$/.test(r.url()) && r.request().method() === "PATCH");
     await button(tx("admin.editor.pub.update")).click();
     await confirm().click();
+    assert.equal((await saved1).status(), 200);
     await toast(tx("admin.editor.pub.published_toast"));
     const updated = row(id);
     assert.equal(updated.markdown, "First version. Second version.");
@@ -245,8 +248,11 @@ test("a draft autosaves; published, only Update sends; after a 409 and Keep mine
     assert.equal(patches().length, 1, "a live post never autosaves");
 
     // 4. Update: one PATCH with the text and the status.
+    // The publish toast of step 2 may still be up, so it does not prove this save ended: wait for its answer.
+    const saved = page.waitForResponse((r) => /\/api\/v1\/posts\/\d+$/.test(r.url()) && r.request().method() === "PATCH");
     await button(tx("admin.editor.pub.update")).click();
     await confirm().click();
+    assert.equal((await saved).status(), 200);
     await toast(tx("admin.editor.pub.published_toast"));
     assert.equal(patches().length, 2);
     assert.equal(patches()[1].body.markdown, "Draft text. Edited.");
@@ -268,8 +274,10 @@ test("a draft autosaves; published, only Update sends; after a 409 and Keep mine
     await banner.getByRole("button", { name: tx("admin.editor.conflict.keep_mine") }).click();
     await page.waitForTimeout(3600);
     assert.equal(patches().length, 3, "Keep mine does not autosave a live post");
+    const kept = page.waitForResponse((r) => /\/api\/v1\/posts\/\d+$/.test(r.url()) && r.request().method() === "PATCH");
     await button(tx("admin.editor.pub.update")).click();
     await confirm().click();
+    assert.equal((await kept).status(), 200);
     await toast(tx("admin.editor.pub.published_toast"));
     assert.equal(patches().length, 4);
     const end = row();

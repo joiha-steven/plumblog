@@ -188,7 +188,7 @@ describe("tokens", () => {
 
   test("a demoted owner's owner token acts as writer", async () => {
     assert.deepEqual(await probes(SEEDED.demoted), { read: 200, writer: 204, owner: 204 });
-    w.query("UPDATE users SET role = 'writer' WHERE id = 3");
+    w.exec("UPDATE users SET role = 'writer' WHERE id = 3");
     assert.deepEqual(await probes(SEEDED.demoted), { read: 200, writer: 204, owner: 403 });
   });
 

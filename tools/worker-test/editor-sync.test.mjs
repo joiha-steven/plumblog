@@ -656,7 +656,7 @@ test("an expired session saves the last keys on this device before going to sign
     const patch = page.waitForRequest((r) => r.method() === "PATCH", { timeout: 15_000 });
     await typeAtEnd(page, " Before.");
     await patch;
-    w.query("DELETE FROM sessions");
+    w.exec("DELETE FROM sessions");
     // The save is out; the writer keeps typing, then the 401 lands within the local debounce.
     await page.keyboard.type(" After.");
     release();
