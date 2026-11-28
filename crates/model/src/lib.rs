@@ -74,6 +74,8 @@ stable_codes! {
         WebhookSecretUnreadable => "webhook.secret_unreadable",
         WebhookDeliveryFailed => "webhook.delivery_failed",
         TooComplex => "input.too_complex",
+        // `status` published with a `published_at` in the future: use `scheduled` instead.
+        PostPublishedInFuture => "post.published_in_future",
         // Reader comments (docs/ARCHITECTURE.md, Reader site): the form redirects with one
         // of these, and the theme maps it to a message, so input is never echoed back.
         CommentsUnavailable => "comments.unavailable",
@@ -323,6 +325,7 @@ mod tests {
                 ),
                 (ErrorCode::WebhookDeliveryFailed, "webhook.delivery_failed"),
                 (ErrorCode::TooComplex, "input.too_complex"),
+                (ErrorCode::PostPublishedInFuture, "post.published_in_future"),
                 (ErrorCode::CommentsUnavailable, "comments.unavailable"),
                 (ErrorCode::CommentsClosed, "comments.closed"),
                 (ErrorCode::CommentName, "comments.name_invalid"),

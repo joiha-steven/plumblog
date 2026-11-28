@@ -4,8 +4,8 @@
 //! L\u{1EA1}t", Nguoi Viet = "Ng\u{01B0}\u{1EDD}i Vi\u{1EC7}t".
 
 use super::db::Db;
+use super::sample::SampleSource;
 use super::search::{MAX_QUERY_CHARS, RESULT_LIMIT};
-use super::source::SampleSource;
 use super::tests_support::run;
 use super::{Outcome, render, seed};
 use plumblog_store::memory::MemoryStore;

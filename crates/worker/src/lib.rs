@@ -37,13 +37,15 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
         return api::handle(req, &env).await;
     }
     let path = req.path();
-    if let ("POST", Some(slug)) = (req.method().as_ref(), pages::routes::comment_form(&path)) {
-        return comments::handle(&mut req, &env, slug).await;
+    if let ("POST", Some((lang, slug))) =
+        (req.method().as_ref(), pages::routes::comment_form(&path))
+    {
+        return comments::handle(&mut req, &env, lang, slug).await;
     }
     match (req.method().as_ref(), path.as_str()) {
         ("GET", "/healthz") => healthz(&env),
         ("GET" | "HEAD", p) if p == admin::PREFIX || p.starts_with("/admin/") => {
-            admin::serve(&req).await
+            admin::serve(&req, &env).await
         }
         ("GET" | "HEAD", _) => pages::serve(&req, &env, &ctx).await,
         _ => Ok(Response::empty()?.with_status(405)),

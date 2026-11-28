@@ -16,6 +16,8 @@ mod log;
 mod media;
 mod post_save;
 mod posts;
+mod reader;
+mod reader_sql;
 mod redirects;
 mod row;
 #[cfg(feature = "contract-tests")]

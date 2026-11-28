@@ -7,6 +7,12 @@ use plumblog_i18n::{Key, key};
 /// Plain-text body of a 500 page.
 pub const PAGE_FAILED: Key = key!("error.page_failed");
 
+/// Site title until the owner sets one.
+pub const SITE_TITLE_FALLBACK: Key = key!("site.title_fallback");
+
+/// Plain-text body of a 404 where no theme page applies.
+pub const PAGE_NOT_FOUND: Key = key!("error.page_not_found");
+
 /// Heading of the post list in llms.txt.
 pub const LLMS_POSTS: Key = key!("llms.posts");
 

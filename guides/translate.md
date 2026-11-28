@@ -38,5 +38,6 @@ numbers unchanged. Vietnamese: keep every tone mark; never strip diacritics from
 
 ## Not built yet
 
-The public site does not show translations yet (no language switcher or `/<lang>/` pages);
-they are stored and returned by the API.
+The public site has no language switcher yet. A translation is public at `/<lang>/<slug>`
+(the default language at `/<slug>`, see `blog guide site`) and both versions link each other
+for search engines (hreflang).

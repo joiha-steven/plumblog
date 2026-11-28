@@ -61,8 +61,8 @@ pub async fn handle(req: &Request, env: &Env) -> Result<Option<Response>> {
     let path = req.path();
     let method = req.method();
     let method = method.as_ref();
-    // Empties the database and saves the sample posts, so search tests and local previews
-    // read the same posts the sample pages show.
+    // Empties the database and saves the sample site, so reader tests and local previews read
+    // the same posts the sample pages show.
     // Writes one theme or plugin option the way the admin will (bumps the content version):
     // `?owner=theme|plugin&id=<name>&key=<key>`, body = the JSON value.
     if path == OPTION && method == "POST" {
@@ -171,9 +171,18 @@ async fn preview(req: &Request, env: &Env) -> Result<Response> {
     };
     let store = D1Store::new(env.d1("DB")?);
     let db = crate::pages::db_source(&store);
-    let src = crate::pages::source::SampleSource::get();
     let started = worker::Date::now().as_millis();
-    match crate::pages::preview(src, &db, &field("title"), &field("body"), &field("lang")).await {
+    let now = i64::try_from(started / 1000).unwrap_or(0);
+    match crate::pages::preview(
+        &db,
+        &db,
+        &field("title"),
+        &field("body"),
+        &field("lang"),
+        now,
+    )
+    .await
+    {
         Ok(html) => {
             let h = worker::Headers::new();
             h.set("content-type", "text/html; charset=utf-8")?;
