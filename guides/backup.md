@@ -19,11 +19,7 @@ never backed up. Run commands in the site's folder; see `blog guide setup` for t
   variants) from R2 to `backups/media/<r2 key>`. Long rows go in pieces under D1's limit of
   100,000 bytes per statement; a row added during the copy brings the rows it points to.
 
-```sh
-blog backup
-```
-
-`--no-media` copies only the database; `--out <dir>` picks another folder than `backups/`.
+`blog backup`: `--no-media` copies only the database; `--out <dir>` picks another folder than `backups/`.
 Media copying resumes: `backups/media/manifest.json` lists each file's size and SHA-256, and a
 re-run fetches only what is missing or changed. Each file is checked against the size the
 database records, and against R2's checksum when it is a plain MD5. A file that fails is not
@@ -53,6 +49,9 @@ counts). It saves a bookmark, imports (ids used since the backup are never hande
 reruns missing migrations and moves the cache version past every value used before. Fewer
 rows than the file in a table the site never prunes is `restore.count_mismatch`; if that or a
 migration fails, give the owner the undo command it prints (deploy names the same one).
+Last, it signs everyone out, revokes every API token and deletes unused invites and codes
+(`restore.credentials_not_reset`: run `blog restore --reset-credentials --yes`). Tell the owner
+to sign in, make new tokens, and redo password, passkey or user changes since the backup.
 
 ## Not covered yet
 

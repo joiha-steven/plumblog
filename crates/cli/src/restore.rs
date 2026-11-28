@@ -22,7 +22,7 @@ use crate::setup::{self, Context, Failure, Run, printable};
 use crate::state::{RollbackRecord, push_capped};
 use crate::text::Code;
 use plumblog_i18n::{Key, key};
-use plumblog_store::SITE_ID_KEY;
+use plumblog_store::{OWNER_RESET_KEYS, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY};
 use plumblog_syslog::{Event, EventKind};
 use serde_json::{Value, json};
 use std::fmt::Write as _;
@@ -428,6 +428,118 @@ pub const SELF_PRUNING: &[&str] = &[
     "system_log",
     "webhook_deliveries",
 ];
+
+/// The command that finishes a restore whose credential reset failed (`blog restore
+/// --reset-credentials --yes`, [`reset_credentials`]).
+pub const RESET_COMMAND: &str = "blog restore --reset-credentials --yes";
+
+/// What a restore makes unusable, per table: the backup holds every credential as it was
+/// then, so one revoked or ended since (a token, a session, an invite, a code) would work
+/// again. Tokens are revoked, not deleted, so the owner still sees them. Passwords, passkeys
+/// and users stay: changing them would lock the owner out. `login_failures` stays too: it is
+/// the rate limiter, and emptying it would only help someone guessing.
+const CREDENTIAL_RESET: &[(&str, &str)] = &[
+    ("sessions", "DELETE FROM sessions"),
+    (
+        "api_tokens",
+        "UPDATE api_tokens SET revoked_at = ? WHERE revoked_at IS NULL",
+    ),
+    ("invites", "DELETE FROM invites WHERE used_at IS NULL"),
+    // WebAuthn challenges: short-lived, but one taken since the backup would be usable again.
+    ("auth_challenges", "DELETE FROM auth_challenges"),
+    // The owner reset and setup codes ([`reset_settings`]).
+    ("settings", ""),
+];
+
+/// The one-time codes kept in settings: every owner reset key and the setup code (which only
+/// works while no user exists; `blog setup` makes a new one).
+fn reset_settings() -> Vec<&'static str> {
+    OWNER_RESET_KEYS
+        .iter()
+        .copied()
+        .chain([SETUP_CODE_HASH_KEY, SETUP_CODE_EXPIRES_KEY])
+        .collect()
+}
+
+/// The statements of the credential reset for the tables in `present`, in order, as
+/// `(sql, params)`; `now` is the revocation time (ms). Public so tools/worker-test replays
+/// this exact SQL (crates/cli/tests/restore writes it to a fixture).
+#[must_use]
+pub fn credential_reset_statements(present: &[&str], now: &str) -> Vec<(String, Vec<String>)> {
+    let keys = reset_settings();
+    CREDENTIAL_RESET
+        .iter()
+        .filter(|(t, _)| present.contains(t))
+        .map(|(table, sql)| match *table {
+            "api_tokens" => ((*sql).to_string(), vec![now.to_string()]),
+            "settings" => (
+                format!(
+                    "DELETE FROM settings WHERE key IN ({})",
+                    vec!["?"; keys.len()].join(", ")
+                ),
+                keys.iter().map(|k| (*k).to_string()).collect(),
+            ),
+            _ => ((*sql).to_string(), Vec::new()),
+        })
+        .collect()
+}
+
+/// Makes every credential from the backup unusable, in one D1 request after reading which
+/// tables exist (an old backup whose migrations failed may lack one). Every statement only
+/// removes or revokes, so running it twice changes nothing more.
+fn reset_credentials_in(db: &Database, now_ms: i64) -> Result<(), ApiError> {
+    // Constant table names, so quoting them as string literals is safe.
+    let names: Vec<String> = CREDENTIAL_RESET
+        .iter()
+        .map(|(t, _)| format!("'{t}'"))
+        .collect();
+    let present: Vec<String> = db
+        .rows(
+            &format!(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ({})",
+                names.join(", ")
+            ),
+            &[],
+        )?
+        .iter()
+        .filter_map(|r| r.get("name").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    let present: Vec<&str> = present.iter().map(String::as_str).collect();
+    let stmts = credential_reset_statements(&present, &now_ms.to_string());
+    if stmts.is_empty() {
+        return Ok(());
+    }
+    let params: Vec<Vec<&str>> = stmts
+        .iter()
+        .map(|(_, v)| v.iter().map(String::as_str).collect())
+        .collect();
+    let batch: Vec<(&str, &[&str])> = stmts
+        .iter()
+        .zip(&params)
+        .map(|((sql, _), v)| (sql.as_str(), v.as_slice()))
+        .collect();
+    db.batch(&batch).map(drop)
+}
+
+/// What the owner must do after the reset; `date` is the backup's.
+fn after_reset(run: &mut Run, date: &str) {
+    run.line(key!("cli.restore.credentials_reset"), &[]);
+    run.line(
+        key!("cli.restore.credentials_next"),
+        &[("date", date.to_string())],
+    );
+}
+
+/// The backup's date, from its file name.
+fn backup_date(run: &Run, file: &std::path::Path) -> String {
+    date_from_name(
+        &file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    )
+    .unwrap_or_else(|| run.t(key!("cli.restore.date_unknown"), &[]))
+}
 
 /// How far the content version moves past the highest value read before the import: the
 /// live site keeps bumping it during the upload and the import, and none of those values may
@@ -910,14 +1022,7 @@ fn plan(
     db_name: &str,
     pending: &[String],
 ) {
-    let date = date_from_name(
-        &opts
-            .file
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-    )
-    .unwrap_or_else(|| run.t(key!("cli.restore.date_unknown"), &[]));
+    let date = backup_date(run, &opts.file);
     run.line(
         key!("cli.restore.plan_file"),
         &[
@@ -966,7 +1071,8 @@ fn read_file(cx: &Context, opts: &Options, shown: &str) -> Result<(Vec<u8>, Dump
     Ok((bytes, dump))
 }
 
-/// Steps 5-7: the import, the row counts, migrations and the content version.
+/// Steps 5-8: the import, the row counts, migrations, the content version and the
+/// credential reset.
 fn replace(
     run: &mut Run,
     db: &Database,
@@ -974,7 +1080,7 @@ fn replace(
     clock: &dyn Clock,
     (bytes, dump): (&[u8], &Dump),
     version_before: Option<i64>,
-    (mark, undo): (&str, &str),
+    (mark, undo, date): (&str, &str, &str),
 ) -> Result<(), Stopped> {
     let (drops, sequences) = drop_sql(db).map_err(|e| stopped("failed", run.api(&e)))?;
     // Read again just before the import: the site kept running since step 2.
@@ -991,15 +1097,92 @@ fn replace(
     let counted = check_counts(run, db, &dump.counts, undo);
     raise_sequences(run, db, &sequences, &dump.sequences);
     let after = after_import(run, db, &reply, floor, mark);
-    match (counted, after) {
-        (Ok(()), after) => after,
-        (Err(c), Ok(())) => Err(c),
-        (Err(c), Err(a)) => {
-            let f = &a.failure;
+    // Whatever failed above, the backup's credentials are live now: always reset them, last,
+    // so every table the migrations create exists.
+    let reset = match reset_credentials_in(db, run.cx.now_ms) {
+        Ok(()) => {
+            after_reset(run, date);
+            Ok(())
+        }
+        Err(e) => Err(stopped(
+            "credentials_not_reset",
+            fail(
+                run,
+                Code::RestoreCredentialsNotReset,
+                key!("cli.error.restore_credentials_not_reset"),
+                &[
+                    ("detail", printable(&e.message(run.cx.text))),
+                    ("command", RESET_COMMAND.to_string()),
+                    ("undo", undo.to_string()),
+                ],
+            ),
+        )),
+    };
+    // The first failure is the answer; the others are printed.
+    let mut first = None;
+    for r in [counted, after, reset] {
+        let Err(s) = r else { continue };
+        if first.is_none() {
+            first = Some(s);
+        } else {
+            let f = &s.failure;
             let _ = writeln!(run.out, "{}", run.cx.text.error_line(f.code, &f.message));
-            Err(c)
         }
     }
+    first.map_or(Ok(()), Err)
+}
+
+/// `blog restore --reset-credentials --yes`: only the last step of a restore, for one whose
+/// reset failed (or whose import was uncertain but applied). Safe to repeat.
+///
+/// # Errors
+/// [`Failure`] with a stable code; `restore.credentials_not_reset` when the write fails.
+pub fn reset_credentials(
+    client: &mut Client,
+    account_id: Option<&str>,
+    cx: &Context,
+    out: &mut dyn Write,
+) -> Result<(), Failure> {
+    let _lock = Lock::take(cx)?;
+    let (st, site) = start(client, account_id, cx)?;
+    let client: &Client = client;
+    let mut run = Run {
+        client,
+        cx,
+        out,
+        state: st,
+        secrets: Vec::new(),
+    };
+    let db = Database::new(client, site.db_id.clone());
+    migrations::check_ours(&db).map_err(|e| setup::migration_error(&run, e))?;
+    let last = run
+        .state
+        .rollbacks
+        .iter()
+        .rev()
+        .find(|r| r.kind == KIND)
+        .cloned();
+    let date = last.as_ref().map_or_else(
+        || run.t(key!("cli.restore.date_unknown"), &[]),
+        |r| backup_date(&run, std::path::Path::new(&r.to)),
+    );
+    reset_credentials_in(&db, cx.now_ms).map_err(|e| {
+        fail(
+            &run,
+            Code::RestoreCredentialsNotReset,
+            key!("cli.error.restore_reset_failed"),
+            &[
+                ("detail", printable(&e.message(cx.text))),
+                ("command", RESET_COMMAND.to_string()),
+            ],
+        )
+    })?;
+    after_reset(&mut run, &date);
+    if let Some(mut rec) = last.filter(|r| r.outcome.as_deref() == Some("credentials_not_reset")) {
+        rec.outcome = Some("restored".into());
+        put_record(&mut run, &rec)?;
+    }
+    Ok(())
 }
 
 /// Raises every AUTOINCREMENT mark to the higher of its live value before the import and the
@@ -1120,7 +1303,8 @@ pub fn run(
     run.line(key!("cli.restore.undo"), &[("command", undo.clone())]);
     run.line(key!("cli.restore.cancels"), &[]);
 
-    // 5-7. Import, migrations, cache version.
+    // 5-8. Import, migrations, cache version, credentials.
+    let date = backup_date(&run, &opts.file);
     let result = replace(
         &mut run,
         &db,
@@ -1128,7 +1312,7 @@ pub fn run(
         clock,
         (&bytes, &dump),
         version_before,
-        (&mark, &undo),
+        (&mark, &undo, &date),
     );
     rec.outcome = Some(match &result {
         Ok(()) => "restored".into(),

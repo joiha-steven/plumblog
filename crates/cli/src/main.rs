@@ -147,9 +147,16 @@ enum Command {
         out: Option<std::path::PathBuf>,
     },
     Restore {
-        file: std::path::PathBuf,
+        #[arg(required_unless_present = "reset_credentials")]
+        file: Option<std::path::PathBuf>,
         #[arg(long)]
         yes: bool,
+        #[arg(
+            long,
+            requires = "yes",
+            conflicts_with_all = ["file", "bundle", "build", "allow_other_site"]
+        )]
+        reset_credentials: bool,
         #[arg(long, conflicts_with = "build")]
         bundle: Option<std::path::PathBuf>,
         #[arg(long)]
@@ -281,6 +288,9 @@ fn restore_help(c: clap::Command, text: &Text) -> clap::Command {
         .mut_arg("build", |a| a.help(t(key!("cli.restore.build_help"))))
         .mut_arg("allow_other_site", |a| {
             a.help(t(key!("cli.restore.allow_other_site_help")))
+        })
+        .mut_arg("reset_credentials", |a| {
+            a.help(t(key!("cli.restore.reset_credentials_help")))
         })
 }
 
@@ -656,6 +666,23 @@ fn restore(text: &Text, mut opts: restore::Options) -> Result<String, (Code, Str
     Ok(String::new())
 }
 
+/// `blog restore --reset-credentials --yes`: only the restore's credential reset.
+fn restore_reset(text: &Text) -> Result<String, (Code, String)> {
+    let creds = Credentials::load(Path::new(".")).map_err(|e| (e.code(), e.message(text)))?;
+    let mut client = Client::from_env(creds.token).map_err(|e| (e.code(), e.message(text)))?;
+    let migrations = migrations::bundled();
+    let cx = setup::Context {
+        dir: Path::new("."),
+        migrations: &migrations,
+        now_ms: now_ms(),
+        text,
+    };
+    let mut out = std::io::stdout().lock();
+    restore::reset_credentials(&mut client, creds.account_id.as_deref(), &cx, &mut out)
+        .map_err(|f| (f.code, f.message))?;
+    Ok(String::new())
+}
+
 /// `blog admin reset`: the plan, then the code, to stdout.
 fn admin_reset(text: &Text, action: AdminAction) -> Result<String, (Code, String)> {
     let AdminAction::Reset {
@@ -894,15 +921,20 @@ fn run(text: &Text, args: &[String]) -> Outcome {
         Some(c @ Command::Deploy { .. }) => deploy_command(text, c),
         Some(Command::Backup { no_media, out }) => backup(text, &backup::Options { no_media, out }),
         Some(Command::Restore {
+            reset_credentials: true,
+            ..
+        }) => restore_reset(text),
+        Some(Command::Restore {
             file,
             yes,
             bundle,
             build,
             allow_other_site,
+            reset_credentials: false,
         }) => restore(
             text,
             restore::Options {
-                file,
+                file: file.unwrap_or_default(),
                 yes,
                 bundle,
                 build,

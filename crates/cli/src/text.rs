@@ -130,6 +130,7 @@ codes! {
     RestoreImportFailed => "restore.import_failed",
     RestoreImportUncertain => "restore.import_uncertain",
     RestoreCountMismatch => "restore.count_mismatch",
+    RestoreCredentialsNotReset => "restore.credentials_not_reset",
     ThemeDirNotEmpty => "theme.dir_not_empty",
     ThemeDirTracked => "theme.dir_tracked",
     ThemeDirUnreadable => "theme.dir_unreadable",
