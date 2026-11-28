@@ -61,6 +61,10 @@ export interface Media {
   url: string;
   width: number;
   height: number;
+  /** The server's whole answer, for the library to show the new item. */
+  item: MediaItem;
+  /** 200, not 201: the caller's own identical file (same `sha256`) was already stored. */
+  existing: boolean;
 }
 
 /**
@@ -124,8 +128,8 @@ export interface Api {
   setMediaAlt(id: number, alt: string): Promise<Result<MediaItem>>;
   /** 403 `auth.forbidden` unless the caller uploaded it or is the owner; 409 `store.conflict` with `posts` while in use. */
   deleteMedia(id: number): Promise<Result<undefined>>;
-  /** Stores a picture; `progress` follows the upload. */
-  upload(file: File, progress: Progress, signal?: AbortSignal): Promise<Result<Media>>;
+  /** Stores a picture; `progress` follows the upload. `sha256` (lowercase hex of the file's bytes) makes a repeat of the same file answer with the stored item. */
+  upload(file: File, progress: Progress, signal?: AbortSignal, sha256?: string): Promise<Result<Media>>;
 }
 
 export type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -279,13 +283,14 @@ async function sizeOf(file: File): Promise<[number, number] | undefined> {
  * `POST /api/v1/media`: the file's own bytes as the body, its metadata in the query. XHR, not
  * fetch: fetch reports no upload progress.
  */
-async function upload(file: File, progress: Progress, signal?: AbortSignal): Promise<Result<Media>> {
+async function upload(file: File, progress: Progress, signal?: AbortSignal, sha256?: string): Promise<Result<Media>> {
   if (signal?.aborted) return fail("cancelled", 0);
   const size = await sizeOf(file);
   // Cancelled while the browser was reading the picture: nothing is sent.
   if (signal?.aborted) return fail("cancelled", 0);
   if (!size) return fail("input.invalid", 0);
   const q = new URLSearchParams({ name: file.name, mime: file.type, width: String(size[0]), height: String(size[1]) });
+  if (sha256) q.set("sha256", sha256);
   const path = `/api/v1/media?${q}`;
   return new Promise((resolve) => {
     const x = new XMLHttpRequest();
@@ -304,12 +309,13 @@ async function upload(file: File, progress: Progress, signal?: AbortSignal): Pro
       // 201 for a new item, 200 for the caller's own identical one.
       if (x.status >= 200 && x.status < 300 && body && typeof (body as MediaItem).src === "string") {
         const m = body as MediaItem;
-        resolve({ ok: true, value: { id: m.id, url: m.src, width: m.width, height: m.height } });
+        resolve({ ok: true, value: { id: m.id, url: m.src, width: m.width, height: m.height, item: m, existing: x.status === 200 } });
         return;
       }
-      const code = (body as { error?: unknown } | null)?.error;
+      const err = body as { error?: unknown; field?: unknown } | null;
+      const code = err?.error;
       console.warn(`api: POST /api/v1/media: ${x.status} ${String(code)}`);
-      resolve(fail(isCode(code) ? code : "bad_response", x.status));
+      resolve(fail(isCode(code) ? code : "bad_response", x.status, typeof err?.field === "string" ? { field: err.field } : {}));
     };
     signal?.addEventListener(
       "abort",

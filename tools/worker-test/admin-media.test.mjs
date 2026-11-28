@@ -68,7 +68,7 @@ const seedFor = (url) => `
     ('site_id', ${sq(JSON.stringify("site-media-1"))}, ${T}),
     ('origin', ${sq(JSON.stringify(url.replace("127.0.0.1", "localhost")))}, ${T});`;
 
-let w, w2, browser;
+let w, w2, w3, browser;
 const at = (worker, path = "") => `${worker.url.replace("127.0.0.1", "localhost")}${path}`;
 
 async function api(worker, who, method, path, { body, raw } = {}) {
@@ -106,10 +106,11 @@ after(async () => {
   await browser?.close();
   await w?.stop();
   await w2?.stop();
+  await w3?.stop();
 });
 
 /** A page signed in as `who`; `problems` collects page errors and CSP violations (expected 4xx/5xx logs are not). */
-async function open(worker, who, path = "/admin/media", { width = 1440, height = 900, allow = null } = {}) {
+async function open(worker, who, path = "/admin/media", { width = 1440, height = 900, allow = null, setup = null } = {}) {
   const context = await browser.newContext({ viewport: { width, height }, locale: "en-US", timezoneId: "UTC" });
   await context.addCookies([{ name: COOKIE, value: S[who], domain: "localhost", path: "/", secure: true, httpOnly: true, sameSite: "Lax" }]);
   await context.addInitScript(() => {
@@ -124,6 +125,7 @@ async function open(worker, who, path = "/admin/media", { width = 1440, height =
     // Failures a test causes on purpose are logged by the client (never silent); the test checks the log.
     (allow?.test(m.text()) ? logged : problems).push(`console: ${m.text()} ${m.location().url}`);
   });
+  await setup?.(page);
   await page.goto(at(worker, path));
   return { context, page, problems, logged };
 }
@@ -591,6 +593,527 @@ test("the admin client's upload() sends the raw file, maps src to url, and stops
     assert.deepEqual([junk.ok, junk.error.code], [false, "input.invalid"]);
     assert.equal(rows(), before + 1, "no row for an aborted or unreadable upload");
     assert.ok(logged.some((l) => /not a picture this browser can read/.test(l)), "the unreadable file is logged");
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+// ---- upload: a third, empty Worker, so the counts above stay as they are --------------------
+// The tests build on each other in order: two pictures by the picker, the same one again, a
+// drop, a paste; then the refusals, cancel, failures, several files and a user without rights.
+
+const pngFile = (name, w, h, rgb) => ({ name, mimeType: "image/png", buffer: png(w, h, rgb) });
+const hex = (buf) => createHash("sha256").update(buf).digest("hex");
+const media3 = () => w3.query("SELECT id, mime, width, height, bytes, uploaded_by, sha256 FROM media ORDER BY id");
+const posts3 = (page) => {
+  const seen = [];
+  page.on("request", (r) => r.method() === "POST" && /\/api\/v1\/media\?/.test(r.url()) && seen.push(new URL(r.url())));
+  return seen;
+};
+const tilesAre = (page, n) => page.waitForFunction((n) => document.querySelectorAll(".media .tile").length === n, n);
+const fill = (s, vars) => s.replace(/\{(\w+)\}/g, (_, k) => vars[k]);
+const UP = { allow: /status of 400|status of 413|admin media: uploading|api: POST|net::ERR_FAILED/ };
+
+test("the picker uploads a PNG with its sha256: a row, an R2 object, and the new tile at the top", async () => {
+  w3 = await startWorker({ seedSql: seedFor });
+  const { context, page, problems } = await open(w3, "will", "/admin/media", UP);
+  try {
+    await page.locator(".media .empty").waitFor();
+    const sent = posts3(page);
+    const input = page.locator(".up-add input[type=file]");
+    assert.equal(await input.getAttribute("accept"), "image/avif,image/webp,image/jpeg,image/png,image/gif");
+    assert.equal(await input.getAttribute("multiple"), "");
+    const a = pngFile("pick-a.png", 12, 8, [200, 40, 40]);
+    await input.setInputFiles(a);
+    await tilesAre(page, 1);
+    await page.locator(".toast").waitFor();
+    const b = pngFile("pick-b.png", 10, 10, [40, 200, 40]);
+    await input.setInputFiles(b);
+    await tilesAre(page, 2);
+    assert.deepEqual(await names(page), ["pick-b.png", "pick-a.png"], "the newest is first");
+    const rows = media3();
+    assert.equal(rows.length, 2);
+    assert.deepEqual([rows[0].mime, rows[0].width, rows[0].height, rows[0].uploaded_by], ["image/png", 12, 8, 2]);
+    assert.equal(sent[0].searchParams.get("sha256"), hex(a.buffer), "the browser sent the hash");
+    assert.equal(rows[0].sha256, hex(a.buffer), "the stored hash is the file's");
+    const orig = await fetch(`${w3.url}/api/v1/media/${rows[0].id}/original`, { headers: { cookie: `${COOKIE}=${S.will}` } });
+    assert.ok(Buffer.from(await orig.arrayBuffer()).equals(a.buffer), "the R2 object is the file");
+    assert.equal(await page.locator(".ups .up-row").count(), 0, "a finished file leaves no row");
+    assert.equal(await page.locator(".toast").innerText(), fill(tx("admin.media.up_added"), { name: "pick-b.png" }));
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("the same file again is 200 with the first item: no second row, no second tile, and it says so", async () => {
+  const { context, page, problems } = await open(w3, "will", "/admin/media", UP);
+  try {
+    await tilesAre(page, 2);
+    const before = media3();
+    const answer = page.waitForResponse((r) => r.request().method() === "POST" && r.url().includes("/api/v1/media?"));
+    await page.locator(".up-add input[type=file]").setInputFiles(pngFile("pick-a.png", 12, 8, [200, 40, 40]));
+    assert.equal((await answer).status(), 200);
+    const note = page.locator(".up-row.is-dup");
+    await note.waitFor();
+    assert.equal(await note.locator(".up-msg").innerText(), fill(tx("admin.media.up_exists"), { name: "pick-a.png" }));
+    assert.deepEqual(media3(), before, "nothing was written");
+    assert.equal(await page.locator(".media .tile").count(), 2);
+    // The existing picture is open in the details.
+    await page.locator(".insp-card").waitFor();
+    assert.equal(await page.locator(".insp-title b").innerText(), "pick-a.png");
+    await note.getByRole("button", { name: tx("admin.media.up_dismiss") }).click();
+    assert.equal(await page.locator(".ups .up-row").count(), 0);
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("dropping files on the library uploads them, and the drop target lights up while dragging", async () => {
+  const { context, page, problems } = await open(w3, "will", "/admin/media", UP);
+  try {
+    await tilesAre(page, 2);
+    const data = [...png(9, 9, [40, 40, 200])];
+    const state = await page.evaluate((data) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array(data)], "dropped.png", { type: "image/png" }));
+      const main = document.querySelector(".media-main");
+      const fire = (type) => main.dispatchEvent(new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true }));
+      fire("dragenter");
+      const over = main.classList.contains("over");
+      fire("drop");
+      return { over, after: main.classList.contains("over") };
+    }, data);
+    assert.deepEqual(state, { over: true, after: false });
+    await tilesAre(page, 3);
+    assert.equal((await names(page))[0], "dropped.png");
+    assert.equal(media3().length, 3);
+    // Dragging something that is not a file (text, a link) does not light it up.
+    const plain = await page.evaluate(() => {
+      const dt = new DataTransfer();
+      dt.setData("text/plain", "words");
+      const main = document.querySelector(".media-main");
+      main.dispatchEvent(new DragEvent("dragenter", { dataTransfer: dt, bubbles: true, cancelable: true }));
+      return main.classList.contains("over");
+    });
+    assert.equal(plain, false);
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("pasting a picture uploads it, but a paste into the description field stays the field's", async () => {
+  const { context, page, problems } = await open(w3, "will", "/admin/media", UP);
+  try {
+    await tilesAre(page, 3);
+    const paste = (selector, data) =>
+      page.evaluate(
+        ({ selector, data }) => {
+          const dt = new DataTransfer();
+          dt.items.add(new File([new Uint8Array(data)], "image.png", { type: "image/png" }));
+          const e = new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true });
+          document.querySelector(selector).dispatchEvent(e);
+          return e.defaultPrevented;
+        },
+        { selector, data },
+      );
+    await tileOf(page, "pick-a.png").click();
+    const alt = page.locator(".insp-card textarea");
+    await alt.waitFor();
+    assert.equal(await paste(".insp-card textarea", [...png(7, 7, [90, 90, 90])]), false);
+    await page.waitForTimeout(300);
+    assert.equal(media3().length, 3);
+    assert.equal(await paste("body", [...png(7, 7, [90, 90, 90])]), true);
+    await tilesAre(page, 4);
+    assert.equal((await names(page))[0], "image.png");
+    assert.equal(media3().length, 4);
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a type the library does not take and a file over 20 MiB are refused in the browser: no request", async () => {
+  const { context, page, problems } = await open(w3, "will", "/admin/media", UP);
+  try {
+    await tilesAre(page, 4);
+    const sent = posts3(page);
+    await page.locator(".up-add input[type=file]").setInputFiles([
+      { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hello") },
+      { name: "icon.svg", mimeType: "image/svg+xml", buffer: Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'/>") },
+      { name: "huge.png", mimeType: "image/png", buffer: Buffer.alloc(20 * 1024 * 1024 + 1) },
+    ]);
+    await page.locator(".ups .up-row.is-err").nth(2).waitFor();
+    assert.deepEqual(await page.locator(".up-row.is-err .up-msg").allInnerTexts(), [
+      fill(tx("admin.media.up_type"), { name: "notes.txt" }),
+      fill(tx("admin.media.up_type"), { name: "icon.svg" }),
+      fill(tx("admin.media.up_size"), { name: "huge.png" }),
+    ]);
+    assert.equal(await page.locator(".up-row.is-err .up-msg[role=alert]").count(), 3, "each is announced");
+    await page.waitForTimeout(300);
+    assert.equal(sent.length, 0, "nothing was sent");
+    assert.equal(media3().length, 4);
+    await page.locator(".up-row.is-err").first().getByRole("button", { name: tx("admin.media.up_dismiss") }).click();
+    assert.equal(await page.locator(".up-row.is-err").count(), 2);
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a file the browser cannot read as a picture says so and sends nothing", async () => {
+  const { context, page, problems, logged } = await open(w3, "will", "/admin/media", { allow: /not a picture this browser can read|admin media: uploading/ });
+  try {
+    await tilesAre(page, 4);
+    const sent = posts3(page);
+    await page.locator(".up-add input[type=file]").setInputFiles({ name: "broken.png", mimeType: "image/png", buffer: Buffer.from("not a picture") });
+    const msg = page.locator(".up-row.is-err .up-msg");
+    await msg.waitFor();
+    assert.equal(await msg.innerText(), fill(tx("admin.media.up_unreadable"), { name: "broken.png" }));
+    assert.equal(sent.length, 0);
+    assert.ok(logged.some((l) => /not a picture this browser can read/.test(l)), "logged for the next agent");
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("Cancel while a file is going out stops it: no row, no tile, nothing stored", async () => {
+  const { context, page, problems } = await open(w3, "will", "/admin/media", UP);
+  try {
+    await tilesAre(page, 4);
+    const held = [];
+    // The request is held on its way out, as a slow upload would be.
+    await page.route("**/api/v1/media?**", (route) => (route.request().method() === "POST" ? held.push(route) : route.continue()));
+    await page.locator(".up-add input[type=file]").setInputFiles(pngFile("cancel-me.png", 6, 6, [10, 120, 200]));
+    const row = page.locator(".up-row");
+    await row.getByText("cancel-me.png").waitFor();
+    // Hashed and out: the row reads 0% and the request is held.
+    await row.getByText(fill(tx("admin.media.up_sending"), { percent: "0" })).waitFor();
+    for (let i = 0; i < 100 && !held.length; i++) await page.waitForTimeout(50);
+    assert.equal(held.length, 1, "the request is out");
+    await row.getByRole("button", { name: tx("admin.media.up_cancel") }).click();
+    assert.equal(await page.locator(".up-row").count(), 0, "the row is gone");
+    await held[0].abort();
+    await page.waitForTimeout(300);
+    assert.equal(await page.locator(".media .tile").count(), 4);
+    assert.equal(await page.locator(".up-row.is-err").count(), 0, "a cancel is not an error");
+    assert.equal(media3().length, 4, "nothing stored");
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a server 400 names the field, a 413 and a lost connection each have their words, and Try again sends the file again", async () => {
+  const { context, page, problems, logged } = await open(w3, "will", "/admin/media", UP);
+  try {
+    await tilesAre(page, 4);
+    const send = (f) => page.locator(".up-add input[type=file]").setInputFiles(f);
+    const msg = () => page.locator(".up-row.is-err .up-msg");
+    const dismiss = () => page.locator(".up-row.is-err").getByRole("button", { name: tx("admin.media.up_dismiss") }).click();
+    // A real 400: the request goes out with a width the file does not have.
+    await page.route("**/api/v1/media?**", (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const u = new URL(route.request().url());
+      u.searchParams.set("width", "999");
+      return route.continue({ url: u.toString() });
+    });
+    await send(pngFile("lies.png", 6, 6, [1, 2, 3]));
+    await msg().waitFor();
+    // Plain words, never the field's name; the log keeps the field.
+    assert.equal(await msg().innerText(), fill(tx("admin.media.up_bad_size"), { name: "lies.png" }));
+    assert.ok(!/width/.test(await msg().innerText()));
+    assert.ok(logged.some((l) => /uploading lies\.png failed: input\.invalid \(400\) on width/.test(l)), logged.join("\n"));
+    assert.equal(media3().length, 4);
+    // 413.
+    await page.unroute("**/api/v1/media?**");
+    await page.route("**/api/v1/media?**", (route) => (route.request().method() === "POST" ? route.fulfill({ status: 413, contentType: "application/json", body: '{"error":"api.body_too_large"}' }) : route.continue()));
+    await dismiss();
+    await send(pngFile("big.png", 6, 6, [3, 2, 1]));
+    await msg().waitFor();
+    assert.equal(await msg().innerText(), fill(tx("admin.media.up_size"), { name: "big.png" }));
+    // No network.
+    await page.unroute("**/api/v1/media?**");
+    await page.route("**/api/v1/media?**", (route) => (route.request().method() === "POST" ? route.abort() : route.continue()));
+    await dismiss();
+    await send(pngFile("offline.png", 6, 6, [5, 5, 5]));
+    await msg().waitFor();
+    assert.equal(await msg().innerText(), fill(tx("admin.media.up_offline"), { name: "offline.png" }));
+    // Back online: Try again sends the same file and it lands.
+    await page.unroute("**/api/v1/media?**");
+    await page.locator(".up-row.is-err").getByRole("button", { name: tx("admin.state.retry") }).click();
+    await tilesAre(page, 5);
+    assert.equal((await names(page))[0], "offline.png");
+    assert.equal(media3().length, 5);
+    assert.equal(await page.locator(".up-row").count(), 0);
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("several files all upload, never more than two at once, and each gets its own tile", async () => {
+  const { context, page, problems } = await open(w3, "will", "/admin/media", UP);
+  try {
+    await tilesAre(page, 5);
+    let inflight = 0;
+    let peak = 0;
+    await page.route("**/api/v1/media?**", async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      peak = Math.max(peak, ++inflight);
+      await new Promise((r) => setTimeout(r, 400));
+      await route.continue();
+      inflight--;
+    });
+    const files = Array.from({ length: 6 }, (_, i) => pngFile(`many-${i}.png`, 8 + i, 8, [i * 40, 100, 50]));
+    await page.locator(".up-add input[type=file]").setInputFiles(files);
+    // Rows wait their turn: some say Waiting while two are out.
+    await page.waitForFunction((w) => [...document.querySelectorAll(".up-state")].some((s) => s.textContent === w), tx("admin.media.up_waiting"));
+    await tilesAre(page, 11);
+    assert.equal(peak, 2, "two at a time");
+    assert.deepEqual((await names(page)).slice(0, 6).sort(), files.map((f) => f.name).sort());
+    assert.equal(media3().length, 11);
+    assert.equal(await page.locator(".up-row").count(), 0);
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a user without media.upload sees no upload controls, and a drop or paste does nothing", async () => {
+  // The API has two roles, both allowed to upload, and a read-only token cannot sign in to the
+  // admin; so the permission gate is exercised by answering /api/auth/me with a role the table lacks.
+  const setup = (page) =>
+    page.route("**/api/auth/me", async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      body.user.role = "reader";
+      await route.fulfill({ response: res, json: body });
+    });
+  const { context, page, problems } = await open(w3, "will", "/admin/media", { setup });
+  try {
+    await tilesAre(page, 11);
+    assert.equal(await page.locator(".up-add").count(), 0);
+    assert.equal(await page.locator("input[type=file]").count(), 0);
+    assert.equal(await page.locator(".drop-hint").count(), 0);
+    assert.equal(await page.locator(".media-main.drop").count(), 0);
+    const sent = posts3(page);
+    const data = [...png(5, 5, [1, 1, 1])];
+    await page.evaluate((data) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array(data)], "nope.png", { type: "image/png" }));
+      document.querySelector(".media-main").dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
+      document.body.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+    }, data);
+    await page.waitForTimeout(300);
+    assert.equal(sent.length, 0);
+    assert.equal(media3().length, 11);
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("on a phone the picture that was already there opens too (its own row does not count as other work)", async () => {
+  const { context, page, problems } = await open(w3, "will", "/admin/media", { ...UP, width: 375, height: 812 });
+  try {
+    await tilesAre(page, 11);
+    await page.locator(".up-add input[type=file]").setInputFiles(pngFile("many-0.png", 8, 8, [0, 100, 50]));
+    // The row sits in the grid's column, which the details replace on a phone.
+    await page.locator(".up-row.is-dup").waitFor({ state: "attached" });
+    await page.locator(".insp-card").waitFor();
+    assert.equal(await page.locator(".insp-title b").innerText(), "many-0.png");
+    assert.equal(await page.locator(".toast").innerText(), fill(tx("admin.media.up_exists"), { name: "many-0.png" }), "said where the row is hidden");
+    assert.equal(media3().length, 11);
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+const DUP_A = () => pngFile("pick-a.png", 12, 8, [200, 40, 40]);
+const DUP_B = () => pngFile("pick-b.png", 10, 10, [40, 200, 40]);
+
+test("a file dropped on the details panel is not opened by the browser and not uploaded", async () => {
+  const { context, page, problems } = await open(w3, "will", "/admin/media", UP);
+  try {
+    await tilesAre(page, 11);
+    await tileOf(page, "pick-a.png").click();
+    await page.locator(".insp-card").waitFor();
+    const sent = posts3(page);
+    const url = page.url();
+    const r = await page.evaluate(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([new Uint8Array(4)], "x.png", { type: "image/png" }));
+      const e = new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true });
+      document.querySelector(".inspector").dispatchEvent(e);
+      const o = new DragEvent("dragover", { dataTransfer: dt, bubbles: true, cancelable: true });
+      document.querySelector(".inspector").dispatchEvent(o);
+      return { drop: e.defaultPrevented, over: o.defaultPrevented, effect: dt.dropEffect };
+    });
+    assert.deepEqual(r, { drop: true, over: true, effect: "none" }, "claimed, so no navigation, and shown as not accepted");
+    await page.waitForTimeout(300);
+    assert.equal(page.url(), url);
+    assert.equal(sent.length, 0);
+    assert.equal(media3().length, 11);
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("on a phone, cancelling the queued files lets the duplicate open", async () => {
+  const { context, page, problems } = await open(w3, "will", "/admin/media", { ...UP, width: 375, height: 812 });
+  try {
+    await tilesAre(page, 11);
+    const held = [];
+    const sent = [];
+    await page.route("**/api/v1/media?**", (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      sent.push(new URL(route.request().url()).searchParams.get("name"));
+      held.push(route);
+    });
+    await page.locator(".up-add input[type=file]").setInputFiles([DUP_B(), DUP_A(), pngFile("q-1.png", 5, 5, [1, 9, 9]), pngFile("q-2.png", 5, 6, [2, 9, 9])]);
+    for (let i = 0; i < 100 && held.length < 2; i++) await page.waitForTimeout(50);
+    assert.equal(held.length, 2, "two are out, two wait");
+    const waiting = page.locator(".up-row", { hasText: tx("admin.media.up_waiting") });
+    assert.equal(await waiting.count(), 2);
+    await waiting.first().getByRole("button", { name: tx("admin.media.up_cancel") }).click();
+    await waiting.first().getByRole("button", { name: tx("admin.media.up_cancel") }).click();
+    await page.waitForTimeout(200);
+    assert.equal(held.length, 2, "a cancelled waiting file is never sent");
+    // The first to answer sees the other still sending; the last one opens.
+    const [first, second] = held;
+    await first.continue();
+    await page.locator(".toast").waitFor();
+    assert.equal(await page.locator(".insp-card").count(), 0, "not while another is still out");
+    await second.continue();
+    await page.locator(".insp-card").waitFor();
+    assert.equal(await page.locator(".insp-title b").innerText(), "pick-a.png");
+    assert.deepEqual(sent.sort(), ["pick-a.png", "pick-b.png"], "q-1 and q-2 never went out");
+    assert.equal(media3().length, 11);
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a picture uploaded while the first page is loading is not lost", async () => {
+  const gate = (() => {
+    let go;
+    const p = new Promise((r) => (go = r));
+    return { p, go };
+  })();
+  const setup = (page) =>
+    page.route("**/api/v1/media?limit*", async (route) => {
+      // The page's answer is taken now and handed over only after the upload: it cannot know the picture.
+      const res = await route.fetch();
+      await gate.p;
+      await route.fulfill({ response: res });
+    });
+  const { context, page, problems } = await open(w3, "will", "/admin/media", { ...UP, setup });
+  try {
+    await page.locator(".grid[aria-busy]").waitFor();
+    await page.locator(".up-add input[type=file]").setInputFiles(pngFile("late.png", 7, 9, [77, 7, 7]));
+    await page.locator(".toast").waitFor();
+    assert.equal(media3().length, 12);
+    gate.go();
+    await tilesAre(page, 12);
+    assert.equal((await names(page))[0], "late.png", "on top, once");
+    assert.deepEqual(problems, []);
+  } finally {
+    gate.go();
+    await context.close();
+  }
+});
+
+test("an upload does not replace the first page's Try again; the picture shows once a page loads", async () => {
+  let fail = true;
+  const setup = (page) =>
+    page.route("**/api/v1/media?limit*", (route) => (fail ? route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"internal"}' }) : route.continue()));
+  const { context, page, problems } = await open(w3, "will", "/admin/media", { allow: /loading the library failed|status of 500|admin media: uploading/, setup });
+  try {
+    const alert = page.locator(".media [role=alert]").first();
+    await alert.getByText(tx("admin.state.error_title")).waitFor();
+    await page.locator(".up-add input[type=file]").setInputFiles(pngFile("after-fail.png", 7, 8, [7, 77, 7]));
+    await page.locator(".toast").waitFor();
+    assert.equal(await page.locator(".media .tile").count(), 0);
+    await alert.getByText(tx("admin.state.error_title")).waitFor();
+    fail = false;
+    await alert.getByRole("button", { name: tx("admin.state.retry") }).click();
+    await tilesAre(page, 13);
+    assert.equal((await names(page))[0], "after-fail.png");
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a failure after the screen was left is a toast, not lost", async () => {
+  const { context, page, problems } = await open(w3, "will", "/admin/media", UP);
+  try {
+    await tilesAre(page, 13);
+    let hold;
+    await page.route("**/api/v1/media?**", (route) => (route.request().method() === "POST" ? (hold = route) : route.continue()));
+    await page.locator(".up-add input[type=file]").setInputFiles(pngFile("gone.png", 5, 7, [8, 8, 80]));
+    for (let i = 0; i < 100 && !hold; i++) await page.waitForTimeout(50);
+    await page.locator("nav.side a", { hasText: tx("admin.nav.posts") }).click();
+    await page.locator(".media").waitFor({ state: "detached" });
+    await hold.fulfill({ status: 500, contentType: "application/json", body: '{"error":"internal"}' });
+    await page.locator(".toast").waitFor();
+    assert.equal(await page.locator(".toast").innerText(), fill(tx("admin.media.up_failed"), { name: "gone.png" }));
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a file waiting in the queue can be cancelled and is never sent", async () => {
+  const { context, page, problems } = await open(w3, "will", "/admin/media", UP);
+  try {
+    await tilesAre(page, 13);
+    const held = [];
+    const names_ = [];
+    await page.route("**/api/v1/media?**", (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      names_.push(new URL(route.request().url()).searchParams.get("name"));
+      // The first two stay out until released; later ones (started when a slot frees) go through.
+      if (held.length < 2) held.push(route);
+      else route.continue();
+    });
+    await page.locator(".up-add input[type=file]").setInputFiles([1, 2, 3, 4].map((i) => pngFile(`cq-${i}.png`, 5 + i, 5, [i * 20, 3, 3])));
+    for (let i = 0; i < 100 && held.length < 2; i++) await page.waitForTimeout(50);
+    const waiting = page.locator(".up-row", { hasText: tx("admin.media.up_waiting") });
+    assert.equal(await waiting.count(), 2);
+    const cancelled = await waiting.first().locator(".up-name").innerText();
+    await waiting.first().getByRole("button", { name: tx("admin.media.up_cancel") }).click();
+    assert.equal(await page.locator(".up-row", { hasText: cancelled }).count(), 0);
+    for (const r of held) await r.continue();
+    await tilesAre(page, 16);
+    assert.ok(!names_.includes(cancelled), `${cancelled} was never requested (${names_})`);
+    assert.equal(names_.length, 3);
+    assert.equal(media3().length, 16);
+    assert.deepEqual(problems, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("when this browser gives no hash the file still goes, without sha256, and it is logged", async () => {
+  const { context, page, problems, logged } = await open(w3, "will", "/admin/media", { allow: /sent without a sha256/, setup: (p) => p.addInitScript(() => Object.defineProperty(crypto, "subtle", { value: undefined })) });
+  try {
+    await tilesAre(page, 16);
+    const sent = posts3(page);
+    await page.locator(".up-add input[type=file]").setInputFiles(pngFile("nohash.png", 6, 9, [9, 99, 9]));
+    await tilesAre(page, 17);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].searchParams.has("sha256"), false);
+    assert.equal(media3().at(-1).sha256, null);
+    assert.ok(logged.some((l) => /sent without a sha256/.test(l)), logged.join("\n"));
     assert.deepEqual(problems, []);
   } finally {
     await context.close();
