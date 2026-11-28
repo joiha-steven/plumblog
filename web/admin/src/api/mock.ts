@@ -15,6 +15,10 @@
  * taken slug; trash and restore work on the same list. `?create=slow` leaves every create
  * unanswered (the editor's "still saving" message).
  *
+ * Settings (`/api/v1/settings`): a map kept in memory from fixtures/settings.json (`?mock=empty`: every key
+ * absent, so the defaults show). Writes need the owner (`?role=writer` gets 403 `auth.forbidden`);
+ * `?settings=invalid` makes writing `site_per_page` fail with 400 `input.invalid`, as a refused value would.
+ *
  * Posts live in memory, from fixtures/posts.json, and reset on page load; the long post (id 1)
  * keeps its body in post-1.txt, so its `markdown` in the JSON is empty and is filled in here.
  * They answer as `/api/v1/posts` does: paged lists (opaque cursor), `post.not_found`, 409
@@ -25,6 +29,7 @@
 
 import me from "../../fixtures/me.json";
 import posts from "../../fixtures/posts.json";
+import settingsFixture from "../../fixtures/settings.json";
 import tokenFixtures from "../../fixtures/tokens.json";
 import longPost from "../../fixtures/post-1.txt";
 import { type Api, type JsonBody, type Me, type Media, type Method, type Result, fail } from "./client";
@@ -168,6 +173,28 @@ async function auth<T>(params: URLSearchParams, method: Method, path: string, bo
 }
 
 const PAGE = 20;
+
+/** The mock's settings; reset by a page load, like the rest of the mock. */
+let settings: Record<string, unknown> | undefined;
+
+async function settingsCall<T>(params: URLSearchParams, method: Method, key: string | undefined, body: Body): Promise<Result<T>> {
+  const mode = params.get("mock");
+  if (mode === "loading") await new Promise(() => undefined);
+  await new Promise((r) => setTimeout(r, 250));
+  if (mode === "error") return fail("internal", 500);
+  if (mode === "offline") return fail("network", 0);
+  settings ??= mode === "empty" ? {} : structuredClone(settingsFixture);
+  if (method === "GET" && key === undefined) return { ok: true, value: { settings: structuredClone(settings) } as T };
+  if (key === undefined) return fail("api.not_found", 404);
+  if (params.get("role") === "writer") return fail("auth.forbidden", 403);
+  if (method === "PUT") {
+    if (body?.["value"] === undefined) return fail("input.invalid", 400, { field: "value" });
+    if (params.get("settings") === "invalid" && key === "site_per_page") return fail("input.invalid", 400, { field: "value" });
+    settings[key] = body["value"];
+  } else if (method === "DELETE") delete settings[key];
+  else return fail("api.not_found", 404);
+  return { ok: true, value: undefined as T };
+}
 
 /** An approximation: the server warns on TeX that does not render (`$\notacommand$`); the mock
  * only knows a `$$` that never closes, enough to show a warning. */
@@ -316,6 +343,8 @@ export function mockApi(params: URLSearchParams): Api {
     // The dev Worker's real renderer (crates/worker/src/contract.rs, test builds only).
     previewUrl: "/__preview",
     async call<T>(method: Method, path: string, body?: Body): Promise<Result<T>> {
+      const sm = /^\/api\/v1\/settings(?:\/([a-z0-9_-]+))?$/.exec(path);
+      if (sm) return settingsCall<T>(params, method, sm[1], body);
       const m = /^\/api\/v1\/posts\/(\d+)\/(trash|restore)$/.exec(path);
       if (method !== "POST" || !m) return auth<T>(params, method, path, body);
       await settle();

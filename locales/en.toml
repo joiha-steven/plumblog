@@ -114,8 +114,6 @@ no_permission_hint = "You're signed in as a writer. You can still write, publish
 back_to_posts = "Back to Posts"
 not_found_title = "Page not found"
 not_found_hint = "This address is not part of the admin."
-building_title = "Not built yet"
-building_hint = "This part of the admin is still being built."
 
 [cli]
 # The `blog` command line. Every error line: the stable code, then the message.
@@ -783,6 +781,31 @@ env_token = "<the token>"
 env_account = "<account id, optional when the token sees one account>"
 step_check = "6. Check it:"
 never_share = "Never paste the token into a chat, an issue or a committed file. If it leaks, roll it on the API tokens page."
+
+[admin.settings]
+sections = "Settings sections"
+general = "General"
+title = "Site title"
+title_hint = "Shown in the header, in browser tabs and in feeds. Leave empty to use the default."
+title_default = "Untitled site"
+description = "Description"
+description_hint = "One or two sentences about the site, used in search results and feeds."
+footer = "Footer"
+footer_hint = "A line of plain text at the bottom of every page, such as a copyright notice."
+lang = "Site language"
+lang_hint = "The language of the site's own pages. Changing it moves that language's posts to new addresses and breaks old links."
+per_page = "Posts per page"
+per_page_hint = "How many posts a list shows before the next page, from 1 to {max}. Leave empty for 10."
+save = "Save changes"
+saving = "Saving..."
+saved = "Saved."
+not_saved = "Some changes were not saved."
+offline = "You're offline. You can read the settings, but saving is off until you're back."
+err_per_page = "Enter a whole number from 1 to {max}, or leave it empty."
+err_network = "Can't reach the blog. Check your connection and save again."
+err_forbidden = "Only the owner can change settings."
+err_invalid = "The blog did not accept this value."
+err_other = "The blog could not save this ({code}). Try again in a moment."
 
 [admin.status]
 draft = "Draft"
