@@ -8,6 +8,7 @@ mod crypto_test;
 pub mod d1;
 mod jobs;
 mod keys;
+mod media;
 mod pages;
 mod theme_runtime;
 mod webcrypto;
@@ -48,6 +49,7 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
         ("GET" | "HEAD", p) if p == admin::PREFIX || p.starts_with("/admin/") => {
             admin::serve(&req, &env).await
         }
+        ("GET" | "HEAD", p) if p.starts_with(media::PREFIX) => media::serve(&req, &env).await,
         ("GET" | "HEAD", _) => {
             theme_runtime::prepare(&env).await;
             pages::serve(&req, &env, &ctx).await
