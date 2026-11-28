@@ -7,7 +7,9 @@ import { createHash, randomBytes } from "node:crypto";
 import { deflateSync } from "node:zlib";
 import { after, before, describe, test } from "node:test";
 
-import { startWorker } from "./harness.mjs";
+import { DatabaseSync } from "node:sqlite";
+
+import { r2File, startWorker } from "./harness.mjs";
 
 const COOKIE = "__Host-plumblog_session";
 const DAY = 86_400_000;
@@ -140,6 +142,29 @@ after(async () => {
 });
 
 const r2Key = (id) => w.query(`SELECT r2_key FROM media WHERE id = ${id}`)[0]?.r2_key;
+const mediaRows = () => w.query("SELECT COUNT(*) AS n FROM media")[0].n;
+/** Objects in the local R2 bucket, read from miniflare's own table like the harness's r2Size. */
+function r2Objects() {
+  const file = r2File(w.state);
+  if (file === null) return 0;
+  const db = new DatabaseSync(file);
+  try {
+    db.exec("PRAGMA busy_timeout = 10000");
+    return Number(db.prepare("SELECT COUNT(*) AS n FROM _mf_objects").get().n);
+  } finally {
+    db.close();
+  }
+}
+/** Rows and R2 objects added by `fn`, so each dedupe case counts what it wrote itself. */
+async function added(fn) {
+  const rows = mediaRows();
+  const objects = r2Objects();
+  const out = await fn();
+  return { out, rows: mediaRows() - rows, objects: r2Objects() - objects };
+}
+const hexOf = (buf) => createHash("sha256").update(buf).digest("hex");
+/** A PNG no other test uploads (its width is unique), so content dedupe never meets another case. */
+const uniquePng = (width, name) => ["image/png", png(width, 1), width, 1, name];
 const settingRow = (key) => w.query(`SELECT value_json FROM settings WHERE key = ${sq(key)}`)[0]?.value_json;
 
 describe("api v1 site", () => {
@@ -151,9 +176,13 @@ describe("api v1 site", () => {
     assert.equal(up.max_body, MAX_MEDIA_BODY);
     assert.equal(up.access, "media.upload");
     assert.deepEqual(up.fields.filter((f) => f.required).map((f) => f.name).sort(), ["height", "mime", "name", "width"]);
+    assert.deepEqual(up.fields.find((f) => f.name === "sha256"), { name: "sha256", type: "string", in: "query", required: false });
+    assert.equal(up.status, 201);
+    assert.deepEqual(up.dedupe, { by: "uploader_sha256", field: "sha256", status: 200 });
     const put = r.json.routes.find((x) => x.method === "PUT" && x.path === "/api/v1/settings/{key}");
     assert.equal(put.body, "json");
     assert.equal(put.variants, null);
+    assert.equal(put.dedupe, null);
     assert.ok(put.fields.some((f) => f.name === "value" && f.type === "json"));
     for (const method of ["PUT", "DELETE"]) {
       const r2 = r.json.routes.find((x) => x.method === method && x.path === "/api/v1/settings/{key}");
@@ -307,6 +336,98 @@ describe("api v1 site", () => {
     assert.ok(w.r2Size(r2Key(m.id)) > 0);
     const unused = await api(w, "GET", "/api/v1/media?unused=true&limit=100", { as: AS.readToken });
     assert.ok(!unused.json.media.some((x) => x.id === m.id));
+  });
+
+  test("media dedupe: the same writer sending the same bytes and sha256 again gets the first item, unchanged", async () => {
+    const img = uniquePng(11, "dd-same.png");
+    const sha256 = hexOf(img[1]);
+    const { out: [a, b], rows, objects } = await added(async () => {
+      const a = await upload(w, AS.writerToken, img, { sha256, alt: "First" });
+      const b = await upload(w, AS.writerSession, img, { sha256, alt: "Second" });
+      return [a, b];
+    });
+    assert.equal(a.status, 201, a.text);
+    assert.equal(b.status, 200, b.text);
+    assert.deepEqual(b.json, a.json);
+    assert.equal(b.json.alt, "First");
+    assert.deepEqual({ rows, objects }, { rows: 1, objects: 1 });
+  });
+
+  test("media dedupe: without sha256 the same bytes twice make two items", async () => {
+    const img = uniquePng(12, "dd-nohash.png");
+    const { out: [a, b], rows, objects } = await added(async () => [await upload(w, AS.writerToken, img), await upload(w, AS.writerToken, img)]);
+    assert.deepEqual([a.status, b.status], [201, 201], b.text);
+    assert.notEqual(a.json.id, b.json.id);
+    assert.deepEqual({ rows, objects }, { rows: 2, objects: 2 });
+  });
+
+  test("media dedupe: different bytes are different items", async () => {
+    const one = uniquePng(13, "dd-one.png");
+    const two = uniquePng(14, "dd-two.png");
+    const { out: [a, b], rows } = await added(async () => [
+      await upload(w, AS.writerToken, one, { sha256: hexOf(one[1]) }),
+      await upload(w, AS.writerToken, two, { sha256: hexOf(two[1]) }),
+    ]);
+    assert.deepEqual([a.status, b.status], [201, 201], b.text);
+    assert.notEqual(a.json.id, b.json.id);
+    assert.equal(rows, 2);
+  });
+
+  test("media dedupe: a sha256 that is not the bytes' is 400 and stores nothing", async () => {
+    const img = uniquePng(15, "dd-wrong.png");
+    const { out: r, rows, objects } = await added(() => upload(w, AS.writerToken, img, { sha256: hexOf(Buffer.from("other bytes")) }));
+    assertError(r, 400, "input.invalid", "sha256");
+    assert.deepEqual({ rows, objects }, { rows: 0, objects: 0 });
+  });
+
+  test("media dedupe: a malformed sha256 is 400", async () => {
+    const img = uniquePng(16, "dd-bad.png");
+    const hex = hexOf(img[1]);
+    for (const sha256 of [hex.toUpperCase(), hex.slice(1), `${hex}0`, `${hex.slice(1)}g`, ""]) {
+      const { out: r, rows, objects } = await added(() => upload(w, AS.writerToken, img, { sha256 }));
+      assertError(r, 400, "input.invalid", "sha256");
+      assert.deepEqual({ rows, objects }, { rows: 0, objects: 0 }, sha256);
+    }
+  });
+
+  test("media dedupe: two uploaders with the same bytes get an item each", async () => {
+    const img = uniquePng(17, "dd-two-users.png");
+    const sha256 = hexOf(img[1]);
+    const { out: [mine, theirs, again], rows, objects } = await added(async () => [
+      await upload(w, AS.writerToken, img, { sha256 }),
+      await upload(w, AS.ownerToken, img, { sha256 }),
+      await upload(w, AS.ownerToken, img, { sha256 }),
+    ]);
+    assert.deepEqual([mine.status, theirs.status, again.status], [201, 201, 200], again.text);
+    assert.notEqual(mine.json.id, theirs.json.id);
+    assert.deepEqual([mine.json.uploaded_by, theirs.json.uploaded_by], [2, 1]);
+    assert.equal(again.json.id, theirs.json.id);
+    assert.deepEqual({ rows, objects }, { rows: 2, objects: 2 });
+  });
+
+  test("media dedupe: two identical uploads at once leave one item and one object", async () => {
+    const img = uniquePng(18, "dd-race.png");
+    const sha256 = hexOf(img[1]);
+    const { out: [a, b], rows, objects } = await added(() =>
+      Promise.all([upload(w, AS.writerToken, img, { sha256 }), upload(w, AS.writerToken, img, { sha256 })]),
+    );
+    assert.deepEqual([a.status, b.status].sort(), [200, 201], `${a.text} ${b.text}`);
+    assert.equal(a.json.id, b.json.id);
+    assert.deepEqual({ rows, objects }, { rows: 1, objects: 1 });
+  });
+
+  test("media dedupe: an item stored without sha256 is never matched", async () => {
+    const img = uniquePng(19, "dd-old.png");
+    const sha256 = hexOf(img[1]);
+    const { out: [old, hashed, again], rows } = await added(async () => [
+      await upload(w, AS.writerToken, img),
+      await upload(w, AS.writerToken, img, { sha256 }),
+      await upload(w, AS.writerToken, img, { sha256 }),
+    ]);
+    assert.deepEqual([old.status, hashed.status, again.status], [201, 201, 200], again.text);
+    assert.notEqual(hashed.json.id, old.json.id);
+    assert.equal(again.json.id, hashed.json.id);
+    assert.equal(rows, 2);
   });
 
   test("redirects: owner puts, lists and deletes; paths must stay on the site", async () => {

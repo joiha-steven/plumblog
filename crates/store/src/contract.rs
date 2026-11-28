@@ -82,6 +82,7 @@ cases! {
     signin::session_renewal,
     library::media_round_trip,
     library::media_paging,
+    library::media_sha256_per_uploader,
     library::media_usage_tracks_saves,
     library::media_in_use_cannot_be_deleted,
     library::taxonomy_paging,

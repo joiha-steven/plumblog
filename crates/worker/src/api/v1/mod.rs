@@ -210,6 +210,16 @@ fn route_json(r: &Route) -> String {
             r.variants
                 .map_or(Out::Null, |v| Out::Str(v.as_str().to_owned())),
         ),
+        (
+            "dedupe",
+            r.dedupe.map_or(Out::Null, |d| {
+                Out::Raw(object(&[
+                    ("by", Out::Str(d.as_str().to_owned())),
+                    ("field", Out::Str(d.field().to_owned())),
+                    ("status", Out::Int(i64::from(d.status()))),
+                ]))
+            }),
+        ),
         ("status", Out::Int(i64::from(r.status))),
         ("response", Out::Str(r.response.to_owned())),
     ])

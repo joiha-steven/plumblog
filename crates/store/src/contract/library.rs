@@ -205,6 +205,88 @@ pub async fn media_round_trip<S: Store>(db: &S) -> Check {
     )
 }
 
+/// `sha256` is unique per uploader and found again by (uploader, sha256); NULL never matches
+/// or collides, and another uploader's equal hash is their own item.
+pub async fn media_sha256_per_uploader<S: Store>(db: &S) -> Check {
+    let a = user(db, "alice").await?;
+    let b = user(db, "bob").await?;
+    let h = "ab".repeat(32);
+    let with = |key: &str, u, hash: Option<&str>| {
+        let mut m = media(key, T0);
+        m.uploaded_by = Some(u);
+        m.sha256 = hash.map(str::to_owned);
+        m
+    };
+    eq!(
+        "find before any upload",
+        ok("find", db.find_media_by_sha256(a, &h).await)?,
+        None,
+    )?;
+    // Rows without a hash (old rows, clients that send none) neither match nor collide.
+    ok("no hash", db.create_media(with("n1.png", a, None)).await)?;
+    ok(
+        "no hash again",
+        db.create_media(with("n2.png", a, None)).await,
+    )?;
+    eq!(
+        "a NULL sha256 is not found",
+        ok("find", db.find_media_by_sha256(a, &h).await)?,
+        None,
+    )?;
+    let first = ok(
+        "create a",
+        db.create_media(with("a.png", a, Some(&h))).await,
+    )?;
+    let got = ok("find a", db.find_media_by_sha256(a, &h).await)?;
+    eq!(
+        "found a",
+        got.as_ref().map(|m| (m.id, m.sha256.clone())),
+        Some((first, Some(h.clone()))),
+    )?;
+    eq!(
+        "get_media returns sha256",
+        ok("get_media", db.get_media(first).await)?.sha256,
+        Some(h.clone()),
+    )?;
+    match db.create_media(with("a2.png", a, Some(&h))).await {
+        Err(e) if e.code == ErrorCode::Conflict && e.field.as_deref() == Some("sha256") => {}
+        other => {
+            return Err(format!(
+                "duplicate sha256: expected Conflict on sha256, got {other:?}"
+            ));
+        }
+    }
+    // The duplicate r2_key stays a Conflict without the sha256 field.
+    match db.create_media(with("a.png", b, None)).await {
+        Err(e) if e.code == ErrorCode::Conflict && e.field.is_none() => {}
+        other => {
+            return Err(format!(
+                "duplicate r2_key: expected Conflict, no field, got {other:?}"
+            ));
+        }
+    }
+    let theirs = ok(
+        "create b",
+        db.create_media(with("b.png", b, Some(&h))).await,
+    )?;
+    that("another uploader gets their own item", theirs != first)?;
+    eq!(
+        "find b",
+        ok("find b", db.find_media_by_sha256(b, &h).await)?.map(|m| m.id),
+        Some(theirs),
+    )?;
+    eq!(
+        "find a still",
+        ok("find a", db.find_media_by_sha256(a, &h).await)?.map(|m| m.id),
+        Some(first),
+    )?;
+    eq!(
+        "another hash",
+        ok("find", db.find_media_by_sha256(a, &"cd".repeat(32)).await)?,
+        None,
+    )
+}
+
 /// Newest first with equal `created_at`; the cursor starts strictly after the last row.
 pub async fn media_paging<S: Store>(db: &S) -> Check {
     let mut ids = Vec::new();
