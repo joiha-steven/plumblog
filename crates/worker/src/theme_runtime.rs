@@ -197,7 +197,7 @@ fn load_parsed(name: &str, pushed: &PushedTheme) -> Result<Pushed, String> {
     .map_err(|e| e.detail)?;
     if theme.name() != name {
         return Err(format!(
-            "theme.toml name {:?} is not the active theme {name:?}",
+            "theme name {:?} is not the active theme {name:?}",
             theme.name()
         ));
     }
@@ -357,8 +357,9 @@ mod tests {
                 .collect(),
             assets: std::collections::BTreeMap::new(),
         };
-        let toml = t.files["theme.toml"].replacen("name = \"minimal\"", "name = \"paper\"", 1);
-        t.files.insert("theme.toml".into(), toml);
+        let manifest =
+            t.files["theme.toml.json"].replacen("\"name\":\"minimal\"", "\"name\":\"paper\"", 1);
+        t.files.insert("theme.toml.json".into(), manifest);
         edit(&mut t);
         t
     }
@@ -372,9 +373,11 @@ mod tests {
         let third = total.saturating_sub(base) / 3;
         let mut css = t.files["style.css"].clone();
         let mut html = t.files["templates/tag.html"].clone();
-        let mut toml = t.files["locales/en.toml"].clone();
-        toml.push_str("\n[pad]\n");
-        let (c0, h0, l0) = (css.len(), html.len(), toml.len());
+        let mut locale: serde_json::Value =
+            serde_json::from_str(&t.files["locales/en.toml.json"]).unwrap();
+        let mut pad = serde_json::Map::new();
+        let (c0, h0) = (css.len(), html.len());
+        let mut pad_len = 0;
         let mut n = 0;
         while css.len() - c0 < third {
             let _ = writeln!(
@@ -390,13 +393,17 @@ mod tests {
             );
             n += 1;
         }
-        while toml.len() - l0 < third {
-            let _ = writeln!(toml, "k{n} = \"Text number {n} for padding\"");
+        while pad_len < third {
+            let text = format!("Text number {n} for padding");
+            pad_len += text.len() + 8;
+            pad.insert(format!("k{n}"), text.into());
             n += 1;
         }
+        locale["pad"] = pad.into();
         t.files.insert("style.css".into(), css);
         t.files.insert("templates/tag.html".into(), html);
-        t.files.insert("locales/en.toml".into(), toml);
+        t.files
+            .insert("locales/en.toml.json".into(), locale.to_string());
         t.to_json()
     }
 
@@ -446,9 +453,9 @@ mod tests {
         let edits: [(Edit, &str); 3] = [
             (
                 |t| {
-                    t.files.remove("theme.toml");
+                    t.files.remove("theme.toml.json");
                 },
-                "theme.toml is missing",
+                "theme.toml.json is missing",
             ),
             (
                 |t| {
@@ -459,8 +466,9 @@ mod tests {
             ),
             (
                 |t| {
-                    let s = t.files["theme.toml"].replace("name = \"paper\"", "name = \"other\"");
-                    t.files.insert("theme.toml".into(), s);
+                    let s = t.files["theme.toml.json"]
+                        .replace("\"name\":\"paper\"", "\"name\":\"other\"");
+                    t.files.insert("theme.toml.json".into(), s);
                 },
                 "not the active theme",
             ),
@@ -469,11 +477,16 @@ mod tests {
             let e = load_parsed("paper", &pushed(edit)).err().expect(why);
             assert!(e.contains(why), "{why}: {e}");
         }
-        let api2 = format!(
-            r#"{{"api":{},"name":"paper","version":"1","hash":"{HASH}","files":{{}}}}"#,
-            THEME_API + 1
-        );
-        for (json, why) in [("{not json", "theme.json"), (api2.as_str(), "api")] {
+        // Another api either way: the first format (TOML text in `files`) is not read.
+        let other_api = |api: u32| {
+            format!(r#"{{"api":{api},"name":"paper","version":"1","hash":"{HASH}","files":{{}}}}"#)
+        };
+        let (newer, older) = (other_api(THEME_API + 1), other_api(THEME_API - 1));
+        for (json, why) in [
+            ("{not json", "theme.json"),
+            (newer.as_str(), "api"),
+            (older.as_str(), "api"),
+        ] {
             let e = load("paper", json).err().expect(why);
             assert!(e.contains(why), "{why}: {e}");
             assert!(

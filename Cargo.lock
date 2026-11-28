@@ -582,7 +582,9 @@ dependencies = [
 name = "plumblog-i18n"
 version = "0.1.0"
 dependencies = [
+ "plumblog-i18n",
  "plumblog-model",
+ "serde_json",
  "toml",
 ]
 
@@ -606,6 +608,7 @@ dependencies = [
  "minijinja",
  "plumblog-i18n",
  "plumblog-markdown",
+ "plumblog-render",
  "serde",
  "serde_json",
  "toml",
@@ -656,6 +659,7 @@ dependencies = [
  "plumblog-webhook",
  "roxmltree",
  "rusqlite",
+ "serde_json",
  "worker",
 ]
 

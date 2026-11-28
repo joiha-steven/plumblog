@@ -64,8 +64,14 @@ impl From<minijinja::Error> for ThemeError {
     }
 }
 
+/// The manifest as the loader reads it: `theme.toml` converted to JSON, because the Worker
+/// links no TOML parser. Locale files follow the same rule ([`LOCALE_SUFFIX`]).
+pub(crate) const MANIFEST: &str = "theme.toml.json";
+/// A locale file is `locales/<lang>` + this.
+pub(crate) const LOCALE_SUFFIX: &str = ".toml.json";
+
 #[derive(Deserialize)]
-struct Manifest {
+pub(crate) struct Manifest {
     name: String,
     #[serde(default)]
     fonts: Fonts,
@@ -223,10 +229,10 @@ impl Theme {
         assets_url: &str,
     ) -> Result<Self, ThemeError> {
         let manifest_src = theme
-            .read("theme.toml")
-            .ok_or_else(|| ThemeError::new("theme.toml is missing"))?;
-        let manifest: Manifest = toml::from_str(manifest_src)
-            .map_err(|e| ThemeError::new(format!("theme.toml: {e}")))?;
+            .read(MANIFEST)
+            .ok_or_else(|| ThemeError::new(format!("{MANIFEST} is missing")))?;
+        let manifest: Manifest = serde_json::from_str(manifest_src)
+            .map_err(|e| ThemeError::new(format!("{MANIFEST}: {e}")))?;
         if manifest.colors.light.keys().ne(manifest.colors.dark.keys()) {
             return Err(ThemeError::new(
                 "theme.toml: [colors.light] and [colors.dark] must define the same keys",
@@ -872,7 +878,7 @@ pub(crate) fn locale_strings(
         for path in files.paths() {
             let Some(lang) = path
                 .strip_prefix("locales/")
-                .and_then(|f| f.strip_suffix(".toml"))
+                .and_then(|f| f.strip_suffix(LOCALE_SUFFIX))
             else {
                 continue;
             };

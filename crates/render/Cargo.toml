@@ -5,13 +5,21 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# TOML -> JSON conversion for `blog` and the Worker's build script (`convert`). Off for the
+# Worker: it loads JSON only, so the TOML parser stays out of the wasm.
+toml = ["dep:toml", "plumblog-i18n/toml"]
+
 [dependencies]
 plumblog-markdown.workspace = true
 plumblog-i18n.workspace = true
 minijinja.workspace = true
-toml.workspace = true
+toml = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+plumblog-render = { workspace = true, features = ["toml"] }
 
 [lints]
 workspace = true

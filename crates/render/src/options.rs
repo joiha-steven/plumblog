@@ -116,7 +116,7 @@ pub(crate) struct OptionDecl {
     pub help: Option<String>,
     pub group: Option<String>,
     pub icon: Option<String>,
-    pub default: toml::Value,
+    pub default: Json,
     /// `color` in a theme: the token it overrides (the option key when absent).
     pub token: Option<String>,
     #[serde(default)]
@@ -258,9 +258,8 @@ impl Schema {
                 },
                 _ => {}
             }
-            let default = toml_json(&d.default);
             let default =
-                check_value(d, &default).map_err(|e| format!("{file}: {at}.default: {e}"))?;
+                check_value(d, &d.default).map_err(|e| format!("{file}: {at}.default: {e}"))?;
             defaults.insert(key.clone(), default);
         }
         Ok(Self { decls, defaults })
@@ -494,21 +493,6 @@ fn is_hex_color(c: &str) -> bool {
     })
 }
 
-/// TOML defaults as the JSON a stored value would be.
-fn toml_json(v: &toml::Value) -> Json {
-    match v {
-        toml::Value::String(s) => Json::String(s.clone()),
-        toml::Value::Integer(i) => Json::from(*i),
-        toml::Value::Float(f) => serde_json::Number::from_f64(*f).map_or(Json::Null, Json::Number),
-        toml::Value::Boolean(b) => Json::Bool(*b),
-        toml::Value::Datetime(d) => Json::String(d.to_string()),
-        toml::Value::Array(a) => Json::Array(a.iter().map(toml_json).collect()),
-        toml::Value::Table(t) => {
-            Json::Object(t.iter().map(|(k, v)| (k.clone(), toml_json(v))).collect())
-        }
-    }
-}
-
 /// The option schema for people and AI writing themes and plugins, built from the types
 /// above (`blog guide options`).
 #[must_use]
@@ -545,8 +529,12 @@ mod tests {
     use super::{FieldType, OptionDecl, check_value, reference};
     use serde_json::json;
 
+    fn parsed(src: &str) -> Result<OptionDecl, serde_json::Error> {
+        serde_json::from_str(&plumblog_i18n::toml_to_json(src).unwrap())
+    }
+
     fn decl(src: &str) -> OptionDecl {
-        toml::from_str(src).unwrap()
+        parsed(src).unwrap()
     }
 
     #[test]
@@ -612,11 +600,8 @@ mod tests {
 
     #[test]
     fn unknown_types_and_stray_keys_do_not_parse() {
-        assert!(toml::from_str::<OptionDecl>("type='slider'\nlabel='x'\ndefault=1").is_err());
-        assert!(
-            toml::from_str::<OptionDecl>("type='toggle'\nlabel='x'\ndefault=true\ncolour=1")
-                .is_err()
-        );
+        assert!(parsed("type='slider'\nlabel='x'\ndefault=1").is_err());
+        assert!(parsed("type='toggle'\nlabel='x'\ndefault=true\ncolour=1").is_err());
     }
 
     #[test]

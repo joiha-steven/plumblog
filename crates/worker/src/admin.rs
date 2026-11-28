@@ -219,7 +219,7 @@ fn text(lang: &str, key: Key, site: &str) -> String {
             .and_then(|(_, src)| match plumblog_i18n::parse(src) {
                 Ok(m) => Some(m),
                 Err(e) => {
-                    worker::console_error!("admin: locales/{l}.toml: {e}");
+                    worker::console_error!("admin: embedded locale {l}: {e}");
                     None
                 }
             })
