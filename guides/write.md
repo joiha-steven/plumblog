@@ -56,5 +56,5 @@ Always write `alt` (later: `PATCH /api/v1/media/{id}`). Delete own uploads only 
 
 ## Not built yet
 
-The public site still renders the built-in sample content, not posts saved through the API,
-and `/media/...` is not served yet. Check results with `GET /api/v1/posts/{id}`.
+The public site still renders the built-in sample content, not posts saved through the API
+(a media `src` is served once a published post uses it). Check with `GET /api/v1/posts/{id}`.

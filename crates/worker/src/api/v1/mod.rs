@@ -5,6 +5,7 @@
 
 mod export;
 mod input;
+mod log;
 mod media;
 mod post_body;
 mod posts;
@@ -152,6 +153,7 @@ pub async fn dispatch(
         RouteId::MediaOriginal => media::original(ctx, &input).await,
         RouteId::CommentList => export::comments(ctx, &input).await,
         RouteId::UserList => export::users(ctx, &input).await,
+        RouteId::LogList => log::list(ctx, &input).await,
         RouteId::RedirectList => settings::redirects(ctx).await,
         RouteId::RedirectPut => settings::redirect_put(ctx, p, &input).await,
         RouteId::RedirectDelete => settings::redirect_delete(ctx, p, &input).await,

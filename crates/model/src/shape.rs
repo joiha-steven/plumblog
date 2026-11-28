@@ -25,6 +25,36 @@ pub const OPTION_TYPES: &[&str] = &[
 ];
 /// Where an installed theme comes from: built into the Worker, or `blog theme push`.
 pub const THEME_SOURCES: &[&str] = &["embedded", "pushed"];
+/// `plumblog_syslog::EventKind::ALL`, in order.
+pub const LOG_KINDS: &[&str] = &[
+    "auth.sign_in",
+    "auth.sign_in_failed",
+    "auth.sign_in_locked",
+    "auth.global_cap",
+    "auth.password_changed",
+    "auth.owner_reset",
+    "auth.owner_reset_redeemed",
+    "auth.sign_out",
+    "auth.passkey_added",
+    "auth.passkey_removed",
+    "auth.token_created",
+    "auth.token_revoked",
+    "user.created",
+    "content.changed",
+    "settings.changed",
+    "theme.changed",
+    "plugin.changed",
+    "plugin.disabled",
+    "system.deploy",
+    "system.migration",
+    "job.run",
+    "webhook.delivery",
+    "error",
+    "comment.created",
+    "comment.moderated",
+];
+/// `plumblog_syslog::Severity`, lowest first (also the `level` filter of `GET /api/v1/log`).
+pub const LOG_LEVELS: &[&str] = &["info", "warning", "error"];
 
 /// A named list of string codes and the TypeScript names it is emitted under.
 #[derive(Clone, Copy, Debug)]
@@ -67,12 +97,33 @@ pub const CODE_LISTS: &[CodeList] = &[
         ty: "ThemeSource",
         values: THEME_SOURCES,
     },
+    CodeList {
+        constant: "LOG_KINDS",
+        ty: "LogKind",
+        values: LOG_KINDS,
+    },
+    CodeList {
+        constant: "LOG_LEVELS",
+        ty: "LogLevel",
+        values: LOG_LEVELS,
+    },
 ];
+
+/// `ErrorCode::ALL`: its constant is emitted by `ts.rs` on its own, so `values` stays empty
+/// here and this entry only names it for shapes.
+const ERROR_CODES: CodeList = CodeList {
+    constant: "ERROR_CODES",
+    ty: "ErrorCode",
+    values: &[],
+};
 
 /// The code list named `constant`.
 #[must_use]
 pub fn code_list(constant: &str) -> Option<&'static CodeList> {
-    CODE_LISTS.iter().find(|l| l.constant == constant)
+    CODE_LISTS
+        .iter()
+        .find(|l| l.constant == constant)
+        .or((constant == ERROR_CODES.constant).then_some(&ERROR_CODES))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -280,6 +331,24 @@ const CONFLICT: &[Prop] = &[
     p("version", Ty::Int),
 ];
 
+const LOG_FIELD: &[Prop] = &[p("key", Ty::Str), p("value", Ty::Str)];
+const LOG_ENTRY: &[Prop] = &[
+    p("id", Ty::Int),
+    p("at", Ty::Int),
+    p("request_id", Ty::Str),
+    p("kind", Ty::Code("LOG_KINDS")),
+    p("level", Ty::Code("LOG_LEVELS")),
+    nullable("actor_id", Ty::Int),
+    nullable("actor_name", Ty::Str),
+    nullable("error_code", Ty::Code("ERROR_CODES")),
+    p("subject", Ty::Str),
+    list("fields", Ty::Shape("log_field")),
+];
+const LOG_PAGE: &[Prop] = &[
+    list("entries", Ty::Shape("log_entry")),
+    nullable("next_cursor", Ty::Str),
+];
+
 pub const SHAPES: &[Shape] = &[
     Shape {
         name: "post_summary",
@@ -325,6 +394,21 @@ pub const SHAPES: &[Shape] = &[
         name: "user_page",
         extends: None,
         props: USER_PAGE,
+    },
+    Shape {
+        name: "log_field",
+        extends: None,
+        props: LOG_FIELD,
+    },
+    Shape {
+        name: "log_entry",
+        extends: None,
+        props: LOG_ENTRY,
+    },
+    Shape {
+        name: "log_page",
+        extends: None,
+        props: LOG_PAGE,
     },
     Shape {
         name: "conflict",

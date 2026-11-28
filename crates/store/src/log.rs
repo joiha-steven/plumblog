@@ -1,20 +1,41 @@
 //! The owner's timeline (`system_log`).
 
-use plumblog_model::{Result, UserId};
-use plumblog_syslog::{Event, EventKind, LogSink, Retention, Scope};
+use plumblog_model::{ErrorCode, Result, UserId};
+use plumblog_syslog::{Event, EventKind, LogSink, Retention, Scope, Severity};
 
 /// A stored event with its row id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogEntry {
     pub id: i64,
     pub event: Event,
+    /// The actor's display name now; `None` for a system event or a deleted user.
+    pub actor_name: Option<String>,
+}
+
+/// The kinds whose severity, with no error code, is at least `min`. Derived from
+/// [`EventKind::ALL`], so a new kind lands in the right filter by itself.
+#[must_use]
+pub fn kinds_at_least(min: Severity) -> Vec<EventKind> {
+    EventKind::ALL
+        .iter()
+        .copied()
+        .filter(|k| k.base_severity() >= min)
+        .collect()
 }
 
 /// One page of the timeline, newest first (`at_ms` DESC, id DESC). Every filter set must hold.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LogQuery {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LogQuery<'a> {
     pub kind: Option<EventKind>,
+    /// Minimum severity of an entry (kind's severity, raised to warning by an error code);
+    /// `None` and `Info` filter nothing.
+    pub min_severity: Option<Severity>,
+    pub error_code: Option<ErrorCode>,
     pub actor: Option<UserId>,
+    /// Matches the request id exactly, or the stored detail (subject and fields) containing
+    /// this text (plain text: stores escape it like `Event::detail`), ASCII case-insensitive.
+    /// Wildcard characters are literal.
+    pub text: Option<&'a str>,
     /// Inclusive.
     pub from_ms: Option<u64>,
     /// Exclusive.
@@ -31,7 +52,7 @@ pub trait LogStore {
     /// Returns the row id. `InvalidInput` if the actor does not exist.
     async fn append(&self, event: Event) -> Result<i64>;
     /// A stored code this version does not know is `Storage`.
-    async fn query_log(&self, query: LogQuery) -> Result<Vec<LogEntry>>;
+    async fn query_log(&self, query: LogQuery<'_>) -> Result<Vec<LogEntry>>;
     /// Deletes at most `limit` entries, oldest first (`at_ms`, id), among those with
     /// `at_ms < older_than_ms` or outside the newest `keep_max`; returns how many went.
     async fn prune_log(&self, older_than_ms: u64, keep_max: u32, limit: u32) -> Result<u64>;
