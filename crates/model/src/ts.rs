@@ -73,8 +73,9 @@ fn pascal(snake: &str) -> String {
 fn prop_ts(p: &Prop) -> String {
     let base = match p.ty {
         Ty::Str => "string".to_owned(),
-        Ty::Int => "number".to_owned(),
+        Ty::Int | Ty::Num => "number".to_owned(),
         Ty::Bool => "boolean".to_owned(),
+        Ty::Json => "unknown".to_owned(),
         Ty::Code(c) => code_list(c).map_or_else(|| "string".to_owned(), |l| l.ty.to_owned()),
         Ty::Shape(s) => pascal(s),
     };
@@ -127,9 +128,9 @@ fn input_interface(out: &mut String, name: &str, route: RouteId, at: In) {
 fn shapes_table(out: &mut String) {
     out.push_str(
         "\n/**\n * Each shape's props in the order the Worker writes them, inherited ones first.\n \
-         * Descriptor: `string`, `integer`, `boolean`, `code:<CONSTANT>` (a list above, e.g.\n \
-         * `code:POST_STATUSES`) or `shape:<name>`; then `[]` for a list; then `|null` for\n \
-         * nullable (`integer[]|null`).\n */\n",
+         * Descriptor: `string`, `integer`, `number`, `boolean`, `json` (any value),\n \
+         * `code:<CONSTANT>` (a list above, e.g. `code:POST_STATUSES`) or `shape:<name>`; then\n \
+         * `[]` for a list; then `|null` for nullable (`integer[]|null`).\n */\n",
     );
     out.push_str(
         "export const SHAPES: Readonly<Record<string, Readonly<Record<string, string>>>> = {\n",

@@ -376,7 +376,7 @@ pub async fn handle(mut req: Request, env: &Env) -> worker::Result<Response> {
         gate_cookie = cookie;
         if path.starts_with(v1::PREFIX) {
             let body = if raw {
-                v1::check_access(&principal, &method, &path)?;
+                v1::check_before_body(&ctx, &principal, &method, &path).await?;
                 read_body(&mut req, max).await?
             } else {
                 body

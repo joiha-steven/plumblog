@@ -319,16 +319,12 @@ pub async fn limits_cap_at_max_page<S: Store>(db: &S) -> Check {
     let l = ok(
         "query_log",
         db.query_log(LogQuery {
-            kind: None,
-            actor: None,
-            from_ms: None,
-            to_ms: None,
-            before: None,
             limit: u32::MAX,
+            ..LogQuery::default()
         })
         .await,
     )?;
-    eq!("query_log capped", l.len(), crate::page_len(MAX_PAGE))
+    eq!("query_log capped", l.len(), crate::probe_len(MAX_PAGE + 1))
 }
 
 /// `count_posts_by_status`: zeros, kind and lang filters, trash moves a post's count.

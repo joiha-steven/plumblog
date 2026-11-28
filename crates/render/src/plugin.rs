@@ -163,7 +163,7 @@ impl Plugin {
             .collect();
         let strings = locale_strings(files, None).map_err(|e| err(e.detail))?;
         let english = strings.get("en").cloned().unwrap_or_default();
-        let schema = Schema::check("plugin.toml", m.options, &m.groups, &english, Owner::Plugin)
+        let schema = Schema::check("plugin.toml", m.options, m.groups, &english, Owner::Plugin)
             .map_err(err)?;
         Ok(Self {
             name: m.name,

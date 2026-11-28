@@ -285,14 +285,10 @@ async fn sign_in_rows_gone<S: Store>(db: &S, v: UserId) -> Check {
     )
 }
 
-fn all_log() -> LogQuery {
+fn all_log() -> LogQuery<'static> {
     LogQuery {
-        kind: None,
-        actor: None,
-        from_ms: None,
-        to_ms: None,
-        before: None,
         limit: 100,
+        ..LogQuery::default()
     }
 }
 

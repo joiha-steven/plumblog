@@ -5,6 +5,7 @@
 
 mod export;
 mod input;
+mod log;
 mod media;
 mod post_body;
 mod posts;
@@ -69,6 +70,29 @@ pub fn check_access(p: &Principal, m: &Method, path: &str) -> Result<()> {
         Some((route, _)) => access(p, route),
         None => Ok(()),
     }
+}
+
+/// What must hold before a raw body is read: the route's access and, for a media item's new
+/// size, ownership of the item (one D1 read), so a caller refused either way never makes the
+/// Worker take the body in. `dispatch` repeats both.
+///
+/// # Errors
+///
+/// `Unauthenticated`, `Forbidden`, or `NotFound` for an unknown item.
+pub async fn check_before_body(ctx: &Ctx, p: &Principal, m: &Method, path: &str) -> Result<()> {
+    check_access(p, m, path)?;
+    let Some((route, values)) = method(m).and_then(|m| api::find(m, path).ok()) else {
+        return Ok(());
+    };
+    if route.id == RouteId::MediaVariant
+        && let Some(id) = values
+            .iter()
+            .find(|(k, _)| *k == "id")
+            .and_then(|(_, v)| v.parse().ok())
+    {
+        media::owned(ctx, p, plumblog_model::MediaId(id)).await?;
+    }
+    Ok(())
 }
 
 /// A content write in the system log: who, how (session or token), what.
@@ -150,19 +174,24 @@ pub async fn dispatch(
         RouteId::MediaUpdate => media::update(ctx, p, &input).await,
         RouteId::MediaDelete => media::delete(ctx, p, &input).await,
         RouteId::MediaOriginal => media::original(ctx, &input).await,
+        RouteId::MediaVariant => media::add_variant(ctx, p, &input, body).await,
         RouteId::CommentList => export::comments(ctx, &input).await,
         RouteId::UserList => export::users(ctx, &input).await,
+        RouteId::LogList => log::list(ctx, &input).await,
         RouteId::RedirectList => settings::redirects(ctx).await,
         RouteId::RedirectPut => settings::redirect_put(ctx, p, &input).await,
         RouteId::RedirectDelete => settings::redirect_delete(ctx, p, &input).await,
         RouteId::SettingList => settings::list(ctx).await,
         RouteId::SettingPut => settings::put(ctx, p, &input).await,
         RouteId::SettingDelete => settings::delete(ctx, p, &input).await,
+        RouteId::ThemeList => settings::themes(ctx).await,
+        RouteId::ThemeDeclarations => settings::declarations(ctx, p, theme, &input).await,
         RouteId::ThemeOptions => settings::options(ctx, p, theme, &input).await,
         RouteId::ThemeOptionPut => settings::option_put(ctx, p, theme, &input).await,
         RouteId::ThemeOptionsDelete => settings::options_delete(ctx, p, theme, &input).await,
         RouteId::PluginList => settings::plugins(ctx).await,
         RouteId::PluginPut => settings::plugin_put(ctx, p, &input).await,
+        RouteId::PluginDeclarations => settings::declarations(ctx, p, plugin, &input).await,
         RouteId::PluginOptions => settings::options(ctx, p, plugin, &input).await,
         RouteId::PluginOptionPut => settings::option_put(ctx, p, plugin, &input).await,
         RouteId::PluginOptionsDelete => settings::options_delete(ctx, p, plugin, &input).await,

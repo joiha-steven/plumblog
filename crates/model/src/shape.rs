@@ -12,6 +12,49 @@ pub const POST_KINDS: &[&str] = &["post", "page"];
 pub const COMMENT_STATUSES: &[&str] = &["pending", "approved", "spam", "trashed"];
 /// `plumblog_markdown::WARNING_CODES`.
 pub const RENDER_WARNINGS: &[&str] = &["markdown.math_invalid"];
+/// `plumblog_render::options::FieldType` names, the admin's fixed field set.
+pub const OPTION_TYPES: &[&str] = &[
+    "short_text",
+    "long_text",
+    "number",
+    "toggle",
+    "choice",
+    "color",
+    "image",
+    "list",
+];
+/// Where an installed theme comes from: built into the Worker, or `blog theme push`.
+pub const THEME_SOURCES: &[&str] = &["embedded", "pushed"];
+/// `plumblog_syslog::EventKind::ALL`, in order.
+pub const LOG_KINDS: &[&str] = &[
+    "auth.sign_in",
+    "auth.sign_in_failed",
+    "auth.sign_in_locked",
+    "auth.global_cap",
+    "auth.password_changed",
+    "auth.owner_reset",
+    "auth.owner_reset_redeemed",
+    "auth.sign_out",
+    "auth.passkey_added",
+    "auth.passkey_removed",
+    "auth.token_created",
+    "auth.token_revoked",
+    "user.created",
+    "content.changed",
+    "settings.changed",
+    "theme.changed",
+    "plugin.changed",
+    "plugin.disabled",
+    "system.deploy",
+    "system.migration",
+    "job.run",
+    "webhook.delivery",
+    "error",
+    "comment.created",
+    "comment.moderated",
+];
+/// `plumblog_syslog::Severity`, lowest first (also the `level` filter of `GET /api/v1/log`).
+pub const LOG_LEVELS: &[&str] = &["info", "warning", "error"];
 
 /// A named list of string codes and the TypeScript names it is emitted under.
 #[derive(Clone, Copy, Debug)]
@@ -44,19 +87,54 @@ pub const CODE_LISTS: &[CodeList] = &[
         ty: "RenderWarning",
         values: RENDER_WARNINGS,
     },
+    CodeList {
+        constant: "OPTION_TYPES",
+        ty: "OptionType",
+        values: OPTION_TYPES,
+    },
+    CodeList {
+        constant: "THEME_SOURCES",
+        ty: "ThemeSource",
+        values: THEME_SOURCES,
+    },
+    CodeList {
+        constant: "LOG_KINDS",
+        ty: "LogKind",
+        values: LOG_KINDS,
+    },
+    CodeList {
+        constant: "LOG_LEVELS",
+        ty: "LogLevel",
+        values: LOG_LEVELS,
+    },
 ];
+
+/// `ErrorCode::ALL`: its constant is emitted by `ts.rs` on its own, so `values` stays empty
+/// here and this entry only names it for shapes.
+const ERROR_CODES: CodeList = CodeList {
+    constant: "ERROR_CODES",
+    ty: "ErrorCode",
+    values: &[],
+};
 
 /// The code list named `constant`.
 #[must_use]
 pub fn code_list(constant: &str) -> Option<&'static CodeList> {
-    CODE_LISTS.iter().find(|l| l.constant == constant)
+    CODE_LISTS
+        .iter()
+        .find(|l| l.constant == constant)
+        .or((constant == ERROR_CODES.constant).then_some(&ERROR_CODES))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ty {
     Str,
     Int,
+    /// Any JSON number, fractions included (option limits).
+    Num,
     Bool,
+    /// Any JSON value (an option's default, whose type follows its field type).
+    Json,
     /// A string from the code list with this constant name.
     Code(&'static str),
     /// Another shape, by name.
@@ -190,10 +268,85 @@ const USER_PAGE: &[Prop] = &[
     nullable("next_cursor", Ty::Str),
 ];
 
+/// `GET /api/v1/themes`: the embedded default and the pushed theme, if one is bound.
+const THEME_LIST: &[Prop] = &[list("themes", Ty::Shape("theme_info"))];
+
+/// `available` is false only for a pushed theme that did not load (the default renders).
+const THEME_INFO: &[Prop] = &[
+    p("name", Ty::Str),
+    nullable("version", Ty::Str),
+    p("active", Ty::Bool),
+    p("source", Ty::Code("THEME_SOURCES")),
+    p("available", Ty::Bool),
+];
+
+/// A theme's or plugin's option declarations, serialised from `plumblog_render`'s own types
+/// (`Schema::declarations`), with text in `lang`.
+const DECLARATIONS: &[Prop] = &[
+    p("name", Ty::Str),
+    nullable("version", Ty::Str),
+    p("lang", Ty::Str),
+    list("groups", Ty::Shape("option_group")),
+    list("options", Ty::Shape("option_declaration")),
+];
+
+const OPTION_GROUP: &[Prop] = &[
+    p("key", Ty::Str),
+    p("label", Ty::Str),
+    p("label_key", Ty::Str),
+    nullable("icon", Ty::Str),
+];
+
+/// Limits are the ones the write check applies (`max_len`, `max_items` filled in when the
+/// declaration leaves them out); `null` where the type has none.
+const OPTION_DECLARATION: &[Prop] = &[
+    p("key", Ty::Str),
+    p("label", Ty::Str),
+    nullable("help", Ty::Str),
+    p("type", Ty::Code("OPTION_TYPES")),
+    p("label_key", Ty::Str),
+    nullable("help_key", Ty::Str),
+    nullable("group", Ty::Str),
+    nullable("icon", Ty::Str),
+    nullable("token", Ty::Str),
+    nullable("min", Ty::Num),
+    nullable("max", Ty::Num),
+    nullable("step", Ty::Num),
+    p("default", Ty::Json),
+    list("choices", Ty::Shape("option_choice")),
+    nullable("max_len", Ty::Int),
+    nullable("max_items", Ty::Int),
+];
+
+/// An offered choice; drafts are left out.
+const OPTION_CHOICE: &[Prop] = &[
+    p("label", Ty::Str),
+    p("value", Ty::Str),
+    p("label_key", Ty::Str),
+];
+
 const CONFLICT: &[Prop] = &[
     p("error", Ty::Str),
     p("field", Ty::Str),
     p("version", Ty::Int),
+];
+
+const LOG_FIELD: &[Prop] = &[p("key", Ty::Str), p("value", Ty::Str)];
+const LOG_ENTRY: &[Prop] = &[
+    p("id", Ty::Int),
+    p("at", Ty::Int),
+    p("request_id", Ty::Str),
+    p("kind", Ty::Code("LOG_KINDS")),
+    p("level", Ty::Code("LOG_LEVELS")),
+    nullable("actor_id", Ty::Int),
+    nullable("actor_name", Ty::Str),
+    nullable("error_code", Ty::Code("ERROR_CODES")),
+    p("subject", Ty::Str),
+    list("fields", Ty::Shape("log_field")),
+];
+const LOG_PAGE: &[Prop] = &[
+    list("entries", Ty::Shape("log_entry")),
+    nullable("next_cursor", Ty::Str),
 ];
 
 pub const SHAPES: &[Shape] = &[
@@ -243,9 +396,54 @@ pub const SHAPES: &[Shape] = &[
         props: USER_PAGE,
     },
     Shape {
+        name: "log_field",
+        extends: None,
+        props: LOG_FIELD,
+    },
+    Shape {
+        name: "log_entry",
+        extends: None,
+        props: LOG_ENTRY,
+    },
+    Shape {
+        name: "log_page",
+        extends: None,
+        props: LOG_PAGE,
+    },
+    Shape {
         name: "conflict",
         extends: None,
         props: CONFLICT,
+    },
+    Shape {
+        name: "theme_list",
+        extends: None,
+        props: THEME_LIST,
+    },
+    Shape {
+        name: "theme_info",
+        extends: None,
+        props: THEME_INFO,
+    },
+    Shape {
+        name: "option_declarations",
+        extends: None,
+        props: DECLARATIONS,
+    },
+    Shape {
+        name: "option_group",
+        extends: None,
+        props: OPTION_GROUP,
+    },
+    Shape {
+        name: "option_declaration",
+        extends: None,
+        props: OPTION_DECLARATION,
+    },
+    Shape {
+        name: "option_choice",
+        extends: None,
+        props: OPTION_CHOICE,
     },
 ];
 
@@ -263,14 +461,17 @@ pub fn all_props(s: &Shape) -> Vec<Prop> {
 }
 
 impl Prop {
-    /// `string`, `integer`, `boolean`, `code:<CONST>` or `shape:<name>`, then `[]` for a
+    /// `string`, `integer`, `number`, `boolean`, `json` (any value), `code:<CONST>` or
+    /// `shape:<name>`, then `[]` for a
     /// list, then `|null` for nullable.
     #[must_use]
     pub fn descriptor(&self) -> String {
         let mut d = match self.ty {
             Ty::Str => "string".to_owned(),
             Ty::Int => "integer".to_owned(),
+            Ty::Num => "number".to_owned(),
             Ty::Bool => "boolean".to_owned(),
+            Ty::Json => "json".to_owned(),
             Ty::Code(c) => format!("code:{c}"),
             Ty::Shape(s) => format!("shape:{s}"),
         };

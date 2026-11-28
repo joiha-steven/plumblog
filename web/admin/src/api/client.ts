@@ -88,7 +88,7 @@ export interface Api {
   upload(file: File, progress: Progress, signal?: AbortSignal): Promise<Result<Media>>;
 }
 
-export type Method = "GET" | "POST" | "PATCH" | "DELETE";
+export type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 /**
  * Set by the sign-in screens: runs when a call outside `/api/auth/` answers 401

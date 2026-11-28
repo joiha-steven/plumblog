@@ -8,12 +8,16 @@
  * Adding or removing a passkey (account screen): `reauth_wrong|reauth|conflict|origin|unsupported|turnstile`
  * fail as the server does (`turnstile`: removing only; adding sends its token after the browser prompt), before any browser prompt (no real WebAuthn runs in shots); `?passkeys=0`
  * starts with none. Removing works on a list kept in memory. `?upload=fail` makes uploads fail
- * halfway and `?upload=slow` takes 20 s.
+ * halfway and `?upload=slow` takes 20 s. API tokens (`/api/auth/tokens`, account screen): `?tokens=0|error|forbidden`.
  *
  * Publishing: a post update with `status` follows the server's rules (a draft carries no time, a
  * scheduled time must be in the future); `?slug=taken` makes the first publish fail once with a
  * taken slug; trash and restore work on the same list. `?create=slow` leaves every create
  * unanswered (the editor's "still saving" message).
+ *
+ * Settings (`/api/v1/settings`): a map kept in memory from fixtures/settings.json (`?mock=empty`: every key
+ * absent, so the defaults show). Writes need the owner (`?role=writer` gets 403 `auth.forbidden`);
+ * `?settings=invalid` makes writing `site_per_page` fail with 400 `input.invalid`, as a refused value would.
  *
  * Posts live in memory, from fixtures/posts.json, and reset on page load; the long post (id 1)
  * keeps its body in post-1.txt, so its `markdown` in the JSON is empty and is filled in here.
@@ -25,6 +29,8 @@
 
 import me from "../../fixtures/me.json";
 import posts from "../../fixtures/posts.json";
+import settingsFixture from "../../fixtures/settings.json";
+import tokenFixtures from "../../fixtures/tokens.json";
 import longPost from "../../fixtures/post-1.txt";
 import { type Api, type JsonBody, type Me, type Media, type Method, type Result, fail } from "./client";
 import type { Post, PostCreateInput, PostPage, PostUpdateInput, RenderWarning } from "./model.gen";
@@ -52,6 +58,44 @@ const keyList = (params: URLSearchParams): Key[] =>
           { id: 1, name: "MacBook Pro", created_at: Date.UTC(2026, 8, 3), last_used_at: Date.UTC(2026, 10, 24) },
           { id: 2, name: "iPhone 16", created_at: Date.UTC(2026, 10, 12), last_used_at: null },
         ]);
+
+interface MockToken {
+  id: number;
+  name: string;
+  scope: string;
+  created_at: number;
+  expires_at: number | null;
+  revoked_at: number | null;
+}
+/** The mock's API tokens; `?tokens=0` starts with none. The token text is made up and never listed. */
+let tokens: MockToken[] | undefined;
+const tokenList = (params: URLSearchParams): MockToken[] => (tokens ??= params.get("tokens") === "0" ? [] : structuredClone(tokenFixtures));
+
+/** `/api/auth/tokens`: `?tokens=error` fails the list, `?tokens=forbidden` refuses a create; `?role=writer` cannot make an owner token. */
+function tokenRoutes<T>(params: URLSearchParams, method: Method, path: string, body: Body): Result<T> | undefined {
+  const done = (value: unknown = {}): Result<T> => ({ ok: true, value: value as T });
+  if (path === "/api/auth/tokens" && method === "GET") {
+    return params.get("tokens") === "error" ? fail("bad_response", 500) : done({ tokens: tokenList(params) });
+  }
+  if (path === "/api/auth/tokens" && method === "POST") {
+    const name = String(body?.["name"] ?? "");
+    const scope = String(body?.["scope"] ?? "");
+    if (!name || [...name].length > 64 || !["read", "writer", "owner"].includes(scope)) return fail("input.invalid", 400);
+    if (params.get("tokens") === "forbidden" || (scope === "owner" && params.get("role") === "writer")) return fail("auth.forbidden", 403);
+    const list = tokenList(params);
+    const made = { id: Math.max(0, ...list.map((k) => k.id)) + 1, name, scope, created_at: Date.now(), expires_at: body?.["expires_at"] ? Number(body["expires_at"]) : null, revoked_at: null };
+    list.push(made);
+    return done({ ...made, token: "plb_mockMockMockMockMockMockMockMockMockMockMoc" });
+  }
+  const del = /^\/api\/auth\/tokens\/(\d+)$/.exec(path);
+  if (del && method === "DELETE") {
+    const at = tokenList(params).find((k) => k.id === Number(del[1]));
+    if (!at) return fail("store.not_found", 404);
+    at.revoked_at = Date.now();
+    return done();
+  }
+  return undefined;
+}
 
 /** The mock's auth routes; the failure each `?auth=` value forces is the one the real route gives. */
 async function auth<T>(params: URLSearchParams, method: Method, path: string, body: Body): Promise<Result<T>> {
@@ -122,11 +166,35 @@ async function auth<T>(params: URLSearchParams, method: Method, path: string, bo
     keys = keyList(params).filter((k) => k.id !== Number(del[1]));
     return done();
   }
+  const tok = tokenRoutes<T>(params, method, path, body);
+  if (tok) return tok;
   console.warn(`mock: ${method} ${path} is not served`);
   return fail("bad_response", 501);
 }
 
 const PAGE = 20;
+
+/** The mock's settings; reset by a page load, like the rest of the mock. */
+let settings: Record<string, unknown> | undefined;
+
+async function settingsCall<T>(params: URLSearchParams, method: Method, key: string | undefined, body: Body): Promise<Result<T>> {
+  const mode = params.get("mock");
+  if (mode === "loading") await new Promise(() => undefined);
+  await new Promise((r) => setTimeout(r, 250));
+  if (mode === "error") return fail("internal", 500);
+  if (mode === "offline") return fail("network", 0);
+  settings ??= mode === "empty" ? {} : structuredClone(settingsFixture);
+  if (method === "GET" && key === undefined) return { ok: true, value: { settings: structuredClone(settings) } as T };
+  if (key === undefined) return fail("api.not_found", 404);
+  if (params.get("role") === "writer") return fail("auth.forbidden", 403);
+  if (method === "PUT") {
+    if (body?.["value"] === undefined) return fail("input.invalid", 400, { field: "value" });
+    if (params.get("settings") === "invalid" && key === "site_per_page") return fail("input.invalid", 400, { field: "value" });
+    settings[key] = body["value"];
+  } else if (method === "DELETE") delete settings[key];
+  else return fail("api.not_found", 404);
+  return { ok: true, value: undefined as T };
+}
 
 /** An approximation: the server warns on TeX that does not render (`$\notacommand$`); the mock
  * only knows a `$$` that never closes, enough to show a warning. */
@@ -275,6 +343,8 @@ export function mockApi(params: URLSearchParams): Api {
     // The dev Worker's real renderer (crates/worker/src/contract.rs, test builds only).
     previewUrl: "/__preview",
     async call<T>(method: Method, path: string, body?: Body): Promise<Result<T>> {
+      const sm = /^\/api\/v1\/settings(?:\/([a-z0-9_-]+))?$/.exec(path);
+      if (sm) return settingsCall<T>(params, method, sm[1], body);
       const m = /^\/api\/v1\/posts\/(\d+)\/(trash|restore)$/.exec(path);
       if (method !== "POST" || !m) return auth<T>(params, method, path, body);
       await settle();

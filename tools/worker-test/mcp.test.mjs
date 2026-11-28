@@ -189,7 +189,7 @@ describe("mcp tools", () => {
     const ref = await fetch(`${w.url}/api/v1/reference`, { headers: { authorization: `Bearer ${TOK.owner}` } }).then((r) => r.json());
     const want = ref.routes
       .map((r) => `${r.method} ${r.path}`)
-      .filter((k) => !["GET /api/v1/reference", "POST /api/v1/media", "GET /api/v1/media/{id}/original"].includes(k))
+      .filter((k) => !["GET /api/v1/reference", "POST /api/v1/media", "GET /api/v1/media/{id}/original", "POST /api/v1/media/{id}/variants"].includes(k))
       .sort();
     const r = await rpc("tools/list");
     const tools = r.json.result.tools;
@@ -238,6 +238,26 @@ describe("mcp tools", () => {
     const del = result(await callTool("tag_create", { slug: "t1", name: "T1" }));
     const gone = result(await callTool("tag_delete", { id: del.structuredContent.id }));
     assert.deepEqual(gone, { content: [{ type: "text", text: "{}" }], structuredContent: {}, isError: false });
+  });
+
+  test("log_list: the owner reads the system log, a writer or read token is refused and does not see the tool", async () => {
+    const own = result(await callTool("log_list", { limit: 5 })).structuredContent;
+    assert.ok(Array.isArray(own.entries));
+    assert.ok(own.entries.every((e) => e.at !== undefined && e.level && e.request_id));
+    const warn = result(await callTool("log_list", { level: "warning" })).structuredContent;
+    assert.ok(warn.entries.every((e) => e.level !== "info"));
+    const bad = result(await callTool("log_list", { kind: "nope" }));
+    assert.equal(bad.isError, true);
+    assert.deepEqual(bad.structuredContent, { error: "input.invalid", field: "kind" });
+    for (const bearer of [TOK.writer, TOK.read]) {
+      const r = result(await callTool("log_list", {}, { bearer }));
+      assert.equal(r.isError, true);
+      assert.deepEqual(r.structuredContent, { error: "auth.forbidden" });
+      const names = (await rpc("tools/list", undefined, { bearer })).json.result.tools.map((t) => t.name);
+      assert.ok(!names.includes("log_list"));
+    }
+    const ownerTools = (await rpc("tools/list")).json.result.tools.map((t) => t.name);
+    assert.ok(ownerTools.includes("log_list"));
   });
 
   test("refusals are tool results naming the code; nothing changes", async () => {

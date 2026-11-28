@@ -1,0 +1,26 @@
+[
+  {
+    "params": [
+      "$user",
+      "cli-agent",
+      "$hash",
+      "writer",
+      "$now",
+      "",
+      "writer",
+      "owner_reset_user",
+      "owner_reset_expires_at"
+    ],
+    "sql": "INSERT INTO api_tokens (user_id, name, token_hash, scope, created_at, expires_at, revoked_at) SELECT ?1, ?2, ?3, ?4, ?5, NULLIF(?6, ''), NULL WHERE EXISTS (SELECT 1 FROM users WHERE id = ?1 AND role = ?7 AND disabled_at IS NULL) AND NOT EXISTS (SELECT 1 FROM settings u, settings e WHERE u.key = ?8 AND u.value_json = ?1 AND e.key = ?9 AND CAST(e.value_json AS INTEGER) > ?5) RETURNING id"
+  },
+  {
+    "params": [
+      "$now",
+      "cli-token-create-$now",
+      "auth.token_created",
+      "cli-agent\nscope\twriter\nuser\t$user\nvia\tcli",
+      "$hash"
+    ],
+    "sql": "INSERT INTO system_log (at_ms, request_id, kind, actor_id, error_code, detail) SELECT ?1, ?2, ?3, NULL, NULL, ?4 WHERE EXISTS (SELECT 1 FROM api_tokens WHERE token_hash = ?5)"
+  }
+]

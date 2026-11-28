@@ -109,6 +109,60 @@ export const RENDER_WARNINGS = [
 ] as const;
 export type RenderWarning = (typeof RENDER_WARNINGS)[number];
 
+export const OPTION_TYPES = [
+  "short_text",
+  "long_text",
+  "number",
+  "toggle",
+  "choice",
+  "color",
+  "image",
+  "list",
+] as const;
+export type OptionType = (typeof OPTION_TYPES)[number];
+
+export const THEME_SOURCES = [
+  "embedded",
+  "pushed",
+] as const;
+export type ThemeSource = (typeof THEME_SOURCES)[number];
+
+export const LOG_KINDS = [
+  "auth.sign_in",
+  "auth.sign_in_failed",
+  "auth.sign_in_locked",
+  "auth.global_cap",
+  "auth.password_changed",
+  "auth.owner_reset",
+  "auth.owner_reset_redeemed",
+  "auth.sign_out",
+  "auth.passkey_added",
+  "auth.passkey_removed",
+  "auth.token_created",
+  "auth.token_revoked",
+  "user.created",
+  "content.changed",
+  "settings.changed",
+  "theme.changed",
+  "plugin.changed",
+  "plugin.disabled",
+  "system.deploy",
+  "system.migration",
+  "job.run",
+  "webhook.delivery",
+  "error",
+  "comment.created",
+  "comment.moderated",
+] as const;
+export type LogKind = (typeof LOG_KINDS)[number];
+
+export const LOG_LEVELS = [
+  "info",
+  "warning",
+  "error",
+] as const;
+export type LogLevel = (typeof LOG_LEVELS)[number];
+
 /** Response bodies of `/api/v1`, one interface per shape. */
 export interface PostSummary {
   id: number;
@@ -186,10 +240,76 @@ export interface UserPage {
   users: User[];
   next_cursor: string | null;
 }
+export interface LogField {
+  key: string;
+  value: string;
+}
+export interface LogEntry {
+  id: number;
+  at: number;
+  request_id: string;
+  kind: LogKind;
+  level: LogLevel;
+  actor_id: number | null;
+  actor_name: string | null;
+  error_code: ErrorCode | null;
+  subject: string;
+  fields: LogField[];
+}
+export interface LogPage {
+  entries: LogEntry[];
+  next_cursor: string | null;
+}
 export interface Conflict {
   error: string;
   field: string;
   version: number;
+}
+export interface ThemeList {
+  themes: ThemeInfo[];
+}
+export interface ThemeInfo {
+  name: string;
+  version: string | null;
+  active: boolean;
+  source: ThemeSource;
+  available: boolean;
+}
+export interface OptionDeclarations {
+  name: string;
+  version: string | null;
+  lang: string;
+  groups: OptionGroup[];
+  options: OptionDeclaration[];
+}
+export interface OptionGroup {
+  key: string;
+  label: string;
+  label_key: string;
+  icon: string | null;
+}
+export interface OptionDeclaration {
+  key: string;
+  label: string;
+  help: string | null;
+  type: OptionType;
+  label_key: string;
+  help_key: string | null;
+  group: string | null;
+  icon: string | null;
+  token: string | null;
+  min: number | null;
+  max: number | null;
+  step: number | null;
+  default: unknown;
+  choices: OptionChoice[];
+  max_len: number | null;
+  max_items: number | null;
+}
+export interface OptionChoice {
+  label: string;
+  value: string;
+  label_key: string;
 }
 
 /** Request shapes of the post routes. Optional means the client may omit it. */
@@ -242,9 +362,9 @@ export interface PostListQuery {
 
 /**
  * Each shape's props in the order the Worker writes them, inherited ones first.
- * Descriptor: `string`, `integer`, `boolean`, `code:<CONSTANT>` (a list above, e.g.
- * `code:POST_STATUSES`) or `shape:<name>`; then `[]` for a list; then `|null` for
- * nullable (`integer[]|null`).
+ * Descriptor: `string`, `integer`, `number`, `boolean`, `json` (any value),
+ * `code:<CONSTANT>` (a list above, e.g. `code:POST_STATUSES`) or `shape:<name>`; then
+ * `[]` for a list; then `|null` for nullable (`integer[]|null`).
  */
 export const SHAPES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   "post_summary": {
@@ -367,9 +487,75 @@ export const SHAPES: Readonly<Record<string, Readonly<Record<string, string>>>> 
     "users": "shape:user[]",
     "next_cursor": "string|null",
   },
+  "log_field": {
+    "key": "string",
+    "value": "string",
+  },
+  "log_entry": {
+    "id": "integer",
+    "at": "integer",
+    "request_id": "string",
+    "kind": "code:LOG_KINDS",
+    "level": "code:LOG_LEVELS",
+    "actor_id": "integer|null",
+    "actor_name": "string|null",
+    "error_code": "code:ERROR_CODES|null",
+    "subject": "string",
+    "fields": "shape:log_field[]",
+  },
+  "log_page": {
+    "entries": "shape:log_entry[]",
+    "next_cursor": "string|null",
+  },
   "conflict": {
     "error": "string",
     "field": "string",
     "version": "integer",
+  },
+  "theme_list": {
+    "themes": "shape:theme_info[]",
+  },
+  "theme_info": {
+    "name": "string",
+    "version": "string|null",
+    "active": "boolean",
+    "source": "code:THEME_SOURCES",
+    "available": "boolean",
+  },
+  "option_declarations": {
+    "name": "string",
+    "version": "string|null",
+    "lang": "string",
+    "groups": "shape:option_group[]",
+    "options": "shape:option_declaration[]",
+  },
+  "option_group": {
+    "key": "string",
+    "label": "string",
+    "label_key": "string",
+    "icon": "string|null",
+  },
+  "option_declaration": {
+    "key": "string",
+    "label": "string",
+    "help": "string|null",
+    "type": "code:OPTION_TYPES",
+    "label_key": "string",
+    "help_key": "string|null",
+    "group": "string|null",
+    "icon": "string|null",
+    "token": "string|null",
+    "min": "number|null",
+    "max": "number|null",
+    "step": "number|null",
+    "default": "json",
+    "choices": "shape:option_choice[]",
+    "max_len": "integer|null",
+    "max_items": "integer|null",
+  },
+  "option_choice": {
+    "label": "string",
+    "value": "string",
+    "label_key": "string",
   },
 };

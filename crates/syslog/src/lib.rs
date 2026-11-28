@@ -7,7 +7,7 @@ mod redact;
 mod retention;
 mod scope;
 
-pub use event::{Event, EventKind, Severity};
+pub use event::{Event, EventKind, Severity, escape};
 pub use redact::{MAX_DEPTH, REDACTED, redacted_label, secret_name};
 pub use retention::Retention;
 pub use scope::{Scope, request_id};

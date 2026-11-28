@@ -5,13 +5,14 @@ import type { Post } from "./api/model.gen";
 import { mockApi } from "./api/mock";
 import { loadText, readBoot } from "./boot";
 import { h } from "./dom";
+import { startEarly } from "./early";
 import { initI18n, t } from "./i18n";
 import { prefetch } from "./lists";
 import { type Route, current, isAuth, start } from "./router";
 import { screen } from "./screens";
 import { shell } from "./shell";
 import { applyTheme, storedTheme } from "./theme";
-import { closePop, failed, loadingRows, offlineBanner, toast } from "./ui";
+import { closePop, failed, followNetwork, loadingRows, offlineBanner, toast } from "./ui";
 
 const boot = readBoot();
 initI18n(boot, await loadText(boot.lang));
@@ -89,7 +90,7 @@ function render(): void {
   if (me === undefined) main.append(loadingRows());
   else if (!me.ok) main.append(failed(me.error, () => void load()));
   else {
-    main.append(...screen(name, me.value, api).filter((c): c is HTMLElement => c instanceof HTMLElement));
+    main.append(...screen(name, me.value, api, route.section).filter((c): c is HTMLElement => c instanceof HTMLElement));
     if (navigated) main.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
   }
 }
@@ -126,10 +127,20 @@ if (isAuth(first)) {
     navigated = true;
     render();
   });
-  addEventListener("online", render);
-  addEventListener("offline", render);
+  const network = (): void => {
+    const signedIn = me?.ok === true;
+    followNetwork(signedIn ? document.getElementById("main") : null, current().screen, forceOffline || !navigator.onLine, render);
+  };
+  addEventListener("online", network);
+  addEventListener("offline", network);
   if (first === "posts") prefetch(api, "post", location.search);
   else if (first === "pages") prefetch(api, "page", "");
+  else if (first === "account") {
+    // The account page is its own chunk with two lists: fetch all three alongside `me` rather than
+    // one after another. A chunk failure is reported by the screen's own import (screens.ts).
+    startEarly(api, ["/api/auth/passkey", "/api/auth/tokens"]);
+    void import("./auth/account").catch(() => undefined);
+  }
   void load();
 }
 

@@ -1,0 +1,11 @@
+/* Account: API tokens. Rows reuse the passkey row look (.pk-main, .pk-name, .pk-meta in settings.css). */
+.tok-list { display: grid; }
+.tok { display: flex; align-items: center; gap: var(--sp-12); padding: var(--sp-12) 0; border-top: 1px solid var(--line); }
+.tok:first-child { border-top: 0; padding-top: 0; }
+.tok-scope { color: var(--text); }
+.tok-err { font: var(--type-small); color: var(--st-err); }
+.tok-err:empty { display: none; }
+@media (max-width: 480px) {
+  .tok { flex-wrap: wrap; }
+  .tok-revoke { margin-left: auto; }
+}

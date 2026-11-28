@@ -2,12 +2,33 @@
 //! token text is stored, so a leaked database cannot be replayed; the token is shown once.
 
 use crate::{Crypto, base64url};
-use plumblog_model::Result;
+use plumblog_model::{Error, ErrorCode, Result};
 use std::fmt;
 
 /// Marks the text as a plumblog token, so secret scanners and people can recognise a leak.
 pub const PREFIX: &str = "plb_";
 pub const TOKEN_BYTES: usize = 32;
+/// Longest token name, in characters.
+pub const MAX_NAME: usize = 64;
+
+/// A token's name: 1-[`MAX_NAME`] characters, not blank, no control characters. It names the
+/// client in the system log, so it must be readable. One rule for the Worker and `blog token`.
+///
+/// # Errors
+///
+/// `InvalidInput` naming the field `name`.
+pub fn check_name(name: &str) -> Result<()> {
+    let why = if name.trim().is_empty() {
+        "empty"
+    } else if name.chars().count() > MAX_NAME {
+        "too long"
+    } else if name.chars().any(char::is_control) {
+        "control character"
+    } else {
+        return Ok(());
+    };
+    Err(Error::new(ErrorCode::InvalidInput, format!("name: {why}")))
+}
 
 /// A syntactically valid API token: [`PREFIX`] + strict base64url of [`TOKEN_BYTES`] bytes
 /// (43 characters). `Debug` never prints it.
@@ -72,7 +93,7 @@ pub async fn hash_token(crypto: &impl Crypto, token: &ApiTokenSecret) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiTokenSecret, hash_token, new_token};
+    use super::{ApiTokenSecret, check_name, hash_token, new_token};
     use crate::base64url::{encode, hex};
     use crate::testutil::{FakeCrypto, block_on, sha256};
     use plumblog_model::ErrorCode;
@@ -95,6 +116,25 @@ mod tests {
             block_on(new_token(&crypto)).unwrap_err().code,
             ErrorCode::Internal
         );
+    }
+
+    #[test]
+    fn names_are_readable_and_bounded() {
+        assert!(check_name("agent").is_ok());
+        assert!(check_name(&"x".repeat(64)).is_ok());
+        for (bad, why) in [
+            ("", "name: empty"),
+            ("  ", "name: empty"),
+            (&*"x".repeat(65), "name: too long"),
+            ("a\u{7}b", "name: control character"),
+        ] {
+            let e = check_name(bad).unwrap_err();
+            assert_eq!(
+                (e.code, e.detail.as_str()),
+                (ErrorCode::InvalidInput, why),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

@@ -81,6 +81,26 @@ const removeConfirm = async (page) => {
   await page.waitForSelector(".confirm");
   await settle(page, ".pop");
 };
+const TOKENS = ".tok";
+const toTokens = (page) => page.evaluate(() => document.querySelector("#acct-tok").scrollIntoView({ block: "start" }));
+const tokForm = async (page) => {
+  await page.click(".tok-add button");
+  await page.waitForSelector("#tok-name");
+  await toTokens(page);
+};
+const tokCreate = async (page) => {
+  await tokForm(page);
+  await page.fill("#tok-name", "Claude agent for the blog");
+  await page.click(".tok-add button[type=submit]");
+  await page.waitForSelector(".tok-secret");
+  await toTokens(page);
+};
+const tokRevoke = async (page) => {
+  await toTokens(page);
+  await page.click(".tok .btn.danger");
+  await page.waitForSelector(".confirm");
+  await settle(page, ".pop");
+};
 const send = (form) => async (page) => {
   await page.fill(`${form} input[type=password]`, "correct horse battery");
   await page.click(`${form} button[type=submit]`);
@@ -204,6 +224,53 @@ const STATES = [
   ["error", "/admin/?mock=error", "main [role=alert]"],
   ["offline", "/admin/?mock=offline", "main [role=alert]"],
   ["no-permission", "/admin/settings?role=writer"],
+  ["settings", "/admin/settings", "#set-site_title"],
+  ["settings-empty", "/admin/settings?mock=empty", "#set-site_title"],
+  ["settings-loading", "/admin/settings?mock=loading"],
+  ["settings-error", "/admin/settings?mock=error", "main [role=alert]"],
+  [
+    "settings-offline",
+    "/admin/settings",
+    "#set-site_title",
+    async (page) => {
+      await page.context().setOffline(true);
+      await page.waitForSelector(".banner");
+      await page.waitForSelector("#set-site_title");
+      await page.context().setOffline(false);
+    },
+  ],
+  [
+    "settings-saved",
+    "/admin/settings",
+    "#set-site_title",
+    async (page) => {
+      await page.fill("#set-site_title", "B\u1ebfp nh\u00e0 Lan");
+      await page.fill("#set-site_per_page", "20");
+      await page.click("button[type=submit]");
+      await page.waitForFunction(() => document.querySelector("[role=status]")?.textContent?.trim());
+      await page.waitForTimeout(900);
+    },
+  ],
+  [
+    "settings-field-error",
+    "/admin/settings?settings=invalid",
+    "#set-site_title",
+    async (page) => {
+      await page.fill("#set-site_per_page", "30");
+      await page.click("button[type=submit]");
+      await page.waitForSelector("#set-site_per_page-err:not([hidden])");
+    },
+  ],
+  [
+    "settings-invalid",
+    "/admin/settings",
+    "#set-site_title",
+    async (page) => {
+      await page.fill("#set-site_per_page", "99");
+      await page.click("button[type=submit]");
+      await page.waitForSelector("#set-site_per_page-err:not([hidden])");
+    },
+  ],
   ["not-found", "/admin/nope"],
   [
     "menu",
@@ -456,6 +523,36 @@ const STATES = [
       await send(".acct-panel")(page);
     },
   ],
+  ["account-tokens", "/admin/account", TOKENS, toTokens],
+  ["account-tokens-empty", "/admin/account?tokens=0", ".sec:has(#acct-tok) .empty", toTokens],
+  ["account-tokens-error", "/admin/account?tokens=error", ".sec:has(#acct-tok) [role=alert]", toTokens],
+  [
+    "account-tokens-invalid",
+    "/admin/account",
+    TOKENS,
+    async (page) => {
+      await tokForm(page);
+      await page.click(".tok-add button[type=submit]");
+      await page.waitForSelector("#tok-name[aria-invalid=true]");
+    },
+  ],
+  ["account-tokens-secret", "/admin/account", TOKENS, tokCreate],
+  ["account-tokens-revoke", "/admin/account", TOKENS, tokRevoke],
+  ["account-tokens-writer", "/admin/account?role=writer", TOKENS, tokForm],
+  [
+    "account-tokens-offline",
+    "/admin/account",
+    TOKENS,
+    async (page) => {
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, "onLine", { get: () => false });
+        dispatchEvent(new Event("offline"));
+      });
+      // The shell redraws the page when the network changes; wait for the redrawn list.
+      await page.waitForSelector(".tok-add button:disabled");
+      await toTokens(page);
+    },
+  ],
   [
     "signout-confirm",
     "/admin/account",
@@ -530,7 +627,7 @@ try {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const english = ["posts", "posts-strip", "pages", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow"];
+        const english = ["posts", "posts-strip", "pages", "no-permission", "settings", "settings-saved", "settings-field-error", "settings-offline", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow", "account-tokens", "account-tokens-secret", "account-tokens-writer"];
         const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
         const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);
@@ -541,7 +638,7 @@ try {
         page.on("pageerror", (e) => errors.push(String(e)));
         for (const [state, path, ready, act] of states) {
           await page.goto(base + path, { waitUntil: "networkidle" });
-          if (state !== "loading") await page.waitForSelector(ready ?? "main h1, main [role=alert]", { timeout: 5000 });
+          if (!state.endsWith("loading")) await page.waitForSelector(ready ?? "main h1, main [role=alert]", { timeout: 5000 });
           // Popovers and bubbles fade in: actions wait until their animations are over.
           if (act) await act(page);
           const name = `${state}-${w}-${theme}-${lang}.png`;
