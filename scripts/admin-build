@@ -5,6 +5,7 @@
 #   scripts/admin-build         the real client, talking to the Worker's API, in target/admin
 #   scripts/admin-build --dev   the mock client (web/admin/src/api/mock.ts), in target/admin-dev
 #                               (its own dir, so scripts/check never rebuilds under admin-dev)
+# `$out.preload` lists the shell's static chunks for the Worker's HTML (see below).
 # Besides the files the output has `_headers` (cache rules for Workers static assets, moved to
 # the assets root when served) and the service worker knows this build's files by name.
 set -euo pipefail
@@ -32,7 +33,7 @@ bin=tools/node_modules/.bin
 export NODE_PATH="$PWD/tools/node_modules"
 if $mock; then out=target/admin-dev; else out=target/admin; fi
 meta="$out.meta.json" # beside the output, not in it: it is not served
-rm -rf "$out" "$meta"
+rm -rf "$out" "$meta" "$out.preload"
 mkdir -p "$out"
 common=(--bundle --minify --target=es2022 --legal-comments=none --log-level=warning --charset=utf8 --loader:.txt=text)
 "$bin/esbuild" web/admin/src/main.ts "${common[@]}" --format=esm --splitting \
@@ -106,6 +107,13 @@ shell_files=$(node -e '
   }
   console.log([...seen].join("\n"));
 ' "$PWD/$meta" "$out/app.js") || fail "reading $meta"
+# The same list, as the URLs the Worker's HTML shell preloads (crates/worker build.rs reads
+# it): the browser then fetches the chunks beside app.js, not one import level at a time.
+# Beside the output like the metafile; app.js itself is the shell's own script tag.
+preload="$out.preload"
+for f in $shell_files; do
+  [ "$f" = "$out/app.js" ] || echo "/admin/${f#"$out"/}"
+done | sort > "$preload"
 shell_size=0
 for f in $shell_files; do shell_size=$((shell_size + $(gz "$f"))); done
 # Plus one language's text, which every page loads too: the largest.

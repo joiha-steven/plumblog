@@ -15,8 +15,12 @@ case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
 wb=$(scripts/worker-build) || fail "worker-build unavailable"
 rm -rf "$out"
 mkdir -p "$out"
-# Same build as scripts/check's size budget: the release profile, with wasm-opt.
-(cd crates/worker && "$wb" --release --out-dir "$out/worker") >&2 || fail "worker-build failed"
+# The Worker's HTML shell names the admin's static chunks (crates/worker/build.rs), so the
+# admin is built first.
 scripts/admin-build >&2 || fail "admin build (above)"
+export PLUMBLOG_ADMIN_PRELOAD="$PWD/target/admin.preload"
+# The release profile with wasm-opt, as scripts/check's size budget (which builds without the
+# preload list, a few hundred bytes smaller).
+(cd crates/worker && "$wb" --release --out-dir "$out/worker") >&2 || fail "worker-build failed"
 scripts/assemble-assets "$out/assets" target/admin || fail "assembling assets (above)"
 cp -R migrations "$out/migrations"
