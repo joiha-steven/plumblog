@@ -6,8 +6,8 @@
 
 use plumblog_model::{Error, ErrorCode, Permission, Result, api};
 use plumblog_store::{
-    ORIGIN_KEY, OptionOwner, PluginState, RedirectStore, SITE_ID_KEY, SettingsStore,
-    is_internal_setting, public_settings,
+    LAST_BACKUP_KEY, ORIGIN_KEY, OptionOwner, PluginState, RedirectStore, SITE_ID_KEY,
+    SettingsStore, is_internal_setting, public_settings,
 };
 
 use super::{Input, Principal, changed, stored_json};
@@ -111,10 +111,11 @@ pub async fn list(ctx: &Ctx) -> Result<Reply> {
 }
 
 /// A key the API may write. Internal keys are refused like a bad name, so the answer says
-/// nothing about them; the site id is read-only, as every password's browser salt holds it.
+/// nothing about them; the site id is read-only, as every password's browser salt holds it,
+/// and so is the last backup record, which only `blog backup` may write.
 fn writable_key(key: &str) -> Result<()> {
     name("key", key)?;
-    if is_internal_setting(key) || key == SITE_ID_KEY {
+    if is_internal_setting(key) || key == SITE_ID_KEY || key == LAST_BACKUP_KEY {
         return Err(invalid("key", "not writable"));
     }
     Ok(())
@@ -291,7 +292,7 @@ mod tests {
         }
         for key in plumblog_store::INTERNAL_SETTING_KEYS
             .iter()
-            .chain(&[plumblog_store::SITE_ID_KEY])
+            .chain(&[plumblog_store::SITE_ID_KEY, plumblog_store::LAST_BACKUP_KEY])
         {
             assert!(writable_key(key).is_err(), "{key}");
         }

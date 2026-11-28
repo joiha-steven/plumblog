@@ -81,19 +81,50 @@ pub struct DeployRecord {
     pub bundle_migrations: Option<Vec<String>>,
 }
 
-/// One `blog rollback`: code (`kind = "version"`) or database (`kind = "database"`).
+/// One `blog rollback`: code (`kind = "version"`) or database (`kind = "database"`), or one
+/// `blog restore` (`kind = "file"`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RollbackRecord {
     pub at: String,
     pub kind: String,
-    /// The version id or bookmark restored.
+    /// The version id or bookmark restored, or the `.sql` file.
     pub to: String,
     /// What it replaced: the version that was serving, or Time Travel's `previous_bookmark`
-    /// (restoring that undoes the restore).
+    /// (restoring that undoes the restore); for a file, the bookmark taken before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smoke: Option<String>,
+    /// `blog restore` only: `started`, `upload_failed`, `import_failed`, `import_uncertain`,
+    /// `migration_failed` or `restored`. Written before the import, so a run that dies
+    /// halfway still names the bookmark that undoes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+}
+
+/// What the media part of a backup run copied.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupMedia {
+    /// Objects in the backup folder, verified (copied now or by an earlier run).
+    pub objects: u64,
+    pub bytes: u64,
+    /// Rows whose object is not in R2.
+    pub missing: u64,
+    /// Objects refused or not copied: an unsafe key, a wrong size or checksum, a failed read.
+    pub failed: u64,
+}
+
+/// The last `blog backup`: the same record goes to the site's `last_backup` setting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupRecord {
+    /// Unix seconds.
+    pub at: i64,
+    pub database: bool,
+    /// `None`: `--no-media`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<BackupMedia>,
+    /// The database and every media object were copied (so `--no-media` is never complete).
+    pub complete: bool,
 }
 
 /// Records kept per list; older ones are dropped.
@@ -130,6 +161,8 @@ pub struct SiteState {
     pub d1: Option<D1State>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub r2: Option<R2State>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_backup: Option<BackupRecord>,
     #[serde(default)]
     pub migrations: MigrationsState,
     /// Newest last.

@@ -47,9 +47,10 @@ pub use posts::{
 pub use redirects::{Redirect, RedirectStore};
 pub use settings::{OptionOwner, PluginState, SettingsStore};
 pub use signin::{
-    ChallengePurpose, ChallengeStore, INTERNAL_SETTING_KEYS, LoginLimitStore, MAX_FAILURE_KEYS,
-    ORIGIN_KEY, Recorded, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY, SITE_ID_KEY, SetupStore,
-    TURNSTILE_SITE_KEY, is_internal_setting, public_settings, setup_hash_json,
+    ChallengePurpose, ChallengeStore, INTERNAL_SETTING_KEYS, LAST_BACKUP_KEY, LoginLimitStore,
+    MAX_FAILURE_KEYS, ORIGIN_KEY, Recorded, SETUP_CODE_EXPIRES_KEY, SETUP_CODE_HASH_KEY,
+    SITE_ID_KEY, SetupStore, TURNSTILE_SITE_KEY, is_internal_setting, public_settings,
+    setup_hash_json,
 };
 pub use taxonomy::{NewSeries, Series, Tag, TaxonomyStore};
 pub use users::{NewUser, ProfileUpdate, SiteStore, User, UserStore};
