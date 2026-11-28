@@ -65,6 +65,33 @@ pub fn cache_tag() -> &'static str {
     }
 }
 
+/// `x-plumblog-theme` for a page the pushed theme rendered (`None` for the default).
+pub fn served_tag() -> Option<&'static str> {
+    cache_tag().strip_prefix("-t")
+}
+
+/// The theme to render with after the active theme failed on `path`: the embedded default
+/// when a pushed theme is active (a template error that only real data shows), so readers
+/// get a page instead of a 500. Logged once per isolate; the caller must not cache the page.
+/// `None` when the default itself failed: nothing to fall back to.
+pub fn fallback(path: &str, detail: &str) -> Option<&'static Theme> {
+    let Some(Some(p)) = PUSHED.get() else {
+        return None;
+    };
+    fallback_from(p.theme.name(), path, detail)
+}
+
+pub(crate) fn fallback_from(name: &str, path: &str, detail: &str) -> Option<&'static Theme> {
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log(&format!(
+            "theme.pushed_render_failed name={name} path={path} detail={detail}; \
+             served with the default theme, not cached"
+        ));
+    }
+    embedded().ok()
+}
+
 /// What fetching `theme.json` gave.
 enum Fetched {
     Body(String),
@@ -211,7 +238,9 @@ fn log(line: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Fetched, decide, embedded, load, load_parsed, plain_name};
+    use super::{
+        Fetched, decide, embedded, fallback, fallback_from, load, load_parsed, plain_name,
+    };
     use crate::pages::source;
     use plumblog_render::{PushedTheme, THEME_API};
 
@@ -301,6 +330,14 @@ mod tests {
         // A failed fetch is retried later: it decides nothing for the isolate.
         assert!(decide("paper", Fetched::Failed("x".into())).is_err());
         assert!(embedded().is_ok());
+    }
+
+    #[test]
+    fn a_render_failure_falls_back_only_from_a_pushed_theme() {
+        // No pushed theme in this isolate: a failing default has nothing behind it.
+        assert!(fallback("/x", "boom").is_none());
+        let t = fallback_from("paper", "/x", "boom").expect("the default");
+        assert_eq!(t.name(), "minimal");
     }
 
     #[test]

@@ -112,6 +112,9 @@ pub struct Site {
     pub version_override: Option<String>,
     /// `/` answers this status (default 200) while the given version is active.
     pub home_status: Option<(String, u16)>,
+    /// `/` reports this theme tag (`None`: no `x-plumblog-theme`) while the given version is
+    /// active, instead of the one its binding and `theme.json` give (a Worker that fell back).
+    pub theme_tag: Option<(String, Option<String>)>,
     pub hits: usize,
     /// `/healthz` answers only after this long (a slow site).
     pub delay: std::time::Duration,
@@ -362,7 +365,8 @@ fn serve_theme(st: &State, req: &Recorded) -> Option<(u16, Vec<u8>)> {
     if req.method != "GET" || at == 0 {
         return None;
     }
-    let path = &req.path[at..];
+    // Static assets are looked up by the decoded path, as Cloudflare does.
+    let path = &percent_decode(&req.path[at..]);
     if let Some(b) = st.public_override.get(path) {
         return Some((200, b.clone()));
     }
@@ -376,6 +380,50 @@ fn serve_theme(st: &State, req: &Recorded) -> Option<(u16, Vec<u8>)> {
         .and_then(|m| m.get(path))
         .and_then(|h| st.asset_bytes.get(h));
     Some(found.map_or_else(|| (404, b"not found".to_vec()), |b| (200, b.clone())))
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = b
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (b[i], hex) {
+            (b'%', Some(v)) => {
+                out.push(v);
+                i += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// What the Worker would send as `x-plumblog-theme` for `version`: the first 16 hex digits
+/// of the hash in the `theme.json` its `PLUMBLOG_THEME` binding names, if it serves one.
+fn served_theme_tag(st: &State, version: &str) -> Option<String> {
+    let meta = &st.versions.iter().find(|v| v.id == version)?.metadata;
+    let name = meta["bindings"]
+        .as_array()?
+        .iter()
+        .find(|b| b["name"] == "PLUMBLOG_THEME")?["text"]
+        .as_str()?
+        .to_string();
+    let doc = format!("/_theme/{name}/theme.json");
+    let bytes = match st.public_override.get(&doc) {
+        Some(b) => b,
+        None => st
+            .asset_bytes
+            .get(st.version_assets.get(version)?.get(&doc)?)?,
+    };
+    let v: Value = serde_json::from_slice(bytes).ok()?;
+    Some(v["hash"].as_str()?.get(..16)?.to_string())
 }
 
 /// The public side: the site's `/healthz` and `/`, and presigned upload URLs. No token.
@@ -415,7 +463,15 @@ fn serve_public(st: &mut State, req: &Recorded) -> Option<(u16, String, String)>
                 (Some((v, s)), Some(a)) if *v == a => *s,
                 _ => 200,
             };
-            Some((status, "<html></html>".into(), String::new()))
+            let a = active(st);
+            let tag = match (&st.site.theme_tag, &a) {
+                (Some((v, t)), Some(a)) if v == a => t.clone(),
+                _ => a.and_then(|a| served_theme_tag(st, &a)),
+            };
+            let header = tag
+                .map(|t| format!("x-plumblog-theme: {t}\r\n"))
+                .unwrap_or_default();
+            Some((status, "<html></html>".into(), header))
         }
         ("PUT", p) if p.starts_with("/__upload/") => Some(upload(st, req, p)),
         _ => None,

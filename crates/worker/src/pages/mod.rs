@@ -54,8 +54,10 @@ fn theme() -> std::result::Result<&'static Theme, &'static ThemeError> {
 /// The theme with this site's stored options and enabled plugins, and whether both were
 /// read. Reading them may fail (D1 hiccup): the page then uses defaults rather than failing,
 /// the log says why, and the caller must not let it be cached.
-async fn configured(ext: &impl ExtSource) -> std::result::Result<(Theme, bool), String> {
-    let base = theme().map_err(|e| format!("theme: {e}"))?;
+async fn configured(
+    base: &Theme,
+    ext: &impl ExtSource,
+) -> std::result::Result<(Theme, bool), String> {
     let mut complete = true;
     let stored = match ext.theme_options(base.name()).await {
         Ok(v) => v,
@@ -148,7 +150,7 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
     }
 
     let started = worker::Date::now().as_millis();
-    let outcome = match render(src, &db, &db, &path, "").await {
+    let (outcome, tag) = match render_or_default(src, &db, &path, "").await {
         Ok(o) => o,
         Err(detail) => return Ok(failure(&detail)),
     };
@@ -185,6 +187,9 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
                 cache::Lookup::Bypass.label()
             };
             h.set("x-plumblog-cache", label)?;
+            if let Some(t) = tag {
+                h.set(plumblog_render::pushed::THEME_HEADER, t)?;
+            }
             let mut resp = Response::ok(body)?.with_status(status).with_headers(h);
             if store && matches!(lookup, cache::Lookup::Miss) {
                 cache::put_later(ctx, key, resp.cloned()?);
@@ -201,7 +206,7 @@ async fn live<S: ExtSource + SearchSource>(
     path: &str,
     query: &str,
 ) -> Result<Response> {
-    let outcome = match render(src, db, db, path, query).await {
+    let (outcome, tag) = match render_or_default(src, db, path, query).await {
         Ok(o) => o,
         Err(detail) => return Ok(failure(&detail)),
     };
@@ -218,7 +223,33 @@ async fn live<S: ExtSource + SearchSource>(
     h.set("content-type", content_type)?;
     h.set("cache-control", "no-store")?;
     h.set("x-plumblog-cache", cache::Lookup::Bypass.label())?;
+    if let Some(t) = tag {
+        h.set(plumblog_render::pushed::THEME_HEADER, t)?;
+    }
     Ok(Response::ok(body)?.with_status(status).with_headers(h))
+}
+
+/// [`render`], and when a pushed theme fails at render time, [`render_with`] the embedded
+/// default (`crate::theme_runtime::fallback`), never cached. `.1` is the `x-plumblog-theme`
+/// value: the pushed theme's tag when it rendered the page, else `None`.
+async fn render_or_default<S: ExtSource + SearchSource>(
+    src: &impl ReaderSource,
+    db: &S,
+    path: &str,
+    query: &str,
+) -> std::result::Result<(Outcome, Option<&'static str>), String> {
+    let detail = match render(src, db, db, path, query).await {
+        Ok(o) => return Ok((o, crate::theme_runtime::served_tag())),
+        Err(d) => d,
+    };
+    let Some(base) = crate::theme_runtime::fallback(path, &detail) else {
+        return Err(detail);
+    };
+    let mut out = render_with(base, src, db, db, path, query).await?;
+    if let Outcome::Page { cacheable, .. } = &mut out {
+        *cacheable = false;
+    }
+    Ok((out, None))
 }
 
 /// Plain-text 500 from the core locale, for when the theme or the data cannot produce a page.
@@ -258,7 +289,23 @@ pub async fn render(
     path: &str,
     query: &str,
 ) -> std::result::Result<Outcome, String> {
-    let (theme, complete) = configured(ext).await?;
+    let base = theme().map_err(|e| format!("theme: {e}"))?;
+    render_with(base, src, ext, search, path, query).await
+}
+
+/// [`render`] with `base` instead of the active theme.
+///
+/// # Errors
+/// A storage or template failure, as a detail for the log.
+pub async fn render_with(
+    base: &Theme,
+    src: &impl ReaderSource,
+    ext: &impl ExtSource,
+    search: &impl SearchSource,
+    path: &str,
+    query: &str,
+) -> std::result::Result<Outcome, String> {
+    let (theme, complete) = configured(base, ext).await?;
     let mut out = route(src, theme, ext, search, path, query).await?;
     if let Outcome::Page { cacheable, .. } = &mut out {
         *cacheable &= complete;
@@ -286,7 +333,8 @@ pub async fn preview(
     lang: &str,
     now: i64,
 ) -> std::result::Result<String, String> {
-    let (theme, _) = configured(ext).await?;
+    let base = theme().map_err(|e| format!("theme: {e}"))?;
+    let (theme, _) = configured(base, ext).await?;
     let settings = src.settings().await.map_err(err)?;
     let origin = public_origin(&settings);
     let p = Pages {

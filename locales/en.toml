@@ -204,6 +204,9 @@ domain_pending = "Warning: {origin} does not serve the new version yet ({seen}).
 seen_no_reply = "{path} did not answer ({detail})"
 seen_status = "{path} answered HTTP {status}"
 seen_version = "/healthz answered as version {got}, not {want}"
+seen_theme_default = "/ was rendered with the default theme, not the pushed theme {want} (an older bundle, or the theme files are not served)"
+seen_theme_still = "/ was rendered with the pushed theme {got}, not the default theme"
+seen_theme_other = "/ was rendered with theme {got}, not {want}"
 log_failed = "Note: the deploy could not be written to the site's system log: {error}"
 done = "Deployed version {version} to {origin}."
 theme_default_help = "Switch to the default theme: do not carry the pushed theme to the new version"
@@ -606,6 +609,17 @@ deploy = "{at}  {version}  {outcome}  deploy: {theme}"
 default = "default theme"
 empty = "No deploy is recorded in this folder yet."
 
+[cli.theme.why]
+hash_mismatch = "theme.json states hash {stated}, but its content hashes to {got}"
+asset_missing = "{path} is missing"
+asset_changed = "{path} does not match its SHA-256 in theme.json"
+too_large = "larger than {max} bytes"
+not_utf8 = "not UTF-8 text"
+bad_name = "name \"{name}\" in theme.toml is not a theme name (lowercase letters, digits, _ and -, starting with a letter)"
+copy_holds_other = "{path} holds another theme ({hash})"
+served_not_utf8 = "{path} on the site is not UTF-8 text"
+served_other = "the site serves theme {served}, but the deploy record names {recorded}"
+
 [cli.plugin]
 about = "Check plugins (check)"
 dir_value = "FOLDER"
@@ -658,6 +672,10 @@ fix = "Add the key to locales/en.toml, and to the other language files the theme
 what = "A page was left incomplete: {detail}"
 fix = "Fix the part the message names."
 
+[cli.finding.theme_asset_missing]
+what = "Uses {asset}, which is not in the theme's assets/ folder; the live site answers 404 for it."
+fix = "Add the file to assets/, or stop using it. A template the theme does not have comes from the default theme: copy it into templates/ to change it."
+
 [cli.finding.file_secret_name]
 what = "This file looks like a secret ({why}), and every file in a theme or plugin is public."
 fix = "Delete it from the folder. If it held a real secret, treat the secret as leaked and replace it."
@@ -681,6 +699,10 @@ fix = "Delete it, and do not name files admin*."
 [cli.finding.file_too_many]
 what = "More files than a theme or plugin has; the rest were not read."
 fix = "Check that this is the right folder, and remove files that do not belong."
+
+[cli.finding.file_asset_name]
+what = "Asset file names may use only A-Z, a-z, 0-9, dot, _ and - in each part of the path."
+fix = "Rename the file or folder (for example, spaces to -), and update what links to it."
 
 [cli.finding.text_hard]
 what = "Fixed text {text} in a template. Text shown to readers belongs in locales/."

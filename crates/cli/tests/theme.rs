@@ -447,6 +447,142 @@ fn dev_shows_the_findings_for_a_broken_theme_and_recovers() {
     server.join().unwrap();
 }
 
+fn has_id(f: &[Finding], id: &str, file: &str) -> bool {
+    f.iter().any(|x| x.kind.id() == id && x.file == file)
+}
+
+#[test]
+fn check_refuses_asset_names_that_are_not_plain() {
+    let (_t, dir) = fresh_theme("t");
+    for name in ["a b.png", "x#1.png", "100%.png", "caf\u{e9}.png"] {
+        std::fs::write(dir.join("assets").join(name), b"x").unwrap();
+    }
+    std::fs::create_dir(dir.join("assets/my dir")).unwrap();
+    std::fs::write(dir.join("assets/my dir/ok.png"), b"x").unwrap();
+    std::fs::write(dir.join("assets/fine-name_1.v2.png"), b"x").unwrap();
+    let f = findings(&dir);
+    for name in [
+        "a b.png",
+        "x#1.png",
+        "100%.png",
+        "caf\u{e9}.png",
+        "my dir/ok.png",
+    ] {
+        assert!(
+            has_id(&f, "file.asset_name", &format!("assets/{name}")),
+            "{name}: {f:#?}"
+        );
+    }
+    assert!(!has_id(&f, "file.asset_name", "assets/fine-name_1.v2.png"));
+    let shown = f
+        .iter()
+        .find(|x| x.kind.id() == "file.asset_name")
+        .unwrap()
+        .render(&en());
+    assert!(shown.contains("A-Z"), "{shown}");
+}
+
+#[test]
+fn check_reports_assets_referenced_but_missing() {
+    let (_t, dir) = fresh_theme("t");
+    assert!(
+        !findings(&dir)
+            .iter()
+            .any(|x| x.kind.id() == "theme.asset_missing")
+    );
+    // post.html is borrowed from the default theme, which loads asset("highlight.js").
+    std::fs::remove_file(dir.join("templates/post.html")).unwrap();
+    std::fs::remove_file(dir.join("assets/highlight.js")).unwrap();
+    // A font named in faces.css and preloaded by theme.toml.
+    std::fs::remove_file(dir.join("assets/fonts/inter-latin.woff2")).unwrap();
+    // The theme's own template and the theme's script list.
+    edit(&dir, "templates/home.html", |s| {
+        format!("{s}\n<script src=\"{{{{ asset(\"gone.js\") }}}}\"></script>\n")
+    });
+    edit(&dir, "theme.toml", |s| {
+        s.replace(
+            "files = [\"assets/minimal.js\"]",
+            "files = [\"assets/minimal.js\", \"assets/extra.js\"]",
+        )
+    });
+    let f = findings(&dir);
+    let missing: Vec<(String, String)> = f
+        .iter()
+        .filter(|x| x.kind.id() == "theme.asset_missing")
+        .map(|x| {
+            let a = x
+                .args
+                .iter()
+                .find(|(k, _)| *k == "asset")
+                .unwrap()
+                .1
+                .clone();
+            (x.file.clone(), a)
+        })
+        .collect();
+    for want in [
+        ("templates/post.html", "assets/highlight.js"),
+        ("assets/fonts/faces.css", "assets/fonts/inter-latin.woff2"),
+        ("theme.toml", "assets/fonts/inter-latin.woff2"),
+        ("templates/home.html", "assets/gone.js"),
+        ("theme.toml", "assets/extra.js"),
+    ] {
+        assert!(
+            missing
+                .iter()
+                .any(|(file, a)| file == want.0 && a == want.1),
+            "{want:?} in {missing:#?}"
+        );
+    }
+    assert!(
+        f.iter()
+            .any(|x| x.kind.id() == "theme.asset_missing" && x.level == Level::Error)
+    );
+}
+
+#[test]
+fn dev_serves_only_the_theme_s_own_assets() {
+    let (_t, dir) = fresh_theme("t");
+    std::fs::remove_file(dir.join("assets/highlight.js")).unwrap();
+    let listener = dev::bind(0).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (d, text) = (dir.clone(), en());
+    let server = std::thread::spawn(move || dev::serve(&listener, &d, &text, Some(2)).unwrap());
+    let host = format!("127.0.0.1:{port}");
+    // The live Worker serves /_theme/<name>/assets/ only: no default theme behind it.
+    let (status, _) = get(port, "/_theme/highlight.js", &host);
+    assert!(status.contains("404"), "{status}");
+    let (status, _) = get(port, "/_theme/minimal.js", &host);
+    assert!(status.contains("200"), "{status}");
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn dev_never_follows_a_symlinked_folder_out_of_assets() {
+    let (t, dir) = fresh_theme("t");
+    let outside = t.0.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("secret.txt"), "top secret").unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("assets/x")).unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("assets/s.txt")).unwrap();
+    let listener = dev::bind(0).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (d, text) = (dir.clone(), en());
+    let server = std::thread::spawn(move || dev::serve(&listener, &d, &text, Some(3)).unwrap());
+    let host = format!("127.0.0.1:{port}");
+    for path in ["/_theme/x/secret.txt", "/_theme/s.txt"] {
+        let (status, body) = get(port, path, &host);
+        assert!(
+            status.contains("404") && !body.contains("top secret"),
+            "{path}: {status}"
+        );
+    }
+    let (status, _) = get(port, "/_theme/minimal.js", &host);
+    assert!(status.contains("200"), "{status}");
+    server.join().unwrap();
+}
+
 fn plugin_findings(dir: &Path) -> Vec<Finding> {
     let name = dir.file_name().unwrap().to_string_lossy().into_owned();
     check_plugin(&DirFiles::read(dir).unwrap(), &name)

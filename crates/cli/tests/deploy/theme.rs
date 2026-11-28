@@ -7,9 +7,9 @@ use crate::{GOOD, TempDir, client};
 use plumblog_cli::deploy::{self, Options, Runtime};
 use plumblog_cli::migrations;
 use plumblog_cli::setup::{Context, Failure as RunFailure};
-use plumblog_cli::text::Code;
+use plumblog_cli::text::{Code, Text};
 use plumblog_cli::theme::push::{self, PushOptions, RollbackOptions};
-use plumblog_cli::theme::store::STORE_DIR;
+use plumblog_cli::theme::store::{self, STORE_DIR};
 use plumblog_render::PushedTheme;
 use std::path::{Path, PathBuf};
 
@@ -45,14 +45,18 @@ enum Cmd<'a> {
 
 /// One command at minute `minute` (each run gets its own record time).
 fn run(fake: &Fake, dir: &TempDir, bundle: &Path, minute: i64, cmd: Cmd) -> Ran {
+    run_in(fake, dir, bundle, minute, cmd, &en())
+}
+
+/// [`run`] in the language of `text`.
+fn run_in(fake: &Fake, dir: &TempDir, bundle: &Path, minute: i64, cmd: Cmd, text: &Text) -> Ran {
     let mut c = client(fake, GOOD);
     let migs = migrations::bundled();
-    let text = en();
     let cx = Context {
         dir: &dir.0,
         migrations: &migs,
         now_ms: NOW + minute * 60_000,
-        text: &text,
+        text,
     };
     let clock = FakeClock::default();
     let rt = Runtime {
@@ -566,4 +570,129 @@ fn a_push_that_fails_the_smoke_check_rolls_back() {
     // Nothing to go back from: the failed push never served.
     let r = run(&fake, &dir, &bundle, 3, Cmd::Rollback(None));
     assert_eq!(code(&r), Code::ThemeRollbackNoRecord);
+}
+
+#[test]
+fn a_push_the_site_does_not_serve_rolls_back() {
+    // The new version answers, but renders the default theme (an older bundle, or theme.json
+    // not reachable through ASSETS): the push must not count as done.
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    fake.state().site.theme_tag = Some((V2.into(), None));
+    let theme = paper(&dir);
+    let r = run(&fake, &dir, &bundle, 1, Cmd::Push(Some(&theme)));
+    assert_eq!(code(&r), Code::SmokeFailed, "{}", r.out);
+    let msg = r.result.as_ref().unwrap_err().message.clone();
+    assert!(msg.contains("default theme"), "{msg}");
+    assert_eq!(active(&fake), P);
+    let rec = load(&dir).deploys.last().unwrap().clone();
+    assert_eq!(rec.outcome, "rolled_back");
+    assert_eq!(rec.smoke.as_deref(), Some("/ theme -"));
+    // Another theme's tag fails the same way.
+    fake.state().site.theme_tag = Some((V3.into(), Some("0123456789abcdef".into())));
+    let r = run(&fake, &dir, &bundle, 2, Cmd::Push(Some(&theme)));
+    assert_eq!(code(&r), Code::SmokeFailed, "{}", r.out);
+    assert_eq!(active(&fake), P);
+}
+
+#[test]
+fn a_default_push_or_deploy_checks_the_theme_too() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    let theme = paper(&dir);
+    ok(&run(&fake, &dir, &bundle, 1, Cmd::Push(Some(&theme))));
+    let tag = served_doc(&fake, V2).hash[..16].to_string();
+    // A deploy carrying the theme whose new version serves the default: rolled back.
+    fake.state().site.theme_tag = Some((V3.into(), None));
+    let r = run(
+        &fake,
+        &dir,
+        &bundle,
+        2,
+        Cmd::Deploy {
+            theme_default: false,
+        },
+    );
+    assert_eq!(code(&r), Code::SmokeFailed, "{}", r.out);
+    assert_eq!(active(&fake), V2);
+    // `--default` whose new version still serves a theme: rolled back.
+    fake.state().site.theme_tag = Some((V4.into(), Some(tag)));
+    let r = run(&fake, &dir, &bundle, 3, Cmd::Push(None));
+    assert_eq!(code(&r), Code::SmokeFailed, "{}", r.out);
+    assert_eq!(active(&fake), V2);
+    // Serving what was asked for passes.
+    fake.state().site.theme_tag = None;
+    ok(&run(&fake, &dir, &bundle, 4, Cmd::Push(None)));
+    assert_eq!(theme_binding(&fake, &active(&fake)), None);
+}
+
+#[test]
+fn assets_whose_names_need_encoding_are_fetched_back() {
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    let theme = paper(&dir);
+    ok(&run(&fake, &dir, &bundle, 1, Cmd::Push(Some(&theme))));
+    // A theme pushed before names were checked: space, #, % and ? in asset names.
+    let names = [
+        "img/a b.png",
+        "x#1.png",
+        "100%.png",
+        "q?.png",
+        "caf\u{e9}.png",
+    ];
+    let mut doc = served_doc(&fake, V2);
+    for n in names {
+        let bytes = n.as_bytes().to_vec();
+        doc.assets.insert(n.into(), store::sha256_hex(&bytes));
+        fake.state()
+            .public_override
+            .insert(format!("/_theme/paper/assets/{n}"), bytes);
+    }
+    doc.hash = store::sha256_hex(&doc.hash_input());
+    fake.state()
+        .public_override
+        .insert(DOC.into(), serde_json::to_vec(&doc).unwrap());
+    let agent = ureq::Agent::new_with_defaults();
+    let b = store::fetch(&agent, &format!("{}/site.example", fake.base), "paper")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    for n in names {
+        assert_eq!(b.assets[n], n.as_bytes(), "{n}");
+    }
+}
+
+#[test]
+fn theme_recovery_reasons_are_translated() {
+    let vi = Text::new("vi");
+    let (fake, dir, bundle) = set_up(&migrations::bundled());
+    let theme = paper(&dir);
+    ok(&run(&fake, &dir, &bundle, 1, Cmd::Push(Some(&theme))));
+    std::fs::remove_dir_all(dir.0.join(".blog")).unwrap();
+    // A changed file on the site.
+    fake.state()
+        .public_override
+        .insert(JS.into(), b"evil()".to_vec());
+    let deploy = Cmd::Deploy {
+        theme_default: false,
+    };
+    let r = run_in(&fake, &dir, &bundle, 2, deploy, &vi);
+    assert_eq!(code(&r), Code::ThemeUnrecoverable);
+    let msg = r.result.unwrap_err().message;
+    assert!(msg.contains("assets/minimal.js"), "{msg}");
+    assert!(
+        !msg.contains("does not match"),
+        "English reason in a Vietnamese message: {msg}"
+    );
+    // Another theme served than the record names.
+    fake.state().public_override.clear();
+    let mut doc = served_doc(&fake, V2);
+    doc.files.insert("style.css".into(), "body{}".into());
+    doc.hash = store::sha256_hex(&doc.hash_input());
+    fake.state()
+        .public_override
+        .insert(DOC.into(), serde_json::to_vec(&doc).unwrap());
+    let r = run_in(&fake, &dir, &bundle, 3, deploy, &vi);
+    assert_eq!(code(&r), Code::ThemeUnrecoverable);
+    let msg = r.result.unwrap_err().message;
+    assert!(msg.contains(store::short(&doc.hash)), "{msg}");
+    assert!(
+        !msg.contains("the deploy record says"),
+        "English reason in a Vietnamese message: {msg}"
+    );
 }

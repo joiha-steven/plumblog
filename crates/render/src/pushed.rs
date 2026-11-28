@@ -46,6 +46,40 @@ pub fn asset_path(name: &str, path: &str) -> String {
     format!("/_theme/{name}/assets/{path}")
 }
 
+/// URL of a file below the theme's `assets/` on the site: [`asset_path`] with each segment
+/// percent-encoded (all but `A-Z a-z 0-9 - . _ ~`), so a name with a space, `#`, `%` or `?`
+/// reaches the file it names. `blog theme check` refuses such names in new themes; themes
+/// pushed before still have to come back.
+#[must_use]
+pub fn asset_url(name: &str, path: &str) -> String {
+    let mut out = format!("/_theme/{name}/assets");
+    for seg in path.split('/') {
+        out.push('/');
+        for b in seg.bytes() {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+                out.push(char::from(b));
+            } else {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                out.push('%');
+                out.push(char::from(HEX[usize::from(b >> 4)]));
+                out.push(char::from(HEX[usize::from(b & 15)]));
+            }
+        }
+    }
+    out
+}
+
+/// Response header on reader pages rendered with a pushed theme: [`theme_tag`] of its hash.
+/// Absent when the embedded default rendered the page, so `blog deploy`'s smoke check can
+/// tell a version that serves the pushed theme from one that fell back.
+pub const THEME_HEADER: &str = "x-plumblog-theme";
+
+/// The first 16 hex digits of a theme hash: what pages, cache keys and owners show.
+#[must_use]
+pub fn theme_tag(hash: &str) -> &str {
+    hash.get(..16).unwrap_or(hash)
+}
+
 /// Theme names are URL path segments: lowercase letters, digits, `_` and `-`, starting with a
 /// letter, at most 64 bytes (the Worker's `theme_runtime` rule).
 #[must_use]
@@ -190,6 +224,22 @@ mod tests {
             PushedTheme::parse(&asset("a.woff2", "x"), "paper")
                 .unwrap_err()
                 .contains("SHA-256")
+        );
+    }
+
+    #[test]
+    fn asset_urls_encode_each_segment() {
+        assert_eq!(
+            super::asset_url("paper", "fonts/inter-latin.woff2"),
+            "/_theme/paper/assets/fonts/inter-latin.woff2"
+        );
+        assert_eq!(
+            super::asset_url("paper", "my dir/a#1 100%?.png"),
+            "/_theme/paper/assets/my%20dir/a%231%20100%25%3F.png"
+        );
+        assert_eq!(
+            super::asset_url("paper", "caf\u{e9}.png"),
+            "/_theme/paper/assets/caf%C3%A9.png"
         );
     }
 

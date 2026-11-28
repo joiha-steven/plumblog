@@ -382,6 +382,8 @@ pub fn check_theme(files: &DirFiles) -> Vec<Finding> {
         out.extend(contrast_findings(src, m));
     }
     out.extend(size_findings(&theme, &view, manifest.as_ref()));
+    out.extend(asset_name_findings(files));
+    out.extend(missing_asset_findings(files, src, manifest.as_ref()));
     out.extend(render_findings(&theme, files));
     for (path, text) in files.iter() {
         if has_ext(path, "css") && !path.starts_with("assets/") {
@@ -392,6 +394,175 @@ pub fn check_theme(files: &DirFiles) -> Vec<Finding> {
         }
     }
     out
+}
+
+/// Asset names are URL path segments as they are: a push serves them at the same path, and
+/// a later deploy fetches them back by it. Anything else would need encoding somewhere.
+fn plain_segment(c: &str) -> bool {
+    !c.is_empty()
+        && c.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+fn asset_name_findings(files: &DirFiles) -> Vec<Finding> {
+    files
+        .sizes
+        .keys()
+        .filter(|p| {
+            p.strip_prefix("assets/")
+                .is_some_and(|rest| !rest.split('/').all(plain_segment))
+        })
+        .map(|p| Finding::new(Level::Error, Kind::FileAssetName, p, None))
+        .collect()
+}
+
+/// Line (1-based) of byte offset `at` in `src`.
+fn line_at(src: &str, at: usize) -> usize {
+    src[..at].matches('\n').count() + 1
+}
+
+/// `asset("x")` and `asset('x')` calls with a literal path, as `(line, x)`.
+fn asset_calls(src: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (at, _) in src.match_indices("asset(") {
+        // `asset(` inside a longer name (`my_asset(`) is another function.
+        if src[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        let rest = src[at + 6..].trim_start();
+        let Some(q) = rest.chars().next().filter(|q| matches!(q, '"' | '\'')) else {
+            continue;
+        };
+        if let Some((path, _)) = rest[1..].split_once(q) {
+            out.push((line_at(src, at), path.to_owned()));
+        }
+    }
+    out
+}
+
+/// `path` resolved against the folder `base` (`/`-separated), `None` when it leaves the root.
+fn join_rel(base: &str, path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = base.split('/').filter(|c| !c.is_empty()).collect();
+    for c in path.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            c => parts.push(c),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// Relative `url(...)` targets of a stylesheet under `assets/` as `(line, path in the
+/// folder)`. In the fonts file, `{{fonts}}` is the file's own folder.
+fn css_urls(path: &str, css: &str) -> Vec<(usize, String)> {
+    let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+    let mut out = Vec::new();
+    for (at, _) in css.match_indices("url(") {
+        let raw = css[at + 4..].split(')').next().unwrap_or_default();
+        let url = raw.trim().trim_matches(['"', '\'']).trim();
+        let url = url.strip_prefix("{{fonts}}/").unwrap_or(url);
+        let skip = url.is_empty()
+            || url.starts_with(['/', '#'])
+            || url.contains(':')
+            || url.contains("{{");
+        if skip {
+            continue;
+        }
+        let url = url.split(['?', '#']).next().unwrap_or_default();
+        if let Some(p) = join_rel(dir, url) {
+            out.push((line_at(css, at), p));
+        }
+    }
+    out
+}
+
+/// Paths under `assets/` named in `theme.toml` (`[fonts] preload`, `preload_by_lang`,
+/// `[js] files`), as `(line, path)`.
+fn manifest_assets(src: &str, manifest: &toml::Table) -> Vec<(Option<usize>, String)> {
+    let strings = |v: Option<&toml::Value>| -> Vec<String> {
+        v.and_then(toml::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let fonts = manifest.get("fonts");
+    let mut paths = strings(fonts.and_then(|f| f.get("preload")));
+    if let Some(by) = fonts
+        .and_then(|f| f.get("preload_by_lang"))
+        .and_then(toml::Value::as_table)
+    {
+        for v in by.values() {
+            paths.extend(strings(Some(v)));
+        }
+    }
+    paths.extend(strings(manifest.get("js").and_then(|j| j.get("files"))));
+    paths
+        .into_iter()
+        .filter(|p| p.starts_with("assets/"))
+        .map(|p| {
+            let line = src.find(&format!("\"{p}\"")).map(|at| line_at(src, at));
+            (line, p)
+        })
+        .collect()
+}
+
+/// Files the theme uses from its `assets/` that are not there: `asset()` in its templates
+/// and in the default templates it borrows, `url()` in its stylesheets under `assets/`, and
+/// paths in `theme.toml`. The Worker serves a pushed theme's own `assets/` only, so each would
+/// be a 404 on the live site.
+fn missing_asset_findings(
+    files: &DirFiles,
+    src: &str,
+    manifest: Option<&toml::Table>,
+) -> Vec<Finding> {
+    let mut refs: Vec<(String, Option<usize>, String)> = Vec::new();
+    let default = Embedded::default_theme();
+    let own: Vec<(&str, &str)> = files.iter().collect();
+    let borrowed = ThemeFiles::paths(&default)
+        .into_iter()
+        .filter(|p| p.starts_with("templates/") && !files.sizes.contains_key(*p))
+        .filter_map(|p| Some((p, default.read(p)?)));
+    for (path, text) in own
+        .iter()
+        .copied()
+        .filter(|(p, _)| p.starts_with("templates/"))
+        .chain(borrowed)
+        .filter(|(p, _)| has_ext(p, "html"))
+    {
+        for (line, a) in asset_calls(text) {
+            refs.push((path.to_owned(), Some(line), format!("assets/{a}")));
+        }
+    }
+    for (path, text) in &own {
+        if path.starts_with("assets/") && has_ext(path, "css") {
+            for (line, p) in css_urls(path, text) {
+                refs.push(((*path).to_owned(), Some(line), p));
+            }
+        }
+    }
+    if let Some(m) = manifest {
+        for (line, p) in manifest_assets(src, m) {
+            refs.push(("theme.toml".to_owned(), line, p));
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    refs.into_iter()
+        .filter(|(_, _, a)| !files.sizes.contains_key(a))
+        .filter(|(file, _, a)| seen.insert((file.clone(), a.clone())))
+        .map(|(file, line, a)| {
+            Finding::new(Level::Error, Kind::ThemeAssetMissing, &file, line).arg("asset", a)
+        })
+        .collect()
 }
 
 fn size_findings(

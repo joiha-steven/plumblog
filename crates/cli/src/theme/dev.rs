@@ -2,7 +2,6 @@
 //! request, so an edit shows on refresh; a broken theme answers with the check findings.
 
 use super::check;
-use super::embed::THEME_FILES;
 use super::files::{DirFiles, Embedded};
 use super::sample::Sample;
 use crate::text::Text;
@@ -154,8 +153,10 @@ fn handle(mut stream: TcpStream, dir: &Path, text: &Text, sample: &Sample) -> st
     )
 }
 
-/// `rest` below `assets/` of the theme, else the default theme's copy (a theme may lean on
-/// its fonts). Never outside those folders, never through a link.
+/// `rest` below the theme's `assets/`, and nothing else: the Worker serves a pushed theme's
+/// `/_theme/<name>/assets/` only, so a file missing here must 404 here too. Never outside
+/// that folder: no `..`, no symbolic link anywhere on the way (`blog theme check` reports
+/// links, and a push does not carry them), and the resolved path must stay under it.
 fn asset(dir: &Path, rest: &str) -> Option<Vec<u8>> {
     let clean = !rest.is_empty()
         && rest
@@ -164,19 +165,25 @@ fn asset(dir: &Path, rest: &str) -> Option<Vec<u8>> {
     if !clean {
         return None;
     }
-    let mut path: PathBuf = dir.join("assets");
-    path.extend(rest.split('/'));
-    if let Ok(meta) = std::fs::symlink_metadata(&path) {
-        if meta.is_file() {
-            return std::fs::read(&path).ok();
+    let root = dir.join("assets");
+    let mut path: PathBuf = root.clone();
+    for c in std::iter::once("").chain(rest.split('/')) {
+        if !c.is_empty() {
+            path.push(c);
         }
+        if std::fs::symlink_metadata(&path)
+            .ok()?
+            .file_type()
+            .is_symlink()
+        {
+            return None;
+        }
+    }
+    let (real, base) = (path.canonicalize().ok()?, root.canonicalize().ok()?);
+    if !real.starts_with(&base) || !std::fs::metadata(&real).ok()?.is_file() {
         return None;
     }
-    let want = format!("assets/{rest}");
-    THEME_FILES
-        .iter()
-        .find(|(p, _)| *p == want)
-        .map(|(_, b)| b.to_vec())
+    std::fs::read(&real).ok()
 }
 
 fn content_type(path: &str) -> &'static str {

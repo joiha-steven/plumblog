@@ -38,12 +38,12 @@ A theme is a folder: `theme.toml`, `style.css`, `styles/`, `templates/`, `assets
 Work in the site folder, never inside the plumblog checkout.
 
 1. `blog theme new paper` copies the default theme into `paper/` as theme `paper`.
-2. `blog theme dev paper` previews it at http://127.0.0.1:4321/ with sample posts; refresh after
-   each edit. Problems show in the page.
+2. `blog theme dev paper` previews it at http://127.0.0.1:4321/ with sample posts and, like the
+   live site, only the folder's own `assets/`; refresh after each edit. Problems show in the page.
 3. `blog theme check paper` must end with no errors (warnings are allowed). It lists each
    problem with file, line and a fix.
 4. `blog theme push paper` checks again, then deploys a new version with the theme and checks
-   the site; if the site fails, the previous version comes back by itself.
+   that the site serves it; if not, the previous version comes back by itself.
 5. `blog theme rollback` goes back to the version before the last push (`blog theme list` shows
    the versions; `--to <version-id>` picks one). `blog theme push --default` returns to the
    default theme.
@@ -54,4 +54,5 @@ one says it cannot (`deploy.theme_unrecoverable`), push the folder again, or dep
 `--theme-default` only if the owner wants the default theme back.
 
 Rules a theme must keep: colors only through tokens with light and dark values, no text outside
-its `locales/`, PageSpeed 100 and no layout shift.
+its `locales/`, PageSpeed 100 and no layout shift. Every file it uses (`asset()`, fonts, scripts,
+also from default templates it borrows) is in its `assets/`, named with `A-Z a-z 0-9 . _ -` only.

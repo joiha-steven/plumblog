@@ -61,7 +61,7 @@ pub fn push(
                     Code::ThemeInvalid,
                     text,
                     key!("cli.error.theme_invalid"),
-                    &[("path", path), ("reason", reason)],
+                    &[("path", path), ("reason", reason.words(text))],
                 )
             })?;
             Some(b)

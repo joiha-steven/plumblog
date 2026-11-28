@@ -391,3 +391,41 @@ fn comment_without_stored_html_is_rendered_from_markdown() {
     );
     assert_eq!(html[0], "<p><em>a</em></p>\n");
 }
+
+#[test]
+fn a_theme_that_fails_on_a_real_post_falls_back_to_the_default() {
+    use super::render_with;
+    use plumblog_render::Theme;
+    // The default's files with a post template that loads but fails on real data.
+    let files: Vec<(&str, String)> = super::source::THEME_FILES
+        .iter()
+        .map(|(p, t)| {
+            let t = if *p == "templates/post.html" {
+                t.replace(
+                    "<h1>{{ post.title }}</h1>",
+                    "<h1>{{ post.nope.deeper }}</h1>",
+                )
+            } else {
+                (*t).to_owned()
+            };
+            (*p, t)
+        })
+        .collect();
+    assert!(files.iter().any(|(_, t)| t.contains("post.nope.deeper")));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+    let fragile = Theme::load(&refs.as_slice(), None, Vec::new(), "/_theme/x/assets").unwrap();
+    let src = SampleSource::get();
+    let db = MemoryStore::default();
+    let path = format!("/{}", src.all_posts()[0].slug);
+    let home = run(render_with(&fragile, src, &Db(&db), &Db(&db), "/", ""));
+    assert!(matches!(home, Ok(Outcome::Page { status: 200, .. })));
+    let err = run(render_with(&fragile, src, &Db(&db), &Db(&db), &path, "")).unwrap_err();
+    let base = crate::theme_runtime::fallback_from("x", &path, &err).expect("the default");
+    match run(render_with(base, src, &Db(&db), &Db(&db), &path, "")).unwrap() {
+        Outcome::Page { status, body, .. } => {
+            assert_eq!(status, 200);
+            assert!(body.contains(&src.all_posts()[0].title), "{body}");
+        }
+        Outcome::Redirect(to) => panic!("redirected to {to}"),
+    }
+}

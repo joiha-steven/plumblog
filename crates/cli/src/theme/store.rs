@@ -7,9 +7,11 @@
 
 use crate::bundle::{self, Asset};
 use crate::state::ThemeRecord;
+use crate::text::Text;
+use plumblog_i18n::{Key, key};
 use plumblog_render::PushedTheme;
 use plumblog_render::THEME_API;
-use plumblog_render::pushed::{ASSETS_DIR, asset_path, document_path, valid_name};
+use plumblog_render::pushed::{ASSETS_DIR, asset_path, asset_url, document_path, valid_name};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,6 +22,37 @@ pub const STORE_DIR: &str = ".blog/themes";
 pub const KEEP: usize = 5;
 /// Largest file Workers static assets accept (as `bundle`).
 const MAX_FILE: u64 = 25 * 1024 * 1024;
+
+/// Why a theme cannot be built, read back or verified: a locale key with its data, or data
+/// alone (I/O and parse errors), so the owner reads it in their language.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Why {
+    Said(Key, Vec<(&'static str, String)>),
+    Data(String),
+}
+
+impl Why {
+    fn said(k: Key, args: &[(&'static str, String)]) -> Self {
+        Self::Said(k, args.to_vec())
+    }
+
+    #[must_use]
+    pub fn words(&self, text: &Text) -> String {
+        match self {
+            Self::Said(k, args) => {
+                let args: Vec<(&str, String)> = args.iter().map(|(n, v)| (*n, v.clone())).collect();
+                text.t(*k, &args)
+            }
+            Self::Data(d) => d.clone(),
+        }
+    }
+}
+
+impl From<String> for Why {
+    fn from(d: String) -> Self {
+        Self::Data(d)
+    }
+}
 
 /// A theme's document and the bytes of each file below `assets/`.
 pub struct Built {
@@ -54,21 +87,26 @@ impl Built {
     ///
     /// # Errors
     /// What does not match.
-    pub fn verify(&self) -> Result<(), String> {
+    pub fn verify(&self) -> Result<(), Why> {
         let got = sha256_hex(&self.doc.hash_input());
         if got != self.doc.hash {
-            return Err(format!(
-                "theme.json hash {} does not match its content ({got})",
-                self.doc.hash
+            return Err(Why::said(
+                key!("cli.theme.why.hash_mismatch"),
+                &[("stated", self.doc.hash.clone()), ("got", got)],
             ));
         }
         for (p, sha) in &self.doc.assets {
+            let path = format!("{ASSETS_DIR}{p}");
             let Some(bytes) = self.assets.get(p) else {
-                return Err(format!("assets/{p} is missing"));
+                return Err(Why::said(
+                    key!("cli.theme.why.asset_missing"),
+                    &[("path", path)],
+                ));
             };
             if &sha256_hex(bytes) != sha {
-                return Err(format!(
-                    "assets/{p} does not match its SHA-256 in theme.json"
+                return Err(Why::said(
+                    key!("cli.theme.why.asset_changed"),
+                    &[("path", path)],
                 ));
             }
         }
@@ -81,9 +119,9 @@ impl Built {
 ///
 /// # Errors
 /// `(path, reason)`: an unreadable or non-UTF-8 file, or a `theme.toml` without a valid name.
-pub fn build(dir: &Path) -> Result<Built, (String, String)> {
+pub fn build(dir: &Path) -> Result<Built, (String, Why)> {
     let listed = super::files::DirFiles::read(dir)
-        .map_err(|e| (dir.display().to_string(), e.to_string()))?;
+        .map_err(|e| (dir.display().to_string(), Why::Data(e.to_string())))?;
     let mut files = BTreeMap::new();
     let mut assets = BTreeMap::new();
     let mut hashes = BTreeMap::new();
@@ -91,14 +129,21 @@ pub fn build(dir: &Path) -> Result<Built, (String, String)> {
         let path = rel.split('/').fold(dir.to_path_buf(), |p, c| p.join(c));
         let shown = || path.display().to_string();
         if *size > MAX_FILE {
-            return Err((shown(), format!("larger than {MAX_FILE} bytes")));
+            return Err((
+                shown(),
+                Why::said(
+                    key!("cli.theme.why.too_large"),
+                    &[("max", MAX_FILE.to_string())],
+                ),
+            ));
         }
-        let bytes = fs::read(&path).map_err(|e| (shown(), e.to_string()))?;
+        let bytes = fs::read(&path).map_err(|e| (shown(), Why::Data(e.to_string())))?;
         if let Some(a) = rel.strip_prefix(ASSETS_DIR) {
             hashes.insert(a.to_owned(), sha256_hex(&bytes));
             assets.insert(a.to_owned(), bytes);
         } else {
-            let text = String::from_utf8(bytes).map_err(|_| (shown(), "not UTF-8 text".into()))?;
+            let text = String::from_utf8(bytes)
+                .map_err(|_| (shown(), Why::said(key!("cli.theme.why.not_utf8"), &[])))?;
             files.insert(rel.clone(), text);
         }
     }
@@ -106,14 +151,19 @@ pub fn build(dir: &Path) -> Result<Built, (String, String)> {
         .get("theme.toml")
         .map(|t| toml::from_str(t))
         .transpose()
-        .map_err(|e| (dir.join("theme.toml").display().to_string(), e.to_string()))?
+        .map_err(|e| {
+            (
+                dir.join("theme.toml").display().to_string(),
+                Why::Data(e.to_string()),
+            )
+        })?
         .unwrap_or_default();
     let field = |k: &str| manifest.get(k).and_then(toml::Value::as_str).unwrap_or("");
     let name = field("name").to_owned();
     if !valid_name(&name) {
         return Err((
             dir.join("theme.toml").display().to_string(),
-            format!("name {name:?} is not a theme name"),
+            Why::said(key!("cli.theme.why.bad_name"), &[("name", name)]),
         ));
     }
     let mut doc = PushedTheme {
@@ -193,13 +243,19 @@ fn prune(site: &Path, keep: &str) {
 ///
 /// # Errors
 /// Why it cannot be used (absent, damaged, another theme).
-pub fn load(site: &Path, name: &str, hash: &str) -> Result<Built, String> {
+pub fn load(site: &Path, name: &str, hash: &str) -> Result<Built, Why> {
     let dir = copy_dir(site, hash);
     let json = fs::read_to_string(dir.join("theme.json"))
         .map_err(|e| format!("{}: {e}", dir.join("theme.json").display()))?;
     let doc = PushedTheme::parse(&json, name)?;
     if doc.hash != hash {
-        return Err(format!("{} holds theme {}", dir.display(), doc.hash));
+        return Err(Why::said(
+            key!("cli.theme.why.copy_holds_other"),
+            &[
+                ("path", dir.display().to_string()),
+                ("hash", short(&doc.hash).to_owned()),
+            ],
+        ));
     }
     let mut assets = BTreeMap::new();
     for rel in doc.assets.keys() {
@@ -213,11 +269,12 @@ pub fn load(site: &Path, name: &str, hash: &str) -> Result<Built, String> {
 }
 
 /// The theme as the site serves it: `theme.json`, then each asset, from `base` (the site's
-/// origin, public, no token).
+/// origin, public, no token). Asset paths are percent-encoded per segment: a theme pushed
+/// before names were checked may hold a space, `#`, `%` or `?`.
 ///
 /// # Errors
 /// A request that fails or answers other than 200, or content that does not verify.
-pub fn fetch(agent: &ureq::Agent, base: &str, name: &str) -> Result<Built, String> {
+pub fn fetch(agent: &ureq::Agent, base: &str, name: &str) -> Result<Built, Why> {
     let get = |path: &str| -> Result<Vec<u8>, String> {
         let url = format!("{base}{path}");
         let r = agent.get(&url).call().map_err(|e| format!("{path}: {e}"))?;
@@ -232,11 +289,16 @@ pub fn fetch(agent: &ureq::Agent, base: &str, name: &str) -> Result<Built, Strin
             .map_err(|e| format!("{path}: {e}"))
     };
     let path = document_path(name);
-    let json = String::from_utf8(get(&path)?).map_err(|_| format!("{path}: not UTF-8"))?;
+    let json = String::from_utf8(get(&path)?).map_err(|_| {
+        Why::said(
+            key!("cli.theme.why.served_not_utf8"),
+            &[("path", path.clone())],
+        )
+    })?;
     let doc = PushedTheme::parse(&json, name)?;
     let mut assets = BTreeMap::new();
     for rel in doc.assets.keys() {
-        assets.insert(rel.clone(), get(&asset_path(name, rel))?);
+        assets.insert(rel.clone(), get(&asset_url(name, rel))?);
     }
     let b = Built { doc, assets };
     b.verify()?;

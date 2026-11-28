@@ -605,11 +605,45 @@ fn deploy_version(client: &Client, worker: &str, version: &str) -> Result<(), Ap
     client.call(&call).map(drop)
 }
 
+/// The theme `/` must render with, read from its `x-plumblog-theme` header: the Worker
+/// falls back to the default theme when it cannot use a pushed one, and `/` still answers 200.
+#[derive(Clone, Copy)]
+pub(crate) enum ThemeWant<'a> {
+    /// Not checked (a rollback to a version whose theme is not on record).
+    Any,
+    /// The embedded default: no header.
+    Default,
+    /// The pushed theme with this full hash.
+    Hash(&'a str),
+}
+
+impl<'a> ThemeWant<'a> {
+    pub(crate) fn of(theme: Option<&'a ThemeRecord>) -> Self {
+        theme.map_or(Self::Default, |t| Self::Hash(&t.hash))
+    }
+
+    /// `Err(wanted tag)` when `got` (the header, if any) is not what was asked for.
+    fn check(self, got: Option<&str>) -> Result<(), Option<String>> {
+        let want = match self {
+            Self::Any => return Ok(()),
+            Self::Default => None,
+            Self::Hash(h) => Some(plumblog_render::pushed::theme_tag(h)),
+        };
+        if got == want {
+            Ok(())
+        } else {
+            Err(want.map(str::to_owned))
+        }
+    }
+}
+
 /// What a failed smoke check saw: data for the record, words for the owner.
 enum Seen {
     NoReply(&'static str, String),
     Status(&'static str, u16),
     Version(String),
+    /// `/` rendered with another theme than wanted: `(got, want)`, `None` = the default.
+    Theme(Option<String>, Option<String>),
 }
 
 impl Seen {
@@ -618,6 +652,7 @@ impl Seen {
             Self::NoReply(p, _) => format!("{p} no-reply"),
             Self::Status(p, s) => format!("{p} http-{s}"),
             Self::Version(v) => format!("/healthz version {v}"),
+            Self::Theme(got, _) => format!("/ theme {}", got.as_deref().unwrap_or("-")),
         }
     }
 
@@ -635,6 +670,20 @@ impl Seen {
                 key!("cli.deploy.seen_version"),
                 &[("got", v.clone()), ("want", want.to_string())],
             ),
+            Self::Theme(None, Some(w)) => text.t(
+                key!("cli.deploy.seen_theme_default"),
+                &[("want", w.clone())],
+            ),
+            Self::Theme(Some(g), None) => {
+                text.t(key!("cli.deploy.seen_theme_still"), &[("got", g.clone())])
+            }
+            Self::Theme(got, w) => text.t(
+                key!("cli.deploy.seen_theme_other"),
+                &[
+                    ("got", got.clone().unwrap_or_default()),
+                    ("want", w.clone().unwrap_or_default()),
+                ],
+            ),
         }
     }
 }
@@ -644,6 +693,7 @@ fn smoke_once(
     agent: &ureq::Agent,
     base: &str,
     version: &str,
+    theme: ThemeWant,
     left: &dyn Fn() -> Duration,
 ) -> Result<(), Seen> {
     let get = |path: &'static str| -> Result<ureq::http::Response<ureq::Body>, Seen> {
@@ -679,13 +729,27 @@ fn smoke_once(
             printable(&got)
         }));
     }
-    get("/").map(drop)
+    let home = get("/")?;
+    let got = home
+        .headers()
+        .get(plumblog_render::pushed::THEME_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(printable);
+    theme
+        .check(got.as_deref())
+        .map_err(|want| Seen::Theme(got, want))
 }
 
 /// `GET <base>/healthz` until it answers 200 with `x-plumblog-version: <version>`, then
-/// `GET <base>/` for 200; retried with backoff. Calls and waits together end within
-/// `rt.smoke_budget`.
-fn smoke(run: &mut Run, t: &Targets, version: &str, rt: &Runtime) -> Result<(), Seen> {
+/// `GET <base>/` for 200 rendered with the theme `theme` names; retried with backoff. Calls
+/// and waits together end within `rt.smoke_budget`.
+fn smoke(
+    run: &mut Run,
+    t: &Targets,
+    version: &str,
+    theme: ThemeWant,
+    rt: &Runtime,
+) -> Result<(), Seen> {
     let base = t.main.as_str();
     run.line(
         key!("cli.deploy.smoke_wait"),
@@ -700,7 +764,7 @@ fn smoke(run: &mut Run, t: &Targets, version: &str, rt: &Runtime) -> Result<(), 
     let left = || rt.smoke_budget.saturating_sub(spent());
     let mut wait = SMOKE_FIRST_WAIT;
     loop {
-        let seen = match smoke_once(&agent, base, version, &left) {
+        let seen = match smoke_once(&agent, base, version, theme, &left) {
             Ok(()) => {
                 run.line(
                     key!("cli.deploy.smoke_ok"),
@@ -789,13 +853,19 @@ pub(crate) fn targets(run: &mut Run, site: &Site, rt: &Runtime) -> Result<Target
 /// After the main check passed: one try on a new custom domain. Not serving the version yet
 /// is a warning; serving it (here or as the main target) makes the domain the smoke target
 /// from now on.
-fn check_domain(run: &mut Run, t: &Targets, version: &str, rt: &Runtime) -> Result<(), Failure> {
+fn check_domain(
+    run: &mut Run,
+    t: &Targets,
+    version: &str,
+    theme: ThemeWant,
+    rt: &Runtime,
+) -> Result<(), Failure> {
     let passed = match &t.domain {
         None => t.domain_is_main,
         Some((url, shown)) => {
             let agent = plain_agent(rt.smoke_base.is_some(), SMOKE_CALL_TIMEOUT, 3);
             let left = || SMOKE_CALL_TIMEOUT;
-            match smoke_once(&agent, url, version, &left) {
+            match smoke_once(&agent, url, version, theme, &left) {
                 Ok(()) => {
                     run.line(key!("cli.deploy.domain_ok"), &[("origin", shown.clone())]);
                     true
@@ -1096,9 +1166,13 @@ pub(crate) fn release(
 ) -> Result<(), Failure> {
     let (version, previous) = ship(run, site, b, rec)?;
     switch(run, site, rec, &version)?;
-    let smoked = smoke(run, &flow.targets, &version, flow.rt);
+    // The theme on record is the one this version must serve: a push's, the one a deploy
+    // carries, or none (the default).
+    let theme = rec.theme.clone();
+    let want = ThemeWant::of(theme.as_ref());
+    let smoked = smoke(run, &flow.targets, &version, want, flow.rt);
     settle(run, site, rec, smoked, &version, &previous)?;
-    check_domain(run, &flow.targets, &version, flow.rt)?;
+    check_domain(run, &flow.targets, &version, want, flow.rt)?;
     cron(run, site, rec)?;
     run.line(
         key!("cli.deploy.done"),
@@ -1321,15 +1395,18 @@ fn carry_theme(
             }
             Err(why) => run.line(
                 key!("cli.deploy.theme_local_unusable"),
-                &[("name", name.clone()), ("reason", why)],
+                &[("name", name.clone()), ("reason", why.words(run.cx.text))],
             ),
         }
     }
     let agent = plain_agent(rt.smoke_base.is_some(), THEME_FETCH_TIMEOUT, 3);
     let fetched = store::fetch(&agent, base, &name).and_then(|b| match &expected {
-        Some(h) if *h != b.doc.hash => Err(format!(
-            "the site serves theme {}, the deploy record says {h}",
-            b.doc.hash
+        Some(h) if *h != b.doc.hash => Err(store::Why::Said(
+            key!("cli.theme.why.served_other"),
+            vec![
+                ("served", store::short(&b.doc.hash).to_string()),
+                ("recorded", store::short(h).to_string()),
+            ],
         )),
         _ => Ok(b),
     });
@@ -1338,7 +1415,7 @@ fn carry_theme(
             Code::ThemeUnrecoverable,
             run.cx.text,
             key!("cli.error.theme_unrecoverable"),
-            &[("name", name.clone()), ("reason", why)],
+            &[("name", name.clone()), ("reason", why.words(run.cx.text))],
         )
     })?;
     store::save(run.cx.dir, &b).map_err(|(path, reason)| theme_unwritable(run, path, reason))?;
@@ -1605,7 +1682,7 @@ pub(crate) fn rollback_to(
         key!("cli.rollback.deployed"),
         &[("version", target.clone()), ("previous", current.clone())],
     );
-    let smoked = smoke(run, &targets, &target, rt);
+    let smoked = smoke(run, &targets, &target, ThemeWant::Any, rt);
     // A target that fails its check goes away again: the version from before serves.
     let restored = smoked
         .as_ref()

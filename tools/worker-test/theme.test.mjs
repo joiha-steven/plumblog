@@ -53,17 +53,32 @@ function assetsWith(name, themeJson) {
   return dir;
 }
 
-function themeJson(name) {
-  const files = pushedFiles(name);
+function themeJson(name, edit = (f) => f) {
+  const files = edit(pushedFiles(name));
   const hash = sha256hex(JSON.stringify(files));
   return JSON.stringify({ api: 1, name, version: "0.2.0", hash, files });
 }
+
+const tagOf = (json) => JSON.parse(json).hash.slice(0, 16);
+
+/** A post template that loads but fails on a real post: `nope` is not a post field. */
+const FRAGILE = themeJson("paper", (f) => ({
+  ...f,
+  "templates/post.html": f["templates/post.html"].replace("<h1>{{ post.title }}</h1>", "<h1>{{ post.nope.deeper }}</h1>"),
+}));
 
 const seed = [
   `INSERT INTO users (id, login, slug, display_name, role, password_hash, disabled_at, created_at, updated_at) VALUES
     (1, 'olga', 'olga', 'Olga', 'owner', NULL, NULL, ${T}, ${T});`,
   `INSERT INTO api_tokens (id, user_id, name, token_hash, scope, created_at, expires_at, revoked_at) VALUES
     (13, 1, 'boss', ${sq(sha256hex(OWNER))}, 'owner', ${T}, NULL, NULL);`,
+].join("\n");
+
+const postSeed = [
+  seed,
+  `INSERT INTO posts (kind, translation_group, lang, slug, status, published_at, author_id, title, markdown, html, created_at, updated_at)
+    VALUES ('post', 0, 'en', 'real-post', 'published', ${T - 1000}, 1, 'Real post', 'x', '<p>x</p>', ${T}, ${T});`,
+  "UPDATE posts SET translation_group = id WHERE slug = 'real-post';",
 ].join("\n");
 
 const put = (w, path, value) =>
@@ -93,6 +108,7 @@ describe("pushed theme", () => {
       broken: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", "{not json") },
       missing: { vars: { PLUMBLOG_THEME: "ghost" }, assets: assetsWith("other", null) },
       embedded: {},
+      fragile: { vars: { PLUMBLOG_THEME: "paper" }, assets: assetsWith("paper", FRAGILE), seedSql: postSeed },
     };
     for (const s of Object.values(setups)) if (s.assets) dirs.push(s.assets);
     await Promise.all(
@@ -116,6 +132,8 @@ describe("pushed theme", () => {
     assert.ok(font, "fonts load from the pushed theme's assets");
     assert.equal((await fetch(workers.pushed.url + font)).status, 200, font);
     assert.match(res.headers.get("etag"), /-t[0-9a-f]{16}-/, "ETag names the theme");
+    // blog deploy's smoke check reads this to confirm the pushed theme is the one serving.
+    assert.equal(res.headers.get("x-plumblog-theme"), tagOf(themeJson("paper")));
     assert.equal((await fetch(`${workers.pushed.url}/`)).headers.get("x-plumblog-cache"), "hit");
     const log = workers.pushed.log();
     assert.equal(count(log, "theme.pushed_loaded name=paper"), 1, log);
@@ -142,6 +160,28 @@ describe("pushed theme", () => {
     const log = w.log();
     assert.equal(count(log, "theme.pushed_invalid name=paper"), 1, log);
     assert.doesNotMatch(first.broken.res.headers.get("etag"), /-t[0-9a-f]{16}-/);
+    assert.equal(first.broken.res.headers.get("x-plumblog-theme"), null, "no theme tag on the default");
+    assert.equal(first.embedded.res.headers.get("x-plumblog-theme"), null);
+  });
+
+  test("a page the pushed theme fails to render is served with the default, uncached, logged once", async () => {
+    const w = workers.fragile;
+    assert.equal(first.fragile.res.status, 200, first.fragile.html);
+    for (let i = 0; i < 2; i++) {
+      const res = await fetch(`${w.url}/real-post`);
+      const html = await res.text();
+      assert.equal(res.status, 200, html);
+      assert.match(html, /Real post/);
+      assert.match(html, new RegExp(`--c-accent:light-dark\\(${DEFAULT_ACCENT},`), "the default theme");
+      assert.equal(res.headers.get("cache-control"), "no-store");
+      assert.equal(res.headers.get("etag"), null);
+      assert.equal(res.headers.get("x-plumblog-cache"), "bypass");
+      assert.equal(res.headers.get("x-plumblog-theme"), null);
+    }
+    assert.equal(first.fragile.res.headers.get("x-plumblog-theme"), tagOf(FRAGILE), "home renders with the push");
+    const log = w.log();
+    assert.equal(count(log, "theme.pushed_render_failed"), 1, log);
+    assert.match(log, /theme\.pushed_render_failed name=paper path=\/real-post/);
   });
 
   test("a theme.json that was never pushed falls back to the default", async () => {

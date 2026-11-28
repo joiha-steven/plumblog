@@ -194,6 +194,9 @@ domain_pending = "Lưu ý: {origin} chưa chạy phiên bản mới ({seen}). T�
 seen_no_reply = "{path} không trả lời ({detail})"
 seen_status = "{path} trả lời HTTP {status}"
 seen_version = "/healthz trả lời bằng phiên bản {got}, không phải {want}"
+seen_theme_default = "/ được dựng bằng giao diện mặc định, không phải giao diện đã đẩy lên {want} (gói cũ, hoặc tệp giao diện không được phục vụ)"
+seen_theme_still = "/ vẫn được dựng bằng giao diện đã đẩy lên {got}, không phải giao diện mặc định"
+seen_theme_other = "/ được dựng bằng giao diện {got}, không phải {want}"
 log_failed = "Lưu ý: không ghi được lần đưa lên này vào nhật ký hệ thống của trang: {error}"
 done = "Đã đưa phiên bản {version} lên {origin}."
 theme_default_help = "Chuyển về giao diện mặc định: không mang giao diện đã đẩy lên sang phiên bản mới"
@@ -592,6 +595,17 @@ deploy = "{at}  {version}  {outcome}  đưa lên: {theme}"
 default = "giao diện mặc định"
 empty = "Thư mục này chưa ghi lần đưa lên nào."
 
+[cli.theme.why]
+hash_mismatch = "theme.json ghi mã băm {stated}, nhưng nội dung của nó cho ra {got}"
+asset_missing = "thiếu {path}"
+asset_changed = "{path} không khớp với SHA-256 ghi trong theme.json"
+too_large = "lớn hơn {max} byte"
+not_utf8 = "không phải văn bản UTF-8"
+bad_name = "tên \"{name}\" trong theme.toml không phải tên giao diện hợp lệ (chữ thường, chữ số, _ và -, bắt đầu bằng một chữ cái)"
+copy_holds_other = "{path} đang chứa một giao diện khác ({hash})"
+served_not_utf8 = "{path} trên trang không phải văn bản UTF-8"
+served_other = "trang đang phục vụ giao diện {served}, nhưng bản ghi đưa lên ghi {recorded}"
+
 [cli.plugin]
 about = "Kiểm tra plugin (check)"
 dir_value = "THƯ MỤC"
@@ -644,6 +658,10 @@ fix = "Thêm khoá vào locales/en.toml và các tệp ngôn ngữ khác của g
 what = "Một trang bị thiếu phần: {detail}"
 fix = "Sửa phần mà thông báo nêu."
 
+[cli.finding.theme_asset_missing]
+what = "Dùng {asset}, nhưng tệp này không có trong thư mục assets/ của giao diện; trang thật sẽ trả 404 cho nó."
+fix = "Thêm tệp vào assets/, hoặc thôi dùng nó. Mẫu nào giao diện không có thì lấy từ giao diện mặc định: chép mẫu đó vào templates/ để sửa."
+
 [cli.finding.file_secret_name]
 what = "Tệp này trông như bí mật ({why}), mà mọi tệp trong giao diện hay plugin đều công khai."
 fix = "Xoá nó khỏi thư mục. Nếu bên trong là bí mật thật, coi như đã lộ và đổi cái mới."
@@ -667,6 +685,10 @@ fix = "Xoá nó, và đừng đặt tên tệp bắt đầu bằng admin."
 [cli.finding.file_too_many]
 what = "Nhiều tệp hơn mức một giao diện hay plugin có; phần còn lại chưa được đọc."
 fix = "Kiểm tra đúng thư mục chưa, và bỏ các tệp không thuộc về nó."
+
+[cli.finding.file_asset_name]
+what = "Tên tệp trong assets/ chỉ được dùng A-Z, a-z, 0-9, dấu chấm, _ và - ở mỗi phần của đường dẫn."
+fix = "Đổi tên tệp hoặc thư mục (ví dụ thay dấu cách bằng -), rồi sửa những chỗ đang trỏ tới nó."
 
 [cli.finding.text_hard]
 what = "Chữ cố định {text} trong mẫu trang. Chữ hiện cho người đọc phải nằm trong locales/."
