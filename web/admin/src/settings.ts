@@ -21,6 +21,7 @@ interface Entry {
 /** The section list. Entries drawn by other screens (they only link there) belong here too. */
 const ENTRIES: readonly Entry[] = [
   { key: "general", href: HREF.settings, label: () => t("admin.settings.general"), permission: "settings.manage" },
+  { key: "log", href: HREF.syslog, label: () => t("admin.syslog.title"), permission: "syslog.view" },
 ];
 
 export interface SettingsOptions {

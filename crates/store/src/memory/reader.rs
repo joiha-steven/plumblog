@@ -6,9 +6,9 @@ use plumblog_model::{PostId, Result};
 
 use super::{MemoryStore, State, count};
 use crate::{
-    Post, PostKind, PostStatus, PostSummary, READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderFilter,
-    ReaderLink, ReaderNeighbours, ReaderPage, ReaderPost, ReaderRow, ReaderSitemapRow, ReaderStore,
-    ReaderTag, Tag, page_len, year_bounds, year_of,
+    Post, PostKind, PostStatus, PostSummary, READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderCover,
+    ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage, ReaderPost, ReaderRow,
+    ReaderSitemapRow, ReaderStore, ReaderTag, Tag, page_len, year_bounds, year_of,
 };
 
 fn listed(p: &Post) -> bool {
@@ -98,6 +98,17 @@ impl ReaderStore for MemoryStore {
                 .map(|p| ReaderPost {
                     post: p.clone(),
                     tags: s.reader_tags_of(p),
+                    cover: p
+                        .cover_media_id
+                        .and_then(|id| s.media.get(&id))
+                        .map(|m| ReaderCover {
+                            id: m.id,
+                            r2_key: m.r2_key.clone(),
+                            width: m.width,
+                            height: m.height,
+                            alt: m.alt.clone(),
+                            variants_json: m.variants_json.clone(),
+                        }),
                 })
         }))
     }
@@ -185,6 +196,7 @@ impl ReaderStore for MemoryStore {
                 .map(|p| ReaderPost {
                     post: p.clone(),
                     tags: s.reader_tags_of(p),
+                    cover: None,
                 })
                 .collect()
         }))
