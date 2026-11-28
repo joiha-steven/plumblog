@@ -76,6 +76,7 @@ cases! {
     library::media_paging,
     library::media_usage_tracks_saves,
     library::media_in_use_cannot_be_deleted,
+    library::taxonomy_paging,
     library::tags_round_trip,
     library::tag_links_and_versions,
     library::tag_delete_stales_editors,

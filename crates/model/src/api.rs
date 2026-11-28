@@ -284,6 +284,8 @@ const POST_FILTERS: &[Field] = &[
     query("limit", Type::Int),
 ];
 
+const PAGE_FILTERS: &[Field] = &[query("cursor", Type::Str), query("limit", Type::Int)];
+
 const POST_CREATE: &[Field] = &[
     req("lang", Type::Str),
     req("slug", Type::Str),
@@ -479,7 +481,7 @@ pub const ROUTES: &[Route] = &[
         Method::Get,
         "/api/v1/tags",
         Access::Read,
-        &[],
+        PAGE_FILTERS,
         200,
         "tag_list",
     ),
@@ -524,7 +526,7 @@ pub const ROUTES: &[Route] = &[
         Method::Get,
         "/api/v1/series",
         Access::Read,
-        &[],
+        PAGE_FILTERS,
         200,
         "series_list",
     ),

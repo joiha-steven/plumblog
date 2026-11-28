@@ -17,7 +17,7 @@ blog guide api
    is null). Without `status` every post comes back, drafts and trash included: skip
    `status: trashed` unless the owner wants the trash. Read each in full with
    `GET /api/v1/posts/{id}`.
-2. Taxonomy and links: `GET /api/v1/tags`, `GET /api/v1/series`, `GET /api/v1/redirects`.
+2. Taxonomy and links: `GET /api/v1/tags` and `GET /api/v1/series` (page both like posts: `limit=100`, follow `next_cursor` until it is null), `GET /api/v1/redirects`.
 3. Media list: page through `GET /api/v1/media`.
 4. Site: `GET /api/v1/settings`, `GET /api/v1/themes/minimal/options`, `GET /api/v1/plugins`.
 5. Write `posts/<lang>/<slug>.md` with front matter, then the Markdown body unchanged:
