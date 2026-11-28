@@ -35,6 +35,8 @@ pub const VERSION_HEADER: &str = "x-plumblog-version";
 pub const VERSION_BINDING: &str = "CF_VERSION_METADATA";
 /// Plain-text binding naming the active pushed theme (crates/worker `theme_runtime`).
 pub const THEME_BINDING: &str = "PLUMBLOG_THEME";
+/// `x-plumblog-theme` of the pushed theme, for the Worker's JS cache fast path.
+pub const THEME_TAG_BINDING: &str = "PLUMBLOG_THEME_TAG";
 /// Test-only smoke target instead of the site's origin; loopback only, like the API base.
 /// Requests go to `<base>/<host><path>`, so a test server tells the hosts apart.
 pub const SMOKE_BASE_ENV: &str = "PLUMBLOG_SMOKE_BASE";
@@ -526,6 +528,8 @@ fn upload_version(
         // The Worker renders this pushed theme (its files are among this version's assets).
         if let Some(t) = theme {
             list.push(json!({"type": "plain_text", "name": THEME_BINDING, "text": t.name}));
+            let tag = plumblog_render::pushed::theme_tag(&t.hash);
+            list.push(json!({"type": "plain_text", "name": THEME_TAG_BINDING, "text": tag}));
         }
         for name in secrets {
             list.push(json!({"type": "inherit", "name": name}));

@@ -121,6 +121,24 @@ fn theme_binding(fake: &Fake, version: &str) -> Option<String> {
         })
 }
 
+/// `PLUMBLOG_THEME_TAG` of `version`, if set.
+fn tag_binding(fake: &Fake, version: &str) -> Option<String> {
+    metadata(fake, version)["bindings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "PLUMBLOG_THEME_TAG")
+        .map(|b| {
+            assert_eq!(b["type"], "plain_text");
+            b["text"].as_str().unwrap().to_string()
+        })
+}
+
+/// The tag the binding must carry for the theme `version` serves.
+fn served_tag(fake: &Fake, version: &str) -> String {
+    plumblog_render::pushed::theme_tag(&served_doc(fake, version).hash).to_string()
+}
+
 /// Static asset paths of `version` under `/_theme/`.
 fn theme_assets(fake: &Fake, version: &str) -> Vec<String> {
     let mut v: Vec<String> = fake.state().version_assets[version]
@@ -156,6 +174,7 @@ fn push_uploads_the_theme_and_binds_it() {
     assert!(r.out.contains("Pushing theme paper"), "{}", r.out);
     assert_eq!(active(&fake), V2);
     assert_eq!(theme_binding(&fake, V2).as_deref(), Some("paper"));
+    assert_eq!(tag_binding(&fake, V2), Some(served_tag(&fake, V2)));
     let paths = theme_assets(&fake, V2);
     assert!(paths.contains(&DOC.to_string()), "{paths:?}");
     assert!(paths.contains(&JS.to_string()), "{paths:?}");
@@ -272,6 +291,7 @@ fn deploy_after_a_push_carries_the_theme_from_the_local_copy() {
     assert!(r.out.contains("from this folder's copy"), "{}", r.out);
     assert_eq!(active(&fake), V3);
     assert_eq!(theme_binding(&fake, V3).as_deref(), Some("paper"));
+    assert_eq!(tag_binding(&fake, V3), Some(served_tag(&fake, V3)));
     assert_eq!(theme_assets(&fake, V3), theme_assets(&fake, V2));
     assert_eq!(served_doc(&fake, V3), served_doc(&fake, V2));
     // Nothing fetched from the site but the smoke check.
@@ -315,6 +335,7 @@ fn deploy_fetches_the_theme_from_the_site_when_the_copy_is_gone_or_damaged() {
     assert!(calls.iter().any(|c| c.ends_with(DOC)), "{calls:?}");
     assert!(calls.iter().any(|c| c.ends_with(JS)), "{calls:?}");
     assert_eq!(theme_binding(&fake, V3).as_deref(), Some("paper"));
+    assert_eq!(tag_binding(&fake, V3), Some(served_tag(&fake, V3)));
     assert_eq!(served_doc(&fake, V3).hash, hash);
     let copy = dir.0.join(STORE_DIR).join(&hash);
     assert!(copy.join("assets/minimal.js").is_file());
@@ -430,6 +451,7 @@ fn deploy_refuses_a_lost_theme_and_theme_default_drops_it() {
     assert!(r.out.contains("is dropped (--theme-default)"), "{}", r.out);
     assert_eq!(active(&fake), V3);
     assert_eq!(theme_binding(&fake, V3), None);
+    assert_eq!(tag_binding(&fake, V3), None);
     assert_eq!(theme_assets(&fake, V3), Vec::<String>::new());
     assert_eq!(load(&dir).deploys.last().unwrap().theme, None);
 }
@@ -448,6 +470,7 @@ fn default_push_removes_the_theme_and_later_deploys_keep_it_removed() {
     );
     assert_eq!(active(&fake), V3);
     assert_eq!(theme_binding(&fake, V3), None);
+    assert_eq!(tag_binding(&fake, V3), None);
     assert_eq!(theme_assets(&fake, V3), Vec::<String>::new());
     let rec = load(&dir).deploys.last().unwrap().clone();
     assert_eq!(
@@ -470,6 +493,7 @@ fn default_push_removes_the_theme_and_later_deploys_keep_it_removed() {
             .any(|r| r.contains("/_theme/"))
     );
     assert_eq!(theme_binding(&fake, V4), None);
+    assert_eq!(tag_binding(&fake, V4), None);
 }
 
 #[test]
@@ -626,6 +650,7 @@ fn a_default_push_or_deploy_checks_the_theme_too() {
     fake.state().site.theme_tag = None;
     ok(&run(&fake, &dir, &bundle, 4, Cmd::Push(None)));
     assert_eq!(theme_binding(&fake, &active(&fake)), None);
+    assert_eq!(tag_binding(&fake, &active(&fake)), None);
 }
 
 #[test]
