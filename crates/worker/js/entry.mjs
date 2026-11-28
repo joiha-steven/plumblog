@@ -2,8 +2,9 @@
 // (./index.js) only for everything else. workers-rs's index.js instantiates the whole wasm at
 // import time, which costs a fresh isolate 8-40 ms CPU (Free plan limit: 10 ms). Any doubt
 // or failure here hands the request to wasm, which does its own lookup, rendering and logging.
-// The key format and the theme tag rule duplicate crates/worker pages/cache.rs and
-// theme_runtime.rs; tools/worker-test/entry.test.mjs pins them to the Rust side.
+// After a Cache API miss (it is per data centre) it reads the page wasm stored in R2. The key
+// formats and the theme tag rule duplicate crates/worker pages/cache.rs and theme_runtime.rs;
+// tools/worker-test/entry.test.mjs and r2pages.test.mjs pin them to the Rust side.
 import { WorkerEntrypoint } from "cloudflare:workers";
 
 // A failed import is not retried: ES modules cache a failed evaluation, so a retry would get
@@ -48,24 +49,51 @@ function healthz(env) {
   return new Response("ok", { headers });
 }
 
-/** The cached page for this request (a 304 when its ETag matches), or null to let wasm handle it. */
-async function cached(req, url, env) {
+const notModified = (etag) => new Response(null, { status: 304, headers: { etag, [MARK]: "js" } });
+
+/** The cached or R2-stored page (a 304 when its ETag matches), or null to let wasm handle it. */
+async function cached(req, url, env, ctx) {
   const tag = themeTag(env);
   if (tag === null) return null;
   const row = await env.DB.prepare("SELECT content_version FROM site WHERE id = 1").first();
   const version = row?.content_version;
   if (!Number.isSafeInteger(version) || version < 0) throw new Error(`content_version is ${JSON.stringify(version)}`);
-  const hit = await caches.default.match(`${url.origin}/__page/v${version}${tag}${url.pathname}`);
-  if (!hit) return null;
+  const id = env.CF_VERSION_METADATA?.id;
+  const page = `/v${version}${tag}${url.pathname}`;
+  const cacheKey = `${url.origin}/__page${typeof id === "string" ? `/${id}` : ""}${page}`;
+  const hit = await caches.default.match(cacheKey);
+  if (!hit) return typeof id === "string" ? stored(req, env, ctx, `pages/${id}${page}`, cacheKey) : null;
   const etag = hit.headers.get("etag");
-  if (etag !== null && req.headers.get("if-none-match") === etag) {
-    return new Response(null, { status: 304, headers: { etag, [MARK]: "js" } });
-  }
+  if (etag !== null && req.headers.get("if-none-match") === etag) return notModified(etag);
   const headers = new Headers();
   for (const [k, v] of hit.headers) if (k !== "x-plumblog-cache" && k !== "server-timing") headers.set(k, v);
   headers.set("x-plumblog-cache", "hit");
   headers.set(MARK, "js");
   return new Response(hit.body, { status: hit.status, headers });
+}
+
+/**
+ * The page from R2 (Rust's pages::cache::store_key), kept in this colo's cache too; null if absent.
+ * A revalidation costs one head, not a get. Keys over R2's 1,024 bytes (Rust never stores them)
+ * are not looked up: R2 would throw, and any long random path would log a warning.
+ */
+async function stored(req, env, ctx, key, cacheKey) {
+  if (req.method !== "GET" || new TextEncoder().encode(key).length > 1024) return null;
+  const inm = req.headers.get("if-none-match");
+  if (inm !== null) {
+    const etag = (await env.MEDIA.head(key))?.customMetadata?.etag;
+    if (etag === undefined) return null;
+    if (inm === etag) return notModified(etag);
+  }
+  const obj = await env.MEDIA.get(key);
+  if (!obj) return null;
+  const m = obj.customMetadata ?? {};
+  const res = new Response(obj.body, { headers: { "content-type": obj.httpMetadata?.contentType ?? "" } });
+  for (const k of ["etag", "cache-control", "x-plumblog-theme"]) if (m[k] !== undefined) res.headers.set(k, m[k]);
+  ctx.waitUntil(caches.default.put(cacheKey, res.clone()).catch((e) => console.warn(`entry: cache store failed: ${e}`)));
+  res.headers.set("x-plumblog-cache", "store");
+  res.headers.set(MARK, "js");
+  return res;
 }
 
 export default class extends WorkerEntrypoint {
@@ -74,10 +102,10 @@ export default class extends WorkerEntrypoint {
     if (req.method === "GET" && url.pathname === "/healthz") return withLoadedMark(healthz(this.env), this.env);
     if ((req.method === "GET" || req.method === "HEAD") && isReaderPath(url.pathname)) {
       try {
-        const res = await cached(req, url, this.env);
+        const res = await cached(req, url, this.env, this.ctx);
         if (res) return withLoadedMark(res, this.env);
       } catch (e) {
-        console.warn(`entry: cache fast path failed, wasm takes over: ${e}`);
+        console.warn(`entry: cache or R2 fast path failed, wasm takes over: ${e}`);
       }
     }
     return withLoadedMark(await new (await wasm())(this.ctx, this.env).fetch(req), this.env);

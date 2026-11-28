@@ -66,15 +66,19 @@ const VERSION_HEADER: &str = "x-plumblog-version";
 /// binding (an older config) there is simply no header.
 fn healthz(env: &Env) -> Result<Response> {
     let mut res = Response::ok("ok")?;
-    let id = worker::js_sys::Reflect::get(env, &"CF_VERSION_METADATA".into())
-        .ok()
-        .filter(worker::wasm_bindgen::JsValue::is_object)
-        .and_then(|m| worker::js_sys::Reflect::get(&m, &"id".into()).ok())
-        .and_then(|v| v.as_string());
-    if let Some(id) = id {
+    if let Some(id) = version_id(env) {
         res.headers_mut().set(VERSION_HEADER, &id)?;
     }
     Ok(res)
+}
+
+/// The running version's id, or `None` without the binding or when it is not a string.
+pub(crate) fn version_id(env: &Env) -> Option<String> {
+    worker::js_sys::Reflect::get(env, &"CF_VERSION_METADATA".into())
+        .ok()
+        .filter(worker::wasm_bindgen::JsValue::is_object)
+        .and_then(|m| worker::js_sys::Reflect::get(&m, &"id".into()).ok())
+        .and_then(|v| v.as_string())
 }
 
 /// The one cron trigger, every 10 minutes; `jobs::run` picks the jobs by scheduled time.
