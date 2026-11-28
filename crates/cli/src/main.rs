@@ -216,8 +216,9 @@ enum TokenAction {
         scope: String,
         #[arg(long)]
         login: Option<String>,
-        #[arg(long)]
-        expires: Option<u16>,
+        // Hyphen values reach our own check, which answers `-1` in the user's language.
+        #[arg(long, allow_hyphen_values = true)]
+        expires: Option<String>,
     },
     List {
         #[arg(long)]
@@ -779,7 +780,7 @@ fn token_command(text: &Text, action: TokenAction) -> Result<String, (Code, Stri
             name,
             scope,
             login,
-            expires_days: expires,
+            expires,
         }),
         TokenAction::List { login } => api_token_cmd::Action::List { login },
         TokenAction::Revoke { id, yes } => api_token_cmd::Action::Revoke { id, yes },
@@ -1376,6 +1377,16 @@ mod tests {
         }
         // English and Vietnamese differ for every case.
         assert!((0..3).all(|i| seen[i] != seen[i + 3]));
+    }
+
+    /// Every `--expires` value reaches `blog token`'s own check (a translated error), not
+    /// clap's English one.
+    #[test]
+    fn token_expires_is_parsed_by_blog_token() {
+        for v in ["-1", "70000", "abc", "1.5", ""] {
+            let argv = ["blog", "token", "create", "--name", "a", "--expires", v];
+            assert!(command(&en()).try_get_matches_from(argv).is_ok(), "{v:?}");
+        }
     }
 
     #[test]

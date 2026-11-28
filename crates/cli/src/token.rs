@@ -31,8 +31,8 @@ pub struct Create {
     pub scope: String,
     /// The user the token belongs to; default the only active owner.
     pub login: Option<String>,
-    /// Days until it stops working; `None` never.
-    pub expires_days: Option<u16>,
+    /// `--expires` as typed: days until it stops working; `None` never.
+    pub expires: Option<String>,
 }
 
 /// What `blog token` was asked to do.
@@ -287,10 +287,21 @@ fn user(run: &Run, db: &Database, login: Option<&str>) -> Result<User, Failure> 
     }
 }
 
-fn create(run: &mut Run, db: &Database, c: &Create) -> Result<(), Failure> {
+/// Longest `--expires`, in days (100 years): past it, "never" says it better.
+pub const MAX_EXPIRES_DAYS: i64 = 36_500;
+
+/// What `create` was asked, checked before the lock and any network call, so a typo costs
+/// nothing: the scope and the expiry time (`None` never).
+#[derive(Clone, Copy)]
+struct Checked {
+    scope: TokenScope,
+    expires: Option<i64>,
+}
+
+fn check(c: &Create, cx: &Context) -> Result<Checked, Failure> {
+    let fail = |code, k, args: &[(&str, String)]| Failure::new(code, cx.text, k, args);
     api_token::check_name(&c.name).map_err(|e| {
         fail(
-            run,
             Code::TokenNameInvalid,
             key!("cli.error.token_name_invalid"),
             &[("detail", e.detail)],
@@ -298,7 +309,6 @@ fn create(run: &mut Run, db: &Database, c: &Create) -> Result<(), Failure> {
     })?;
     let scope = TokenScope::parse(&c.scope).ok_or_else(|| {
         fail(
-            run,
             Code::TokenScopeUnknown,
             key!("cli.error.token_scope_unknown"),
             &[
@@ -314,18 +324,33 @@ fn create(run: &mut Run, db: &Database, c: &Create) -> Result<(), Failure> {
             ],
         )
     })?;
-    let expires = match c.expires_days {
+    // Parsed here, not by clap, so every bad value (negative, huge, not a number) gets the
+    // translated message.
+    let expires = match c.expires.as_deref() {
         None => None,
-        Some(0) => {
-            return Err(fail(
-                run,
-                Code::TokenExpiresInvalid,
-                key!("cli.error.token_expires_invalid"),
-                &[("max", u16::MAX.to_string())],
-            ));
+        Some(v) => {
+            let days = (!v.is_empty() && v.len() <= 6 && v.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| v.parse::<i64>().ok())
+                .flatten()
+                .filter(|d| (1..=MAX_EXPIRES_DAYS).contains(d))
+                .ok_or_else(|| {
+                    fail(
+                        Code::TokenExpiresInvalid,
+                        key!("cli.error.token_expires_invalid"),
+                        &[
+                            ("value", printable(v)),
+                            ("max", MAX_EXPIRES_DAYS.to_string()),
+                        ],
+                    )
+                })?;
+            Some(cx.now_ms + days * DAY_MS)
         }
-        Some(d) => Some(run.cx.now_ms + i64::from(d) * DAY_MS),
     };
+    Ok(Checked { scope, expires })
+}
+
+fn create(run: &mut Run, db: &Database, c: &Create, checked: &Checked) -> Result<(), Failure> {
+    let Checked { scope, expires } = *checked;
     let u = user(run, db, c.login.as_deref())?;
     let login = printable(&u.login);
     let role =
@@ -551,6 +576,10 @@ pub fn run(
     cx: &Context,
     out: &mut dyn Write,
 ) -> Result<(), Failure> {
+    let checked = match action {
+        Action::Create(c) => Some(check(c, cx)?),
+        _ => None,
+    };
     // Writes hold the folder lock, as `blog admin reset` does; a list only reads.
     let _lock = match action {
         Action::List { .. } => None,
@@ -568,7 +597,10 @@ pub fn run(
     let db = Database::new(client, site.db_id.clone());
     admin::check_ours(&run, &site.worker, &db)?;
     match action {
-        Action::Create(c) => create(&mut run, &db, c),
+        Action::Create(c) => match &checked {
+            Some(k) => create(&mut run, &db, c, k),
+            None => Err(internal(&run, "create without its checks")),
+        },
         Action::List { login } => list(&mut run, &db, login.as_deref()),
         Action::Revoke { id, yes } => revoke(&mut run, &db, *id, *yes),
     }

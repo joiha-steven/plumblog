@@ -71,7 +71,7 @@ fn create(name: &str) -> Create {
         name: name.into(),
         scope: "writer".into(),
         login: None,
-        expires_days: None,
+        expires: None,
     }
 }
 
@@ -177,7 +177,7 @@ fn create_prints_a_token_that_authenticates_and_is_kept_nowhere() {
 fn an_expiry_is_stored() {
     let (fake, dir) = set_up();
     let c = Create {
-        expires_days: Some(30),
+        expires: Some("30".into()),
         ..create("short")
     };
     ok(&run(&fake, &dir, &Action::Create(c)));
@@ -185,7 +185,7 @@ fn an_expiry_is_stored() {
 
     let before = snapshot(&fake);
     let c = Create {
-        expires_days: Some(0),
+        expires: Some("0".into()),
         ..create("zero")
     };
     assert_eq!(
@@ -193,6 +193,70 @@ fn an_expiry_is_stored() {
         Code::TokenExpiresInvalid
     );
     assert_eq!(snapshot(&fake), before);
+}
+
+#[test]
+fn bad_input_is_refused_before_the_lock_and_any_network_call() {
+    let (fake, dir) = set_up();
+    let lock = dir.0.join(plumblog_cli::deploy::LOCK_FILE);
+    std::fs::write(&lock, "1").unwrap();
+    let sent = fake.requests().len();
+    let bad = |expires: &str| Create {
+        expires: Some(expires.into()),
+        ..create("agent")
+    };
+    for v in [
+        "0",
+        "-1",
+        "36501",
+        "65536",
+        "99999999999999999999",
+        "abc",
+        "1.5",
+        "+3",
+        "",
+    ] {
+        let r = run(&fake, &dir, &Action::Create(bad(v)));
+        assert_eq!(code(&r), Code::TokenExpiresInvalid, "{v:?}");
+        let msg = r.result.unwrap_err().message;
+        assert!(msg.contains("1 to 36500"), "{msg}");
+    }
+    let vi = Text::new("vi");
+    let cx = Context {
+        dir: &dir.0,
+        migrations: &migrations::bundled(),
+        now_ms: NOW,
+        text: &vi,
+    };
+    let e = token::run(
+        &mut client(&fake, GOOD),
+        None,
+        &Action::Create(bad("-1")),
+        &cx,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, Code::TokenExpiresInvalid);
+    assert!(
+        e.message.contains("--expires -1") && !e.message.contains("Nothing was created"),
+        "translated: {}",
+        e.message
+    );
+    let c = Create {
+        scope: "admin".into(),
+        ..create("agent")
+    };
+    assert_eq!(
+        code(&run(&fake, &dir, &Action::Create(c))),
+        Code::TokenScopeUnknown
+    );
+    assert_eq!(
+        code(&run(&fake, &dir, &Action::Create(create("")))),
+        Code::TokenNameInvalid
+    );
+    assert_eq!(fake.requests().len(), sent, "no Cloudflare call");
+    std::fs::remove_file(&lock).unwrap();
+    ok(&run(&fake, &dir, &Action::Create(bad("36500"))));
 }
 
 #[test]
