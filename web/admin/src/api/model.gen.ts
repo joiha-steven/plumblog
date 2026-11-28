@@ -36,6 +36,7 @@ export const ERROR_CODES = [
   "comments.form_invalid",
   "comments.check_failed",
   "comments.rate_limited",
+  "theme.unavailable",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 

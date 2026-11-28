@@ -24,6 +24,9 @@ publish = false
 # Cloudflare Workers runtime bindings (fetch handler, D1, R2); no other way to run Rust on Workers.
 # d1: bindings for the D1 store adapter (crates/worker/src/d1).
 worker = { version = "0.9.0", features = ["d1"] }
+# The Stream trait, to read theme.json from ASSETS in chunks and stop at its size cap; worker
+# returns a Stream but does not re-export the trait. Already linked through worker: no wasm cost.
+futures-core = "0.3"
 # Argument parsing for the `blog` CLI; derive keeps commands declarative.
 clap = { version = "4.6.7", features = ["derive"] }
 # NFC before slugging so the same heading typed on macOS (NFD) and elsewhere (NFC) gets one id;

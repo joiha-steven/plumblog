@@ -266,6 +266,18 @@ impl Schema {
         Ok(Self { decls, defaults })
     }
 
+    /// One value (JSON as stored) against its declaration, the check [`Self::resolve`]
+    /// applies; `None` when `key` is not declared.
+    pub fn check_one(&self, key: &str, raw: &str) -> Option<Result<(), String>> {
+        let decl = self.decls.get(key)?;
+        Some(
+            serde_json::from_str::<Json>(raw)
+                .map_err(|e| format!("not JSON: {e}"))
+                .and_then(|v| check_value(decl, &v))
+                .map(|_| ()),
+        )
+    }
+
     /// The value of every declared option: the stored one when it passes its declaration,
     /// else the default. Each fallback and each stored key with no declaration is reported
     /// (`owner` like `theme:minimal`), for the Worker log.

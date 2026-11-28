@@ -17,6 +17,8 @@ path = "src/bin/blog-release.rs"
 clap.workspace = true
 plumblog-i18n.workspace = true
 plumblog-render.workspace = true
+# `blog theme dev` and `theme check` render the sample posts the way saving a post does.
+plumblog-markdown.workspace = true
 ureq.workspace = true
 serde.workspace = true
 # float_roundtrip: the dump reads a REAL from D1's JSON reply and must get its exact bits

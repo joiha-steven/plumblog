@@ -564,6 +564,7 @@ dependencies = [
  "miniz_oxide",
  "plumblog-auth",
  "plumblog-i18n",
+ "plumblog-markdown",
  "plumblog-model",
  "plumblog-render",
  "plumblog-store",
@@ -643,6 +644,7 @@ dependencies = [
 name = "plumblog-worker"
 version = "0.1.0"
 dependencies = [
+ "futures-core",
  "idna_adapter",
  "plumblog-auth",
  "plumblog-i18n",

@@ -617,3 +617,35 @@ fn the_css_budget_check_counts_plugin_css_and_bites() {
     let err = css_with("hello", &heavy).unwrap_err();
     assert!(err.contains("bytes of CSS (cap 40000)"), "{err}");
 }
+
+/// The options API refuses what a render would replace by the default, so an owner learns
+/// at write time, not from a log line.
+#[test]
+fn one_value_is_checked_against_the_theme_or_plugin_declaration() {
+    let theme = theme_with(&minimal(), vec![plugin(&hello()).unwrap()]).unwrap();
+    let ok = |p: Option<&str>, k: &str, v: &str| theme.check_option(p, k, v);
+    assert_eq!(ok(None, "excerpt_words", "40"), Some(Ok(())));
+    assert_eq!(
+        ok(None, "accent", r##"{"light":"#123456","dark":"#abcdef"}"##),
+        Some(Ok(()))
+    );
+    for (key, bad) in [
+        ("excerpt_words", "121"),
+        ("excerpt_words", "41"),
+        ("excerpt_words", "\"40\""),
+        ("accent", "\"#336699\""),
+        ("accent", r##"{"light":"red","dark":"#abcdef"}"##),
+        ("style", "\"magazine\""),
+        ("list_images", "not json"),
+    ] {
+        let e = ok(None, key, bad).expect("declared").unwrap_err();
+        assert!(!e.is_empty(), "{key}={bad}");
+    }
+    // Undeclared keys and unknown plugins are kept and not read, as before.
+    assert_eq!(ok(None, "only_theme", "true"), None);
+    assert_eq!(ok(Some("nope"), "x", "1"), None);
+    assert_eq!(ok(Some("hello"), "greeting", "\"Hi\""), Some(Ok(())));
+    let long = format!("\"{}\"", "x".repeat(41));
+    assert!(matches!(ok(Some("hello"), "greeting", &long), Some(Err(_))));
+    assert!(matches!(ok(Some("hello"), "greeting", "42"), Some(Err(_))));
+}

@@ -36,9 +36,11 @@ A partial for a slot the active theme does not offer is not shown (`plugin.slot_
 
 ## Writing a new plugin
 
-A new plugin is a folder `plugins/<name>/` in the repository (`plugin.toml`, `partials/`,
-`assets/`, `locales/`), so today it is contributor work: it means a fork and a build, and the
-owner's blog must deploy that build. There is no `blog plugin` command yet.
+A plugin is a folder named after it (`plugin.toml`, `partials/`, `assets/`, `locales/`).
+`blog plugin check <folder>` checks it the way the blog loads it and renders it on the default
+theme. Only the plugins in `plugins/` of the deployed bundle run, so shipping a new one is still
+contributor work: a fork, a build, and a deploy of that build. Plugin files are public on the
+site: never put tokens or keys in them.
 
 For anything that needs server code (newsletters, syncing, notifications), build a separate
 service that uses the API instead of a plugin (no route creates outgoing webhooks yet).
