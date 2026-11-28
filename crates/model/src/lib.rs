@@ -194,6 +194,7 @@ stable_codes! {
         PublishPost => "post.publish",
         EditAnyPost => "post.edit_any",
         DeleteAnyPost => "post.delete_any",
+        DeleteAnyMedia => "media.delete_any",
         UploadMedia => "media.upload",
         CreateOwnToken => "token.create_own",
         ManageSettings => "settings.manage",
@@ -222,7 +223,10 @@ impl Permission {
             // Moderation is content work: writers already edit any post. The site-wide
             // comments switch is a setting, so it stays with ManageSettings (owner).
             | Self::ModerateComments => BOTH,
-            Self::ManageSettings
+            // Media is a shared library: writers use and edit anyone's, but deleting another
+            // uploader's (or an orphan's) is the owner's call (issue #59).
+            Self::DeleteAnyMedia
+            | Self::ManageSettings
             | Self::ManageThemes
             | Self::ManagePlugins
             | Self::ManageUsers
@@ -362,6 +366,7 @@ mod tests {
     #[test]
     fn permission_table_is_pinned() {
         let writer_only_lacks = [
+            Permission::DeleteAnyMedia,
             Permission::ManageSettings,
             Permission::ManageThemes,
             Permission::ManagePlugins,
@@ -376,7 +381,7 @@ mod tests {
                 "writer and {p:?}"
             );
         }
-        assert_eq!(Permission::ALL.len(), 12);
+        assert_eq!(Permission::ALL.len(), 13);
     }
 
     /// Scope codes are stored in D1 rows; the order and the effective scope are the token
@@ -417,6 +422,13 @@ mod tests {
         assert!(Role::Writer.can(Permission::ModerateComments));
         assert!(Role::Owner.can(Permission::ManageSettings));
         assert!(!Role::Writer.can(Permission::ManageSettings));
+    }
+
+    /// Writers delete only their own media; deleting anyone's is the owner's (issue #59).
+    #[test]
+    fn deleting_any_media_is_owner_only() {
+        assert_eq!(Permission::DeleteAnyMedia.roles(), [Role::Owner]);
+        assert_eq!(Permission::DeleteAnyMedia.as_str(), "media.delete_any");
     }
 
     #[test]

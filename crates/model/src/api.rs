@@ -625,15 +625,18 @@ pub const ROUTES: &[Route] = &[
         200,
         "media",
     ),
-    route(
-        RouteId::MediaDelete,
-        Method::Delete,
-        "/api/v1/media/{id}",
-        MEDIA,
-        ID,
-        204,
-        "none",
-    ),
+    Route {
+        also: &[Permission::DeleteAnyMedia],
+        ..route(
+            RouteId::MediaDelete,
+            Method::Delete,
+            "/api/v1/media/{id}",
+            MEDIA,
+            ID,
+            204,
+            "none",
+        )
+    },
     // A read token sees drafts and the media list already, so it may read originals too.
     route(
         RouteId::MediaOriginal,
