@@ -207,6 +207,8 @@ export function mountAccount(box: HTMLElement, me: Me, api: Api): void {
     list.replaceChildren(flush(loadingRows(2), "flush"));
     addBox.hidden = true;
     const r = await listPasskeys(api);
+    // From here the passkeys list has its height: the tokens section below can show without moving.
+    tokens.hidden = false;
     if (!r.ok) {
       list.replaceChildren(failed(r.error, () => void load()));
       return;
@@ -300,6 +302,10 @@ export function mountAccount(box: HTMLElement, me: Me, api: Api): void {
   }
 
   addBox.append(addBtn);
+  // Loaded at once but out of the layout until the passkeys list above settles: two loading rows
+  // collapsing into "no passkeys" would otherwise push it up (Lighthouse CLS 0.03).
+  const tokens = mountTokens(me, api);
+  tokens.hidden = true;
   // i18n: admin.role.owner admin.role.writer
   const role = t(`admin.role.${me.role}`);
   box.replaceChildren(
@@ -322,7 +328,7 @@ export function mountAccount(box: HTMLElement, me: Me, api: Api): void {
       list,
       addBox,
     ),
-    mountTokens(me, api),
+    tokens,
   );
   void load();
 }

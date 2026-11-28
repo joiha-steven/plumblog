@@ -48,8 +48,10 @@ const src = (f) => new URL(`web/admin/src/${f}`, root).pathname;
 const out = await build({
   stdin: {
     contents: `export { mountTokens } from ${JSON.stringify(src("auth/tokens.ts"))};
+      export { mountAccount } from ${JSON.stringify(src("auth/account.ts"))};
+      export { startEarly } from ${JSON.stringify(src("early.ts"))};
       export { initI18n } from ${JSON.stringify(src("i18n.ts"))};
-      export { closePop } from ${JSON.stringify(src("ui.ts"))};`,
+      export { closePop, followNetwork, offlineBanner } from ${JSON.stringify(src("ui.ts"))};`,
     resolveDir: new URL("tools/", root).pathname,
     loader: "ts",
   },
@@ -274,4 +276,112 @@ test("offline: actions are disabled with a message, and come back online", async
   win.dispatchEvent(new win.Event("online"));
   assert.equal($(el, ".tok-add button").disabled, false);
   assert.equal($(el, ".tok button.danger").disabled, false);
+});
+
+const make = async (el) => {
+  const form = await openForm(el);
+  type($(form, "input[type=text]"), "Agent");
+  submit(form);
+  await settle();
+};
+
+test("I've saved it: the secret leaves the page", async () => {
+  const { el } = setup();
+  await make(el);
+  assert.ok(el.innerHTML.includes("SECRETSECRET"));
+  [...el.querySelectorAll("button")].find((b) => b.textContent === en["admin.tokens.done"]).click();
+  assert.equal($(el, "input[readonly]"), null);
+  assert.ok(!el.innerHTML.includes("SECRETSECRET"));
+  assert.equal(document.activeElement, $(el, ".tok-add > button"));
+});
+
+test("a network blip on the account page keeps the secret: only the banner follows", async () => {
+  const { el } = setup();
+  const main = document.createElement("main");
+  main.append(el);
+  document.body.replaceChildren(main);
+  await make(el);
+  let redrawn = 0;
+  // What main.ts does on `offline` then `online` for the account screen.
+  online = false;
+  win.dispatchEvent(new win.Event("offline"));
+  assert.equal(m.followNetwork(main, "account", true, () => redrawn++), undefined);
+  assert.ok(main.firstElementChild.classList.contains("banner"));
+  online = true;
+  win.dispatchEvent(new win.Event("online"));
+  m.followNetwork(main, "account", false, () => redrawn++);
+  assert.equal(redrawn, 0);
+  assert.equal(main.querySelector(".banner"), null);
+  assert.equal($(el, "input[readonly]").value, "plb_SECRETSECRETSECRET");
+  // Any other screen still redraws.
+  m.followNetwork(main, "posts", true, () => redrawn++);
+  assert.equal(redrawn, 1);
+});
+
+test("a section no longer on the page stops listening to the network", async () => {
+  const { el } = setup();
+  await settle();
+  document.body.replaceChildren();
+  online = false;
+  win.dispatchEvent(new win.Event("offline"));
+  // A detached section is not synced: its buttons keep their last state.
+  assert.equal($(el, ".tok-add > button").disabled, false);
+  online = true;
+  win.dispatchEvent(new win.Event("online"));
+});
+
+test("revoking a token that is already gone says so and reloads the list", async () => {
+  let gets = 0;
+  const { el, calls } = setup({
+    routes: {
+      "DELETE /api/auth/tokens/1": async () => ({ ok: false, error: { code: "store.not_found", status: 404 } }),
+      "GET /api/auth/tokens": async () => ({ ok: true, value: { tokens: gets++ === 0 ? [T(1, "CI", "writer")] : [] } }),
+    },
+  });
+  await settle();
+  $(el, ".tok button.danger").click();
+  document.querySelector(".pop .confirm button.danger").click();
+  await settle();
+  assert.equal(calls.filter((c) => c.method === "GET").length, 2);
+  assert.equal(el.querySelectorAll(".tok").length, 0);
+  m.closePop(false);
+});
+
+test("the account page shows tokens only once the passkeys above have settled, so nothing moves", async () => {
+  let release;
+  const passkeys = new Promise((r) => (release = r));
+  const call = async (method, path) => {
+    if (path === "/api/auth/passkey") return passkeys;
+    if (path === "/api/auth/tokens") return { ok: true, value: { tokens: [T(1, "CI", "writer")] } };
+    return { ok: false, error: { code: "network", status: 0 } };
+  };
+  const box = document.createElement("div");
+  document.body.replaceChildren(box);
+  m.mountAccount(box, { id: 1, login: "lan", slug: "lan", display_name: "Lan", bio: "", role: "owner" }, { call });
+  await settle();
+  const tokens = box.querySelector("[aria-labelledby=acct-tok]");
+  assert.equal(tokens.hidden, true, "held back while the passkeys list may still change height");
+  assert.equal(tokens.querySelectorAll(".tok").length, 1, "but already loaded");
+  release({ ok: true, value: { passkeys: [] } });
+  await settle();
+  assert.equal(tokens.hidden, false);
+});
+
+test("lists started early at boot are read once, not fetched again", async () => {
+  let gets = 0;
+  const call = async (method, path) => {
+    if (method === "GET") gets++;
+    if (path === "/api/auth/passkey") return { ok: true, value: { passkeys: [] } };
+    if (path === "/api/auth/tokens") return { ok: true, value: { tokens: [T(1, "CI", "writer")] } };
+    return { ok: false, error: { code: "network", status: 0 } };
+  };
+  const api = { call };
+  m.startEarly(api, ["/api/auth/passkey", "/api/auth/tokens"]);
+  assert.equal(gets, 2);
+  const box = document.createElement("div");
+  document.body.replaceChildren(box);
+  m.mountAccount(box, { id: 1, login: "lan", slug: "lan", display_name: "Lan", bio: "", role: "owner" }, api);
+  await settle();
+  assert.equal(gets, 2, "the account page used the early answers");
+  assert.equal(box.querySelectorAll(".tok").length, 1);
 });

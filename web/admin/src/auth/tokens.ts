@@ -7,6 +7,7 @@
 
 import type { Api, ApiError, Me } from "../api/client";
 import { h } from "../dom";
+import { getOnce } from "../early";
 import { t } from "../i18n";
 import { icon } from "../icons";
 import { seg } from "../seg";
@@ -90,7 +91,7 @@ export function mountTokens(me: Me, api: Api): HTMLElement {
   async function load(): Promise<void> {
     list.replaceChildren(loadingRows(2));
     addBox.hidden = true;
-    const r = await api.call<{ tokens: Token[] }>("GET", "/api/auth/tokens");
+    const r = await getOnce<{ tokens: Token[] }>(api, "/api/auth/tokens");
     if (!r.ok) {
       loaded = false;
       list.replaceChildren(failed(r.error, () => void load()));
@@ -149,6 +150,8 @@ export function mountTokens(me: Me, api: Api): HTMLElement {
         go.textContent = t("admin.tokens.revoke_submit");
         if (!r.ok) {
           alert.textContent = explain(r.error, "revoke");
+          // Already gone (revoked elsewhere): the message says the list is refreshed, so refresh it.
+          if (r.error.code === "store.not_found" || r.error.code === "auth.forbidden") void load();
           return;
         }
         closePop(false);
@@ -313,8 +316,18 @@ export function mountTokens(me: Me, api: Api): HTMLElement {
     list,
     addBox,
   );
-  window.addEventListener("online", () => loaded && sync());
-  window.addEventListener("offline", () => loaded && sync());
+  // The shell redraws other screens on a network change, which drops this section: stop listening
+  // then, or every visit to the account page would leave a listener behind.
+  const onNetwork = (): void => {
+    if (!section.isConnected) {
+      window.removeEventListener("online", onNetwork);
+      window.removeEventListener("offline", onNetwork);
+      return;
+    }
+    if (loaded) sync();
+  };
+  window.addEventListener("online", onNetwork);
+  window.addEventListener("offline", onNetwork);
   void load();
   return section;
 }
