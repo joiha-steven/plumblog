@@ -8,7 +8,7 @@
 //! - Read paths never write.
 //! - `site.content_version` is bumped inside the same write whenever the write can change
 //!   what a reader sees (rules on each method).
-//! - Page sizes (`limit`) are capped at [`MAX_PAGE`], one more for post and media lists (the
+//! - Page sizes (`limit`) are capped at [`MAX_PAGE`], one more for post, media and log lists (the
 //!   probe row, see [`probe_len`]); a limit of 0 returns nothing.
 
 mod auth;
@@ -40,7 +40,7 @@ pub mod comment {
         site_enabled, submit,
     };
 }
-pub use log::{LogEntry, LogQuery, LogStore, RETENTION_JOB, retention_job};
+pub use log::{LogEntry, LogQuery, LogStore, RETENTION_JOB, kinds_at_least, retention_job};
 pub use media::{Media, MediaQuery, MediaStore, NewMedia};
 pub use posts::{
     NewRevision, Post, PostCounts, PostCursor, PostKind, PostOrder, PostQuery, PostStatus,
