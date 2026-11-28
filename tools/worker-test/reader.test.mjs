@@ -114,7 +114,11 @@ test("published with a future date is refused, and reserved slugs are not for th
     const r = await api("POST", "/posts", { lang: "en", slug, title: "T", markdown: "x", status: "draft" });
     assert.deepEqual(r.json, { error: "input.invalid", field: "slug" }, slug);
   }
-  // Another language lives under /<lang>/, where the word is free.
+  // `search` is refused in every language: /<lang>/search is that language's search page.
+  const viSearch = await api("POST", "/posts", { lang: "vi", slug: "search", title: "T", markdown: "x", status: "draft" });
+  assert.equal(viSearch.status, 400, viSearch.raw);
+  assert.deepEqual(viSearch.json, { error: "input.invalid", field: "slug" });
+  // Another language lives under /<lang>/, where the other words are free.
   const vi = await api("POST", "/posts", { lang: "vi", slug: "page", title: "T", markdown: "x", status: "draft" });
   assert.equal(vi.status, 201, vi.raw);
 });

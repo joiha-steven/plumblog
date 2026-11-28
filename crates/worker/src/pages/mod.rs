@@ -138,13 +138,13 @@ pub async fn serve(req: &Request, env: &Env, ctx: &Context) -> Result<Response> 
     let src = &db;
     // Search results depend on the query string and on the store, neither of which is in
     // the cache key or the ETag, so they skip both.
-    if path == routes::SEARCH {
+    if matches!(routes::parse(&path), Route::Search { .. }) {
         let query = url
             .query_pairs()
             .find(|(k, _)| k == "q")
             .map(|(_, v)| v.into_owned())
             .unwrap_or_default();
-        return live(src, &db, &path, &query).await;
+        return live(src, &db, &origin, &path, &query).await;
     }
     // From the store: option and plugin changes bump it too, so they reach cached pages.
     let version = match db.content_version().await {
@@ -273,6 +273,7 @@ fn stored_copy(
 async fn live<S: ExtSource + SearchSource>(
     src: &impl ReaderSource,
     db: &S,
+    origin: &str,
     path: &str,
     query: &str,
 ) -> Result<Response> {
@@ -280,14 +281,19 @@ async fn live<S: ExtSource + SearchSource>(
         Ok(o) => o,
         Err(e) => return Ok(failure(e.detail())),
     };
-    let Outcome::Page {
-        status,
-        content_type,
-        body,
-        ..
-    } = outcome
-    else {
-        return Ok(failure("live page asked for a redirect"));
+    let (status, content_type, body) = match outcome {
+        Outcome::Page {
+            status,
+            content_type,
+            body,
+            ..
+        } => (status, content_type, body),
+        // Built by `search_redirect` from a constant path: never leaves the site.
+        Outcome::Redirect(to) if to.starts_with("/search") => {
+            let url = worker::Url::parse(&format!("{origin}{to}"))?;
+            return Response::redirect_with_status(url, 301);
+        }
+        Outcome::Redirect(to) => return Ok(failure(&format!("live page redirected to {to:?}"))),
     };
     let h = Headers::new();
     h.set("content-type", content_type)?;
@@ -539,7 +545,13 @@ async fn route(
         }
         Route::Tag { slug, page } => p.tag(&slug, page).await?,
         Route::Archive { year, page } => p.archive(year, page).await?,
-        Route::Search => p.search(search, query).await?,
+        Route::Search { lang: None } => p.search(search, query, &settings.lang).await?,
+        Route::Search { lang: Some(l) } if l == settings.lang => {
+            return Ok(Outcome::Redirect(search_redirect(query)));
+        }
+        Route::Search { lang: Some(l) } if settings.languages.contains(&l) => {
+            p.search(search, query, &l).await?
+        }
         Route::Feed { lang, format } => {
             return Ok(match p.feed(&settings, lang.as_deref(), format).await? {
                 Some(body) => doc(format.content_type(), body),
@@ -549,6 +561,8 @@ async fn route(
         Route::Sitemap => return Ok(doc(docs::XML, p.sitemap(&settings).await?)),
         Route::Robots => return Ok(doc(docs::TEXT, docs::robots(origin))),
         Route::Llms => return Ok(doc(docs::TEXT, p.llms(&settings).await?)),
+        // `/<seg>/search` where `seg` is no site language: an ordinary post path as before.
+        Route::Search { lang: Some(l) } => p.post(&l, "search", ext).await?,
         // A language home past page 1 of an unlisted language, or nothing at all.
         Route::LangHome { .. } | Route::LangFirstPage { .. } | Route::NotFound => None,
     };
@@ -563,6 +577,16 @@ async fn route(
 }
 
 const HTML: &str = "text/html; charset=utf-8";
+
+/// `/search` with the query kept, for the default language's `/<lang>/search`.
+fn search_redirect(query: &str) -> String {
+    if query.is_empty() {
+        return routes::SEARCH.to_owned();
+    }
+    let mut u = worker::Url::parse("http://host/").expect("constant URL");
+    u.query_pairs_mut().append_pair("q", query);
+    format!("{}?{}", routes::SEARCH, u.query().unwrap_or_default())
+}
 
 fn doc(content_type: &'static str, body: String) -> Outcome {
     Outcome::Page {
@@ -947,7 +971,7 @@ fn site(s: &Settings, lang: &str) -> Site {
         description: s.description.clone(),
         default_lang: s.lang.clone(),
         home_url: "/".to_owned(),
-        search_url: Some(routes::SEARCH.to_owned()),
+        search_url: Some(routes::search_in(lang, &s.lang)),
         feed_url: routes::feed(feed_lang, routes::FeedFormat::Atom),
         rss_url: routes::feed(feed_lang, routes::FeedFormat::Rss),
         json_feed_url: routes::feed(feed_lang, routes::FeedFormat::Json),

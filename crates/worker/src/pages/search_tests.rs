@@ -9,6 +9,7 @@ use super::search::{MAX_QUERY_CHARS, RESULT_LIMIT};
 use super::tests_support::run;
 use super::{Outcome, RenderError, render, seed};
 use plumblog_store::memory::MemoryStore;
+use plumblog_store::{PostKind, PostStatus, PostStore, SavePost};
 
 fn store() -> MemoryStore {
     let db = MemoryStore::default();
@@ -17,13 +18,61 @@ fn store() -> MemoryStore {
 }
 
 fn search(db: &MemoryStore, q: &str) -> String {
-    match run(render(SampleSource::get(), &Db(db), &Db(db), "/search", q)).unwrap() {
-        Outcome::Page { status, body, .. } => {
-            assert_eq!(status, 200, "{q:?}");
-            body
-        }
-        Outcome::Redirect(to) => panic!("{q:?} redirected to {to}"),
+    search_at(db, "/search", q)
+}
+
+fn search_at(db: &MemoryStore, path: &str, q: &str) -> String {
+    match get(db, path, q) {
+        (200, body) => body,
+        (status, body) => panic!("{path}?q={q:?}: {status} {body}"),
     }
+}
+
+/// Status and body of a page, or 301 and the redirect target.
+fn get(db: &MemoryStore, path: &str, q: &str) -> (u16, String) {
+    match run(render(SampleSource::get(), &Db(db), &Db(db), path, q)).unwrap() {
+        Outcome::Page { status, body, .. } => (status, body),
+        Outcome::Redirect(to) => (301, to),
+    }
+}
+
+/// A published Vietnamese post whose title and search text are `text`.
+fn publish_vi(db: &MemoryStore, slug: &str, text: &str) {
+    publish_in(db, "vi", slug, text);
+}
+
+fn publish_in(db: &MemoryStore, lang: &str, slug: &str, text: &str) {
+    let author = run(plumblog_store::UserStore::list_users(db)).unwrap()[0].id;
+    run(db.save_post(SavePost {
+        id: None,
+        expected_version: None,
+        translation_group: None,
+        kind: PostKind::Post,
+        lang: lang.to_owned(),
+        slug: slug.to_owned(),
+        status: PostStatus::Published,
+        published_at: Some(1_900_000_000_000),
+        author_id: author,
+        title: text.to_owned(),
+        markdown: String::new(),
+        html: format!("<p>{text}</p>"),
+        toc_json: "[]".to_owned(),
+        excerpt: String::new(),
+        word_count: 1,
+        reading_minutes: 1,
+        pinned: false,
+        comments_enabled: false,
+        cover_media_id: None,
+        series_id: None,
+        series_position: None,
+        tag_ids: Vec::new(),
+        media_ids: Vec::new(),
+        search_text: text.to_owned(),
+        revision: None,
+        client_id: None,
+        now: 1_900_000_000_000,
+    }))
+    .unwrap();
 }
 
 /// Links in the result list, in order.
@@ -177,4 +226,101 @@ fn a_store_failure_is_an_error_not_an_empty_page() {
         ))
         .is_ok()
     );
+}
+
+// "B\u{1ED9}t m\u{00E0}u" is the Vietnamese "bot mau" (pigment).
+const BOT_MAU: &str = "B\u{1ED9}t m\u{00E0}u r\u{1EA5}t \u{0111}\u{1EB9}p";
+
+#[test]
+fn each_language_searches_only_its_own_posts() {
+    let db = store();
+    publish_vi(&db, "bot-mau", BOT_MAU);
+    for q in [
+        "bot mau",
+        "B\u{1ED9}t m\u{00E0}u",
+        "\u{0111}\u{1EB9}p",
+        "dep",
+    ] {
+        assert_eq!(
+            results(&search_at(&db, "/vi/search", q)),
+            ["/vi/bot-mau"],
+            "{q:?}"
+        );
+        assert!(
+            results(&search_at(&db, "/search", q)).is_empty(),
+            "{q:?} at /search"
+        );
+    }
+    // An English query finds English at /search and nothing at /vi/search.
+    assert_eq!(results(&search(&db, "tools"))[0], "/why-small-tools");
+    assert!(results(&search_at(&db, "/vi/search", "tools")).is_empty());
+}
+
+#[test]
+fn search_urls_follow_the_one_url_rule() {
+    let db = store();
+    assert_eq!(
+        get(&db, "/en/search", "tools"),
+        (301, "/search?q=tools".to_owned())
+    );
+    assert_eq!(
+        get(&db, "/en/search", "\u{0111}\u{00E0} l\u{1EA1}t&x"),
+        (301, "/search?q=%C4%91%C3%A0+l%E1%BA%A1t%26x".to_owned())
+    );
+    assert_eq!(get(&db, "/en/search", ""), (301, "/search".to_owned()));
+    assert_eq!(get(&db, "/vi/search/", "x"), (301, "/vi/search".to_owned()));
+    assert_eq!(get(&db, "/xx/search", "tools").0, 404);
+    assert_eq!(get(&db, "/api/search", "tools").0, 404);
+}
+
+#[test]
+fn the_page_and_its_form_follow_the_page_language() {
+    let db = store();
+    let action = |path: &str| {
+        let html = search_at(&db, path, "");
+        html.contains(&format!(
+            "action=\"{}\"",
+            if path.starts_with("/vi") {
+                "/vi/search"
+            } else {
+                "/search"
+            }
+        ))
+    };
+    let vi = search_at(&db, "/vi/search", "bot");
+    assert!(vi.contains("<html lang=\"vi\""));
+    assert!(vi.contains("<link rel=\"canonical\" href=\"https://blog.test/vi/search\">"));
+    assert!(vi.contains("<meta name=\"robots\" content=\"noindex\">"));
+    assert!(!vi.contains("action=\"/search\""), "{vi}");
+    assert!(action("/vi/search") && action("/search"));
+    // Any vi page submits to /vi/search; any default-language page to /search.
+    for path in ["/vi/", "/vi/bai-viet-dau-tien"] {
+        let (status, html) = get(&db, path, "");
+        assert_eq!(status, 200, "{path}");
+        assert!(html.contains("action=\"/vi/search\""), "{path}");
+        assert!(html.contains("href=\"/vi/search\""), "{path}");
+        assert!(!html.contains("action=\"/search\""), "{path}");
+    }
+    for path in ["/", "/first-post", "/nothing-here"] {
+        let html = get(&db, path, "").1;
+        assert!(html.contains("action=\"/search\""), "{path}");
+    }
+}
+
+#[test]
+fn only_a_listed_language_has_a_search_page_else_it_is_a_post_path() {
+    let db = store();
+    // `fr` is not a site language: `/fr/search` is the post it always was.
+    publish_in(&db, "fr", "search", "Bonjour");
+    let (status, html) = match run(render(&Db(&db), &Db(&db), &Db(&db), "/fr/search", "")).unwrap()
+    {
+        Outcome::Page { status, body, .. } => (status, body),
+        Outcome::Redirect(to) => panic!("redirected to {to}"),
+    };
+    assert_eq!(status, 200);
+    assert!(html.contains("Bonjour"), "{html}");
+    assert!(html.contains("<link rel=\"canonical\" href=\"https://blog.test/fr/search\">"));
+    // A listed language's search page wins over a stored post of that slug.
+    publish_in(&db, "vi", "search", "Shadowed");
+    assert!(search_at(&db, "/vi/search", "").contains("action=\"/vi/search\""));
 }
