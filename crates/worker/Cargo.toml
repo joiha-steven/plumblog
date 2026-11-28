@@ -27,9 +27,15 @@ plumblog-store.workspace = true
 plumblog-syslog.workspace = true
 plumblog-webhook.workspace = true
 
+[build-dependencies]
+# Converts the embedded TOML to JSON at build time; the `toml` feature never reaches the wasm
+# (a build dependency runs on the build machine only).
+plumblog-render = { workspace = true, features = ["toml"] }
+
 [dev-dependencies]
 roxmltree.workspace = true
 rusqlite.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

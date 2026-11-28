@@ -169,7 +169,11 @@ fn push_uploads_the_theme_and_binds_it() {
     assert!(fake.state().version_assets[V2].contains_key("/admin/app.js"));
     // theme.json: every text file, assets listed by SHA-256, hash over both.
     let doc = served_doc(&fake, V2);
-    assert!(doc.files.contains_key("theme.toml") && doc.files.contains_key("templates/base.html"));
+    assert!(
+        doc.files.contains_key("theme.toml.json")
+            && !doc.files.contains_key("theme.toml")
+            && doc.files.contains_key("templates/base.html")
+    );
     assert!(!doc.files.keys().any(|p| p.starts_with("assets/")));
     assert!(doc.assets.contains_key("minimal.js"));
     let rec = load(&dir).deploys.last().unwrap().clone();

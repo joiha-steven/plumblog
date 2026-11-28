@@ -1,6 +1,7 @@
 //! Embeds the default theme's text files, bundled plugins and the sample posts, so the Worker renders pages
 //! with no storage at all. Fonts and JS are served as static assets, not embedded (they would
-//! only grow the wasm).
+//! only grow the wasm). TOML files are embedded as JSON under `<name>.json`: the Worker
+//! links no TOML parser (docs/ARCHITECTURE.md, Budgets).
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
@@ -29,13 +30,7 @@ fn main() {
     files.sort();
     out.push_str("pub static THEME_FILES: &[(&str, &str)] = &[\n");
     for p in &files {
-        writeln!(
-            out,
-            "    ({:?}, include_str!({:?})),",
-            rel(&theme, p),
-            p.display()
-        )
-        .unwrap();
+        writeln!(out, "    {},", entry(&rel(&theme, p), p)).unwrap();
     }
     out.push_str("];\n");
 
@@ -156,7 +151,7 @@ fn embed_plugins(plugins_dir: &Path, out: &mut String) {
             let rel = rel(dir, p);
             let embed = !rel.starts_with("assets/") || p.extension().is_some_and(|e| e == "css");
             if embed {
-                writeln!(out, "        ({rel:?}, include_str!({:?})),", p.display()).unwrap();
+                writeln!(out, "        {},", entry(&rel, p)).unwrap();
             } else {
                 writeln!(out, "        ({rel:?}, \"\"),").unwrap();
             }
@@ -164,6 +159,20 @@ fn embed_plugins(plugins_dir: &Path, out: &mut String) {
         out.push_str("    ]),\n");
     }
     out.push_str("];\n");
+}
+
+/// `(path, text)` for the embedded table: a TOML file becomes its JSON under the name
+/// `convert::json_name` gives; any other file is included as it is.
+fn entry(rel: &str, p: &Path) -> String {
+    match plumblog_render::convert::json_name(rel) {
+        Some(name) => {
+            let src = fs::read_to_string(p).unwrap();
+            let json = plumblog_render::convert::file(rel, &src)
+                .unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+            format!("({name:?}, {json:?})")
+        }
+        None => format!("({rel:?}, include_str!({:?}))", p.display()),
+    }
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -215,7 +224,9 @@ fn embed_locales(dir: &Path, out: &mut String) {
     for p in &locales {
         let lang = p.file_stem().unwrap().to_string_lossy();
         let text = without_admin_client_text(&fs::read_to_string(p).unwrap());
-        writeln!(out, "    ({lang:?}, {text:?}),").unwrap();
+        let json = plumblog_render::convert::file(&format!("locales/{lang}.toml"), &text)
+            .unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        writeln!(out, "    ({lang:?}, {json:?}),").unwrap();
     }
     out.push_str("];\n");
 }
