@@ -77,14 +77,7 @@ impl MediaStore for MemoryStore {
 
     async fn public_media(&self, id: MediaId) -> Result<Option<Media>> {
         Ok(self.read(|s| {
-            let live = |p: PostId| {
-                s.posts
-                    .get(&p)
-                    .is_some_and(|p| p.status == PostStatus::Published)
-            };
-            s.media_usage(id)
-                .into_iter()
-                .any(live)
+            s.on_published(id)
                 .then(|| s.media.get(&id).cloned())
                 .flatten()
         }))
@@ -136,7 +129,9 @@ impl MediaStore for MemoryStore {
                 )));
             }
             new.clone_into(&mut m.variants_json);
-            s.bump();
+            if s.on_published(id) {
+                s.bump();
+            }
             Ok(())
         })
     }
@@ -177,6 +172,15 @@ impl State {
         ids.sort_unstable();
         ids.dedup();
         ids
+    }
+
+    /// Whether a published post uses `id` (its bytes and sizes are on reader pages).
+    fn on_published(&self, id: MediaId) -> bool {
+        self.media_usage(id).into_iter().any(|p| {
+            self.posts
+                .get(&p)
+                .is_some_and(|p| p.status == PostStatus::Published)
+        })
     }
 }
 
