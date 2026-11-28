@@ -28,8 +28,8 @@ const MARK = "x-plumblog-entry";
 
 // What lib.rs routes to pages::serve (media::serve owns /media/) besides search (/search and
 // /<lang>/search), which is never cached.
-// First segments the router owns (pages::routes::RESERVED): never a language, so /tag/search is a page.
-const OWNED = new Set(["page", "tag", "archive", "search", "theme", "plugin", "media", "admin", "api", "healthz"]);
+// First segments the router owns (pages::routes::RESERVED): never a language, so /tag/search is a page. (`/series` alone may still be a post: see routes.rs.)
+const OWNED = new Set(["page", "tag", "series", "archive", "search", "theme", "plugin", "media", "admin", "api", "healthz"]);
 const isLangSearch = (p) => {
   const m = /^\/([a-z]{2,3}(?:-[a-z0-9]{2,8})*)\/search$/.exec(p);
   return m !== null && !OWNED.has(m[1]);

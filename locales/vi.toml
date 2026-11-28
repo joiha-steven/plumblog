@@ -756,6 +756,10 @@ fix = "Đổi `{fg}` hoặc `{bg}` trong [colors.{mode}] (hoặc tuỳ chọn gh
 what = "Tệp CSS nặng {size} KB sau khi nén; giới hạn là {max} KB."
 fix = "Bỏ các quy tắc không dùng, hoặc chuyển phần ít người cần sang tệp kiểu do một tuỳ chọn chọn."
 
+[cli.finding.theme_template_default]
+what = "Giao diện chưa có {file}, nên trang đó dùng bản của giao diện mặc định."
+fix = "Thêm templates/{file} để trang đó hợp với phần còn lại của giao diện; bản mặc định dùng sẵn phần đầu và chân trang của chính giao diện."
+
 [cli.finding.theme_js_size]
 what = "Mã JS của giao diện nặng {size} KB sau khi nén; giới hạn là {max} KB."
 fix = "Cắt bớt mã, hoặc chỉ nạp phần ít dùng ở trang cần bằng asset()."

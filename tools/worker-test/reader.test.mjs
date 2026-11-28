@@ -101,7 +101,7 @@ test("published with a future date is refused, and reserved slugs are not for th
   const future = await api("POST", "/posts", { lang: "en", slug: "too-early", title: "T", markdown: "x", status: "published", published_at: T + DAY });
   assert.equal(future.status, 400, future.raw);
   assert.deepEqual(future.json, { error: "post.published_in_future", field: "published_at" });
-  for (const slug of ["page", "tag", "archive", "search", "theme", "plugin", "media", "admin", "api", "healthz"]) {
+  for (const slug of ["page", "tag", "series", "archive", "search", "theme", "plugin", "media", "admin", "api", "healthz"]) {
     const r = await api("POST", "/posts", { lang: "en", slug, title: "T", markdown: "x", status: "draft" });
     assert.deepEqual(r.json, { error: "input.invalid", field: "slug" }, slug);
   }

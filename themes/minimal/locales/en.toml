@@ -21,6 +21,7 @@ newer_posts = "Newer posts"
 page_title = "{title} - {site}"
 reading_time = "{minutes} min read"
 tag = "#{name}"
+series = "Series:"
 posts = "Posts"
 previous = "Previous"
 next = "Next"
@@ -83,6 +84,11 @@ month_12 = "Dec"
 
 [tag]
 title = "#{name}"
+
+[series]
+# Paging runs in reading order: earlier parts first.
+earlier_posts = "Earlier parts"
+later_posts = "Later parts"
 
 [archive]
 title = "Posts from {year}"

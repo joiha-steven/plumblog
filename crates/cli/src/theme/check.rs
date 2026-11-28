@@ -432,6 +432,7 @@ pub fn check_theme(files: &DirFiles) -> Vec<Finding> {
     out.extend(asset_name_findings(files));
     out.extend(document_size_finding(files));
     out.extend(missing_asset_findings(files, src, manifest.as_ref()));
+    out.extend(fallback_template_findings(files));
     out.extend(render_findings(&theme, files));
     for (path, text) in files.iter() {
         if has_ext(path, "css") && !path.starts_with("assets/") {
@@ -666,6 +667,24 @@ fn size_findings(
         );
     }
     out
+}
+
+/// Templates added after themes were first pushed: a theme without one is still served (the
+/// default theme's template fills in), so this is a warning.
+fn fallback_template_findings(files: &DirFiles) -> Vec<Finding> {
+    ["series.html"]
+        .into_iter()
+        .filter(|name| files.read(&format!("templates/{name}")).is_none())
+        .map(|name| {
+            Finding::new(
+                Level::Warning,
+                Kind::ThemeTemplateDefault,
+                format!("templates/{name}").as_str(),
+                None,
+            )
+            .arg("file", name)
+        })
+        .collect()
 }
 
 /// Renders every page kind over the sample blog; each failure or missing text key is a

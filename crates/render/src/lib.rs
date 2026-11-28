@@ -16,7 +16,7 @@ mod seo;
 mod theme;
 
 pub use data::{
-    Alternate, Body, CommentItem, Comments, Image, Link, NavItem, PageInfo, Post, Site,
+    Alternate, Body, CommentItem, Comments, Image, Link, NavItem, PageInfo, Post, SeriesRef, Site,
 };
 pub use plugin::Plugin;
 pub use pushed::{PushedTheme, THEME_API};
@@ -36,6 +36,7 @@ pub enum PageKind {
     Home,
     Post,
     Tag,
+    Series,
     Archive,
     Search,
     NotFound,
@@ -48,6 +49,7 @@ impl PageKind {
             Self::Home => "home.html",
             Self::Post => "post.html",
             Self::Tag => "tag.html",
+            Self::Series => "series.html",
             Self::Archive => "archive.html",
             Self::Search => "search.html",
             Self::NotFound => "404.html",
@@ -61,6 +63,7 @@ impl PageKind {
             Self::Home => "home",
             Self::Post => "post",
             Self::Tag => "tag",
+            Self::Series => "series",
             Self::Archive => "archive",
             Self::Search => "search",
             Self::NotFound => "404",

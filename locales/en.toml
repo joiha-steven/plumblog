@@ -770,6 +770,10 @@ fix = "Change `{fg}` or `{bg}` in [colors.{mode}] (or the option that overrides 
 what = "The stylesheet is {size} KB compressed; the limit is {max} KB."
 fix = "Remove unused rules, or move styles most readers do not need into a style file chosen by an option."
 
+[cli.finding.theme_template_default]
+what = "The theme has no {file}, so the default theme's is used for that page."
+fix = "Add templates/{file} to style that page like the rest of the theme; the default one uses the theme's own header and footer."
+
 [cli.finding.theme_js_size]
 what = "The theme's scripts are {size} KB compressed; the limit is {max} KB."
 fix = "Trim the scripts, or load rare ones only on the pages that need them with asset()."

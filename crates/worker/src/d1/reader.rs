@@ -1,10 +1,11 @@
 //! Reader reads (`ReaderStore`): published posts only. The SQL is in `reader_sql`, where a test
 //! checks the plan of each query against the index it is meant to use.
 
-use plumblog_model::{PostId, Result, TagId};
+use plumblog_model::{PostId, Result, SeriesId, TagId};
 use plumblog_store::{
     READER_MAX_OFFSET, READER_SITEMAP_MAX, ReaderFilter, ReaderLink, ReaderNeighbours, ReaderPage,
-    ReaderPost, ReaderRow, ReaderSitemapRow, ReaderStore, ReaderTag, Tag, year_bounds,
+    ReaderPost, ReaderRow, ReaderSeries, ReaderSitemapRow, ReaderStore, ReaderTag, ReaderTaxonPage,
+    Tag, year_bounds,
 };
 use worker::js_sys::{Array, JSON};
 use worker::wasm_bindgen::{JsCast, JsValue};
@@ -46,7 +47,9 @@ fn listing(filter: ReaderFilter<'_>) -> Result<Option<(String, Vec<JsValue>)>> {
         return Ok(None);
     };
     let params = match filter {
-        ReaderFilter::Tag(TagId(t)) => vec![bound(t)],
+        ReaderFilter::Tag(TagId(t), l) | ReaderFilter::Series(SeriesId(t), l) => {
+            vec![bound(t), text(l)]
+        }
         ReaderFilter::Year(y) => {
             let (from, to) = year_bounds(y).ok_or_else(|| storage("reader_posts", "year"))?;
             vec![int(from)?, int(to)?]
@@ -86,7 +89,11 @@ impl ReaderStore for D1Store {
         params.extend([limit(limit_n), JsValue::from(offset)]);
         let s = self.stmt(
             "reader_posts",
-            &sql::rows(&from, matches!(filter, ReaderFilter::Home(_))),
+            &if matches!(filter, ReaderFilter::Series(..)) {
+                sql::rows_series(&from)
+            } else {
+                sql::rows(&from, matches!(filter, ReaderFilter::Home(_)))
+            },
             &params,
         )?;
         let rows = self
@@ -103,13 +110,17 @@ impl ReaderStore for D1Store {
         Ok(ReaderPage { total, rows })
     }
 
-    // 1 query (post page): the post, its tag ids and its tags.
+    // 1 query (post page): the post, its tags and its series.
     async fn reader_post(&self, lang: &str, slug: &str) -> Result<Option<ReaderPost>> {
         let s = self.stmt("reader_post", &sql::post(), &[text(lang), text(slug)])?;
         match self.row(s).await? {
             Some(mut r) => Ok(Some(ReaderPost {
                 post: read_post(&mut r)?,
                 tags: read_tags("reader_post", &mut r)?,
+                series: match (r.opt_text()?, r.opt_text()?) {
+                    (Some(slug), Some(title)) => Some(ReaderSeries { slug, title }),
+                    _ => None,
+                },
             })),
             None => Ok(None),
         }
@@ -211,6 +222,7 @@ impl ReaderStore for D1Store {
                 Ok(ReaderPost {
                     post: read_post(r)?,
                     tags: read_tags("reader_feed", r)?,
+                    series: None,
                 })
             })
             .collect()
@@ -258,5 +270,81 @@ impl ReaderStore for D1Store {
                 })
             })
             .collect()
+    }
+
+    // 1 query (none for an empty list): an EXISTS on post_tags_tag per tag and language.
+    async fn reader_tag_pages(&self, langs: &[String]) -> Result<Vec<ReaderTaxonPage>> {
+        self.taxon_pages("reader_tag_pages", sql::tag_pages(langs.len()), langs)
+            .await
+    }
+
+    // 1 query (none for an empty list): an EXISTS on posts_series per series and language.
+    async fn reader_series_pages(&self, langs: &[String]) -> Result<Vec<ReaderTaxonPage>> {
+        self.taxon_pages("reader_series_pages", sql::series_pages(langs.len()), langs)
+            .await
+    }
+
+    // 1 query (none for an empty list).
+    async fn reader_tag_langs(&self, tag: TagId, langs: &[String]) -> Result<Vec<String>> {
+        self.taxon_langs(
+            "reader_tag_langs",
+            sql::tag_langs(langs.len()),
+            tag.0,
+            langs,
+        )
+        .await
+    }
+
+    // 1 query (none for an empty list).
+    async fn reader_series_langs(&self, series: SeriesId, langs: &[String]) -> Result<Vec<String>> {
+        self.taxon_langs(
+            "reader_series_langs",
+            sql::series_langs(langs.len()),
+            series.0,
+            langs,
+        )
+        .await
+    }
+}
+
+impl D1Store {
+    async fn taxon_pages(
+        &self,
+        name: &'static str,
+        sql: String,
+        langs: &[String],
+    ) -> Result<Vec<ReaderTaxonPage>> {
+        if langs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let params: Vec<JsValue> = langs.iter().map(|l| text(l)).collect();
+        let s = self.stmt(name, &sql, &params)?;
+        self.rows(s)
+            .await?
+            .iter_mut()
+            .map(|r| {
+                Ok(ReaderTaxonPage {
+                    slug: r.text()?,
+                    name: r.text()?,
+                    lang: r.text()?,
+                })
+            })
+            .collect()
+    }
+
+    async fn taxon_langs(
+        &self,
+        name: &'static str,
+        sql: String,
+        id: i64,
+        langs: &[String],
+    ) -> Result<Vec<String>> {
+        if langs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut params: Vec<JsValue> = langs.iter().map(|l| text(l)).collect();
+        params.push(bound(id));
+        let s = self.stmt(name, &sql, &params)?;
+        self.rows(s).await?.iter_mut().map(Row::text).collect()
     }
 }

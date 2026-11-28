@@ -93,6 +93,7 @@ impl Sample {
                     cover: None,
                     thumb: None,
                     translations: Vec::new(),
+                    series: None,
                 };
                 (post, year)
             })

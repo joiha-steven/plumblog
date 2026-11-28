@@ -88,6 +88,7 @@ fn post(slug: &str, title: &str, at: i64, pinned: bool) -> Post {
         cover: None,
         thumb: None,
         translations: vec![],
+        series: None,
     }
 }
 
