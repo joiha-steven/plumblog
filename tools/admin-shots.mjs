@@ -81,6 +81,26 @@ const removeConfirm = async (page) => {
   await page.waitForSelector(".confirm");
   await settle(page, ".pop");
 };
+const TOKENS = ".tok";
+const toTokens = (page) => page.evaluate(() => document.querySelector("#acct-tok").scrollIntoView({ block: "start" }));
+const tokForm = async (page) => {
+  await page.click(".tok-add button");
+  await page.waitForSelector("#tok-name");
+  await toTokens(page);
+};
+const tokCreate = async (page) => {
+  await tokForm(page);
+  await page.fill("#tok-name", "Claude agent for the blog");
+  await page.click(".tok-add button[type=submit]");
+  await page.waitForSelector(".tok-secret");
+  await toTokens(page);
+};
+const tokRevoke = async (page) => {
+  await toTokens(page);
+  await page.click(".tok .btn.danger");
+  await page.waitForSelector(".confirm");
+  await settle(page, ".pop");
+};
 const send = (form) => async (page) => {
   await page.fill(`${form} input[type=password]`, "correct horse battery");
   await page.click(`${form} button[type=submit]`);
@@ -494,6 +514,36 @@ const STATES = [
       await send(".acct-panel")(page);
     },
   ],
+  ["account-tokens", "/admin/account", TOKENS, toTokens],
+  ["account-tokens-empty", "/admin/account?tokens=0", ".sec:has(#acct-tok) .empty", toTokens],
+  ["account-tokens-error", "/admin/account?tokens=error", ".sec:has(#acct-tok) [role=alert]", toTokens],
+  [
+    "account-tokens-invalid",
+    "/admin/account",
+    TOKENS,
+    async (page) => {
+      await tokForm(page);
+      await page.click(".tok-add button[type=submit]");
+      await page.waitForSelector("#tok-name[aria-invalid=true]");
+    },
+  ],
+  ["account-tokens-secret", "/admin/account", TOKENS, tokCreate],
+  ["account-tokens-revoke", "/admin/account", TOKENS, tokRevoke],
+  ["account-tokens-writer", "/admin/account?role=writer", TOKENS, tokForm],
+  [
+    "account-tokens-offline",
+    "/admin/account",
+    TOKENS,
+    async (page) => {
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, "onLine", { get: () => false });
+        dispatchEvent(new Event("offline"));
+      });
+      // The shell redraws the page when the network changes; wait for the redrawn list.
+      await page.waitForSelector(".tok-add button:disabled");
+      await toTokens(page);
+    },
+  ],
   [
     "signout-confirm",
     "/admin/account",
@@ -568,7 +618,7 @@ try {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const english = ["posts", "posts-strip", "pages", "media", "media-details", "media-in-use", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow"];
+        const english = ["posts", "posts-strip", "pages", "media", "media-details", "media-in-use", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "reset-taken", "account", "account-wrong-password", "account-tokens", "account-tokens-secret", "account-tokens-writer", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow"];
         const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
         const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);

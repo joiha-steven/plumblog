@@ -8,7 +8,7 @@
  * Adding or removing a passkey (account screen): `reauth_wrong|reauth|conflict|origin|unsupported|turnstile`
  * fail as the server does (`turnstile`: removing only; adding sends its token after the browser prompt), before any browser prompt (no real WebAuthn runs in shots); `?passkeys=0`
  * starts with none. Removing works on a list kept in memory. `?upload=fail` makes uploads fail
- * halfway and `?upload=slow` takes 20 s.
+ * halfway and `?upload=slow` takes 20 s. API tokens (`/api/auth/tokens`, account screen): `?tokens=0|error|forbidden`.
  *
  * Publishing: a post update with `status` follows the server's rules (a draft carries no time, a
  * scheduled time must be in the future); `?slug=taken` makes the first publish fail once with a
@@ -29,6 +29,7 @@
 import me from "../../fixtures/me.json";
 import mediaFixtures from "../../fixtures/media.json";
 import posts from "../../fixtures/posts.json";
+import tokenFixtures from "../../fixtures/tokens.json";
 import longPost from "../../fixtures/post-1.txt";
 import { type Api, type JsonBody, type Me, type Media, type MediaItem, type MediaPage, type Method, type Result, fail } from "./client";
 import type { Post, PostCreateInput, PostPage, PostUpdateInput, RenderWarning } from "./model.gen";
@@ -56,6 +57,44 @@ const keyList = (params: URLSearchParams): Key[] =>
           { id: 1, name: "MacBook Pro", created_at: Date.UTC(2026, 8, 3), last_used_at: Date.UTC(2026, 10, 24) },
           { id: 2, name: "iPhone 16", created_at: Date.UTC(2026, 10, 12), last_used_at: null },
         ]);
+
+interface MockToken {
+  id: number;
+  name: string;
+  scope: string;
+  created_at: number;
+  expires_at: number | null;
+  revoked_at: number | null;
+}
+/** The mock's API tokens; `?tokens=0` starts with none. The token text is made up and never listed. */
+let tokens: MockToken[] | undefined;
+const tokenList = (params: URLSearchParams): MockToken[] => (tokens ??= params.get("tokens") === "0" ? [] : structuredClone(tokenFixtures));
+
+/** `/api/auth/tokens`: `?tokens=error` fails the list, `?tokens=forbidden` refuses a create; `?role=writer` cannot make an owner token. */
+function tokenRoutes<T>(params: URLSearchParams, method: Method, path: string, body: Body): Result<T> | undefined {
+  const done = (value: unknown = {}): Result<T> => ({ ok: true, value: value as T });
+  if (path === "/api/auth/tokens" && method === "GET") {
+    return params.get("tokens") === "error" ? fail("bad_response", 500) : done({ tokens: tokenList(params) });
+  }
+  if (path === "/api/auth/tokens" && method === "POST") {
+    const name = String(body?.["name"] ?? "");
+    const scope = String(body?.["scope"] ?? "");
+    if (!name || [...name].length > 64 || !["read", "writer", "owner"].includes(scope)) return fail("input.invalid", 400);
+    if (params.get("tokens") === "forbidden" || (scope === "owner" && params.get("role") === "writer")) return fail("auth.forbidden", 403);
+    const list = tokenList(params);
+    const made = { id: Math.max(0, ...list.map((k) => k.id)) + 1, name, scope, created_at: Date.now(), expires_at: body?.["expires_at"] ? Number(body["expires_at"]) : null, revoked_at: null };
+    list.push(made);
+    return done({ ...made, token: "plb_mockMockMockMockMockMockMockMockMockMockMoc" });
+  }
+  const del = /^\/api\/auth\/tokens\/(\d+)$/.exec(path);
+  if (del && method === "DELETE") {
+    const at = tokenList(params).find((k) => k.id === Number(del[1]));
+    if (!at) return fail("store.not_found", 404);
+    at.revoked_at = Date.now();
+    return done();
+  }
+  return undefined;
+}
 
 /** The mock's auth routes; the failure each `?auth=` value forces is the one the real route gives. */
 async function auth<T>(params: URLSearchParams, method: Method, path: string, body: Body): Promise<Result<T>> {
@@ -126,6 +165,8 @@ async function auth<T>(params: URLSearchParams, method: Method, path: string, bo
     keys = keyList(params).filter((k) => k.id !== Number(del[1]));
     return done();
   }
+  const tok = tokenRoutes<T>(params, method, path, body);
+  if (tok) return tok;
   console.warn(`mock: ${method} ${path} is not served`);
   return fail("bad_response", 501);
 }

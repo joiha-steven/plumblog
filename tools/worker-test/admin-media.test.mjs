@@ -498,7 +498,10 @@ test("a delete in flight belongs to its picture: another open card stays; a refu
     await page.locator(".toast", { hasText: tx("admin.media.err_used") }).waitFor();
     assert.match(await page.locator(".toast").innerText(), /Post #\d+/);
     assert.equal(await tileOf(page, "busy.png").count(), 1);
-    assert.deepEqual(problems, []);
+    // The deleted picture's own tile may refetch it (no-store) in the moment between the
+    // server's delete and the tile's removal: a 404 for that one URL is expected.
+    const gone = `/media/${free.id}/free.png`;
+    assert.deepEqual(problems.filter((p) => !(p.includes("status of 404") && p.endsWith(gone))), []);
   } finally {
     await context.close();
   }

@@ -5,6 +5,7 @@
 
 mod export;
 mod input;
+mod log;
 mod media;
 mod post_body;
 mod posts;
@@ -152,17 +153,21 @@ pub async fn dispatch(
         RouteId::MediaOriginal => media::original(ctx, &input).await,
         RouteId::CommentList => export::comments(ctx, &input).await,
         RouteId::UserList => export::users(ctx, &input).await,
+        RouteId::LogList => log::list(ctx, &input).await,
         RouteId::RedirectList => settings::redirects(ctx).await,
         RouteId::RedirectPut => settings::redirect_put(ctx, p, &input).await,
         RouteId::RedirectDelete => settings::redirect_delete(ctx, p, &input).await,
         RouteId::SettingList => settings::list(ctx).await,
         RouteId::SettingPut => settings::put(ctx, p, &input).await,
         RouteId::SettingDelete => settings::delete(ctx, p, &input).await,
+        RouteId::ThemeList => settings::themes(ctx).await,
+        RouteId::ThemeDeclarations => settings::declarations(ctx, p, theme, &input).await,
         RouteId::ThemeOptions => settings::options(ctx, p, theme, &input).await,
         RouteId::ThemeOptionPut => settings::option_put(ctx, p, theme, &input).await,
         RouteId::ThemeOptionsDelete => settings::options_delete(ctx, p, theme, &input).await,
         RouteId::PluginList => settings::plugins(ctx).await,
         RouteId::PluginPut => settings::plugin_put(ctx, p, &input).await,
+        RouteId::PluginDeclarations => settings::declarations(ctx, p, plugin, &input).await,
         RouteId::PluginOptions => settings::options(ctx, p, plugin, &input).await,
         RouteId::PluginOptionPut => settings::option_put(ctx, p, plugin, &input).await,
         RouteId::PluginOptionsDelete => settings::options_delete(ctx, p, plugin, &input).await,

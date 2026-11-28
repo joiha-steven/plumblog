@@ -49,6 +49,26 @@ pub enum Severity {
     Error,
 }
 
+impl Severity {
+    /// Lowest first, as `plumblog_model::shape::LOG_LEVELS`.
+    pub const ALL: &[Severity] = &[Self::Info, Self::Warning, Self::Error];
+
+    /// The code the API and the admin use for the level.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(code: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|s| s.as_str() == code)
+    }
+}
+
 impl EventKind {
     /// Severity when the event carries no error code. An exhaustive match: a new kind must
     /// decide how loud it is.
@@ -239,7 +259,10 @@ impl Event {
     }
 }
 
-fn escape(s: &str) -> String {
+/// The stored form of one subject, key or value (see [`Event::detail`]); a text search over
+/// `detail` escapes its needle the same way.
+#[must_use]
+pub fn escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('\n', "\\n")
         .replace('\t', "\\t")
@@ -271,6 +294,16 @@ mod tests {
 
     fn rid() -> RequestId {
         RequestId::parse("8f2a1c3b9d-SIN").unwrap()
+    }
+
+    /// The model crate cannot see these enums, so it keeps copies for the admin's types.
+    #[test]
+    fn model_code_lists_match_the_enums() {
+        let kinds: Vec<_> = EventKind::ALL.iter().map(|k| k.as_str()).collect();
+        assert_eq!(plumblog_model::shape::LOG_KINDS, kinds);
+        let levels: Vec<_> = Severity::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(plumblog_model::shape::LOG_LEVELS, levels);
+        assert!(Severity::ALL.is_sorted(), "lowest first");
     }
 
     /// Pins every stored code: renaming one orphans existing D1 rows.
