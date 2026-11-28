@@ -58,8 +58,20 @@ ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
 # `blog setup` makes WEBHOOK_KEY, the site id and the setup code from the OS random source;
 # already in the lock through ring, so no new code.
 getrandom = "0.2.17"
+# Release signatures (issue #21): Ed25519 verify for `blog update` and signing in `blog-release`.
+# Already linked through ureq's rustls, so no new code ships; Ed25519 is not code to own.
+ring = { version = "0.17.14", default-features = false }
+# Release archives are .tar.gz (and .zip on Windows): a raw DEFLATE decoder. Inflate is subtle,
+# security-relevant code; miniz_oxide is pure Rust, no unsafe, and is what Rust's own std uses.
+# The gzip/tar/zip containers around it are a few small, strict readers in crates/cli.
+miniz_oxide = { version = "0.8.9", default-features = false, features = ["with-alloc"] }
+# `blog backup` checks each downloaded R2 object against its ETag, which for a single-part
+# upload is the MD5 of the bytes; `blog restore` will need it for D1 import etags too. ring has
+# no MD5 and a checksum is not code to hand-write; RustCrypto's md-5 is small and pure Rust.
+md-5 = { version = "0.11.0", default-features = false }
 # Tests only: the fake Cloudflare D1 (crates/cli/tests/fake_cf) runs the repo's migrations and
-# setup's SQL in real SQLite, so tests assert the rows the Worker reads. Bundled: no system
+# setup's SQL in real SQLite, so tests assert the rows the Worker reads; the Worker's tests
+# run EXPLAIN QUERY PLAN on the reader queries. Bundled: no system
 # SQLite, and FTS5 is compiled in. Never linked into `blog` or the Worker.
 rusqlite = { version = "0.39", features = ["bundled"] }
 # Pinned to the stub back end of `idna` (via `url`, only through `worker`): no Unicode tables, so

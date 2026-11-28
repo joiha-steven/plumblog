@@ -146,11 +146,11 @@ export const openPopEl = (): HTMLElement | undefined => pop?.el;
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
-/** A short note at the bottom of the screen, read out by screen readers. */
-export function toast(text: string, ms = 2600): void {
+/** A short note at the bottom of the screen, read out by screen readers; `link` opens a page in a new tab. */
+export function toast(text: string, ms = 2600, link?: { text: string; href: string }): void {
   document.querySelector(".toast")?.remove();
   clearTimeout(toastTimer);
-  const el = h("div", { class: "toast", role: "status" }, text);
+  const el = h("div", { class: "toast", role: "status" }, text, link ? h("a", { href: link.href, target: "_blank", rel: "noopener" }, link.text) : null);
   document.body.append(el);
   toastTimer = setTimeout(() => el.remove(), ms);
 }

@@ -9,19 +9,32 @@
  * fail as the server does (`turnstile`: removing only; adding sends its token after the browser prompt), before any browser prompt (no real WebAuthn runs in shots); `?passkeys=0`
  * starts with none. Removing works on a list kept in memory. `?upload=fail` makes uploads fail
  * halfway and `?upload=slow` takes 20 s.
+ *
+ * Publishing: a post update with `status` follows the server's rules (a draft carries no time, a
+ * scheduled time must be in the future); `?slug=taken` makes the first publish fail once with a
+ * taken slug; trash and restore work on the same list. `?create=slow` leaves every create
+ * unanswered (the editor's "still saving" message).
+ *
+ * Posts live in memory, from fixtures/posts.json, and reset on page load; the long post (id 1)
+ * keeps its body in post-1.txt, so its `markdown` in the JSON is empty and is filled in here.
+ * They answer as `/api/v1/posts` does: paged lists (opaque cursor), `post.not_found`, 409
+ * `store.conflict` on a stale `expected_version` (`?conflict=1` makes the first update
+ * conflict, as if another device saved first) or a taken slug. Rendering is not simulated:
+ * `html` stays as the fixture has it, and the only warning computed is `markdown.math_invalid`.
  */
 
 import me from "../../fixtures/me.json";
 import posts from "../../fixtures/posts.json";
 import longPost from "../../fixtures/post-1.txt";
-import { type Api, type Me, type Media, type Method, type PostDraft, type PostSummary, type Result, fail } from "./client";
+import { type Api, type JsonBody, type Me, type Media, type Method, type Result, fail } from "./client";
+import type { Post, PostCreateInput, PostPage, PostUpdateInput, RenderWarning } from "./model.gen";
 
 /** Cloudflare's public always-pass Turnstile key: the real widget works in dev. */
 const TEST_SITE_KEY = "1x00000000000000000000AA";
 /** Set by a mock sign-in, so `?auth=out` (still in the page's own address) lets the writer back in. */
 const SIGNED_IN = "pb.mock.signed-in";
 
-type Body = Record<string, string | boolean> | undefined;
+type Body = JsonBody | undefined;
 
 interface Key {
   id: number;
@@ -108,11 +121,32 @@ async function auth<T>(params: URLSearchParams, method: Method, path: string, bo
   return fail("bad_response", 501);
 }
 
+const PAGE = 20;
+
+/** An approximation: the server warns on TeX that does not render (`$\notacommand$`); the mock
+ * only knows a `$$` that never closes, enough to show a warning. */
+const warningsOf = (markdown: string): RenderWarning[] =>
+  (markdown.match(/\$\$/g)?.length ?? 0) % 2 === 1 ? ["markdown.math_invalid"] : [];
+
+const wordsOf = (markdown: string): number => markdown.split(/\s+/).filter(Boolean).length;
+
 export function mockApi(params: URLSearchParams): Api {
   const mode = params.get("mock");
   const up = params.get("upload");
   let mediaId = 100;
   const role = params.get("role") === "writer" ? "writer" : "owner";
+  const store: Post[] = (posts as Post[]).map((p) => structuredClone(p));
+  const first = store.find((p) => p.id === 1);
+  if (first) first.markdown = longPost;
+  /** The first update fails once with the server's newer version when `?conflict=1`. */
+  let conflictPending = params.get("conflict") === "1";
+  /** The first publish fails once with a taken slug when `?slug=taken`. */
+  let slugPending = params.get("slug") === "taken";
+  const down = <T>(): Result<T> | undefined => {
+    if (mode === "error") return fail("internal", 500);
+    if (mode === "offline") return fail("network", 0);
+    return undefined;
+  };
   const settle = async () => {
     if (mode === "loading") await new Promise(() => undefined);
     await new Promise((r) => setTimeout(r, 150));
@@ -126,24 +160,125 @@ export function mockApi(params: URLSearchParams): Api {
       const user: Me = { ...(me.user as Me), role };
       return { ok: true, value: user };
     },
-    async posts() {
+    async posts(q) {
       await settle();
-      if (mode === "error") return fail("internal", 500);
-      if (mode === "offline") return fail("network", 0);
-      return { ok: true, value: mode === "empty" ? [] : (posts as PostSummary[]) };
+      const bad = down<PostPage>();
+      if (bad) return bad;
+      if (q.order !== undefined && q.order !== "updated") return fail("input.invalid", 400, { field: "order" });
+      let offset = 0;
+      if (q.cursor !== undefined) {
+        offset = Number(atob(q.cursor));
+        if (!Number.isInteger(offset) || offset < 0) return fail("input.invalid", 400, { field: "cursor" });
+      }
+      const limit = q.limit ?? PAGE;
+      const all = mode === "empty" ? [] : store.filter((p) => (q.kind === undefined || p.kind === q.kind) && (q.status === undefined || p.status === q.status) && (q.lang === undefined || p.lang === q.lang));
+      all.sort((a, b) => b.updated_at - a.updated_at || b.id - a.id);
+      const page = all.slice(offset, offset + limit).map((p) => {
+        const { markdown: _m, html: _h, media_ids: _i, warnings: _w, ...summary } = p;
+        return summary;
+      });
+      const next = offset + limit < all.length ? btoa(String(offset + limit)) : null;
+      return { ok: true, value: { posts: page, next_cursor: next } };
     },
     async post(id) {
       await settle();
       if (mode === "offline") return fail("network", 0);
-      const s = (posts as PostSummary[]).find((p) => p.id === id);
-      if (!s) return fail("post.not_found", 404);
-      const body = id === 1 ? longPost : `${s.excerpt}\n`;
-      const post: PostDraft = { id: s.id, title: s.title, body, lang: s.lang, status: s.status, updated_at: s.updated_at };
-      return { ok: true, value: post };
+      const p = store.find((x) => x.id === id);
+      return p ? { ok: true, value: structuredClone(p) } : fail("post.not_found", 404);
+    },
+    async createPost(input: PostCreateInput) {
+      await settle();
+      if (params.get("create") === "slow") await new Promise(() => undefined);
+      const bad = down<Post>();
+      if (bad) return bad;
+      if (store.some((p) => p.slug === input.slug && p.lang === input.lang)) return fail("store.conflict", 409, { field: "slug" });
+      const now = Date.now();
+      const id = Math.max(0, ...store.map((p) => p.id)) + 1;
+      const status = input.status ?? "draft";
+      const words = wordsOf(input.markdown);
+      const post: Post = {
+        id,
+        kind: input.kind ?? "post",
+        translation_group: input.translation_of ?? id,
+        lang: input.lang,
+        slug: input.slug,
+        status,
+        trashed_from: null,
+        published_at: input.published_at ?? (status === "published" ? now : null),
+        author_id: 1,
+        title: input.title,
+        excerpt: input.excerpt ?? "",
+        word_count: words,
+        reading_minutes: Math.max(1, Math.round(words / 200)),
+        pinned: input.pinned ?? false,
+        comments_enabled: input.comments_enabled ?? true,
+        cover_media_id: input.cover_media_id ?? null,
+        series_id: input.series_id ?? null,
+        series_position: input.series_position ?? null,
+        created_at: now,
+        updated_at: now,
+        version: 1,
+        tags: input.tags ?? [],
+        markdown: input.markdown,
+        html: "",
+        media_ids: [],
+        warnings: warningsOf(input.markdown),
+      };
+      store.push(post);
+      return { ok: true, value: structuredClone(post) };
+    },
+    async updatePost(id, input: PostUpdateInput) {
+      await settle();
+      const bad = down<Post>();
+      if (bad) return bad;
+      const p = store.find((x) => x.id === id);
+      if (!p) return fail("post.not_found", 404);
+      if (conflictPending) {
+        conflictPending = false;
+        p.version += 1;
+        p.updated_at = Date.now();
+      }
+      if (input.expected_version !== p.version) return fail("store.conflict", 409, { field: "expected_version", version: p.version });
+      const { expected_version: _v, ...fields } = input;
+      if (fields.status === "published" && p.status !== "published" && slugPending) {
+        slugPending = false;
+        return fail("store.conflict", 409, { field: "slug" });
+      }
+      if (fields.status === "scheduled" && (fields.published_at ?? 0) <= Date.now()) return fail("input.invalid", 400, { field: "published_at" });
+      if (fields.status === "draft" && fields.published_at !== null && fields.published_at !== undefined) return fail("input.invalid", 400, { field: "published_at" });
+      if (fields.slug !== undefined && store.some((x) => x.id !== id && x.slug === fields.slug && x.lang === (fields.lang ?? p.lang))) {
+        return fail("store.conflict", 409, { field: "slug" });
+      }
+      for (const k of Object.keys(fields) as (keyof typeof fields)[]) if (fields[k] === undefined) delete fields[k];
+      Object.assign(p, fields);
+      if (fields.markdown !== undefined) {
+        p.word_count = wordsOf(p.markdown);
+        p.reading_minutes = Math.max(1, Math.round(p.word_count / 200));
+        p.warnings = warningsOf(p.markdown);
+      }
+      p.version += 1;
+      p.updated_at = Date.now();
+      if (p.status === "published" && p.published_at === null) p.published_at = p.updated_at;
+      return { ok: true, value: structuredClone(p) };
     },
     // The dev Worker's real renderer (crates/worker/src/contract.rs, test builds only).
     previewUrl: "/__preview",
-    call: <T>(method: Method, path: string, body?: Body) => auth<T>(params, method, path, body),
+    async call<T>(method: Method, path: string, body?: Body): Promise<Result<T>> {
+      const m = /^\/api\/v1\/posts\/(\d+)\/(trash|restore)$/.exec(path);
+      if (method !== "POST" || !m) return auth<T>(params, method, path, body);
+      await settle();
+      const bad = down<T>();
+      if (bad) return bad;
+      const p = store.find((x) => x.id === Number(m[1]));
+      if (!p) return fail("post.not_found", 404);
+      if (m[2] === "trash") {
+        p.trashed_from = p.status === "trashed" ? p.trashed_from : p.status;
+        p.status = "trashed";
+      } else p.status = p.trashed_from ?? "draft";
+      p.version += 1;
+      p.updated_at = Date.now();
+      return { ok: true, value: structuredClone(p) as T };
+    },
     // Sends nothing: progress over a second or two, then the picture from this browser.
     async upload(file, progress, signal) {
       if (mode === "offline") return fail("network", 0);

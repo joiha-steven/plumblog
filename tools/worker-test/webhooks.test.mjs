@@ -130,7 +130,7 @@ test("success: one signed request, row delivered, one log entry with the host on
   assert.equal(body.id, row.msg_id);
   assert.equal(body.type, "post.published");
   assert.equal(body.data.post_id, postId);
-  assert.match(body.data.url, /^https:\/\/blog\.test\/[a-z]+\/[a-z0-9-]+$/);
+  assert.match(body.data.url, /^https:\/\/blog\.test\/[a-z0-9-]+$/);
   assert.equal(body.data.previous_url, undefined);
   assert.deepEqual([row.attempts, row.last_status, row.last_error], [1, 200, null]);
 
@@ -206,7 +206,9 @@ test("timeout: a receiver that never answers ends as timeout after about 10 s", 
   console.log("timeout row:", JSON.stringify(row), `after ${took} ms`);
   assert.equal(row.last_error, "timeout");
   assert.equal(row.last_status, null);
-  assert.ok(took >= 9_500 && took < 20_000, `took ${took} ms`);
+  // The timeout is 10 s. No upper bound: wall time under load is not the product's timeout,
+  // and `until` above already fails the test if the row is not there after 25 s.
+  assert.ok(took >= 9_500, `took ${took} ms`);
 });
 
 test("SSRF: refused URLs save nothing; a tampered row is checked again before sending", async () => {
@@ -274,7 +276,7 @@ test("cron publish_due: a scheduled post that is due sends post.published", asyn
   console.log("post status:", status, "job.run:", JSON.stringify(job));
   assert.ok(verify(hit, hook.secret));
   assert.equal(body.type, "post.published");
-  assert.equal(body.data.url, "https://blog.test/en/due-now");
+  assert.equal(body.data.url, "https://blog.test/due-now");
   assert.equal(status, "published");
   assert.ok(job.some((j) => j.detail.startsWith("posts.publish_due\npublished\t1")));
 });

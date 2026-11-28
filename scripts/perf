@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Real CPU budgets, measured. scripts/check gates on work and scaling only (wall time on a
+# shared runner is too noisy to gate on); this prints the numbers against the budgets in
+# docs/ARCHITECTURE.md (Budgets). CI runs it for the log.
+#   scripts/perf            print the table; exit 0 even when over budget, 2 when nothing was measured
+#   scripts/perf --strict   also exit 1 when a budget is exceeded: use on a machine that is not shared
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+strict=false
+case "${1:-}" in
+  "") ;;
+  --strict) strict=true; export PLUMBLOG_PERF_STRICT=1 ;;
+  *) echo "perf: unknown argument $1" >&2; exit 2 ;;
+esac
+
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+# Per command: 0 ran fine, 1 over budget or backstop, 2 did not build or run.
+broken=0
+over=0
+run() {
+  local out
+  out=$(mktemp)
+  # One test thread: the numbers are for reading, so no two timed loops share a core.
+  cargo test -q "$@" -- --nocapture --test-threads=1 > "$out" 2>&1
+  local rc=$?
+  cat "$out" >> "$log"
+  if [ "$rc" -ne 0 ]; then
+    # A panic inside a test is over budget; anything else (compile error, no such test) is broken.
+    if grep -qE "panicked at|test result: FAILED" "$out"; then over=1; else broken=1; fi
+  fi
+  rm -f "$out"
+}
+run --release -p plumblog-markdown --test perf
+run --release -p plumblog-auth --test perf
+run --release -p plumblog-worker every_page_renders
+
+sed -n 's/^\.*\(perf .*\)$/\1/p' "$log"
+lines=$(grep -cE '^\.*perf ' "$log")
+echo "perf: the server-side PBKDF2 cost in workerd is printed by scripts/worker-test (auth tests)"
+if [ "$broken" -ne 0 ] || [ "$lines" -eq 0 ]; then
+  grep -nE '^error|could not compile|no test' "$log" | head -20
+  echo "perf: FAIL: no numbers (a perf test did not build or run, $lines perf lines)" >&2
+  exit 2
+fi
+if [ "$over" -ne 0 ]; then
+  grep -nE 'panicked|over budget|CI-normal' "$log" | head -20
+  echo "perf: a budget or a backstop was exceeded"
+  $strict && exit 1
+fi
+exit 0

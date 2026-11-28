@@ -1,7 +1,8 @@
 use super::db::Db;
 use super::routes::{Route, parse};
+use super::sample::SampleSource;
 use super::source::{
-    Filter, Neighbours, ReaderSource, SampleSource, Settings, Slice, StoredPost, Tag,
+    Filter, Neighbours, ReaderSource, Settings, SitemapPost, Slice, StoredPost, Tag,
 };
 use super::{Outcome, render};
 use plumblog_model::Result;
@@ -58,25 +59,38 @@ pub(super) struct Fixture {
 impl Fixture {
     pub(super) fn new(edit: impl FnOnce(&mut Vec<StoredPost>, &mut Settings)) -> Self {
         let sample = SampleSource::get();
-        let mut posts = run(sample.posts(Filter::All, 0, usize::MAX)).unwrap().posts;
+        let mut posts = sample.all_posts().to_vec();
         let mut settings = run(sample.settings()).unwrap();
+        // The sample's own translated pair is covered by the worker tests; these fixtures
+        // build their own languages from a single-language site.
+        posts.retain(|p| p.lang == settings.lang);
+        for p in &mut posts {
+            p.translations.clear();
+        }
         edit(&mut posts, &mut settings);
         let posts = SampleSource::from_posts(posts);
-        // The sample's own rule for the site date, applied to the edited posts.
-        settings.updated_at = run(posts.settings()).unwrap().updated_at;
         Self { posts, settings }
     }
 }
 
 impl ReaderSource for Fixture {
+    async fn settings_updated(&self) -> Result<Option<i64>> {
+        self.posts.settings_updated().await
+    }
     fn settings(&self) -> impl Future<Output = Result<Settings>> {
         std::future::ready(Ok(self.settings.clone()))
     }
     async fn posts(&self, filter: Filter<'_>, offset: usize, limit: usize) -> Result<Slice> {
         self.posts.posts(filter, offset, limit).await
     }
-    async fn post(&self, slug: &str) -> Result<Option<Neighbours>> {
-        self.posts.post(slug).await
+    async fn post(&self, lang: &str, slug: &str) -> Result<Option<Neighbours>> {
+        self.posts.post(lang, slug).await
+    }
+    async fn feed(&self, lang: &str, limit: usize) -> Result<Vec<StoredPost>> {
+        self.posts.feed(lang, limit).await
+    }
+    async fn sitemap_posts(&self, limit: usize) -> Result<Vec<SitemapPost>> {
+        self.posts.sitemap_posts(limit).await
     }
     async fn tag(&self, slug: &str) -> Result<Option<Tag>> {
         self.posts.tag(slug).await
@@ -86,6 +100,20 @@ impl ReaderSource for Fixture {
     }
     async fn years(&self) -> Result<Vec<i32>> {
         self.posts.years().await
+    }
+}
+
+/// Every first path segment the Worker or its assets answer is never a post.
+#[test]
+fn router_owned_segments_are_not_posts() {
+    for owned in [
+        "page", "tag", "archive", "search", "theme", "plugin", "media", "admin", "api", "healthz",
+    ] {
+        assert!(
+            !matches!(parse(&format!("/{owned}")), Route::Post { .. }),
+            "/{owned}"
+        );
+        assert!(super::routes::RESERVED.contains(&owned), "{owned}");
     }
 }
 
@@ -103,6 +131,7 @@ fn routes_parse_to_one_canonical_url() {
     assert_eq!(
         parse("/hello-world"),
         Route::Post {
+            lang: None,
             slug: "hello-world".into()
         }
     );
@@ -271,9 +300,26 @@ fn not_found_is_friendly_and_suggests_posts() {
 }
 
 #[test]
-fn every_page_renders_well_under_the_cpu_budget() {
-    // Native code is several times faster than wasm, so this is a smoke bound, not the budget:
-    // the Worker reports real per-page time in its Server-Timing header.
+fn every_page_renders_without_a_blowup() {
+    // Wall time on a shared CI runner is a poor clock, and a debug build on the host says
+    // little about wasm, so this gates only on a ratio to a reference workload (a serial hash
+    // of a fixed buffer, same build profile) timed in the same loop, so a slow machine slows
+    // both. Measured normal ratio: see the `ratio` in the `perf` line (1.0-1.9 per page, debug
+    // build, laptop); K = 8 is about 4x that, so a uniform 10x slowdown fails. It catches a slowdown, not the budget. The real
+    // per-page time is the `perf` line (`scripts/perf` shows it; PLUMBLOG_PERF_STRICT holds it
+    // to 2 ms natively) and the Worker's Server-Timing.
+    const K: f64 = 8.0;
+    let buf = vec![0x5a_u8; 64 * 1024];
+    let reference = || {
+        let t = std::time::Instant::now();
+        let h = std::hint::black_box(&buf)
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |h, &b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+            });
+        std::hint::black_box(h);
+        t.elapsed()
+    };
     for path in [
         "/",
         "/reading-on-screens",
@@ -282,13 +328,26 @@ fn every_page_renders_well_under_the_cpu_budget() {
         "/x/y",
     ] {
         get(path);
-        let start = std::time::Instant::now();
+        // Interleaved single renders, minimum per side: a window much longer than the reference
+        // would catch scheduler time slices that the reference escapes.
+        let (mut per, mut calibration) = (std::time::Duration::MAX, std::time::Duration::MAX);
         for _ in 0..100 {
+            let start = std::time::Instant::now();
             get(path);
+            per = per.min(start.elapsed());
+            calibration = calibration.min(reference());
         }
-        let per = start.elapsed() / 100;
-        println!("render {path}: {per:?}");
-        assert!(per.as_micros() < 2_000, "{path} took {per:?} natively");
+        eprintln!(
+            "perf page render {path}: {per:?} (budget 2ms natively); reference {calibration:?}, ratio {:.2} (limit {K})",
+            per.as_secs_f64() / calibration.as_secs_f64()
+        );
+        if std::env::var_os("PLUMBLOG_PERF_STRICT").is_some() {
+            assert!(per.as_micros() < 2_000, "{path} took {per:?} natively");
+        }
+        assert!(
+            per.as_secs_f64() < K * calibration.as_secs_f64(),
+            "{path} took {per:?}, reference {calibration:?}: over {K}x"
+        );
     }
 }
 
@@ -318,7 +377,13 @@ fn comment_without_stored_html_is_rendered_from_markdown() {
     };
     add("*a*", None, 1);
     add("*b*", Some("<p>stored</p>\n"), 2);
-    let c = run(Db(&db).comments("en", "first-post")).unwrap().unwrap();
+    let mut shown = run(SampleSource::get().post("en", "first-post"))
+        .unwrap()
+        .unwrap()
+        .post;
+    shown.id = post.id;
+    shown.comments_enabled = true;
+    let c = run(Db(&db).comments(&shown, "en")).unwrap().unwrap();
     let html: Vec<&str> = c.items.iter().map(|i| i.html.as_str()).collect();
     assert_eq!(
         html,

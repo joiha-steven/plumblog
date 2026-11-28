@@ -18,7 +18,7 @@ use plumblog_syslog::{Event, EventKind};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -46,9 +46,6 @@ pub const SMOKE_BUDGET: Duration = Duration::from_secs(60);
 const SMOKE_FIRST_WAIT: Duration = Duration::from_secs(1);
 const SMOKE_MAX_WAIT: Duration = Duration::from_secs(15);
 const SMOKE_CALL_TIMEOUT: Duration = Duration::from_secs(10);
-/// A D1 export of a free-plan database (500 MB at most) finishes well inside this.
-const EXPORT_BUDGET: Duration = Duration::from_mins(15);
-const EXPORT_POLL_WAIT: Duration = Duration::from_secs(1);
 /// wrangler `versions upload` / `deploy` keep secrets with `keepSecrets: true`, sent as
 /// `keep_bindings: ["secret_text", "secret_key"]` (`createWorkerUploadForm`): secret bindings
 /// absent from the metadata are inherited from the previous version.
@@ -90,8 +87,13 @@ impl Clock for RealClock {
 pub struct Options {
     /// Export the database even with no pending migration.
     pub export: bool,
-    /// A release bundle; without it the bundle is built in the repo.
+    /// A release bundle folder (`--bundle`).
     pub bundle: Option<PathBuf>,
+    /// Build the bundle in the repo (`--build`, for contributors).
+    pub build: bool,
+    /// The release this binary was made for (default when neither of the above): downloaded,
+    /// checked against the baked hash and cached. `None` in a dev build.
+    pub release: Option<crate::release::Release>,
     /// Deploy a bundle that lacks migrations the database already has.
     pub allow_older: bool,
 }
@@ -152,24 +154,24 @@ fn malformed(endpoint: Endpoint, detail: &str) -> ApiError {
     }
 }
 
-fn str_at<'v>(v: &'v Value, key: &str) -> Option<&'v str> {
+pub(crate) fn str_at<'v>(v: &'v Value, key: &str) -> Option<&'v str> {
     v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
 /// The site as `blog setup` left it.
-struct Site {
-    account: String,
-    worker: String,
-    origin: String,
-    db_name: String,
-    db_id: String,
-    bucket: String,
-    turnstile: bool,
+pub(crate) struct Site {
+    pub(crate) account: String,
+    pub(crate) worker: String,
+    pub(crate) origin: String,
+    pub(crate) db_name: String,
+    pub(crate) db_id: String,
+    pub(crate) bucket: String,
+    pub(crate) turnstile: bool,
     /// Custom domain host, if any.
-    domain: Option<String>,
+    pub(crate) domain: Option<String>,
 }
 
-fn site(state: Option<&SiteState>, cx: &Context) -> Result<Site, Failure> {
+pub(crate) fn site(state: Option<&SiteState>, cx: &Context) -> Result<Site, Failure> {
     let not_set_up = || {
         Failure::new(
             Code::NotSetUp,
@@ -197,7 +199,7 @@ fn site(state: Option<&SiteState>, cx: &Context) -> Result<Site, Failure> {
 }
 
 /// Loads the state, verifies the token and checks the account is the site's.
-fn start(
+pub(crate) fn start(
     client: &mut Client,
     account_id: Option<&str>,
     cx: &Context,
@@ -234,11 +236,27 @@ fn restore_pending(st: &SiteState, cx: &Context) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The bundle: `--bundle`, else built in the repo with [`BUILD_SCRIPT`].
-fn bundle(run: &mut Run, opts: &Options) -> Result<(PathBuf, Bundle), Failure> {
+/// A dev build has no release to download: it deploys only what the owner names.
+pub(crate) fn check_source(opts: &Options, text: &Text) -> Result<(), Failure> {
+    if opts.bundle.is_none() && !opts.build && opts.release.is_none() {
+        return Err(Failure::new(
+            Code::ReleaseDevBuild,
+            text,
+            key!("cli.error.release_dev_build"),
+            &[("page", crate::release::fetch::RELEASES_PAGE.into())],
+        ));
+    }
+    Ok(())
+}
+
+/// The bundle: `--bundle`, else built in the repo with [`BUILD_SCRIPT`] (`--build`), else
+/// this binary's release bundle.
+pub(crate) fn bundle(run: &mut Run, opts: &Options) -> Result<(PathBuf, Bundle), Failure> {
     let text = run.cx.text;
     let dir = if let Some(b) = &opts.bundle {
         b.clone()
+    } else if let (false, Some(r)) = (opts.build, &opts.release) {
+        crate::release::bundle(r, run)?
     } else {
         let script = run.cx.dir.join(BUILD_SCRIPT);
         if !script.is_file() {
@@ -333,67 +351,15 @@ impl Drop for Lock {
     }
 }
 
-/// D1 export into `backups/<utc>-<db>.sql` (0600). Polling as the docs say: re-POST with
-/// `current_bookmark` until `status` is `complete` (an export nobody polls is cancelled),
-/// then download `result.signed_url` (valid 1 h), without the API token.
-/// <https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/export/>
-fn export(run: &mut Run, site: &Site, rt: &Runtime, stamp: &str) -> Result<String, Failure> {
-    run.line(key!("cli.deploy.exporting"), &[]);
-    let text = run.cx.text;
-    let fail = |detail: String| {
-        Failure::new(
-            Code::ExportFailed,
-            text,
-            key!("cli.error.export_failed"),
-            &[("detail", detail)],
-        )
-    };
-    let started = rt.clock.elapsed();
-    let mut current: Option<String> = None;
-    let url = loop {
-        let mut body = json!({"output_format": "polling"});
-        if let Some(b) = &current {
-            body["current_bookmark"] = json!(b);
-        }
-        let call = Call::new(Endpoint::D1Export)
-            .param("database_id", site.db_id.clone())
-            .json(body);
-        let r = run.client.call(&call).map_err(|e| run.api(&e))?;
-        match str_at(&r, "status") {
-            Some("complete") => {
-                break r
-                    .get("result")
-                    .and_then(|x| str_at(x, "signed_url"))
-                    .map(str::to_string)
-                    .ok_or_else(|| run.api(&malformed(Endpoint::D1Export, "no signed_url")))?;
-            }
-            Some("error") => {
-                return Err(fail(printable(str_at(&r, "error").unwrap_or("error"))));
-            }
-            _ => {}
-        }
-        current = str_at(&r, "at_bookmark").map(str::to_string).or(current);
-        if rt.clock.elapsed().saturating_sub(started) > EXPORT_BUDGET {
-            return Err(fail(format!("{} s", EXPORT_BUDGET.as_secs())));
-        }
-        rt.clock.sleep(EXPORT_POLL_WAIT);
-    };
-    let rel = format!("{BACKUP_DIR}/{stamp}-{}.sql", site.db_name);
-    let path = run.cx.dir.join(&rel);
-    download(&url, &path, run.client.is_local()).map_err(|reason| {
-        Failure::new(
-            Code::BackupUnwritable,
-            text,
-            key!("cli.error.backup_unwritable"),
-            &[("path", path.display().to_string()), ("reason", reason)],
-        )
-    })?;
-    run.line(key!("cli.deploy.exported"), &[("file", rel.clone())]);
-    Ok(rel)
+/// What the export is for: only the wording of its failures differs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Purpose {
+    Deploy,
+    Backup,
 }
 
-/// No token, ever: these go to the site and to signed URLs.
-fn plain_agent(local: bool, timeout: Duration, redirects: u32) -> ureq::Agent {
+/// No token, ever: these go to the site and to presigned URLs.
+pub(crate) fn plain_agent(local: bool, timeout: Duration, redirects: u32) -> ureq::Agent {
     let mut config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(redirects)
@@ -404,56 +370,6 @@ fn plain_agent(local: bool, timeout: Duration, redirects: u32) -> ureq::Agent {
         config = config.proxy(None);
     }
     config.build().into()
-}
-
-/// Downloads `url` into a new file at `path` (mode 0600, directory 0700). The URL is a
-/// bearer link, so errors never include it. Plain HTTP only to a loopback test server.
-fn download(url: &str, path: &Path, local: bool) -> Result<(), String> {
-    let loopback =
-        crate::cloudflare::client::base_override_ok(url.split(['?', '#']).next().unwrap_or(""));
-    if !(url.starts_with("https://") || local && loopback) {
-        return Err("the export link is not https".into());
-    }
-    if let Some(dir) = path.parent() {
-        let mut b = fs::DirBuilder::new();
-        b.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            b.mode(0o700);
-        }
-        b.create(dir).map_err(|e| e.to_string())?;
-    }
-    let agent = plain_agent(local, Duration::from_mins(30), 3);
-    let resp = agent.get(url).call().map_err(|e| {
-        // ureq's error text can include the URL.
-        let s = e.to_string();
-        if s.contains(url) {
-            "no reply".to_string()
-        } else {
-            s
-        }
-    })?;
-    let status = resp.status().as_u16();
-    if status != 200 {
-        return Err(format!("HTTP {status}"));
-    }
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut f = opts.open(path).map_err(|e| e.to_string())?;
-    let copied =
-        std::io::copy(&mut resp.into_body().into_reader(), &mut f).and_then(|_| f.sync_all());
-    if let Err(e) = copied {
-        drop(f);
-        let _ = fs::remove_file(path);
-        return Err(e.to_string());
-    }
-    Ok(())
 }
 
 /// Assets upload session, then only the buckets Cloudflare asks for, each as multipart of
@@ -883,7 +799,7 @@ fn check_domain(run: &mut Run, t: &Targets, version: &str, rt: &Runtime) -> Resu
 
 /// One system log row per event in the site's own D1, as the Worker writes them
 /// (crates/worker d1/log.rs). A failure is reported, never fatal: the deploy is done.
-fn log_events(run: &mut Run, db: &Database, events: &[Event]) {
+pub(crate) fn log_events(run: &mut Run, db: &Database, events: &[Event]) {
     const SQL: &str = "INSERT INTO system_log (at_ms, request_id, kind, actor_id, error_code, \
                        detail) VALUES (?, ?, ?, NULL, NULL, ?)";
     let rows: Vec<[String; 4]> = events
@@ -908,11 +824,11 @@ fn log_events(run: &mut Run, db: &Database, events: &[Event]) {
     }
 }
 
-fn request_id(kind: &str, now_ms: i64) -> RequestId {
+pub(crate) fn request_id(kind: &str, now_ms: i64) -> RequestId {
     RequestId::parse(&format!("cli-{kind}-{now_ms}")).unwrap_or_else(RequestId::unknown)
 }
 
-fn at_ms(cx: &Context) -> u64 {
+pub(crate) fn at_ms(cx: &Context) -> u64 {
     u64::try_from(cx.now_ms).unwrap_or(0)
 }
 
@@ -1108,7 +1024,16 @@ fn steps(
     flow: &Flow,
 ) -> Result<(), Failure> {
     if flow.pending || flow.export {
-        rec.export = Some(export(run, site, flow.rt, &flow.stamp)?);
+        let mark = rec.bookmark.clone().unwrap_or_default();
+        rec.export = Some(crate::dump::export(
+            run,
+            site,
+            db,
+            &mark,
+            &flow.stamp,
+            BACKUP_DIR,
+            Purpose::Deploy,
+        )?);
         put_record(run, rec)?;
     }
     // Migrations; a failure stops before any code is uploaded.
@@ -1162,6 +1087,7 @@ pub fn run(
     rt: &Runtime,
     out: &mut dyn Write,
 ) -> Result<(), Failure> {
+    check_source(opts, cx.text)?;
     let _lock = Lock::take(cx)?;
     let (st, site) = start(client, account_id, cx)?;
     restore_pending(&st, cx)?;
@@ -1451,6 +1377,7 @@ fn rollback_code(
             (Err(s), Some(Ok(()))) => format!("{}; back to previous", s.record()),
             (Err(s), _) => s.record(),
         }),
+        outcome: None,
     };
     let saved = run.update(|s| push_capped(&mut s.rollbacks, record));
     let db = Database::new(client, site.db_id.clone());
@@ -1534,6 +1461,7 @@ fn restore_db(run: &mut Run, site: &Site, bookmark: &str, clear: bool) -> Result
         to: bookmark.to_string(),
         previous: previous.clone(),
         smoke: None,
+        outcome: None,
     };
     let db = Database::new(client, site.db_id.clone());
     // What the restored database records; a failed read keeps the old list (setup and
@@ -1589,7 +1517,7 @@ mod tests {
     /// One value, three places: the code, the dev config and the architecture doc.
     #[test]
     fn cron_and_date_match_the_dev_config_and_docs() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let dev = fs::read_to_string(root.join("tools/wrangler.dev.toml")).unwrap();
         assert!(dev.contains(&format!("compatibility_date = \"{COMPATIBILITY_DATE}\"")));
         assert!(dev.contains(&format!("crons = [\"{CRON}\"]")));

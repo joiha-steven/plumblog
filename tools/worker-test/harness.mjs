@@ -361,6 +361,12 @@ export function makeStateDir() {
  * Ready means this start's own Worker answered with its own token (`/__instance`), not just
  * that something answers on the port. `port` pins the port; only the harness's own test uses it.
  */
+/** Empties the database and saves the sample site (settings, posts, tags, one translated pair). */
+export async function seedSample(worker) {
+  const res = await fetch(`${worker.url}/__seed`, { method: "POST" });
+  if (res.status !== 200) throw new Error(`/__seed: ${res.status} ${await res.text()}`);
+}
+
 export async function startWorker({ seedSql = null, vars = {}, port: pinned = null } = {}) {
   const entry = { state: mkdtempSync(join(RUN_DIR, "plumblog-wrangler-")), pgid: null, pgidFile: null, portLock: null };
   live.add(entry);

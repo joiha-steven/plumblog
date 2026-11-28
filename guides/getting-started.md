@@ -3,8 +3,8 @@
 plumblog is a blog engine in Rust that runs entirely on the Cloudflare free plan.
 
 You are an AI agent operating a plumblog site. Code lives in git; all site data lives on
-Cloudflare (D1 for content, R2 for media). Use the `blog` CLI for every task, and read the
-matching guide before you act.
+Cloudflare (D1 for content, R2 for media). Use the `blog` CLI and the site's HTTP API, and
+read the matching guide before you act.
 
 ```sh
 blog guide
@@ -14,39 +14,31 @@ blog --version
 `blog guide` lists every guide with a one-line summary. `blog guide <topic>` prints one.
 Guides are embedded in the binary, so they always match the version you are running.
 
-## Put a site on Cloudflare
+## Which guide
 
-Run these in the site's folder. `blog` reads `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`
-from the environment or `.env`, and keeps what it made in `site.local.toml` (never the token).
-
-```sh
-blog guide token
-blog setup --check-token
-blog setup
-blog deploy
-blog deploy --bundle <dir>
-```
-
-1. `blog guide token` says how to create the token; `--check-token` checks it.
-2. `blog setup` makes the database, media bucket, Worker, secrets, Turnstile and a one-time
-   setup code for the owner. Safe to run again. `--domain <host>` adds a custom domain.
-3. `blog deploy` builds in the plumblog repository; elsewhere pass a release bundle. Order:
-   token; a Time Travel bookmark (always) and a SQL export into `backups/` (when migrations
-   are pending, or with `--export`); migrations; static files; a new Worker version; switch;
-   cron; check `/healthz` and `/`. If the check fails within 60 s the previous version goes
-   back by itself (`deploy.smoke_failed`). Steps are recorded under `deploys` in
-   `site.local.toml`.
+| Job | Guide |
+|---|---|
+| Create the site, deploy, roll back, first owner | `blog guide setup` |
+| Write, edit, publish posts and media; API token | `blog guide write` |
+| Site title, languages, post URLs | `blog guide site` |
+| Translate posts | `blog guide translate` |
+| Change the look | `blog guide theme` |
+| Turn plugins on and configure them | `blog guide plugin` |
+| Keep data safe and restore it | `blog guide backup` |
+| Bring posts in from another blog | `blog guide import` |
+| Copy content out as files | `blog guide export` |
+| Every API route; option schema; Cloudflare token | `blog guide api`, `options`, `token` |
 
 ```sh
-blog rollback
-blog rollback --to <version-id>
-blog rollback --db <bookmark> --yes
+blog guide setup
+blog guide write
 ```
 
-`blog rollback` returns to the version before the last deploy; `--to` picks a recent one. A
-version whose bundle lacked migrations the database has run, or that `blog` did not deploy from
-this folder, is refused (`rollback.older`) unless `--allow-older` is added.
-`--db` overwrites the whole database with its state at the bookmark and cancels running
-queries, so it needs `--yes`; it prints the bookmark that undoes it. After a failed migration
-every deploy refuses until `blog rollback --db` has run. `cf.network_write_uncertain` means the
-change may already be applied: look before you retry.
+## Rules
+
+- Ask the owner before anything that publishes, deletes or overwrites (a post, the trash, a
+  database restore). Drafts are safe to write.
+- Errors carry a stable code (`deploy.smoke_failed`, `store.conflict`): act on the code, and
+  report it with the message when you cannot.
+- When a guide says something is not built yet, tell the owner; do not work around it with
+  other tools or edit tracked files.

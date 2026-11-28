@@ -1,11 +1,12 @@
 // Reader pages through the real Worker: status, key content, cache headers, assets.
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import { startWorker } from "./harness.mjs";
+import { seedSample, startWorker } from "./harness.mjs";
 
 let worker;
 before(async () => {
   worker = await startWorker();
+  await seedSample(worker);
 });
 after(async () => {
   await worker?.stop();

@@ -7,11 +7,12 @@
 //! request. A strict CSP allows only same-origin scripts and styles: no theme or plugin code
 //! ever runs here.
 
+use crate::d1::D1Store;
 use crate::keys;
 use crate::pages::core_text;
-use crate::pages::source::{CORE_LOCALES, ReaderSource, SampleSource};
+use crate::pages::source::{CORE_LOCALES, ReaderSource};
 use plumblog_i18n::{Catalog, Key};
-use worker::{Headers, Request, Response, Result};
+use worker::{Env, Headers, Request, Response, Result};
 
 /// Path prefix of every admin URL.
 pub const PREFIX: &str = "/admin";
@@ -78,19 +79,26 @@ const PLATE: &str = "#1a1918";
 /// Braun signal orange (`--signal`, dark theme), the admin's one accent.
 const SIGNAL: &str = "#e0804b";
 
-pub async fn serve(req: &Request) -> Result<Response> {
+pub async fn serve(req: &Request, env: &Env) -> Result<Response> {
     let path = req.path();
     if path == PREFIX {
         let h = Headers::new();
         h.set("location", "/admin/")?;
         return Ok(Response::empty()?.with_status(301).with_headers(h));
     }
-    // The sample settings until site settings move to D1, the same source reader pages use.
-    let site = match SampleSource::get().settings().await {
-        Ok(s) => s,
+    // The site's own settings (1 query). The admin is how a broken site gets fixed, so an
+    // unreadable store shows the shell with default settings rather than an error page.
+    let site = match env.d1("DB") {
+        Ok(d) => match crate::pages::db_source(&D1Store::new(d)).settings().await {
+            Ok(s) => s,
+            Err(e) => {
+                worker::console_error!("admin: site settings: {e}");
+                crate::pages::reader_db::parse_settings(&[])
+            }
+        },
         Err(e) => {
-            worker::console_error!("admin: site settings: {e}");
-            return Response::error(core_text("en", keys::PAGE_FAILED), 500);
+            worker::console_error!("admin: D1 binding DB: {e}");
+            crate::pages::reader_db::parse_settings(&[])
         }
     };
     let lang = pick_lang(

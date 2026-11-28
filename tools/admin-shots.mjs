@@ -108,6 +108,35 @@ const seedDrafts = (page) =>
       }),
   );
 
+// Drafts for user 1 that the posts list shows on its "on this device" strip: two new posts and
+// one edit of post 2, with the ids and saved times the editor writes (editor/drafts.ts).
+const seedKept = (page) =>
+  page.evaluate(
+    () =>
+      new Promise((resolve, reject) => {
+        const req = indexedDB.open("plumblog-admin", 2);
+        req.onupgradeneeded = () => {
+          if (req.result.objectStoreNames.contains("drafts")) req.result.deleteObjectStore("drafts");
+          req.result.createObjectStore("drafts");
+        };
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const db = req.result;
+          const tx = db.transaction("drafts", "readwrite");
+          const at = (min) => Date.now() - min * 60000;
+          const put = (key, title, min) => tx.objectStore("drafts").put({ title, body: "Words kept on this device.", base: null, rev: 1, savedAt: at(min) }, key);
+          put("1:new-shotkeptaaaa0001", "M\u1ed9t bu\u1ed5i chi\u1ec1u \u1edf H\u1ed9i An", 5);
+          put("1:post-2", "V\u00ec sao t\u00f4i b\u1ecf th\u00f3i quen \u0111\u1ecdc tin bu\u1ed5i s\u00e1ng", 190);
+          put("1:new-shotkeptbbbb0002", "", 2900);
+          tx.oncomplete = () => (db.close(), resolve());
+          tx.onerror = () => reject(tx.error);
+        };
+      }),
+  );
+const ROWS = ".rows .row .row-title";
+// The list is drawn once its rows (or its empty or error state) are.
+const listed = (page) => page.waitForSelector(`${ROWS}, main .empty`);
+
 // [name, path, element to wait for, action before the shot, widths it applies to]
 // Pastes into the writing column what a clipboard would hold: a picture made on a canvas, or
 // HTML as Google Docs puts it there.
@@ -142,11 +171,37 @@ const DOCS_HTML =
   "<table><tr><td><p>Ng\u00e0y</p></td><td><p>N\u01a1i</p></td></tr><tr><td><p>1</p></td><td><p>Ch\u1ee3 s\u1edbm</p></td></tr></table></b>";
 
 const STATES = [
-  ["posts", "/admin/"],
-  ["empty", "/admin/?mock=empty"],
+  ["posts", "/admin/", ROWS],
+  ["posts-draft", "/admin/?status=draft", ROWS],
+  ["posts-scheduled", "/admin/?status=scheduled", ROWS],
+  ["posts-published", "/admin/?status=published", ROWS],
+  ["posts-trash", "/admin/?status=trashed", ROWS],
+  ["posts-filter-empty", "/admin/?status=scheduled&mock=empty", "main .empty"],
+  [
+    "posts-more",
+    "/admin/",
+    ROWS,
+    async (page) => {
+      await page.locator(".more .btn").scrollIntoViewIfNeeded();
+    },
+  ],
+  [
+    "posts-strip",
+    "/admin/",
+    ROWS,
+    async (page) => {
+      await seedKept(page);
+      await page.reload({ waitUntil: "networkidle" });
+      await page.waitForSelector(".device .row");
+      await listed(page);
+    },
+  ],
+  ["pages", "/admin/pages", ROWS],
+  ["pages-empty", "/admin/pages?mock=empty", "main .empty"],
+  ["empty", "/admin/?mock=empty", "main .empty"],
   ["loading", "/admin/?mock=loading"],
-  ["error", "/admin/?mock=error"],
-  ["offline", "/admin/?mock=offline"],
+  ["error", "/admin/?mock=error", "main [role=alert]"],
+  ["offline", "/admin/?mock=offline", "main [role=alert]"],
   ["no-permission", "/admin/settings?role=writer"],
   ["not-found", "/admin/nope"],
   [
@@ -221,6 +276,138 @@ const STATES = [
   ],
   ["preview", "/admin/posts/1", EDITOR, (page) => previewIn(page, () => page.click(".seg button:last-child"))],
   ["new", "/admin/posts/new", EDITOR],
+  // Publishing: a live post's Update button, the confirm, and the settings panel (a sheet over the text on phones).
+  // Post 4, not 2: the "posts-strip" state leaves a kept draft for post 2, which asks first.
+  ["editor-published", "/admin/posts/4", EDITOR, pictures],
+  [
+    "publish-confirm",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await page.click(".ed-actions .btn.primary");
+      await page.waitForSelector(".pubpop");
+      await settle(page, ".pop");
+    },
+  ],
+  [
+    "publish-confirm-update",
+    "/admin/posts/4",
+    EDITOR,
+    async (page) => {
+      await page.click(".ed-actions .btn.primary");
+      await page.waitForSelector(".pubpop");
+      await settle(page, ".pop");
+    },
+  ],
+  [
+    "settings-now",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await settle(page, ".panel");
+    },
+  ],
+  [
+    "settings-later",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await page.check('.panel input[name="pub-when"] >> nth=1');
+      await page.waitForSelector("[data-at]:not([hidden])");
+      await settle(page, ".panel");
+      // The radio's fill eases in; the shot waits for it.
+      await page.waitForTimeout(400);
+    },
+  ],
+  [
+    "settings-published",
+    "/admin/posts/4",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await settle(page, ".panel");
+    },
+  ],
+  [
+    "settings-scheduled",
+    "/admin/posts/3",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await settle(page, ".panel");
+    },
+  ],
+  [
+    "publish-confirm-later",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await page.check('.panel input[name="pub-when"] >> nth=1');
+      // Close the panel (a sheet over the text on phones): the choice stays.
+      await page.click(".panel-head .ib");
+      await page.waitForSelector(".panel .panel-body", { state: "hidden" });
+      await page.click(".ed-actions .btn.primary");
+      await page.waitForSelector(".pubpop");
+      await settle(page, ".pop");
+    },
+  ],
+  [
+    "publish-offline",
+    "/admin/posts/1",
+    EDITOR,
+    async (page) => {
+      await page.evaluate(() => Object.defineProperty(navigator, "onLine", { get: () => false }));
+      await page.click(".ed-actions .btn.primary");
+      await page.waitForSelector(".pubpop");
+      await settle(page, ".pop");
+    },
+  ],
+  ...["unpublish", "trash"].map((act) => [
+    `confirm-${act}`,
+    "/admin/posts/4",
+    EDITOR,
+    async (page) => {
+      await page.click("[data-panel-btn]");
+      await page.waitForSelector(".panel .panel-body");
+      await settle(page, ".panel");
+      await page.click(`.panel [data-act=${act}]`);
+      await page.waitForSelector(".confirm");
+      await settle(page, ".pop");
+    },
+  ]),
+  [
+    "unpublished-changes",
+    "/admin/posts/4",
+    EDITOR,
+    async (page) => {
+      await pictures(page);
+      await page.click(EDITOR);
+      await page.keyboard.press("End");
+      await page.keyboard.type(" Edited.");
+      await page.waitForFunction(() => [...document.querySelectorAll(".saved")].some((e) => e.textContent?.trim()));
+      await page.waitForTimeout(500);
+    },
+  ],
+  [
+    "sync-slow",
+    "/admin/posts/new?create=slow",
+    EDITOR,
+    async (page) => {
+      await page.click(EDITOR);
+      await page.keyboard.type("A first line that never reaches the server.");
+      // Autosave starts after 3 s and the create is called slow after 20 s more.
+      await page.waitForTimeout(24000);
+    },
+  ],
+  ["trashed", "/admin/posts/5", EDITOR, async (page) => void (await page.waitForSelector(".banner [data-act=restore]"))],
   ["signin", "/admin/signin"],
   ["signin-wrong", "/admin/signin?auth=wrong", null, submitWith(SIGN)],
   ["signin-locked", "/admin/signin?auth=locked", null, submitWith(SIGN)],
@@ -338,7 +525,7 @@ try {
     for (const theme of ["light", "dark"]) {
       for (const lang of ["vi", "en"]) {
         // English once per width and theme, on the busiest screens, to catch longer text.
-        const english = ["posts", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "account", "account-wrong-password", "signout-confirm"];
+        const english = ["posts", "posts-strip", "pages", "no-permission", "editor", "slash", "signin-wrong", "setup-short", "account", "account-wrong-password", "signout-confirm", "trashed", "confirm-trash", "unpublished-changes", "publish-confirm-later", "sync-slow"];
         const states = STATES.filter(([s, , , , fits]) => (lang === "vi" || english.includes(s)) && (!fits || fits(w)) && (!only || only.includes(s)));
         const ctx = await browser.newContext({ viewport: { width: w, height: hgt }, deviceScaleFactor: 1, hasTouch: w < 768, isMobile: w < 768, colorScheme: theme });
         await ctx.addCookies([{ name: "pb_lang", value: lang, url: base }]);

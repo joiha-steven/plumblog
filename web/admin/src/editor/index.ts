@@ -2,28 +2,33 @@
  * The writing screen (docs/ARCHITECTURE.md, Admin and editor): title and Markdown body with
  * live styling, Write / Split / Preview, a toolbar that steps back while you type, a
  * selection bubble, the "/" block menu, focus mode, typewriter scrolling, a word count and
- * drafts saved in this browser. Loaded as its own chunk, only on the editor route.
+ * drafts saved in this browser, then on the server (sync.ts). Loaded as its own chunk, only
+ * on the editor route.
  */
 
 import { redo, undo } from "@codemirror/commands";
 import { EditorView, type ViewUpdate } from "@codemirror/view";
-import type { Api, PostDraft } from "../api/client";
+import { type Api, session } from "../api/client";
+import type { Post } from "../api/model.gen";
 import { type Child, h } from "../dom";
 import { type IconName, icon } from "../icons";
 import { num, t } from "../i18n";
-import { HREF } from "../router";
+import { HREF, editHref, go } from "../router";
 import { closePop, openPop, openPopEl, toast } from "../ui";
 import { BLOCKS, type Block, blockName, fold, picker } from "./blocks";
 import { createEditor, inCode, removeCard, showCard } from "./cm";
 import { countWords, heading, link, linePrefix, wrap } from "./commands";
 import { mdAlt, mdUrl } from "./md-text";
-import { draftKey, loadDraft, saveDraft } from "./drafts";
+import { type Draft, type SaveResult, draftKey, dropDraft, followMoved, holdOpen, sweepMoved, loadDraft, loadSides, putDraft, putNow, saveDraft, sideKey, startState } from "./drafts";
+import { created, fromPost, label as pubLabel, newPub } from "./pub";
+import type { PubHost, PubUi } from "./publish";
+import type { Sync } from "./sync";
 
 export interface EditorOptions {
   root: HTMLElement;
   api: Api;
   /** The post being edited; undefined for a new one. */
-  post: PostDraft | undefined;
+  post: Post | undefined;
   /** The signed-in user: drafts are kept per user. */
   user: number;
   lang: string;
@@ -87,9 +92,15 @@ const modeName = (m: Mode): string =>
   // i18n: admin.editor.mode.write admin.editor.mode.split admin.editor.mode.preview
   t(`admin.editor.mode.${m}`);
 
-const statusName = (s: PostDraft["status"]): string =>
-  // i18n: admin.status.draft admin.status.scheduled admin.status.published
+const statusName = (s: Post["status"]): string =>
+  // i18n: admin.status.draft admin.status.scheduled admin.status.published admin.status.trashed
   t(`admin.status.${s}`);
+
+/** The last editor's final local save, flushed when it left the page; the next mount reads after it. */
+let flushed: Promise<unknown> = Promise.resolve();
+
+/** A name for this tab's side copy of a draft (drafts.ts sideKey). */
+const newTab = (): string => crypto.randomUUID().replaceAll("-", "").slice(0, 16);
 
 export async function mountEditor(o: EditorOptions): Promise<void> {
   const post = o.post;
@@ -103,22 +114,50 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     history.replaceState(history.state, "", url);
   }
   const key = draftKey(o.user, post?.id, newId);
+  await flushed;
+  // Redrawn (online/offline) while an earlier mount was creating this post: open the post it
+  // became rather than creating a second one (sync.ts `settled`, at most 8 s).
+  if (post === undefined) {
+    const made = await import("./sync").then(
+      (m) => m.settled(key, o.user),
+      () => undefined,
+    );
+    if (made) {
+      history.replaceState(history.state, "", editHref(made.id));
+      return go(editHref(made.id));
+    }
+    // Created by a page that is gone (its copy of the last keys may still be under this key):
+    // open the post, copies moved with it, rather than create it twice.
+    const moved = await followMoved(key);
+    if (moved !== undefined) {
+      history.replaceState(history.state, "", editHref(moved));
+      return go(editHref(moved));
+    }
+  }
+  holdOpen();
+  void sweepMoved(o.user);
   const local = await loadDraft(key);
-  const same = local !== undefined && post !== undefined && local.title === post.title && local.body === post.body;
-  const fromLocal = local !== undefined && !same;
-  // The draft is the writer's latest text, unless the server copy moved on since the version
-  // the draft started from: then both exist and the writer chooses (never a silent pick).
-  const serverMoved = fromLocal && post !== undefined && local.base !== post.updated_at;
-  /** The server version the text in this editor started from. */
-  let base: number | null = fromLocal ? local.base : (post?.updated_at ?? null);
-  /** The stored draft's `rev` this tab last read or wrote; saves expect it. */
-  let rev = local?.rev ?? 0;
-  /** Saving waits while another tab's newer draft is unresolved. */
-  let paused = false;
+  const { st, fromLocal, serverMoved } = startState(key, local, post);
+  /** This page load's side copy (drafts.ts sideKey): the only one it ever writes. */
+  const tab = newTab();
+  let own: { key: string; rev: number } | undefined;
+  // Copies other pages left (a tab paused or closed): one with the text this editor opens with
+  // holds nothing new and goes; every other is offered, newest first, one choice after another
+  // (none comes back on the next open), never taken in silently. Typing meanwhile goes to this
+  // page's own copy, never to theirs.
+  const opening: [string, string] = [local?.title ?? post?.title ?? "", local?.body ?? post?.markdown ?? ""];
+  const offers: { key: string; rev: number }[] = [];
+  for (const c of await loadSides(key)) {
+    if (c.draft.title === opening[0] && c.draft.body === opening[1]) await dropDraft(c.key, c.draft.rev);
+    else offers.push({ key: c.key, rev: c.draft.rev });
+  }
+  if (offers.length) st.paused = true;
+  let sync: Sync | undefined;
   const lang = post?.lang ?? o.lang;
-  const status = post?.status ?? "draft";
-  let title = fromLocal ? local.title : (post?.title ?? "");
-  const body = fromLocal ? local.body : (post?.body ?? "");
+  const pub = newPub(post);
+  const start = fromLocal ? local : undefined;
+  let title = start?.title ?? post?.title ?? "";
+  const body = start?.body ?? post?.markdown ?? "";
 
   let mode: Mode = "write";
   let focusMode = false;
@@ -130,6 +169,10 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   /* ---------- frame ---------- */
   const saved = h("span", { class: "saved", "aria-live": "polite" });
   const saved2 = h("span", {});
+  const stLabel = h("span", {}, statusName(pub.status));
+  const chip = h("span", { class: `st ${pub.status}` }, statusName(pub.status));
+  const gear = h("button", { type: "button", class: "ib", "data-panel-btn": "", "aria-pressed": "false", "aria-label": t("admin.editor.pub.settings"), title: t("admin.editor.pub.settings_tip") }, icon("panel"));
+  const pubBtn = h("button", { type: "button", class: "btn primary" }, pubLabel(pub));
   const wc = h("span", { class: "wc" });
   const wc2 = h("span", { class: "num" });
   const modes = h("div", { class: "seg", role: "group", "aria-label": t("admin.editor.modes") });
@@ -145,20 +188,26 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   const toolbar = h("div", { class: "tools", role: "toolbar", "aria-label": t("admin.editor.toolbar") });
   const toolsWrap = h("div", { class: "tools-wrap" }, toolbar);
   const choiceSlot = h("div", {});
+  /** The trashed state's banner, with Restore. */
+  const trashSlot = h("div", {});
+  const note = h("div", {});
   const write = h(
     "div",
     { class: "pane ed-write" },
     toolsWrap,
+    trashSlot,
     choiceSlot,
     h(
       "div",
       { class: "col" },
       titleIn,
+      note,
       cmHost,
-      h("div", { class: "phone-status" }, h("span", {}, statusName(status), " \u00b7 ", saved2), wc2),
+      h("div", { class: "phone-status" }, h("span", {}, stLabel, " \u00b7 ", saved2), wc2),
     ),
   );
   const previewPane = h("div", { class: "pane ed-preview" });
+  const edBody = h("div", { class: "ed-body" }, write, previewPane);
   const root = h(
     "div",
     { class: "ed", "data-mode": mode },
@@ -166,11 +215,11 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
       "header",
       { class: "head ed-top" },
       h("a", { class: "ib flush-start", href: HREF.posts, "aria-label": t("admin.editor.back"), title: t("admin.editor.back") }, icon("back")),
-      h("div", { class: "crumb" }, h("span", {}, t("admin.nav.posts")), h("span", { class: `st ${status}` }, statusName(status)), wc),
+      h("div", { class: "crumb" }, h("span", {}, t("admin.nav.posts")), chip, wc),
       h("div", { class: "ed-mid" }, modes),
-      h("div", { class: "ed-actions" }, saved),
+      h("div", { class: "ed-actions" }, saved, gear, pubBtn),
     ),
-    h("div", { class: "ed-body" }, write, previewPane),
+    edBody,
   );
   o.root.replaceChildren(root);
 
@@ -256,37 +305,98 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   /* ---------- saving ---------- */
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   let quietTimer: ReturnType<typeof setTimeout> | undefined;
+  // A live post's edits stay here until Update: say they are not on the site.
+  const here = () => pub.status === "draft" ? t("admin.editor.saved_here") : t("admin.editor.pub.unpublished_changes");
   const setSaved = (text: string, quiet = false) => {
     for (const el of [saved, saved2]) {
       el.textContent = text;
       el.classList.toggle("settled", quiet);
     }
   };
+  /** Typed text is not in this device's storage yet: true until the save of the last keys lands. */
+  let unsaved = false;
+  /** Bumped on every edit: a save landing clears `unsaved` only if nothing was typed since it began. */
+  let edits = 0;
+  /** The key and rev of this page's next write to its own copy (it follows a moved draft key). */
+  const ownNext = (): { key: string; rev: number } => {
+    const k = sideKey(st.key, tab);
+    return { key: k, rev: own?.key === k ? own.rev + 1 : 1 };
+  };
+  /** Paused: the text goes to this page's own copy, never over the other tab's draft. */
+  const saveSide = async (d: Omit<Draft, "rev">): Promise<SaveResult> => {
+    const old = own;
+    const to = ownNext();
+    const res = await putDraft(to.key, { ...d, rev: to.rev });
+    if (res !== "saved") return res;
+    own = to;
+    // The draft key moved (a new post was created) while paused: the copy follows it.
+    if (old && old.key !== to.key) await dropDraft(old.key, old.rev);
+    return res;
+  };
+  /** Once its text is in the draft (or the writer chose the other): this page's copy goes. */
+  const dropOwn = () => {
+    const s = own;
+    own = undefined;
+    if (s) st.q = st.q.then(() => dropDraft(s.key, s.rev));
+    return st.q;
+  };
+  const saveNow = async (): Promise<SaveResult> => {
+    const mark = edits;
+    // `unsaved` stays true while this write waits behind a draft move (st.q): a page hidden
+    // meanwhile still puts the keys in its own copy (leaving, putNow).
+    const landed = () => {
+      if (edits === mark) unsaved = false;
+    };
+    const d = { title: titleIn.value, body: view.state.doc.toString(), base: st.base, version: st.version, savedAt: Date.now() };
+    const paused = st.paused;
+    // After any draft move or drop sync.ts has queued, so it reads the current key and rev.
+    const job = st.q.then(() => (paused ? saveSide(d) : saveDraft(st.key, d, st.rev)));
+    st.q = job;
+    const res = await job;
+    if (res === "saved") landed();
+    if (paused) {
+      if (res === "failed") {
+        setSaved(t("admin.editor.not_saved"));
+        toast(t("admin.editor.not_saved_hint"), 6000);
+      } else setSaved(here());
+      return res;
+    }
+    if (res === "conflict") {
+      st.paused = true;
+      // This text is not in the draft yet: it goes to the side copy now, not at the next key.
+      await saveNow();
+      // Another page created the post from this new-post key: open it, this copy moved along.
+      const moved = st.key.includes(":new-") ? await followMoved(st.key) : undefined;
+      if (moved !== undefined) {
+        console.warn(`admin editor: ${st.key} became post ${moved} in another page; opening it`);
+        history.replaceState(history.state, "", editHref(moved));
+        go(editHref(moved));
+        return res;
+      }
+      otherTab();
+      return res;
+    }
+    if (res === "failed") {
+      setSaved(t("admin.editor.not_saved"));
+      toast(t("admin.editor.not_saved_hint"), 6000);
+      return res;
+    }
+    st.rev++;
+    setSaved(here());
+    quietTimer = setTimeout(() => setSaved(here(), true), 1800);
+    if (mode !== "write" && root.isConnected) preview();
+    sync?.changed();
+    return res;
+  };
   const dirty = () => {
     clearTimeout(saveTimer);
     clearTimeout(quietTimer);
     setSaved(t("admin.editor.saving"));
-    saveTimer = setTimeout(async () => {
-      if (paused) return setSaved(t("admin.editor.not_saved"));
-      const res = await saveDraft(key, { title: titleIn.value, body: view.state.doc.toString(), base, savedAt: Date.now() }, rev);
-      if (res === "conflict") {
-        paused = true;
-        setSaved(t("admin.editor.not_saved"));
-        otherTab();
-        return;
-      }
-      if (res === "failed") {
-        setSaved(t("admin.editor.not_saved"));
-        toast(t("admin.editor.not_saved_hint"), 6000);
-        return;
-      }
-      rev++;
-      setSaved(t("admin.editor.saved_here"));
-      quietTimer = setTimeout(() => setSaved(t("admin.editor.saved_here"), true), 1800);
-      if (mode !== "write") preview();
-    }, 700);
+    unsaved = true;
+    edits++;
+    saveTimer = setTimeout(saveNow, 700);
   };
-  setSaved(fromLocal || post ? t("admin.editor.saved_here") : "", true);
+  setSaved(fromLocal || (post && pub.status === "draft") ? here() : "", true);
 
   /* ---------- two texts: the writer chooses, never a silent pick ---------- */
   const setText = (tt: string, bb: string) => {
@@ -300,6 +410,7 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     const pick = (f: () => void) => () => {
       choiceSlot.replaceChildren();
       f();
+      pubState();
     };
     choiceSlot.replaceChildren(
       h(
@@ -311,52 +422,75 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
         h("button", { type: "button", class: "btn quiet", onclick: pick(other[1]) }, other[0]),
       ),
     );
+    pubState();
   };
-  /** The server copy moved on since this device's draft began. */
-  const serverChoice = (p: PostDraft) =>
+  /** A server choice not picked yet: a tab choice shown over it hands back to it. */
+  let pendingServer: Post | undefined;
+  /** The server copy moved on since this device's draft began. Either pick bases the text on it. */
+  const serverChoice = (p: Post) => {
+    pendingServer = p;
+    // A tab choice is open (paused): it hands back to this one once picked (otherTab settle).
+    if (st.paused && choiceSlot.childElementCount > 0) return;
+    const adopt = () => {
+      pendingServer = undefined;
+      Object.assign(st, { hold: false, base: p.updated_at, version: p.version, server: [p.title, p.markdown] });
+    };
     choice(
       t("admin.editor.conflict.server_title"),
       t("admin.editor.conflict.server_hint"),
-      [
-        t("admin.editor.conflict.keep_mine"),
-        () => {
-          base = p.updated_at;
-          dirty();
-        },
-      ],
-      [
-        t("admin.editor.conflict.use_saved"),
-        () => {
-          base = p.updated_at;
-          setText(p.title, p.body);
-        },
-      ],
+      [t("admin.editor.conflict.keep_mine"), () => (adopt(), dirty())],
+      [t("admin.editor.conflict.use_saved"), () => (adopt(), setText(p.title, p.markdown))],
     );
-  /** Another tab saved this draft after this tab last read it. */
-  const otherTab = () =>
+  };
+  /**
+   * Another tab saved this draft after this tab last read it, or (`other`) another page left a
+   * side copy of it. Copies go only once the writer's pick is in the draft: this page's own,
+   * and the other one if nothing was written to it since it was offered.
+   */
+  const otherTab = (other?: { key: string; rev: number }) => {
+    const settle = async (dropOther: number | undefined) => {
+      if ((await saveNow()) !== "saved") return;
+      await dropOwn();
+      if (other && dropOther !== undefined) await dropDraft(other.key, dropOther);
+      const next = offers.shift();
+      if (next) {
+        st.paused = true;
+        return otherTab(next);
+      }
+      if (pendingServer && choiceSlot.childElementCount === 0) serverChoice(pendingServer);
+    };
     choice(
       t("admin.editor.conflict.tab_title"),
       t("admin.editor.conflict.tab_hint"),
       [
         t("admin.editor.conflict.keep_this"),
         async () => {
-          rev = (await loadDraft(key))?.rev ?? 0;
-          paused = false;
-          dirty();
+          st.rev = (await loadDraft(st.key))?.rev ?? 0;
+          st.paused = false;
+          clearTimeout(saveTimer);
+          await settle(other?.rev);
         },
       ],
       [
         t("admin.editor.conflict.load_other"),
         async () => {
-          const d = await loadDraft(key);
-          paused = false;
-          if (!d) return dirty();
-          rev = d.rev;
-          base = d.base;
-          setText(d.title, d.body);
+          // Read now: the other page may have written more since the choice was shown.
+          const theirs = other && (await loadDraft(other.key));
+          const main = await loadDraft(st.key);
+          const d = theirs ?? main;
+          st.paused = false;
+          clearTimeout(saveTimer);
+          st.rev = main?.rev ?? 0;
+          if (d) {
+            st.base = d.base;
+            st.version = d.version;
+            setText(d.title, d.body);
+          }
+          await settle(theirs?.rev);
         },
       ],
     );
+  };
 
   const count = () => {
     const words = countWords(`${titleIn.value} ${view.state.doc.toString()}`);
@@ -364,6 +498,15 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
     const text = words ? t("admin.editor.words", { count: words, minutes: num(Math.max(1, Math.round(words / 220))) }) : t("admin.editor.words_none");
     wc.textContent = text;
     wc2.textContent = text;
+    pubState();
+  };
+  /* ---------- publishing (publish.ts, loaded on first use) ---------- */
+  let working = false;
+  /** The post is in the trash (opened so, or trashed elsewhere): nothing is sent until Restore. */
+  let trashed = post?.status === "trashed";
+  /** Nothing to publish yet, or a choice between two texts is waiting. */
+  const pubState = () => {
+    pubBtn.disabled = working || trashed || st.hold || st.paused || (!titleIn.value.trim() && view.state.doc.length === 0);
   };
 
   /* ---------- typing: toolbar steps back, typewriter keeps the line mid-screen ---------- */
@@ -911,9 +1054,46 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   vv?.addEventListener("scroll", keyboard);
   const relayout = () => drawModes();
   addEventListener("resize", relayout);
+  // The keys typed within the debounce are saved now when the page may go: the tab hidden or
+  // closed, or the session expired (main.ts waits for this before it leaves for sign-in).
+  const flush = (): Promise<unknown> => {
+    clearTimeout(saveTimer);
+    if (unsaved) flushed = saveNow();
+    return flushed.then(() => st.q);
+  };
+  /**
+   * The page is hidden or going away: it may not live to finish an IndexedDB request, so the
+   * unsaved keys go to this page's own copy at once (putNow), then the usual save runs. Once the
+   * text is in the draft the copy goes; otherwise (paused, or storage refused) it stays as the
+   * text's only home and is offered when the post is next opened.
+   */
+  const leaving = () => {
+    if (!unsaved) return void flush();
+    const d = { title: titleIn.value, body: view.state.doc.toString(), base: st.base, version: st.version, savedAt: Date.now() };
+    const to = ownNext();
+    if (putNow(to.key, { ...d, rev: to.rev })) own = to;
+    const paused = st.paused;
+    clearTimeout(saveTimer);
+    const job = saveNow();
+    flushed = job;
+    void job.then((r) => !paused && r === "saved" && dropOwn());
+  };
+  const onHide = () => {
+    if (document.visibilityState === "hidden") leaving();
+  };
+  const onPageHide = () => leaving();
+  session.flush = flush;
+  addEventListener("pagehide", onPageHide);
+  document.addEventListener("visibilitychange", onHide);
   // Leaving the screen (a route change replaces the root) drops the listeners with it.
   new MutationObserver((_, obs) => {
     if (!root.isConnected) {
+      // Redrawn or left within the debounce: the last keys are saved now, under the current key.
+      clearTimeout(saveTimer);
+      if (unsaved) flushed = saveNow();
+      if (session.flush === flush) session.flush = undefined;
+      removeEventListener("pagehide", onPageHide);
+      document.removeEventListener("visibilitychange", onHide);
       removeEventListener("resize", relayout);
       vv?.removeEventListener("resize", keyboard);
       vv?.removeEventListener("scroll", keyboard);
@@ -924,7 +1104,132 @@ export async function mountEditor(o: EditorOptions): Promise<void> {
   }).observe(o.root, { childList: true });
 
   drawModes();
-  if (serverMoved && post) serverChoice(post);
+  if (serverMoved && post) pendingServer = post;
+  const first = offers.shift();
+  if (first) otherTab(first);
+  else if (pendingServer) serverChoice(pendingServer);
+  /** A sync is started or loading. */
+  let syncing = false;
+  /**
+   * Bumped by every `begin` and `end`: a sync chunk that arrives late starts a sync only if its
+   * `begin` is still the current one, so begin, end, begin while loading never runs two.
+   */
+  let syncGen = 0;
+  const end = () => {
+    syncing = false;
+    syncGen++;
+    sync?.stop();
+    sync = undefined;
+  };
+  // Drafts also go to the server (sync.ts); published and scheduled posts stay here until Update.
+  const begin = () => {
+    if (syncing) return;
+    syncing = true;
+    const gen = ++syncGen;
+    void import("./sync").then(
+      (m) => {
+        if (gen !== syncGen || !root.isConnected) return;
+        sync = m.startSync({
+          api: o.api,
+          user: o.user,
+          lang,
+          st,
+          id: pub.id,
+          draft: pub.status === "draft",
+          offline: o.offline,
+          alive: () => root.isConnected,
+          text: () => [titleIn.value, view.state.doc.toString()],
+          say: (s) => setSaved(s),
+          choose: serverChoice,
+          live,
+          made: (p) => {
+            created(pub, p);
+            ui.draw?.();
+          },
+          note,
+        });
+      },
+      (e: unknown) => console.error("admin editor: loading the server sync failed; drafts stay on this device", e),
+    );
+  };
+  const ui: PubUi = {};
+  /** The status line follows the text: "Saved" only while the server holds exactly what is here. */
+  const line = () => {
+    const sv = st.server;
+    setSaved(sv && sv[0] === titleIn.value && sv[1] === view.state.doc.toString() ? t("admin.editor.saved") : here(), true);
+  };
+  /** `pub.status` changed: the chip, the button and draft saving follow it. */
+  const restatus = () => {
+    const s = trashed ? "trashed" : pub.status;
+    chip.className = `st ${s}`;
+    chip.textContent = statusName(s);
+    stLabel.textContent = statusName(s);
+    pubBtn.textContent = pubLabel(pub);
+    // Only a draft autosaves; a live post's edits reach the server only by Update (publish.ts).
+    if (pub.status !== "draft" || trashed) end();
+    else begin();
+    trashSlot.replaceChildren(
+      ...(trashed
+        ? [
+            h(
+              "div",
+              { class: "banner choice", role: "status" },
+              icon("alert"),
+              h("div", { class: "grow" }, t("admin.editor.pub.trashed_banner")),
+              h("button", { type: "button", class: "btn", "data-act": "restore", onclick: () => loadPublish((m) => void m.restore(host)) }, t("admin.editor.pub.restore")),
+            ),
+          ]
+        : []),
+    );
+    pubState();
+  };
+  /** The server copy's status moved on elsewhere (sync.ts learn, or a publish step's stale read). */
+  function live(p: Post): void {
+    trashed = p.status === "trashed";
+    if (!trashed) fromPost(pub, p);
+    restatus();
+    line();
+    ui.draw?.();
+  }
+  // A trashed post never autosaves: the server refuses edits until it is restored.
+  if (trashed) restatus();
+  else if (pub.status === "draft") begin();
+  const applied = () => {
+    restatus();
+    line();
+  };
+  const host: PubHost = {
+    api: o.api,
+    root,
+    body: edBody,
+    pub,
+    st,
+    lang,
+    ui,
+    text: () => [titleIn.value, view.state.doc.toString()],
+    sync: () => sync,
+    offline: o.offline,
+    wide,
+    busy: (on) => {
+      working = on;
+      pubState();
+    },
+    applied,
+    relabel: () => {
+      pubBtn.textContent = pubLabel(pub);
+    },
+    live,
+    trashed: () => trashed,
+    choose: serverChoice,
+  };
+  const loadPublish = (f: (m: typeof import("./publish")) => void) =>
+    void import("./publish").then(f, (e: unknown) => {
+      console.error("admin editor: loading the publish flow failed", e);
+      toast(t("admin.editor.pub.failed"), 6000);
+    });
+  pubBtn.addEventListener("click", () => loadPublish((m) => m.publishClick(host, pubBtn)));
+  gear.addEventListener("click", () => loadPublish((m) => m.togglePanel(host)));
+  pubState();
   if (!body && !title) titleIn.focus();
   else if (!phone()) {
     view.focus();

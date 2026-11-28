@@ -1,8 +1,13 @@
 //! The Cloudflare client and token checks against the fake API (no real network).
 
+mod backup;
 mod deploy;
+mod dump;
 mod fake_cf;
+mod fake_release;
+mod restore;
 mod setup;
+mod update;
 
 use fake_cf::{Failure, Fake, Owner, State, Token};
 use plumblog_cli::cloudflare::{

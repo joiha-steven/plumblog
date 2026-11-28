@@ -1,6 +1,8 @@
 //! `blog deploy` and `blog rollback` against the fake API: real migrations in SQLite, a fake
 //! site answering `/healthz` with the active version, and a virtual clock (no real waits).
 
+mod release;
+
 use super::{GOOD, TempDir, client};
 use crate::fake_cf::{Failure, Fake, Recorded};
 use crate::setup::{ALL, Ran as SetupRan, ok as setup_ok, run_with as setup_with, secret, site};
@@ -16,6 +18,8 @@ use std::process::Command;
 use std::time::Duration;
 
 const NOW: i64 = 1_790_000_000_000;
+/// In every query that reads a page of the dump (crates/cli/src/dump.rs).
+const DUMP_MARK: &str = "_pb_s";
 /// Version ids the fake hands out, in order: setup's placeholder, then each upload.
 const V1: &str = "00000000-0000-4000-8000-000000000001";
 const V2: &str = "00000000-0000-4000-8000-000000000002";
@@ -24,7 +28,7 @@ const WORKERS: &str = "/accounts/acc1/workers/scripts/plumblog";
 const HOST: &str = "/plumblog.steven.workers.dev";
 
 /// Real time plus virtual waits: `sleep` moves time without waiting, slow calls still count.
-struct FakeClock(std::time::Instant, Cell<Duration>);
+pub(crate) struct FakeClock(std::time::Instant, Cell<Duration>);
 
 impl Default for FakeClock {
     fn default() -> Self {
@@ -47,7 +51,7 @@ const V3: &str = "00000000-0000-4000-8000-000000000003";
 const P: &str = "00000000-0000-4000-9000-000000000002";
 
 /// Replaces the bundle's migrations/ with `migs`.
-fn write_migrations(bundle: &Path, migs: &[Migration]) {
+pub(crate) fn write_migrations(bundle: &Path, migs: &[Migration]) {
     let d = bundle.join("migrations");
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -77,7 +81,7 @@ fn assets() -> Vec<(&'static str, &'static [u8])> {
 }
 
 /// A release bundle as scripts/build-bundle lays it out.
-fn make_bundle(dir: &TempDir) -> PathBuf {
+pub(crate) fn make_bundle(dir: &TempDir) -> PathBuf {
     let b = dir.0.join("bundle");
     let w = b.join("worker");
     std::fs::create_dir_all(w.join("worker")).unwrap();
@@ -384,11 +388,7 @@ fn no_pending_migration_takes_a_bookmark_but_no_export() {
     let r = deploy(&fake, &dir, &bundle);
     ok(&r);
     let reqs = fake.requests();
-    assert!(
-        !reqs
-            .iter()
-            .any(|r| r.path.ends_with("/export") || r.path.starts_with("/__signed"))
-    );
+    assert!(!reqs.iter().any(|r| r.body.contains(DUMP_MARK)));
     assert!(!dir.0.join("backups").exists());
     assert!(load(&dir).deploys[0].bookmark.is_some());
 }
@@ -396,48 +396,30 @@ fn no_pending_migration_takes_a_bookmark_but_no_export() {
 #[test]
 fn pending_migrations_export_first_into_a_private_file() {
     let (fake, dir, bundle) = set_up(&all_but_last());
-    fake.state().export_polls = 2;
     let skip = fake.requests().len();
     let r = deploy(&fake, &dir, &bundle);
     ok(&r);
     let reqs = fake.requests();
-    let c = calls(&reqs, skip);
-    let bm = c
-        .iter()
-        .position(|x| x.ends_with("/time_travel/bookmark"))
-        .unwrap();
-    let exports: Vec<usize> = (0..c.len())
-        .filter(|i| c[*i].ends_with("/export"))
+    let bm = skip
+        + reqs[skip..]
+            .iter()
+            .position(|r| r.path.ends_with("/time_travel/bookmark"))
+            .unwrap();
+    let pages: Vec<usize> = (skip..reqs.len())
+        .filter(|i| reqs[*i].path.ends_with("/query") && reqs[*i].body.contains(DUMP_MARK))
         .collect();
-    let signed = c
-        .iter()
-        .position(|x| x.starts_with("GET /__signed/"))
-        .unwrap();
-    assert_eq!(exports.len(), 3, "{c:?}");
-    assert!(bm < exports[0] && exports[2] < signed, "{c:?}");
-    // Re-polls carry the bookmark the first reply gave.
-    let posts: Vec<&Recorded> = reqs
-        .iter()
-        .filter(|r| r.path.ends_with("/export"))
-        .collect();
-    assert_eq!(body_json(posts[0]), json!({"output_format": "polling"}));
-    assert_eq!(body_json(posts[1])["current_bookmark"], "exp-bm");
-    let signed_req = reqs
-        .iter()
-        .find(|r| r.path.starts_with("/__signed/"))
-        .unwrap();
-    assert_eq!(signed_req.header("authorization"), None);
-    // The export happened before the migration ran.
+    assert!(
+        pages.len() > 10,
+        "a page per table at least: {}",
+        pages.len()
+    );
+    // The dump is read after the bookmark and before the migration runs.
     let last = migrations::bundled().pop().unwrap().name;
     let first_migration = reqs
         .iter()
         .position(|r| r.path.ends_with("/query") && r.body.contains(&last))
         .unwrap();
-    let signed_at = reqs
-        .iter()
-        .position(|r| r.path.starts_with("/__signed/"))
-        .unwrap();
-    assert!(signed_at < first_migration);
+    assert!(bm < pages[0] && pages[pages.len() - 1] < first_migration);
     // The file: backups/<utc>-<db>.sql, 0600, holding the dump.
     let rec = load(&dir).deploys[0].clone();
     assert_eq!(
@@ -446,11 +428,17 @@ fn pending_migrations_export_first_into_a_private_file() {
     );
     assert_eq!(rec.migrations, std::slice::from_ref(&last));
     let file = dir.0.join(rec.export.unwrap());
-    assert!(
-        std::fs::read_to_string(&file)
-            .unwrap()
-            .contains("-- table posts")
-    );
+    let text = std::fs::read_to_string(&file).unwrap();
+    let mark = rec.bookmark.unwrap();
+    assert!(text.contains(&format!("bookmark taken just before: {mark}\n")));
+    assert!(text.contains("\nCREATE VIRTUAL TABLE posts_fts USING fts5"));
+    assert!(text.ends_with("-- end of plumblog dump\n"));
+    assert!(!dir.0.join("backups").read_dir().unwrap().any(|e| {
+        e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".blog-part")
+    }));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1082,8 +1070,20 @@ fn the_binary_refuses_a_db_restore_without_yes_before_any_call() {
         err.contains("[rollback.db_unconfirmed]") && err.contains("--yes"),
         "{err}"
     );
+    // A dev build (tests never bake a bundle hash) deploys only with --build or --bundle.
     let out = Command::new(env!("CARGO_BIN_EXE_blog"))
         .args(["--lang", "en", "deploy"])
+        .current_dir(&dir.0)
+        .env("PLUMBLOG_CF_API_BASE", "http://127.0.0.1:9")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("[release.dev_build]") && err.contains("--build"),
+        "{err}"
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_blog"))
+        .args(["--lang", "en", "deploy", "--build"])
         .current_dir(&dir.0)
         .env("PLUMBLOG_CF_API_BASE", "http://127.0.0.1:9")
         .output()

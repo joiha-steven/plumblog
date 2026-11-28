@@ -140,6 +140,8 @@ pub struct State {
     pub d1: Vec<Value>,
     /// R2 bucket names; listed with a cursor, as R2 does.
     pub r2: Vec<String>,
+    /// `<bucket>/<key>` -> object, read with `GET .../r2/buckets/<bucket>/objects/<key>`.
+    pub objects: HashMap<String, Object>,
     pub requests: Vec<Recorded>,
     /// `(n, failure)`: the n-th request (1-based, counting every request) fails.
     pub failures: Vec<(usize, Failure)>,
@@ -168,14 +170,10 @@ pub struct State {
     pub sessions: HashMap<String, Vec<String>>,
     /// Completion JWTs handed out.
     pub completions: Vec<String>,
-    /// Polls an export answers `active` before `complete`.
-    pub export_polls: usize,
-    /// `(database id, polls so far)` of the running export.
-    pub exporting: Option<(String, usize)>,
     /// Restores done: `(database id, bookmark)`.
     pub restores: Vec<(String, String)>,
     pub site: Site,
-    /// The fake's own base URL (signed URLs point at it).
+    /// The fake's own base URL (presigned URLs point at it).
     pub base: String,
     /// Manifest path of each asset hash an upload session asked for.
     pub asset_paths: HashMap<String, String>,
@@ -189,6 +187,31 @@ pub struct State {
     /// `(pattern, action)`: before answering the first request whose `METHOD /path` contains
     /// `pattern`, run `action` once (e.g. someone editing site.local.toml meanwhile).
     pub on_request: Vec<(String, Box<dyn FnOnce() + Send>)>,
+    /// D1 import uploads by file name: `(database id, etag from init, bytes once PUT)`.
+    pub uploads: HashMap<String, (String, String, Option<String>)>,
+    /// Replaces the `ETag` an upload answers with (bytes damaged on the way).
+    pub upload_etag: Option<String>,
+    /// The next upload answers this status, keeping nothing.
+    pub upload_status: Option<u16>,
+    /// Refuse any write to `sqlite_sequence`, in queries and imports (D1 may).
+    pub refuse_sequence_writes: bool,
+    /// The next import fails with this error, applying nothing.
+    pub import_error: Option<String>,
+    /// Polls an import answers `active` before its result.
+    pub import_polls: usize,
+    /// `(database id, polls so far, final reply)` of the running import.
+    pub importing: Option<(String, usize, Value)>,
+    /// Run after the next import succeeds, in the same database: a row lost on the way.
+    pub after_import: Option<String>,
+    /// `(request number, reply body bytes)` of every API reply.
+    pub reply_bytes: Vec<(usize, usize)>,
+}
+
+/// An R2 object: bytes (text, for the tests) and the `ETag` header it answers with.
+#[derive(Clone, Debug)]
+pub struct Object {
+    pub body: String,
+    pub etag: Option<String>,
 }
 
 pub struct Fake {
@@ -202,6 +225,10 @@ impl Fake {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let mut state = state;
         state.base.clone_from(&base);
+        // D1 enforces foreign keys on every query and import; a test's own database too.
+        for conn in state.sqlite.values() {
+            conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        }
         let state = Arc::new(Mutex::new(state));
         let shared = Arc::clone(&state);
         // Never joined: the thread ends with the test process.
@@ -298,10 +325,6 @@ fn read_request(stream: &TcpStream) -> Option<Recorded> {
     })
 }
 
-fn write_reply(stream: &TcpStream, status: u16, body: &str) {
-    write_reply_with(stream, status, body, "");
-}
-
 /// `extra`: more header lines, each ending in `\r\n`.
 fn write_reply_with(mut stream: &TcpStream, status: u16, body: &str, extra: &str) {
     let reply = format!(
@@ -312,7 +335,7 @@ fn write_reply_with(mut stream: &TcpStream, status: u16, body: &str, extra: &str
     let _ = stream.write_all(reply.as_bytes());
 }
 
-/// The public side: the site's `/healthz` and `/`, and signed export URLs. No token.
+/// The public side: the site's `/healthz` and `/`, and presigned upload URLs. No token.
 fn serve_public(st: &mut State, req: &Recorded) -> Option<(u16, String, String)> {
     let active = |st: &State| {
         st.scripts
@@ -351,26 +374,7 @@ fn serve_public(st: &mut State, req: &Recorded) -> Option<(u16, String, String)>
             };
             Some((status, "<html></html>".into(), String::new()))
         }
-        ("GET", p) if p.starts_with("/__signed/") => {
-            if query(&req.query, "sig") != Some("s1g") {
-                return Some((403, "bad signature".into(), String::new()));
-            }
-            let id = p.trim_start_matches("/__signed/").trim_end_matches(".sql");
-            let conn = st.sqlite.get(id)?;
-            let tables = run_rows(
-                conn,
-                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
-                &[],
-            )
-            .unwrap_or_default();
-            let mut dump = String::from("PRAGMA defer_foreign_keys=TRUE;\n");
-            for t in tables {
-                dump.push_str("-- table ");
-                dump.push_str(t["name"].as_str().unwrap_or(""));
-                dump.push('\n');
-            }
-            Some((200, dump, String::new()))
-        }
+        ("PUT", p) if p.starts_with("/__upload/") => Some(upload(st, req, p)),
         _ => None,
     }
 }
@@ -426,6 +430,7 @@ fn serve(stream: &TcpStream, state: &Mutex<State>) {
     {
         failure = Some(st.fail_on.remove(i).1);
     }
+    let mut extra = String::new();
     let (status, body) = match failure {
         Some(Failure::Drop) => return,
         Some(Failure::DropAfter) => {
@@ -455,12 +460,18 @@ fn serve(stream: &TcpStream, state: &Mutex<State>) {
             (502, format!("{}{bearer}</pre></html>", "x".repeat(n)))
         }
         None => {
-            let (s, v) = route(&mut st, &req);
-            (s, v.to_string())
+            if let Some((s, b, e)) = r2_object(&st, &req) {
+                extra = e;
+                (s, b)
+            } else {
+                let (s, v) = route(&mut st, &req);
+                (s, v.to_string())
+            }
         }
     };
+    st.reply_bytes.push((n, body.len()));
     drop(st);
-    write_reply(stream, status, &body);
+    write_reply_with(stream, status, &body, &extra);
 }
 
 fn ok(result: &Value) -> (u16, Value) {
@@ -575,7 +586,9 @@ fn route_d1(
             let id = format!("db-{}", st.d1.len() + 1);
             let db = json!({"uuid": id, "name": name});
             st.d1.push(db.clone());
-            st.sqlite.insert(id, Connection::open_in_memory().unwrap());
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+            st.sqlite.insert(id, conn);
             ok(&db)
         }
         (
@@ -597,7 +610,7 @@ fn route_d1(
             st.bookmarks.push(b.clone());
             ok(&json!({"bookmark": b}))
         }
-        ("POST", ["accounts", _, "d1", "database", id, "export"]) => d1_export(st, req, id),
+        ("POST", ["accounts", _, "d1", "database", id, "import"]) => d1_import(st, req, id),
         (
             "POST",
             [
@@ -615,6 +628,13 @@ fn route_d1(
             let Some(conn) = st.sqlite.get(*id) else {
                 return err(404, 7404, "database not found");
             };
+            if st.refuse_sequence_writes && writes_sequence(&req.body) {
+                return err(
+                    400,
+                    7500,
+                    "not authorized to use sqlite_sequence: SQLITE_AUTH",
+                );
+            }
             let reply = d1_query(conn, &body);
             if let Some(i) = st
                 .after_query
@@ -630,31 +650,147 @@ fn route_d1(
     }
 }
 
-/// Export, polled: `active` for `export_polls` polls, then `complete` with a signed URL.
-fn d1_export(st: &mut State, req: &Recorded, id: &str) -> (u16, Value) {
-    let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
-    if body["output_format"] != "polling" || !st.sqlite.contains_key(id) {
-        return err(400, 7400, "bad export");
+fn md5_hex(bytes: &[u8]) -> String {
+    use md5::{Digest, Md5};
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    for b in Md5::digest(bytes) {
+        let _ = write!(s, "{b:02x}");
     }
-    let polls = match (&st.exporting, body["current_bookmark"].as_str()) {
-        (None, None) => 0,
-        (Some((db, n)), Some("exp-bm")) if db.as_str() == id => n + 1,
-        _ => return err(400, 7400, "export not running or wrong bookmark"),
+    s
+}
+
+/// The presigned upload URL D1 import's `init` hands out: like R2, it takes no credentials
+/// and answers with the MD5 of the bytes as a quoted `ETag`.
+fn upload(st: &mut State, req: &Recorded, path: &str) -> (u16, String, String) {
+    if query(&req.query, "X-Amz-Signature") != Some("upl0ad") {
+        return (403, "bad signature".into(), String::new());
+    }
+    if req.header("authorization").is_some() {
+        return (400, "credentials not allowed".into(), String::new());
+    }
+    if let Some(status) = st.upload_status.take() {
+        return (status, "unavailable".into(), String::new());
+    }
+    let name = path.trim_start_matches("/__upload/");
+    let Some(entry) = st.uploads.get_mut(name) else {
+        return (404, "no such upload".into(), String::new());
     };
-    if polls < st.export_polls {
-        st.exporting = Some((id.to_string(), polls));
-        return ok(
-            &json!({"success": true, "type": "export", "status": "active",
-                          "at_bookmark": "exp-bm", "messages": ["Generating"]}),
-        );
+    entry.2 = Some(req.body.clone());
+    let etag = st
+        .upload_etag
+        .clone()
+        .unwrap_or_else(|| md5_hex(req.body.as_bytes()));
+    (200, String::new(), format!("ETag: \"{etag}\"\r\n"))
+}
+
+/// Runs an uploaded file in one transaction, as D1 import does ("your DB will return to its
+/// original state" on failure, wrangler 4.160.0), and returns the final poll reply.
+fn apply_import(st: &mut State, id: &str, sql: &str) -> Value {
+    let conn = &st.sqlite[id];
+    let applied = match st.import_error.take() {
+        Some(e) => Err(e),
+        None if st.refuse_sequence_writes && writes_sequence(sql) => {
+            Err("not authorized to use sqlite_sequence: SQLITE_AUTH".into())
+        }
+        None => import_sql(conn, sql),
+    };
+    match applied {
+        Ok(()) => {
+            if let Some(lost) = st.after_import.take() {
+                conn.execute_batch(&lost).unwrap();
+            }
+            let b = format!("bm-{}-{}", id, st.bookmarks.len() + 1);
+            st.bookmarks.push(b.clone());
+            json!({"success": true, "type": "import", "status": "complete", "at_bookmark": b,
+                   "messages": ["Imported"],
+                   "result": {"num_queries": sql.matches(';').count(), "final_bookmark": b,
+                              "meta": {"duration": 1.0, "rows_read": 0, "rows_written": 0}}})
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            json!({"success": true, "type": "import", "status": "error", "at_bookmark": "imp-bm",
+                   "error": e, "errors": [e], "messages": ["Import failed"]})
+        }
     }
-    st.exporting = None;
-    let url = format!("{}/__signed/{id}.sql?sig=s1g", st.base);
-    ok(
-        &json!({"success": true, "type": "export", "status": "complete",
-               "at_bookmark": "exp-bm", "messages": [],
-               "result": {"filename": format!("{id}.sql"), "signed_url": url}}),
-    )
+}
+
+fn writes_sequence(sql: &str) -> bool {
+    let up = sql.to_ascii_uppercase();
+    [
+        "INTO SQLITE_SEQUENCE",
+        "UPDATE SQLITE_SEQUENCE",
+        "DELETE FROM SQLITE_SEQUENCE",
+    ]
+    .iter()
+    .any(|w| up.contains(w))
+}
+
+/// What the fake's import does with an uploaded file: all of it in one transaction, or
+/// nothing (the caller rolls back on error).
+pub fn import_sql(conn: &Connection, sql: &str) -> Result<(), String> {
+    conn.execute_batch("BEGIN")
+        .and_then(|()| conn.execute_batch(sql))
+        .and_then(|()| conn.execute_batch("COMMIT"))
+        .map_err(|e| e.to_string())
+}
+
+/// D1 import (wrangler 4.160.0 `executeRemotely`): `init` hands out an upload URL, `ingest`
+/// runs the uploaded file, `poll` follows it.
+fn d1_import(st: &mut State, req: &Recorded, id: &str) -> (u16, Value) {
+    if req.header("content-type") != Some("application/json") {
+        return err(400, 1001, "expected application/json");
+    }
+    let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
+    let active = json!({"success": true, "type": "import", "status": "active",
+                        "at_bookmark": "imp-bm", "messages": ["Processing"]});
+    match body["action"].as_str() {
+        Some("init") => {
+            let Some(etag) = body["etag"]
+                .as_str()
+                .filter(|e| e.len() == 32 && e.bytes().all(|b| b.is_ascii_hexdigit()))
+            else {
+                return err(400, 7400, "etag must be the hex MD5 of the file");
+            };
+            let name = format!("{id}-{}.sql", st.uploads.len() + 1);
+            st.uploads
+                .insert(name.clone(), (id.to_string(), etag.to_string(), None));
+            let url = format!("{}/__upload/{name}?X-Amz-Signature=upl0ad", st.base);
+            ok(&json!({"success": true, "upload_url": url, "filename": name}))
+        }
+        Some("ingest") => {
+            let (Some(name), Some(etag)) = (body["filename"].as_str(), body["etag"].as_str())
+            else {
+                return err(400, 7400, "filename and etag are required");
+            };
+            let Some((db, want, Some(sql))) = st.uploads.get(name).cloned() else {
+                return err(400, 7400, "file not uploaded");
+            };
+            if db != id || want != etag || md5_hex(sql.as_bytes()) != etag {
+                return err(400, 7400, "etag does not match the upload");
+            }
+            let reply = apply_import(st, id, &sql);
+            if st.import_polls == 0 {
+                return ok(&reply);
+            }
+            st.importing = Some((id.to_string(), 0, reply));
+            ok(&active)
+        }
+        Some("poll") => {
+            let Some((db, n, reply)) = st.importing.take() else {
+                return err(400, 7400, "no import running");
+            };
+            if db != id || body["current_bookmark"] != "imp-bm" {
+                return err(400, 7400, "wrong bookmark");
+            }
+            if n + 1 < st.import_polls {
+                st.importing = Some((db, n + 1, reply));
+                return ok(&active);
+            }
+            ok(&reply)
+        }
+        _ => err(400, 7400, "unknown action"),
+    }
 }
 
 /// Time Travel restore; the bookmark must be one the fake handed out.
@@ -669,6 +805,69 @@ fn d1_restore(st: &mut State, req: &Recorded, id: &str) -> (u16, Value) {
     let prev = format!("bm-{}-before-restore-{}", id, st.restores.len());
     ok(&json!({"bookmark": b, "previous_bookmark": prev,
                "message": "Restored"}))
+}
+
+/// `GET /accounts/<a>/r2/buckets/<bucket>/objects/<key>`: the object's bytes with an `ETag`,
+/// or a JSON 404 (R2 code 10007). Keys keep their slashes and arrive percent-encoded.
+fn r2_object(st: &State, req: &Recorded) -> Option<(u16, String, String)> {
+    let segs: Vec<&str> = req.path.split('/').skip(1).collect();
+    let ["accounts", _, "r2", "buckets", bucket, "objects", key @ ..] = segs.as_slice() else {
+        return None;
+    };
+    if req.method != "GET" {
+        return None;
+    }
+    let token = req
+        .header("authorization")
+        .and_then(|a| a.strip_prefix("Bearer "))
+        .and_then(|t| st.tokens.get(t));
+    let json = |(s, v): (u16, Value)| Some((s, v.to_string(), String::new()));
+    let Some(token) = token else {
+        return json(err(401, 10000, "Authentication error"));
+    };
+    if !token
+        .permissions
+        .contains(&"Account | Workers R2 Storage | Edit")
+    {
+        return json(err(403, 10000, "Authentication error"));
+    }
+    let key = key
+        .iter()
+        .map(|s| unescape(s))
+        .collect::<Vec<_>>()
+        .join("/");
+    match st.objects.get(&format!("{bucket}/{key}")) {
+        Some(o) => {
+            let etag = o
+                .etag
+                .as_ref()
+                .map(|e| format!("ETag: \"{e}\"\r\n"))
+                .unwrap_or_default();
+            Some((200, o.body.clone(), etag))
+        }
+        None => json(err(404, 10007, "The specified object does not exist")),
+    }
+}
+
+/// `%XX` escapes of a path segment (UTF-8).
+fn unescape(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let Some(v) = s
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// R2 buckets, listed by cursor as R2 does.
